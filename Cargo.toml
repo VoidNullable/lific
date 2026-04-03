@@ -1,0 +1,53 @@
+[package]
+name = "lific"
+version = "0.1.0"
+edition = "2024"
+description = "Local-first, lightweight issue tracker. Single binary, SQLite-backed, MCP-native."
+license = "MIT"
+repository = "https://github.com/Void-n-Null/lific"
+keywords = ["issue-tracker", "project-management", "mcp", "sqlite", "local-first"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# HTTP
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "vtab", "backup"] }
+crossbeam-queue = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# MCP
+rmcp = { version = "1", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+schemars = "0.8"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Auth
+api-keys-simplified = "0.5"
+
+# Import
+reqwest = { version = "0.12", features = ["json"] }
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

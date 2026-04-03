@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: lific-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: lific-linux-aarch64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: lific-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: lific-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: lific-windows-x86_64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            name: lific-windows-aarch64.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (unix)
+        if: runner.os != 'Windows'
+        run: cp target/${{ matrix.target }}/release/lific ${{ matrix.name }}
+
+      - name: Rename binary (windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/lific.exe ${{ matrix.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd binaries
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            binaries/lific-linux-x86_64
+            binaries/lific-linux-aarch64
+            binaries/lific-macos-x86_64
+            binaries/lific-macos-aarch64
+            binaries/lific-windows-x86_64.exe
+            binaries/lific-windows-aarch64.exe
+            binaries/sha256sums.txt
