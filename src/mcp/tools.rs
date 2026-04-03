@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::db::{DbPool, models, queries};
+use crate::db::{models, queries, DbPool};
 
-use super::LificMcp;
 use super::schemas::*;
+use super::LificMcp;
 
 impl LificMcp {
     pub(crate) fn create_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
@@ -774,5 +774,591 @@ impl LificMcp {
                 "Unsupported: {rt}/{act}. Types: project, module, label, folder. Actions: create, update."
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    fn mcp() -> LificMcp {
+        let db = crate::db::open_memory().expect("test db");
+        LificMcp::new(db)
+    }
+
+    /// Seed a project via manage_resource, return identifier.
+    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+        let result = mcp.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "create".into(),
+            name: Some(name.into()),
+            identifier: Some(ident.into()),
+            description: None,
+            project: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.starts_with("Created project"), "got: {result}");
+        ident.to_string()
+    }
+
+    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+        let result = mcp.create_issue(Parameters(CreateIssueInput {
+            project: project.into(),
+            title: title.into(),
+            description: None,
+            status: None,
+            priority: None,
+            module: None,
+            labels: None,
+        }));
+        assert!(result.starts_with("Created"), "got: {result}");
+        result
+    }
+
+    // ── manage_resource ──
+
+    #[test]
+    fn manage_create_project() {
+        let m = mcp();
+        let result = seed_project(&m, "Alpha", "ALP");
+        assert_eq!(result, "ALP");
+    }
+
+    #[test]
+    fn manage_update_project() {
+        let m = mcp();
+        seed_project(&m, "Old", "UPD");
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("UPD".into()),
+            name: Some("New Name".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("New Name"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_create_module() {
+        let m = mcp();
+        seed_project(&m, "Test", "MOD");
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("MOD".into()),
+            name: Some("Backend".into()),
+            description: Some("Server-side logic".into()),
+            identifier: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("Backend"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_create_label() {
+        let m = mcp();
+        seed_project(&m, "Test", "LBL");
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "label".into(),
+            action: "create".into(),
+            project: Some("LBL".into()),
+            name: Some("bug".into()),
+            color: Some("#EF4444".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+        }));
+        assert!(result.contains("bug"), "got: {result}");
+        assert!(result.contains("#EF4444"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_create_folder() {
+        let m = mcp();
+        seed_project(&m, "Test", "FLD");
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "folder".into(),
+            action: "create".into(),
+            project: Some("FLD".into()),
+            name: Some("Docs".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("Docs"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_missing_name_errors() {
+        let m = mcp();
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "create".into(),
+            name: None,
+            identifier: Some("X".into()),
+            description: None,
+            project: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("name required"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_unknown_type() {
+        let m = mcp();
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "widget".into(),
+            action: "create".into(),
+            name: None,
+            identifier: None,
+            description: None,
+            project: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("Unsupported"), "got: {result}");
+    }
+
+    // ── create / get / update / delete issue ──
+
+    #[test]
+    fn issue_create_and_get() {
+        let m = mcp();
+        seed_project(&m, "Test", "TST");
+        let created = seed_issue(&m, "TST", "First issue");
+        assert!(created.contains("TST-1"), "got: {created}");
+
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "TST-1".into(),
+        }));
+        assert!(detail.contains("First issue"), "got: {detail}");
+        assert!(detail.contains("backlog"), "got: {detail}");
+    }
+
+    #[test]
+    fn issue_create_with_options() {
+        let m = mcp();
+        seed_project(&m, "Test", "OPT");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "label".into(),
+            action: "create".into(),
+            project: Some("OPT".into()),
+            name: Some("feature".into()),
+            color: None,
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+        }));
+        let result = m.create_issue(Parameters(CreateIssueInput {
+            project: "OPT".into(),
+            title: "Detailed issue".into(),
+            description: Some("Some markdown".into()),
+            status: Some("todo".into()),
+            priority: Some("high".into()),
+            module: None,
+            labels: Some(vec!["feature".into()]),
+        }));
+        assert!(result.contains("OPT-1"), "got: {result}");
+
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "OPT-1".into(),
+        }));
+        assert!(detail.contains("high"), "got: {detail}");
+        assert!(detail.contains("todo"), "got: {detail}");
+        assert!(detail.contains("feature"), "got: {detail}");
+        assert!(detail.contains("Some markdown"), "got: {detail}");
+    }
+
+    #[test]
+    fn issue_update() {
+        let m = mcp();
+        seed_project(&m, "Test", "UPI");
+        seed_issue(&m, "UPI", "Original");
+
+        let result = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "UPI-1".into(),
+            title: Some("Renamed".into()),
+            status: Some("active".into()),
+            priority: Some("urgent".into()),
+            description: None,
+            module: None,
+            labels: None,
+        }));
+        assert!(result.contains("Renamed"), "got: {result}");
+        assert!(result.contains("active"), "got: {result}");
+        assert!(result.contains("urgent"), "got: {result}");
+    }
+
+    #[test]
+    fn issue_delete() {
+        let m = mcp();
+        seed_project(&m, "Test", "DEL");
+        seed_issue(&m, "DEL", "Doomed");
+
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "issue".into(),
+            identifier: "DEL-1".into(),
+            project: None,
+        }));
+        assert!(result.contains("Deleted issue"), "got: {result}");
+
+        // Verify gone
+        let get = m.get_issue(Parameters(GetIssueInput {
+            identifier: "DEL-1".into(),
+        }));
+        assert!(get.starts_with("Error"), "got: {get}");
+    }
+
+    #[test]
+    fn get_nonexistent_issue_errors() {
+        let m = mcp();
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "NOPE-999".into(),
+        }));
+        assert!(result.starts_with("Error"), "got: {result}");
+    }
+
+    // ── list_issues ──
+
+    #[test]
+    fn list_issues_with_filters() {
+        let m = mcp();
+        seed_project(&m, "Test", "LST");
+
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "LST".into(),
+            title: "Todo one".into(),
+            status: Some("todo".into()),
+            priority: Some("high".into()),
+            description: None,
+            module: None,
+            labels: None,
+        }));
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "LST".into(),
+            title: "Active one".into(),
+            status: Some("active".into()),
+            priority: Some("low".into()),
+            description: None,
+            module: None,
+            labels: None,
+        }));
+
+        // Filter by status
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "LST".into(),
+            status: Some("todo".into()),
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: None,
+        }));
+        assert!(result.contains("1 issues"), "got: {result}");
+        assert!(result.contains("Todo one"), "got: {result}");
+    }
+
+    #[test]
+    fn list_issues_empty() {
+        let m = mcp();
+        seed_project(&m, "Empty", "EMP");
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "EMP".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: None,
+        }));
+        assert_eq!(result, "No issues found.");
+    }
+
+    #[test]
+    fn list_issues_bad_project_errors() {
+        let m = mcp();
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "NOPE".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: None,
+        }));
+        assert!(result.starts_with("Error"), "got: {result}");
+    }
+
+    // ── link / unlink ──
+
+    #[test]
+    fn link_and_unlink_issues() {
+        let m = mcp();
+        seed_project(&m, "Test", "LNK");
+        seed_issue(&m, "LNK", "Blocker");
+        seed_issue(&m, "LNK", "Blocked");
+
+        let result = m.link_issues(Parameters(LinkIssuesInput {
+            source: "LNK-1".into(),
+            target: "LNK-2".into(),
+            relation_type: "blocks".into(),
+        }));
+        assert!(result.contains("blocks"), "got: {result}");
+
+        // Verify relation shows in get_issue
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "LNK-1".into(),
+        }));
+        assert!(detail.contains("Blocks"), "got: {detail}");
+
+        let result = m.unlink_issues(Parameters(UnlinkIssuesInput {
+            source: "LNK-1".into(),
+            target: "LNK-2".into(),
+        }));
+        assert!(result.contains("Unlinked"), "got: {result}");
+    }
+
+    // ── board ──
+
+    #[test]
+    fn board_groups_by_status() {
+        let m = mcp();
+        seed_project(&m, "Test", "BRD");
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "BRD".into(),
+            title: "A".into(),
+            status: Some("todo".into()),
+            description: None,
+            priority: None,
+            module: None,
+            labels: None,
+        }));
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "BRD".into(),
+            title: "B".into(),
+            status: Some("active".into()),
+            description: None,
+            priority: None,
+            module: None,
+            labels: None,
+        }));
+
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BRD".into(),
+            group_by: None,
+        }));
+        assert!(result.contains("todo"), "got: {result}");
+        assert!(result.contains("active"), "got: {result}");
+    }
+
+    // ── pages ──
+
+    #[test]
+    fn page_create_get_update() {
+        let m = mcp();
+        seed_project(&m, "Test", "PG");
+
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: Some("PG".into()),
+            title: "Design Doc".into(),
+            content: Some("# Overview\nSome content".into()),
+            folder: None,
+        }));
+        assert!(created.contains("PG-DOC-1"), "got: {created}");
+
+        let detail = m.get_page(Parameters(GetPageInput {
+            identifier: "PG-DOC-1".into(),
+        }));
+        assert!(detail.contains("Design Doc"), "got: {detail}");
+        assert!(detail.contains("# Overview"), "got: {detail}");
+
+        let updated = m.update_page(Parameters(UpdatePageInput {
+            identifier: "PG-DOC-1".into(),
+            title: Some("Updated Doc".into()),
+            content: None,
+            folder: None,
+        }));
+        assert!(updated.contains("Updated Doc"), "got: {updated}");
+    }
+
+    #[test]
+    fn workspace_page_no_project() {
+        let m = mcp();
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: None,
+            title: "Global Note".into(),
+            content: None,
+            folder: None,
+        }));
+        assert!(created.contains("DOC-"), "got: {created}");
+    }
+
+    #[test]
+    fn page_delete() {
+        let m = mcp();
+        seed_project(&m, "Test", "PGD");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PGD".into()),
+            title: "Temp".into(),
+            content: None,
+            folder: None,
+        }));
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "page".into(),
+            identifier: "PGD-DOC-1".into(),
+            project: None,
+        }));
+        assert!(result.contains("Deleted page"), "got: {result}");
+    }
+
+    // ── search ──
+
+    #[test]
+    fn search_finds_issue() {
+        let m = mcp();
+        seed_project(&m, "Test", "SRC");
+        seed_issue(&m, "SRC", "Unique searchterm xyz");
+
+        let result = m.search(Parameters(SearchInput {
+            query: "searchterm".into(),
+            project: None,
+            limit: None,
+        }));
+        assert!(result.contains("1 results"), "got: {result}");
+        assert!(result.contains("searchterm"), "got: {result}");
+    }
+
+    #[test]
+    fn search_no_results() {
+        let m = mcp();
+        let result = m.search(Parameters(SearchInput {
+            query: "nonexistent_gibberish_zzz".into(),
+            project: None,
+            limit: None,
+        }));
+        assert_eq!(result, "No results found.");
+    }
+
+    // ── list_resources ──
+
+    #[test]
+    fn list_resources_projects() {
+        let m = mcp();
+        seed_project(&m, "Alpha", "AAA");
+        seed_project(&m, "Beta", "BBB");
+
+        let result = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            project: None,
+            folder: None,
+        }));
+        assert!(result.contains("2 projects"), "got: {result}");
+        assert!(result.contains("AAA"), "got: {result}");
+        assert!(result.contains("BBB"), "got: {result}");
+    }
+
+    #[test]
+    fn list_resources_requires_project() {
+        let m = mcp();
+        for rt in ["module", "label", "folder", "issue"] {
+            let result = m.list_resources(Parameters(ListResourcesInput {
+                resource_type: rt.into(),
+                project: None,
+                folder: None,
+            }));
+            assert!(result.contains("project required"), "{rt} got: {result}");
+        }
+    }
+
+    #[test]
+    fn list_resources_unknown_type() {
+        let m = mcp();
+        let result = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "widget".into(),
+            project: None,
+            folder: None,
+        }));
+        assert!(result.contains("Unknown type"), "got: {result}");
+    }
+
+    // ── delete ──
+
+    #[test]
+    fn delete_project() {
+        let m = mcp();
+        seed_project(&m, "Doomed", "DPJ");
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "project".into(),
+            identifier: "DPJ".into(),
+            project: None,
+        }));
+        assert!(result.contains("Deleted project"), "got: {result}");
+    }
+
+    #[test]
+    fn delete_module_requires_project() {
+        let m = mcp();
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "module".into(),
+            identifier: "Backend".into(),
+            project: None,
+        }));
+        assert!(result.contains("project required"), "got: {result}");
+    }
+
+    #[test]
+    fn delete_unknown_type() {
+        let m = mcp();
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "widget".into(),
+            identifier: "x".into(),
+            project: None,
+        }));
+        assert!(result.contains("Unknown type"), "got: {result}");
+    }
+
+    // ── fmt_issue ──
+
+    #[test]
+    fn fmt_issue_includes_relations() {
+        let issue = models::Issue {
+            id: 1,
+            project_id: 1,
+            sequence: 1,
+            identifier: "T-1".into(),
+            title: "Test".into(),
+            description: String::new(),
+            status: "todo".into(),
+            priority: "high".into(),
+            module_id: None,
+            sort_order: 0.0,
+            start_date: None,
+            target_date: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            labels: vec!["bug".into()],
+            blocks: vec!["T-2".into()],
+            blocked_by: vec![],
+            relates_to: vec![],
+        };
+        let s = fmt_issue(&issue);
+        assert!(s.contains("[bug]"), "got: {s}");
+        assert!(s.contains("blocks:T-2"), "got: {s}");
     }
 }
