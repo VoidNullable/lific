@@ -16,6 +16,7 @@ use crate::db::DbPool;
 pub struct AuthState {
     pub db: DbPool,
     pub manager: ApiKeyManagerV0,
+    pub public_url: String,
 }
 
 /// Create the API key manager with our prefix.
@@ -152,10 +153,15 @@ pub async fn require_api_key(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string());
 
+    let www_auth = format!(
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+        auth.public_url
+    );
+
     let Some(token) = token else {
         return (
             StatusCode::UNAUTHORIZED,
-            [("WWW-Authenticate", "Bearer")],
+            [("WWW-Authenticate", www_auth.as_str())],
             "Missing Authorization: Bearer <key> header",
         )
             .into_response();
@@ -186,7 +192,7 @@ pub async fn require_api_key(
         }
         return (
             StatusCode::UNAUTHORIZED,
-            [("WWW-Authenticate", "Bearer")],
+            [("WWW-Authenticate", www_auth.as_str())],
             "Invalid or expired OAuth token",
         )
             .into_response();
@@ -210,7 +216,7 @@ pub async fn require_api_key(
     warn!("rejected invalid API key or OAuth token");
     (
         StatusCode::UNAUTHORIZED,
-        [("WWW-Authenticate", "Bearer")],
+        [("WWW-Authenticate", www_auth.as_str())],
         "Invalid API key",
     )
         .into_response()

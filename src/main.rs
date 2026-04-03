@@ -144,9 +144,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Auth state for middleware
+            let issuer = cfg
+                .server
+                .public_url
+                .clone()
+                .unwrap_or_else(|| format!("http://{}:{}", cfg.server.host, cfg.server.port));
+
             let auth_state = auth::AuthState {
                 db: pool.clone(),
                 manager,
+                public_url: issuer.clone(),
             };
 
             // Start backup task
@@ -186,12 +193,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     auth_middleware_wrapper,
                 ));
 
-            // OAuth routes (no auth -- they handle their own)
-            let issuer = cfg
-                .server
-                .public_url
-                .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", cfg.server.host, cfg.server.port));
             let oauth_state = oauth::OAuthState {
                 db: pool.clone(),
                 issuer,
