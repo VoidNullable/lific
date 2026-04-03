@@ -39,6 +39,10 @@ pub fn router(state: OAuthState) -> Router {
             get(authorize_page).post(authorize_approve),
         )
         .route("/oauth/token", post(token_exchange))
+        // Claude.ai strips /oauth/ prefix (known bug anthropics/claude-ai-mcp#82)
+        .route("/register", post(register_client))
+        .route("/authorize", get(authorize_page).post(authorize_approve))
+        .route("/token", post(token_exchange))
         .with_state(state)
 }
 

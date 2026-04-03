@@ -275,7 +275,13 @@ async fn auth_middleware_wrapper(
     next: middleware::Next,
 ) -> axum::response::Response {
     let path = request.uri().path();
-    if path == "/api/health" || path.starts_with("/.well-known/") || path.starts_with("/oauth/") {
+    if path == "/api/health"
+        || path.starts_with("/.well-known/")
+        || path.starts_with("/oauth/")
+        || path == "/register"
+        || path == "/authorize"
+        || path == "/token"
+    {
         return next.run(request).await;
     }
     auth::require_api_key(state, request, next).await
