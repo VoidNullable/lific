@@ -5,7 +5,6 @@ mod cli;
 mod config;
 mod db;
 mod error;
-mod import;
 mod mcp;
 mod oauth;
 
@@ -230,39 +229,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle.waiting().await?;
         }
 
-        #[cfg(feature = "plane-import")]
-        Command::ImportPlane {
-            url,
-            api_key,
-            workspace,
-            skip,
-        } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-                )
-                .init();
-
-            let pool = db::open(&cfg.database.path)?;
-            info!(path = %cfg.database.path.display(), "database ready");
-
-            import::run_api_import(&pool, &url, &api_key, &workspace, &skip).await?;
-        }
-
-        Command::ImportFile { file, skip } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-                )
-                .init();
-
-            let pool = db::open(&cfg.database.path)?;
-            info!(path = %cfg.database.path.display(), "database ready");
-
-            import::run_import(&pool, &file, &skip)?;
-        }
     }
 
     Ok(())

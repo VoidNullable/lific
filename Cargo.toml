@@ -8,9 +8,6 @@ repository = "https://github.com/Void-n-Null/lific"
 keywords = ["issue-tracker", "project-management", "mcp", "sqlite", "local-first"]
 categories = ["command-line-utilities", "development-tools"]
 
-[features]
-default = []
-plane-import = ["reqwest"]
 
 [dependencies]
 # HTTP
@@ -36,9 +33,6 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Auth
 api-keys-simplified = "0.5"
-
-# Import (optional, adds ~100 crates and TLS stack)
-reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # Config
 toml = "0.8"

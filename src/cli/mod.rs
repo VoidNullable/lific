@@ -39,36 +39,6 @@ pub enum Command {
     /// Generate a default lific.toml config file
     Init,
 
-    /// Import projects, issues, and data from the Plane API (requires --features plane-import)
-    #[cfg(feature = "plane-import")]
-    ImportPlane {
-        /// Plane API base URL (e.g. http://localhost:8585)
-        #[arg(long, env = "PLANE_BASE_URL")]
-        url: String,
-
-        /// Plane API key
-        #[arg(long, env = "PLANE_API_KEY")]
-        api_key: String,
-
-        /// Plane workspace slug
-        #[arg(long, env = "PLANE_WORKSPACE_SLUG")]
-        workspace: String,
-
-        /// Skip projects with these identifiers (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        skip: Vec<String>,
-    },
-
-    /// Import from a pre-exported Plane JSON file
-    ImportFile {
-        /// Path to the JSON export file
-        file: PathBuf,
-
-        /// Skip projects with these identifiers (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        skip: Vec<String>,
-    },
-
     /// Manage API keys
     Key {
         #[command(subcommand)]
@@ -188,18 +158,5 @@ mod tests {
     #[test]
     fn missing_subcommand_errors() {
         assert!(Cli::try_parse_from(["lific"]).is_err());
-    }
-
-    #[test]
-    fn import_file_with_skip() {
-        let cli = Cli::try_parse_from(["lific", "import-file", "export.json", "--skip", "FOO,BAR"])
-            .unwrap();
-        match cli.command {
-            Command::ImportFile { file, skip } => {
-                assert_eq!(file, PathBuf::from("export.json"));
-                assert_eq!(skip, vec!["FOO", "BAR"]);
-            }
-            _ => panic!("expected ImportFile"),
-        }
     }
 }
