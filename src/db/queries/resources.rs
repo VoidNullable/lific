@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -182,6 +182,39 @@ pub fn create_label(conn: &Connection, input: &CreateLabel) -> Result<Label, Lif
     })
 }
 
+pub fn update_label(conn: &Connection, id: i64, input: &UpdateLabel) -> Result<Label, LificError> {
+    if let Some(ref name) = input.name {
+        conn.execute(
+            "UPDATE labels SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+    }
+    if let Some(ref color) = input.color {
+        conn.execute(
+            "UPDATE labels SET color = ?1 WHERE id = ?2",
+            params![color, id],
+        )?;
+    }
+    conn.query_row(
+        "SELECT id, project_id, name, color FROM labels WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Label {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                color: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("label {id} not found"))
+        }
+        _ => e.into(),
+    })
+}
+
 pub fn delete_label(conn: &Connection, id: i64) -> Result<(), LificError> {
     let changed = conn.execute("DELETE FROM labels WHERE id = ?1", params![id])?;
     if changed == 0 {
@@ -217,6 +250,38 @@ pub fn create_folder(conn: &Connection, input: &CreateFolder) -> Result<Folder, 
         parent_id: input.parent_id,
         name: input.name.clone(),
         sort_order: 0.0,
+    })
+}
+
+pub fn update_folder(
+    conn: &Connection,
+    id: i64,
+    input: &UpdateFolder,
+) -> Result<Folder, LificError> {
+    if let Some(ref name) = input.name {
+        conn.execute(
+            "UPDATE folders SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+    }
+    conn.query_row(
+        "SELECT id, project_id, parent_id, name, sort_order FROM folders WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Folder {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                name: row.get(3)?,
+                sort_order: row.get(4)?,
+            })
+        },
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("folder {id} not found"))
+        }
+        _ => e.into(),
     })
 }
 
@@ -365,6 +430,72 @@ mod tests {
 
         delete_label(&conn, label.id).unwrap();
         assert_eq!(list_labels(&conn, pid).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn update_label_fields() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let label = create_label(
+            &conn,
+            &CreateLabel {
+                project_id: pid,
+                name: "bug".into(),
+                color: "#EF4444".into(),
+            },
+        )
+        .unwrap();
+
+        let updated = update_label(
+            &conn,
+            label.id,
+            &UpdateLabel {
+                name: Some("defect".into()),
+                color: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.name, "defect");
+        assert_eq!(updated.color, "#EF4444"); // unchanged
+
+        let updated = update_label(
+            &conn,
+            label.id,
+            &UpdateLabel {
+                name: None,
+                color: Some("#FF0000".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.name, "defect"); // unchanged
+        assert_eq!(updated.color, "#FF0000");
+    }
+
+    #[test]
+    fn update_folder_name() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let folder = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id: pid,
+                parent_id: None,
+                name: "Docs".into(),
+            },
+        )
+        .unwrap();
+
+        let updated = update_folder(
+            &conn,
+            folder.id,
+            &UpdateFolder {
+                name: Some("Documentation".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.name, "Documentation");
     }
 
     #[test]

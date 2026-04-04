@@ -155,8 +155,19 @@ pub struct CreateLabel {
     pub color: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateLabel {
+    pub name: Option<String>,
+    pub color: Option<String>,
+}
+
 fn default_label_color() -> String {
     "#6B7280".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateFolder {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

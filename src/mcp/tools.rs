@@ -745,6 +745,35 @@ impl LificMcp {
                     Err(e) => format!("Error: {e}"),
                 }
             }
+            ("label", "update") => {
+                let Some(ref proj) = input.project else {
+                    return "Error: project required".into();
+                };
+                let pid = match resolve_project(&self.db, proj) {
+                    Ok(id) => id,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                let Some(ref current) = input.current_name else {
+                    return "Error: current_name required to identify label".into();
+                };
+                let lid = match self.read(|conn| queries::resolve_label_name(conn, pid, current)) {
+                    Ok(id) => id,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                match self.write(|conn| {
+                    queries::update_label(
+                        conn,
+                        lid,
+                        &models::UpdateLabel {
+                            name: input.name.clone(),
+                            color: input.color.clone(),
+                        },
+                    )
+                }) {
+                    Ok(l) => format!("Updated label: {} ({})", l.name, l.color),
+                    Err(e) => format!("Error: {e}"),
+                }
+            }
             ("folder", "create") => {
                 let Some(ref proj) = input.project else {
                     return "Error: project required".into();
@@ -767,6 +796,34 @@ impl LificMcp {
                     )
                 }) {
                     Ok(f) => format!("Created folder [{}]: {}", f.id, f.name),
+                    Err(e) => format!("Error: {e}"),
+                }
+            }
+            ("folder", "update") => {
+                let Some(ref proj) = input.project else {
+                    return "Error: project required".into();
+                };
+                let pid = match resolve_project(&self.db, proj) {
+                    Ok(id) => id,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                let Some(ref current) = input.current_name else {
+                    return "Error: current_name required to identify folder".into();
+                };
+                let fid = match self.read(|conn| queries::resolve_folder_name(conn, pid, current)) {
+                    Ok(id) => id,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                match self.write(|conn| {
+                    queries::update_folder(
+                        conn,
+                        fid,
+                        &models::UpdateFolder {
+                            name: input.name.clone(),
+                        },
+                    )
+                }) {
+                    Ok(f) => format!("Updated folder: {}", f.name),
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1331,6 +1388,67 @@ mod tests {
             project: None,
         }));
         assert!(result.contains("Unknown type"), "got: {result}");
+    }
+
+    // ── manage_resource update label/folder ──
+
+    #[test]
+    fn manage_update_label() {
+        let m = mcp();
+        seed_project(&m, "Test", "UPL");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "label".into(),
+            action: "create".into(),
+            project: Some("UPL".into()),
+            name: Some("bug".into()),
+            color: Some("#EF4444".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+        }));
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "label".into(),
+            action: "update".into(),
+            project: Some("UPL".into()),
+            current_name: Some("bug".into()),
+            name: Some("defect".into()),
+            color: Some("#FF0000".into()),
+            identifier: None,
+            description: None,
+            status: None,
+        }));
+        assert!(result.contains("defect"), "got: {result}");
+        assert!(result.contains("#FF0000"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_update_folder() {
+        let m = mcp();
+        seed_project(&m, "Test", "UPF");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "folder".into(),
+            action: "create".into(),
+            project: Some("UPF".into()),
+            name: Some("Docs".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+        }));
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "folder".into(),
+            action: "update".into(),
+            project: Some("UPF".into()),
+            current_name: Some("Docs".into()),
+            name: Some("Documentation".into()),
+            identifier: None,
+            description: None,
+            status: None,
+            color: None,
+        }));
+        assert!(result.contains("Documentation"), "got: {result}");
     }
 
     // ── fmt_issue ──
