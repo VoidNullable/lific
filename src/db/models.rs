@@ -218,6 +218,61 @@ pub struct CreateFolder {
     pub name: String,
 }
 
+// ── Users & Sessions ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub username: String,
+    pub email: String,
+    #[serde(skip_serializing)]
+    pub password_hash: String,
+    pub display_name: String,
+    pub is_admin: bool,
+    pub is_bot: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUser {
+    pub username: String,
+    pub email: String,
+    pub password: String,
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub is_bot: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    /// Accepts either username or email
+    pub identity: String,
+    pub password: String,
+}
+
+/// Lightweight user identity extracted from auth middleware.
+/// Inserted into request extensions after token resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthUser {
+    pub id: i64,
+    pub username: String,
+    pub display_name: String,
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub token: String,
+    pub user_id: i64,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+// ── Search ───────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub query: String,

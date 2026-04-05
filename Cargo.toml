@@ -33,6 +33,8 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Auth
 api-keys-simplified = "0.5"
+argon2 = "0.5"
+rand = "0.8"
 
 # Config
 toml = "0.8"
