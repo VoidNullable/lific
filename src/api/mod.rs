@@ -348,6 +348,7 @@ async fn create_bot(
     let display_name = match tool.as_str() {
         "opencode" => "OpenCode",
         "cursor" => "Cursor",
+        "claude-code" => "Claude Code",
         "claude" => "Claude Desktop",
         "codex" => "Codex",
         _ => return Err(LificError::BadRequest(format!("unknown tool: {tool}"))),

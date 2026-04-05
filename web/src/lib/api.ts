@@ -204,6 +204,26 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
       ),
   },
   {
+    id: "claude-code",
+    name: "Claude Code",
+    description: "Anthropic's CLI coding agent",
+    configPath: "~/.claude/mcp.json (global) or .mcp.json (project)",
+    configNote:
+      'Add to the "mcpServers" section. Or run: claude mcp add lific --transport http ' + MCP_URL,
+    generateConfig: (_url, key) =>
+      JSON.stringify(
+        {
+          lific: {
+            type: "http",
+            url: MCP_URL,
+            headers: { Authorization: `Bearer ${key}` },
+          },
+        },
+        null,
+        2
+      ),
+  },
+  {
     id: "claude",
     name: "Claude Desktop",
     description: "Anthropic's desktop client for Claude",
