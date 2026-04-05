@@ -2,6 +2,7 @@ pub(crate) mod schemas;
 pub(crate) mod tools;
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use rmcp::{
     handler::server::router::tool::ToolRouter,
@@ -12,16 +13,22 @@ use rmcp::{
 use crate::db::models::AuthUser;
 use crate::db::DbPool;
 
-// Task-local storage for the authenticated user during MCP requests.
-// Set by the HTTP handler before passing the request to rmcp,
-// read by MCP tools (e.g. add_comment) to attribute actions.
-tokio::task_local! {
-    pub static MCP_AUTH_USER: Option<AuthUser>;
+/// Global storage for the most recent MCP request's authenticated user.
+/// This is a workaround for rmcp spawning tool calls on different tasks
+/// where tokio::task_local doesn't propagate.
+///
+/// Safe for single-server use: the mutex serializes access and the value
+/// is set immediately before mcp_service.handle() and read during tool execution.
+static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
+
+/// Set the authenticated user for the current MCP request.
+pub fn set_request_user(user: Option<AuthUser>) {
+    *MCP_REQUEST_USER.lock().unwrap() = user;
 }
 
 /// Get the authenticated user for the current MCP request, if any.
 pub(crate) fn current_auth_user() -> Option<AuthUser> {
-    MCP_AUTH_USER.try_with(|u| u.clone()).ok().flatten()
+    MCP_REQUEST_USER.lock().unwrap().clone()
 }
 
 #[derive(Clone)]
