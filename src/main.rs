@@ -10,7 +10,14 @@ mod oauth;
 
 use std::sync::Arc;
 
-use axum::{body::Body, extract::Request, middleware, response::IntoResponse, routing::any};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{StatusCode, header},
+    middleware,
+    response::IntoResponse,
+    routing::{any, get},
+};
 use clap::Parser;
 use cli::{Cli, Command, KeyAction, UserAction};
 use config::Config;
@@ -21,7 +28,45 @@ use rmcp::{
         tower::{StreamableHttpServerConfig, StreamableHttpService},
     },
 };
+use rust_embed::Embed;
 use tracing::info;
+
+/// Embedded frontend assets compiled from web/dist/.
+/// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
+#[derive(Embed)]
+#[folder = "web/dist/"]
+#[allow(dead_code)]
+struct WebAssets;
+
+/// Serve an embedded static file, or fall back to index.html for SPA routing.
+async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+
+    // Try the exact path first (e.g. assets/index-abc.js)
+    if let Some(file) = WebAssets::get(path) {
+        let mime = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime)],
+            file.data.to_vec(),
+        )
+            .into_response();
+    }
+
+    // SPA fallback: serve index.html for all unmatched routes
+    match WebAssets::get("index.html") {
+        Some(file) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html".to_string())],
+            file.data.to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "Frontend not built. Run: cd web && bun run build")
+            .into_response(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -284,7 +329,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 issuer,
             };
 
-            let app = authed_routes.merge(oauth::router(oauth_state));
+            let app = authed_routes
+                .merge(oauth::router(oauth_state))
+                .fallback(get(serve_frontend));
 
             let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;

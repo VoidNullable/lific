@@ -13,6 +13,9 @@ REMOTE_DIR="/opt/ada/lific"
 BINARY="target/release/lific"
 
 if [[ "${1:-}" != "--skip" ]]; then
+    echo ":: building frontend..."
+    (cd web && bun install --frozen-lockfile && bun run build)
+
     echo ":: building release binary..."
     cargo build --release
 fi

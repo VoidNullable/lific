@@ -36,6 +36,10 @@ api-keys-simplified = "0.5"
 argon2 = "0.5"
 rand = "0.8"
 
+# Static assets (embedded frontend)
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
 # Config
 toml = "0.8"
 dirs = "6"
