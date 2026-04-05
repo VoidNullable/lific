@@ -139,10 +139,14 @@ pub struct ApiKeyInfo {
     pub revoked: bool,
 }
 
-/// Axum middleware that validates Bearer tokens against stored API key hashes.
+/// Axum middleware that validates Bearer tokens and resolves user identity.
+///
+/// After successful auth, inserts `Extension<Option<AuthUser>>` into the request:
+/// - `Some(user)` if the token resolves to a user (session, or API key with user_id)
+/// - `None` if the token is valid but has no user association (legacy keys, OAuth)
 pub async fn require_api_key(
     State(auth): State<AuthState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     // Extract Bearer token from Authorization header
@@ -167,27 +171,47 @@ pub async fn require_api_key(
             .into_response();
     };
 
-    let secure_token = SecureString::from(token);
+    // ── Session tokens (lific_sess_ prefix) ──────────────────────
+    if token.starts_with("lific_sess_") {
+        let user = {
+            let conn = match auth.db.write() {
+                Ok(c) => c,
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+                }
+            };
+            crate::db::queries::users::validate_session(&conn, &token)
+        };
 
-    // Load all active (non-revoked) key hashes
-    let hashes: Vec<String> = {
-        let conn = match auth.db.read() {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        let mut stmt = match conn.prepare("SELECT key_hash FROM api_keys WHERE revoked = 0") {
-            Ok(s) => s,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        match stmt.query_map([], |row| row.get::<_, String>(0)) {
-            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        match user {
+            Ok(u) => {
+                let auth_user = crate::db::models::AuthUser {
+                    id: u.id,
+                    username: u.username,
+                    display_name: u.display_name,
+                    is_admin: u.is_admin,
+                };
+                request.extensions_mut().insert(Some(auth_user));
+                return next.run(request).await;
+            }
+            Err(_) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())],
+                    "Invalid or expired session",
+                )
+                    .into_response();
+            }
         }
-    };
+    }
 
-    // Check OAuth tokens first (lific_at_ prefix)
-    if secure_token.expose_secret().starts_with("lific_at_") {
-        if crate::oauth::validate_oauth_token(&auth.db, secure_token.expose_secret()) {
+    // ── OAuth tokens (lific_at_ prefix) ──────────────────────────
+    if token.starts_with("lific_at_") {
+        if crate::oauth::validate_oauth_token(&auth.db, &token) {
+            // OAuth tokens don't have user association yet
+            request
+                .extensions_mut()
+                .insert(None::<crate::db::models::AuthUser>);
             return next.run(request).await;
         }
         return (
@@ -198,14 +222,57 @@ pub async fn require_api_key(
             .into_response();
     }
 
-    if hashes.is_empty() {
+    // ── API keys (lific_sk- prefix) ──────────────────────────────
+    let secure_token = SecureString::from(token);
+
+    // Load all active key hashes with their user_id
+    let keys: Vec<ApiKeyRow> = {
+        let conn = match auth.db.read() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        };
+        let mut stmt = match conn
+            .prepare("SELECT id, key_hash, user_id FROM api_keys WHERE revoked = 0")
+        {
+            Ok(s) => s,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        };
+        match stmt.query_map([], |row| {
+            Ok(ApiKeyRow {
+                id: row.get(0)?,
+                hash: row.get(1)?,
+                user_id: row.get(2)?,
+            })
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        }
+    };
+
+    if keys.is_empty() {
         warn!("no API keys configured, allowing unauthenticated access");
+        request
+            .extensions_mut()
+            .insert(None::<crate::db::models::AuthUser>);
         return next.run(request).await;
     }
 
-    for hash in &hashes {
-        match auth.manager.verify(&secure_token, hash) {
+    for key in &keys {
+        match auth.manager.verify(&secure_token, &key.hash) {
             Ok(KeyStatus::Valid) => {
+                // Resolve user if the key has a user_id
+                let auth_user = key.user_id.and_then(|uid| {
+                    let conn = auth.db.read().ok()?;
+                    crate::db::queries::users::get_user_by_id(&conn, uid)
+                        .ok()
+                        .map(|u| crate::db::models::AuthUser {
+                            id: u.id,
+                            username: u.username,
+                            display_name: u.display_name,
+                            is_admin: u.is_admin,
+                        })
+                });
+                request.extensions_mut().insert(auth_user);
                 return next.run(request).await;
             }
             Ok(KeyStatus::Invalid) => continue,
@@ -220,6 +287,15 @@ pub async fn require_api_key(
         "Invalid API key",
     )
         .into_response()
+}
+
+/// Internal struct for loading API key rows during auth.
+#[derive(Debug)]
+struct ApiKeyRow {
+    #[allow(dead_code)]
+    id: i64,
+    hash: String,
+    user_id: Option<i64>,
 }
 
 #[cfg(test)]
