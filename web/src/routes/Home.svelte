@@ -9,6 +9,7 @@
     type AuthUser,
     type ApiKey,
   } from "../lib/api";
+  import ThemeToggle from "../lib/ThemeToggle.svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
 
@@ -16,13 +17,10 @@
   let keys = $state<ApiKey[]>([]);
   let loading = $state(true);
 
-  // Key creation
   let newKeyName = $state("");
   let creatingKey = $state(false);
   let createdKey = $state<string | null>(null);
   let keyError = $state("");
-
-  // Key revocation
   let revokingId = $state<number | null>(null);
 
   $effect(() => {
@@ -43,9 +41,7 @@
 
   async function loadKeys() {
     const result = await listKeys();
-    if (result.ok) {
-      keys = result.data;
-    }
+    if (result.ok) keys = result.data;
   }
 
   async function handleLogout() {
@@ -67,7 +63,6 @@
 
     creatingKey = true;
     const result = await createKey(name);
-
     if (result.ok) {
       createdKey = result.data.key;
       newKeyName = "";
@@ -103,84 +98,159 @@
   }
 </script>
 
-<div class="home-layout">
+<div class="min-h-dvh flex flex-col">
   {#if loading}
-    <div class="loading-state">
-      <div class="spinner"></div>
+    <div class="flex-1 flex items-center justify-center">
+      <div
+        class="size-6 rounded-full border-2 border-[var(--border)]
+               border-t-[var(--accent)] animate-spin"
+      ></div>
     </div>
   {:else if user}
-    <header class="topbar">
-      <span class="topbar-brand">Lific</span>
-      <div class="topbar-right">
-        <div class="avatar" title={user.username}>
+    <!-- Top bar -->
+    <header
+      class="flex items-center justify-between px-6 py-3
+             border-b border-[var(--border)]"
+    >
+      <span class="font-display text-lg tracking-tight">Lific</span>
+      <div class="flex items-center gap-3">
+        <ThemeToggle />
+        <div
+          class="size-8 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+                 flex items-center justify-center text-xs font-semibold
+                 tracking-wide select-none"
+          title={user.username}
+        >
           {initials(user.display_name || user.username)}
         </div>
-        <button class="btn-ghost" onclick={handleLogout}>Sign out</button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] px-2 py-1
+                 rounded transition-colors
+                 hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
+          onclick={handleLogout}
+        >
+          Sign out
+        </button>
       </div>
     </header>
 
-    <main class="home-main">
-      <div class="content-area">
+    <!-- Main content -->
+    <main class="flex-1 flex justify-center px-6 py-10 md:py-16">
+      <div class="w-full max-w-[560px]">
+
         <!-- User info -->
-        <section class="section section-enter-1">
-          <div class="welcome-hello">
-            <span class="greeting">Signed in as</span>
-            <h1 class="display-name">{user.display_name || user.username}</h1>
+        <section class="mb-10 animate-reveal delay-100">
+          <div class="mb-6">
+            <span
+              class="block text-[0.8125rem] font-medium uppercase
+                     tracking-widest text-[var(--text-muted)] mb-1"
+            >
+              Signed in as
+            </span>
+            <h1
+              class="font-display text-[clamp(1.75rem,4vw,2.25rem)]
+                     tracking-tight text-[var(--text)]"
+            >
+              {user.display_name || user.username}
+            </h1>
           </div>
 
-          <div class="info-grid">
-            <div class="info-item">
-              <span class="info-label">Username</span>
-              <span class="info-value">{user.username}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Email</span>
-              <span class="info-value">{user.email}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Role</span>
-              <span class="info-value">{user.is_admin ? "Admin" : "Member"}</span>
-            </div>
+          <!-- Info grid -->
+          <div
+            class="grid grid-cols-3 max-sm:grid-cols-1
+                   gap-px bg-[var(--border)] border border-[var(--border)]
+                   rounded-md overflow-hidden"
+          >
+            {#each [
+              { label: "Username", value: user.username },
+              { label: "Email", value: user.email },
+              { label: "Role", value: user.is_admin ? "Admin" : "Member" },
+            ] as item}
+              <div class="bg-[var(--surface)] p-4">
+                <span
+                  class="block text-[0.6875rem] font-medium uppercase
+                         tracking-widest text-[var(--text-faint)] mb-1"
+                >
+                  {item.label}
+                </span>
+                <span class="text-[0.9375rem] font-medium text-[var(--text)]">
+                  {item.value}
+                </span>
+              </div>
+            {/each}
           </div>
         </section>
 
         <!-- API Keys -->
-        <section class="section section-enter-2">
-          <div class="section-header">
-            <h2>API Keys</h2>
-            <p class="section-desc">
+        <section class="animate-reveal delay-250">
+          <div class="mb-6">
+            <h2 class="font-display text-[1.375rem] text-[var(--text)] mb-1">
+              API Keys
+            </h2>
+            <p class="text-[0.875rem] text-[var(--text-muted)]">
               Keys authenticate CLI tools, MCP clients, and scripts acting on your behalf.
             </p>
           </div>
 
-          <!-- Create key form -->
-          <form class="create-key-form" onsubmit={handleCreateKey}>
+          <!-- Create form -->
+          <form onsubmit={handleCreateKey} class="flex gap-2 mb-4">
             <input
               type="text"
               bind:value={newKeyName}
               placeholder="Key name (e.g. opencode, laptop, ci)"
               disabled={creatingKey}
+              class="flex-1 rounded-md px-3 py-2 text-[0.9375rem]"
             />
-            <button type="submit" class="btn-primary btn-sm" disabled={creatingKey}>
+            <button
+              type="submit"
+              disabled={creatingKey}
+              class="shrink-0 rounded-md bg-[var(--accent)] text-[var(--accent-text)]
+                     text-[0.875rem] font-medium px-4 py-2
+                     whitespace-nowrap transition-all duration-200
+                     hover:bg-[var(--accent-hover)] active:scale-[0.98]
+                     disabled:opacity-60 disabled:cursor-not-allowed"
+            >
               {creatingKey ? "Creating..." : "Create key"}
             </button>
           </form>
 
           {#if keyError}
-            <div class="msg msg-error" role="alert">{keyError}</div>
+            <div
+              class="text-sm text-[var(--error)] bg-[var(--error-bg)]
+                     px-4 py-2 rounded-md border-l-[3px] border-[var(--error)] mb-4"
+              role="alert"
+            >
+              {keyError}
+            </div>
           {/if}
 
           {#if createdKey}
-            <div class="msg msg-key">
-              <div class="msg-key-header">
-                <strong>Key created</strong>
-                <span class="msg-key-warn">Copy it now — it won't be shown again.</span>
+            <div
+              class="bg-[var(--success-bg)] border-l-[3px] border-[var(--success)]
+                     rounded-md p-4 mb-4"
+            >
+              <div class="flex items-baseline gap-2 mb-2">
+                <strong class="text-[var(--success)] text-sm">Key created</strong>
+                <span class="text-[0.8125rem] text-[var(--text-muted)]">
+                  Copy it now — it won't be shown again.
+                </span>
               </div>
-              <div class="key-display">
-                <code>{createdKey}</code>
+              <div
+                class="flex items-center gap-2 bg-[var(--surface)]
+                       border border-[var(--border)] rounded px-3 py-2"
+              >
+                <code
+                  class="flex-1 font-mono text-[0.8125rem] text-[var(--text)]
+                         break-all"
+                >
+                  {createdKey}
+                </code>
                 <button
-                  class="btn-ghost btn-copy"
-                  onclick={() => { navigator.clipboard.writeText(createdKey!); }}
+                  class="shrink-0 text-[0.75rem] font-semibold uppercase
+                         tracking-wide text-[var(--accent)] px-2 py-1
+                         rounded transition-colors
+                         hover:bg-[var(--accent-subtle)]"
+                  onclick={() => navigator.clipboard.writeText(createdKey!)}
                 >
                   Copy
                 </button>
@@ -190,25 +260,49 @@
 
           <!-- Key list -->
           {#if keys.length === 0}
-            <p class="empty-state">No keys yet. Create one to get started.</p>
+            <p class="text-[0.875rem] text-[var(--text-faint)] py-6">
+              No keys yet. Create one to get started.
+            </p>
           {:else}
-            <div class="key-list">
-              {#each keys as key (key.id)}
-                <div class="key-row" class:revoked={key.revoked}>
-                  <div class="key-info">
-                    <span class="key-name">{key.name}</span>
-                    <span class="key-meta">
+            <div class="border border-[var(--border)] rounded-md overflow-hidden">
+              {#each keys as key, i (key.id)}
+                <div
+                  class="flex items-center justify-between px-4 py-3
+                         bg-[var(--surface)] gap-4
+                         {i > 0 ? 'border-t border-[var(--border)]' : ''}"
+                  class:opacity-50={key.revoked}
+                >
+                  <div class="flex flex-col gap-0.5 min-w-0">
+                    <span class="text-[0.9375rem] font-medium text-[var(--text)] truncate">
+                      {key.name}
+                    </span>
+                    <span class="text-[0.75rem] text-[var(--text-faint)] flex items-center gap-2">
                       Created {formatDate(key.created_at)}
                       {#if key.revoked}
-                        <span class="key-badge badge-revoked">Revoked</span>
+                        <span
+                          class="text-[0.6875rem] font-semibold uppercase tracking-wide
+                                 text-[var(--error)] bg-[var(--error-bg)]
+                                 px-1.5 py-0.5 rounded"
+                        >
+                          Revoked
+                        </span>
                       {:else}
-                        <span class="key-badge badge-active">Active</span>
+                        <span
+                          class="text-[0.6875rem] font-semibold uppercase tracking-wide
+                                 text-[var(--success)] bg-[var(--success-bg)]
+                                 px-1.5 py-0.5 rounded"
+                        >
+                          Active
+                        </span>
                       {/if}
                     </span>
                   </div>
                   {#if !key.revoked}
                     <button
-                      class="btn-ghost btn-danger"
+                      class="shrink-0 text-[0.8125rem] text-[var(--error)]
+                             px-2 py-1 rounded transition-colors
+                             hover:bg-[var(--error-bg)]
+                             disabled:opacity-50 disabled:cursor-not-allowed"
                       disabled={revokingId === key.id}
                       onclick={() => handleRevoke(key.id)}
                     >
@@ -224,386 +318,3 @@
     </main>
   {/if}
 </div>
-
-<style>
-  .home-layout {
-    min-height: 100dvh;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .loading-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .spinner {
-    width: 24px;
-    height: 24px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.6s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  /* ── Top bar ───────────────────────────── */
-
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-md) var(--space-xl);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .topbar-brand {
-    font-family: var(--font-display);
-    font-size: 1.125rem;
-    letter-spacing: -0.01em;
-  }
-
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: var(--space-md);
-  }
-
-  .avatar {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    user-select: none;
-  }
-
-  .btn-ghost {
-    background: none;
-    color: var(--text-muted);
-    font-size: 0.8125rem;
-    padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-sm);
-    transition: color 0.15s var(--ease-out), background 0.15s var(--ease-out);
-  }
-
-  .btn-ghost:hover {
-    color: var(--text);
-    background: var(--bg-subtle);
-  }
-
-  /* ── Main ──────────────────────────────── */
-
-  .home-main {
-    flex: 1;
-    padding: var(--space-2xl) var(--space-xl);
-    display: flex;
-    justify-content: center;
-  }
-
-  .content-area {
-    width: 100%;
-    max-width: 560px;
-  }
-
-  .section {
-    margin-bottom: var(--space-2xl);
-  }
-
-  .section-enter-1 {
-    opacity: 0;
-    animation: reveal 0.5s var(--ease-out) 0.1s forwards;
-  }
-  .section-enter-2 {
-    opacity: 0;
-    animation: reveal 0.5s var(--ease-out) 0.25s forwards;
-  }
-
-  /* ── User info ─────────────────────────── */
-
-  .welcome-hello {
-    margin-bottom: var(--space-lg);
-  }
-
-  .greeting {
-    font-size: 0.8125rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    display: block;
-    margin-bottom: var(--space-xs);
-  }
-
-  .display-name {
-    font-size: clamp(1.75rem, 4vw, 2.25rem);
-    letter-spacing: -0.02em;
-  }
-
-  .info-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1px;
-    background: var(--border);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-
-  @media (max-width: 480px) {
-    .info-grid {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .info-item {
-    background: var(--surface);
-    padding: var(--space-md);
-  }
-
-  .info-label {
-    display: block;
-    font-size: 0.6875rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-faint);
-    margin-bottom: var(--space-xs);
-  }
-
-  .info-value {
-    font-size: 0.9375rem;
-    font-weight: 500;
-  }
-
-  /* ── API Keys section ──────────────────── */
-
-  .section-header {
-    margin-bottom: var(--space-lg);
-  }
-
-  .section-header h2 {
-    font-size: 1.375rem;
-    margin-bottom: var(--space-xs);
-  }
-
-  .section-desc {
-    font-size: 0.875rem;
-    color: var(--text-muted);
-  }
-
-  .create-key-form {
-    display: flex;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-md);
-  }
-
-  .create-key-form input {
-    flex: 1;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: #fff;
-    font-size: 0.875rem;
-    font-weight: 500;
-    padding: 0.5rem 1rem;
-    border-radius: var(--radius-md);
-    white-space: nowrap;
-    transition: background 0.2s var(--ease-out), transform 0.15s var(--ease-out);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:active:not(:disabled) {
-    transform: scale(0.98);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  /* ── Messages ──────────────────────────── */
-
-  .msg {
-    padding: var(--space-sm) var(--space-md);
-    border-radius: var(--radius-md);
-    margin-bottom: var(--space-md);
-    font-size: 0.875rem;
-  }
-
-  .msg-error {
-    color: var(--error);
-    background: var(--error-bg);
-    border-left: 3px solid var(--error);
-  }
-
-  .msg-key {
-    background: var(--success-bg);
-    border-left: 3px solid var(--success);
-    padding: var(--space-md);
-  }
-
-  .msg-key-header {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-sm);
-  }
-
-  .msg-key-header strong {
-    color: var(--success);
-  }
-
-  .msg-key-warn {
-    font-size: 0.8125rem;
-    color: var(--text-muted);
-  }
-
-  .key-display {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: var(--space-sm) var(--space-md);
-  }
-
-  .key-display code {
-    flex: 1;
-    font-family: ui-monospace, "Cascadia Code", monospace;
-    font-size: 0.8125rem;
-    color: var(--text);
-    word-break: break-all;
-  }
-
-  .btn-copy {
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--accent);
-    flex-shrink: 0;
-  }
-
-  .btn-copy:hover {
-    background: var(--accent-subtle);
-  }
-
-  /* ── Key list ──────────────────────────── */
-
-  .empty-state {
-    font-size: 0.875rem;
-    color: var(--text-faint);
-    padding: var(--space-lg) 0;
-  }
-
-  .key-list {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-
-  .key-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-md);
-    background: var(--surface);
-    gap: var(--space-md);
-  }
-
-  .key-row + .key-row {
-    border-top: 1px solid var(--border);
-  }
-
-  .key-row.revoked {
-    opacity: 0.5;
-  }
-
-  .key-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .key-name {
-    font-size: 0.9375rem;
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .key-meta {
-    font-size: 0.75rem;
-    color: var(--text-faint);
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-  }
-
-  .key-badge {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1em 0.4em;
-    border-radius: 3px;
-  }
-
-  .badge-active {
-    color: var(--success);
-    background: var(--success-bg);
-  }
-
-  .badge-revoked {
-    color: var(--error);
-    background: var(--error-bg);
-  }
-
-  .btn-danger {
-    color: var(--error);
-    font-size: 0.8125rem;
-    flex-shrink: 0;
-  }
-
-  .btn-danger:hover {
-    background: var(--error-bg);
-    color: var(--error);
-  }
-
-  .btn-danger:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* ── Animation ─────────────────────────── */
-
-  @keyframes reveal {
-    from {
-      opacity: 0;
-      transform: translateY(12px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-</style>

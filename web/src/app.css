@@ -1,150 +1,199 @@
-/* ── Reset ─────────────────────────────────────────────── */
+@import "tailwindcss";
 
-*,
-*::before,
-*::after {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/*
+ * Lific design tokens.
+ * Tailwind v4 CSS-first config: custom properties + @theme.
+ *
+ * Dark mode is class-based: `<html class="dark">`.
+ * Every color is warm-tinted — no pure black, no pure white.
+ */
 
-/* ── Tokens ────────────────────────────────────────────── */
-
-:root {
-  --bg: #faf8f5;
-  --bg-subtle: #f3f0eb;
-  --surface: #fff;
-  --text: #1c1917;
-  --text-muted: #78716c;
-  --text-faint: #a8a29e;
-
-  --accent: #5746a0;
-  --accent-hover: #4a3b8a;
-  --accent-subtle: #ece8f8;
-
-  --error: #b91c1c;
-  --error-bg: #fef2f2;
-  --success: #15803d;
-  --success-bg: #f0fdf4;
-
-  --border: #e7e5e4;
-  --border-focus: #5746a0;
-
+@theme {
   --font-display: "DM Serif Display", Georgia, serif;
   --font-body: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
 
-  --space-xs: 0.25rem;
-  --space-sm: 0.5rem;
-  --space-md: 1rem;
-  --space-lg: 1.5rem;
-  --space-xl: 2.5rem;
-  --space-2xl: 4rem;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
+  /* named colors for palette reference */
+  --color-stone-50: #faf8f5;
+  --color-stone-100: #f3f0eb;
+  --color-stone-200: #e7e5e4;
+  --color-stone-300: #d6d3d1;
+  --color-stone-400: #a8a29e;
+  --color-stone-500: #78716c;
+  --color-stone-600: #57534e;
+  --color-stone-700: #44403c;
+  --color-stone-800: #292524;
+  --color-stone-850: #1c1a17;
+  --color-stone-900: #1c1917;
+  --color-stone-950: #141210;
 
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --color-indigo-400: #8b7fd4;
+  --color-indigo-500: #6e5fbd;
+  --color-indigo-600: #5746a0;
+  --color-indigo-700: #4a3b8a;
+  --color-indigo-subtle: #ece8f8;
+  --color-indigo-subtle-dark: #231e3a;
+
+  --color-red-600: #b91c1c;
+  --color-red-400: #f87171;
+  --color-red-bg: #fef2f2;
+  --color-red-bg-dark: #2a1515;
+
+  --color-green-600: #15803d;
+  --color-green-400: #4ade80;
+  --color-green-bg: #f0fdf4;
+  --color-green-bg-dark: #142a1b;
 }
 
-/* ── Base ──────────────────────────────────────────────── */
+/* ── Light mode (default) ────────────────────────────── */
 
-html {
-  font-size: 16px;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+:root {
+  --bg: var(--color-stone-50);
+  --bg-subtle: var(--color-stone-100);
+  --surface: #fff;
+  --text: var(--color-stone-900);
+  --text-muted: var(--color-stone-500);
+  --text-faint: var(--color-stone-400);
+  --border: var(--color-stone-200);
+
+  --accent: var(--color-indigo-600);
+  --accent-hover: var(--color-indigo-700);
+  --accent-text: #fff;
+  --accent-subtle: var(--color-indigo-subtle);
+
+  --error: var(--color-red-600);
+  --error-bg: var(--color-red-bg);
+  --success: var(--color-green-600);
+  --success-bg: var(--color-green-bg);
+
+  /* The dark panel on auth pages */
+  --panel-bg: var(--color-stone-900);
+  --panel-text: var(--color-stone-50);
+  --panel-muted: var(--color-stone-400);
 }
 
-body {
-  font-family: var(--font-body);
-  color: var(--text);
-  background: var(--bg);
-  line-height: 1.6;
-  min-height: 100dvh;
+/* ── Dark mode ───────────────────────────────────────── */
+
+.dark {
+  --bg: var(--color-stone-950);
+  --bg-subtle: var(--color-stone-800);
+  --surface: var(--color-stone-850);
+  --text: var(--color-stone-200);
+  --text-muted: var(--color-stone-400);
+  --text-faint: var(--color-stone-600);
+  --border: var(--color-stone-700);
+
+  --accent: var(--color-indigo-400);
+  --accent-hover: var(--color-indigo-500);
+  --accent-text: var(--color-stone-950);
+  --accent-subtle: var(--color-indigo-subtle-dark);
+
+  --error: var(--color-red-400);
+  --error-bg: var(--color-red-bg-dark);
+  --success: var(--color-green-400);
+  --success-bg: var(--color-green-bg-dark);
+
+  --panel-bg: var(--color-stone-800);
+  --panel-text: var(--color-stone-200);
+  --panel-muted: var(--color-stone-500);
 }
 
-#app {
-  min-height: 100dvh;
+/* ── Base layer ──────────────────────────────────────── */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: var(--font-body);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.6;
+    min-height: 100dvh;
+    transition:
+      background 0.3s var(--ease-out-expo),
+      color 0.3s var(--ease-out-expo);
+  }
+
+  #app {
+    min-height: 100dvh;
+  }
+
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  a {
+    color: var(--accent);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+
+  /* Form reset for Tailwind */
+  input[type="text"],
+  input[type="email"],
+  input[type="password"] {
+    font-family: var(--font-body);
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    outline: none;
+    transition:
+      border-color 0.2s var(--ease-out-expo),
+      box-shadow 0.2s var(--ease-out-expo);
+  }
+  input::placeholder {
+    color: var(--text-faint);
+  }
+  input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-subtle);
+  }
+  input[aria-invalid="true"] {
+    border-color: var(--error);
+  }
+
+  button {
+    font-family: var(--font-body);
+    cursor: pointer;
+  }
 }
 
-h1, h2, h3 {
-  font-family: var(--font-display);
-  font-weight: 400;
-  line-height: 1.2;
-  color: var(--text);
+/* ── Reveal animation ────────────────────────────────── */
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-a {
-  color: var(--accent);
-  text-decoration: none;
-  transition: color 0.15s var(--ease-out);
-}
-a:hover {
-  text-decoration: underline;
+.animate-reveal {
+  opacity: 0;
+  animation: reveal 0.5s var(--ease-out-expo) forwards;
 }
 
-p {
-  margin: 0;
-}
-
-/* ── Form elements ─────────────────────────────────────── */
-
-input[type="text"],
-input[type="email"],
-input[type="password"] {
-  font-family: var(--font-body);
-  font-size: 0.9375rem;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 0.625rem 0.75rem;
-  width: 100%;
-  outline: none;
-  transition:
-    border-color 0.2s var(--ease-out),
-    box-shadow 0.2s var(--ease-out);
-}
-
-input::placeholder {
-  color: var(--text-faint);
-}
-
-input:focus {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 3px var(--accent-subtle);
-}
-
-input[aria-invalid="true"] {
-  border-color: var(--error);
-}
-
-label {
-  display: block;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  margin-bottom: var(--space-xs);
-}
-
-button {
-  font-family: var(--font-body);
-  cursor: pointer;
-  border: none;
-  outline: none;
-}
-
-/* ── Utility ───────────────────────────────────────────── */
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border-width: 0;
-}
+.delay-100 { animation-delay: 0.1s; }
+.delay-150 { animation-delay: 0.15s; }
+.delay-250 { animation-delay: 0.25s; }
+.delay-300 { animation-delay: 0.3s; }

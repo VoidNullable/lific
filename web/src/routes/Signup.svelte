@@ -1,5 +1,6 @@
 <script lang="ts">
   import { signup, saveSession } from "../lib/api";
+  import ThemeToggle from "../lib/ThemeToggle.svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
 
@@ -31,35 +32,60 @@
   }
 </script>
 
-<div class="auth-layout">
-  <aside class="auth-aside">
-    <div class="aside-content">
-      <h1 class="brand">Lific</h1>
-      <p class="tagline">Local-first issue tracking.<br />Single binary. No dependencies.</p>
-      <div class="aside-detail">
-        <span class="detail-label">v0.1</span>
-        <span class="detail-sep"></span>
-        <span class="detail-value">SQLite + Rust + MCP</span>
+<div class="grid min-h-dvh md:grid-cols-2">
+  <!-- Left panel -->
+  <aside
+    class="hidden md:flex flex-col justify-between p-10
+           bg-[var(--panel-bg)] text-[var(--panel-text)]"
+  >
+    <div></div>
+    <div class="animate-reveal delay-150">
+      <h1 class="font-display text-[clamp(2.5rem,5vw,3.5rem)] leading-[1.1] tracking-tight text-[var(--panel-text)] mb-4">
+        Lific
+      </h1>
+      <p class="text-[1.0625rem] leading-relaxed text-[var(--panel-muted)] max-w-[20ch]">
+        Local-first issue tracking.<br />Single binary. No dependencies.
+      </p>
+      <div class="flex items-center gap-2 mt-10 text-[0.8125rem] text-[var(--panel-muted)]">
+        <span>v0.1</span>
+        <span class="w-4 h-px bg-[var(--panel-muted)]"></span>
+        <span>SQLite + Rust + MCP</span>
       </div>
     </div>
   </aside>
 
-  <main class="auth-main">
-    <div class="auth-form-container">
-      <div class="form-header">
-        <h2>Create account</h2>
-        <p class="form-subtitle">Set up your identity. No email verification needed.</p>
+  <!-- Right panel -->
+  <main class="flex flex-col items-center justify-center p-10">
+    <div class="w-full max-w-[360px] animate-reveal delay-300">
+
+      <h1 class="md:hidden font-display text-2xl text-[var(--text)] mb-6">Lific</h1>
+
+      <div class="mb-10">
+        <h2 class="font-display text-[clamp(1.5rem,3vw,2rem)] text-[var(--text)] mb-1">Create account</h2>
+        <p class="text-[0.9375rem] text-[var(--text-muted)]">
+          Set up your identity. No email verification needed.
+        </p>
       </div>
 
-      <form onsubmit={handleSubmit}>
+      <form onsubmit={handleSubmit} class="flex flex-col gap-6">
         {#if error}
-          <div class="error-message" role="alert">
+          <div
+            class="text-sm text-[var(--error)] bg-[var(--error-bg)]
+                   px-4 py-2 rounded-md border-l-[3px] border-[var(--error)]"
+            role="alert"
+          >
             {error}
           </div>
         {/if}
 
-        <div class="field">
-          <label for="username">Username</label>
+        <div class="flex flex-col">
+          <label
+            for="username"
+            class="text-[0.8125rem] font-medium text-[var(--text-muted)]
+                   uppercase tracking-wider mb-1"
+          >
+            Username
+          </label>
           <input
             id="username"
             type="text"
@@ -68,11 +94,18 @@
             required
             autocomplete="username"
             aria-invalid={error ? "true" : undefined}
+            class="rounded-md px-3 py-2.5 text-[0.9375rem]"
           />
         </div>
 
-        <div class="field">
-          <label for="email">Email</label>
+        <div class="flex flex-col">
+          <label
+            for="email"
+            class="text-[0.8125rem] font-medium text-[var(--text-muted)]
+                   uppercase tracking-wider mb-1"
+          >
+            Email
+          </label>
           <input
             id="email"
             type="email"
@@ -80,11 +113,18 @@
             placeholder="you@example.com"
             required
             autocomplete="email"
+            class="rounded-md px-3 py-2.5 text-[0.9375rem]"
           />
         </div>
 
-        <div class="field">
-          <label for="password">Password</label>
+        <div class="flex flex-col">
+          <label
+            for="password"
+            class="text-[0.8125rem] font-medium text-[var(--text-muted)]
+                   uppercase tracking-wider mb-1"
+          >
+            Password
+          </label>
           <input
             id="password"
             type="password"
@@ -93,184 +133,36 @@
             required
             minlength={8}
             autocomplete="new-password"
+            class="rounded-md px-3 py-2.5 text-[0.9375rem]"
           />
         </div>
 
-        <button type="submit" class="btn-primary" disabled={loading}>
-          {#if loading}
-            Creating account...
-          {:else}
-            Create account
-          {/if}
+        <button
+          type="submit"
+          disabled={loading}
+          class="mt-2 rounded-md bg-[var(--accent)] text-[var(--accent-text)]
+                 text-[0.9375rem] font-medium py-2.5 px-5
+                 transition-all duration-200
+                 hover:bg-[var(--accent-hover)] active:scale-[0.98]
+                 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {loading ? "Creating account..." : "Create account"}
         </button>
       </form>
 
-      <p class="auth-switch">
-        Already have an account? <button class="link-btn" onclick={() => navigate("/login")}>Sign in</button>
+      <p class="text-center mt-10 text-[0.875rem] text-[var(--text-muted)]">
+        Already have an account?
+        <button
+          class="text-[var(--accent)] font-medium bg-transparent border-none cursor-pointer hover:underline"
+          onclick={() => navigate("/login")}
+        >
+          Sign in
+        </button>
       </p>
+
+      <div class="flex justify-center mt-6">
+        <ThemeToggle />
+      </div>
     </div>
   </main>
 </div>
-
-<style>
-  .auth-layout {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    min-height: 100dvh;
-  }
-
-  @media (max-width: 768px) {
-    .auth-layout {
-      grid-template-columns: 1fr;
-    }
-    .auth-aside {
-      display: none;
-    }
-  }
-
-  .auth-aside {
-    background: var(--text);
-    color: var(--bg);
-    display: flex;
-    align-items: flex-end;
-    padding: var(--space-2xl);
-  }
-
-  .aside-content {
-    opacity: 0;
-    animation: reveal 0.6s var(--ease-out) 0.15s forwards;
-  }
-
-  .brand {
-    font-size: clamp(2.5rem, 5vw, 3.5rem);
-    color: var(--bg);
-    margin-bottom: var(--space-md);
-    letter-spacing: -0.02em;
-  }
-
-  .tagline {
-    font-size: 1.0625rem;
-    color: var(--text-faint);
-    line-height: 1.5;
-    max-width: 20ch;
-  }
-
-  .aside-detail {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    margin-top: var(--space-xl);
-    font-size: 0.8125rem;
-    color: var(--text-faint);
-  }
-
-  .detail-sep {
-    width: 16px;
-    height: 1px;
-    background: var(--text-muted);
-  }
-
-  .auth-main {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-2xl) var(--space-xl);
-  }
-
-  .auth-form-container {
-    width: 100%;
-    max-width: 360px;
-    opacity: 0;
-    animation: reveal 0.6s var(--ease-out) 0.3s forwards;
-  }
-
-  .form-header {
-    margin-bottom: var(--space-xl);
-  }
-
-  .form-header h2 {
-    font-size: clamp(1.5rem, 3vw, 2rem);
-    margin-bottom: var(--space-xs);
-  }
-
-  .form-subtitle {
-    color: var(--text-muted);
-    font-size: 0.9375rem;
-  }
-
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-lg);
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .error-message {
-    font-size: 0.875rem;
-    color: var(--error);
-    background: var(--error-bg);
-    padding: var(--space-sm) var(--space-md);
-    border-radius: var(--radius-md);
-    border-left: 3px solid var(--error);
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: #fff;
-    font-size: 0.9375rem;
-    font-weight: 500;
-    padding: 0.6875rem 1.25rem;
-    border-radius: var(--radius-md);
-    transition:
-      background 0.2s var(--ease-out),
-      transform 0.15s var(--ease-out);
-    margin-top: var(--space-sm);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn-primary:active:not(:disabled) {
-    transform: scale(0.98);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .auth-switch {
-    text-align: center;
-    margin-top: var(--space-xl);
-    color: var(--text-muted);
-    font-size: 0.875rem;
-  }
-
-  .link-btn {
-    background: none;
-    color: var(--accent);
-    font-size: inherit;
-    padding: 0;
-    font-weight: 500;
-  }
-
-  .link-btn:hover {
-    text-decoration: underline;
-  }
-
-  @keyframes reveal {
-    from {
-      opacity: 0;
-      transform: translateY(12px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-</style>
