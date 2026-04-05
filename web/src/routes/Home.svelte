@@ -116,7 +116,9 @@
   }
 
   function getToolBot(toolId: string): Bot | undefined {
-    return bots.find((b) => b.username.startsWith(toolId + "-"));
+    if (!user) return undefined;
+    // Exact match: bot username is always "{toolId}-{ownerUsername}"
+    return bots.find((b) => b.username === `${toolId}-${user!.username}`);
   }
 
   function isToolConnected(toolId: string): boolean {
