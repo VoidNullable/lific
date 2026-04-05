@@ -158,6 +158,174 @@ export async function deleteBot(id: number) {
   });
 }
 
+// ── Projects ────────────────────────────────────────────────
+
+export interface Project {
+  id: number;
+  name: string;
+  identifier: string;
+  description: string;
+  emoji: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listProjects() {
+  return request<Project[]>("/projects");
+}
+
+export async function getProject(id: number) {
+  return request<Project>(`/projects/${id}`);
+}
+
+// ── Issues ──────────────────────────────────────────────────
+
+export interface Issue {
+  id: number;
+  project_id: number;
+  sequence: number;
+  identifier: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  module_id: number | null;
+  sort_order: number;
+  start_date: string | null;
+  target_date: string | null;
+  created_at: string;
+  updated_at: string;
+  labels: string[];
+  blocks?: string[];
+  blocked_by?: string[];
+  relates_to?: string[];
+}
+
+export interface IssueFilters {
+  project_id?: number;
+  status?: string;
+  priority?: string;
+  module_id?: number;
+  label?: string;
+  workable?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listIssues(filters: IssueFilters) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters)) {
+    if (v !== undefined && v !== null) params.set(k, String(v));
+  }
+  return request<Issue[]>(`/issues?${params}`);
+}
+
+export async function getIssue(id: number) {
+  return request<Issue>(`/issues/${id}`);
+}
+
+export async function resolveIssue(identifier: string) {
+  return request<Issue>(`/issues/resolve/${identifier}`);
+}
+
+export interface UpdateIssueInput {
+  title?: string;
+  description?: string;
+  status?: string;
+  priority?: string;
+  module_id?: number;
+  sort_order?: number;
+  labels?: string[];
+}
+
+export async function updateIssue(id: number, input: UpdateIssueInput) {
+  return request<Issue>(`/issues/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+// ── Modules ─────────────────────────────────────────────────
+
+export interface Module {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listModules(projectId: number) {
+  return request<Module[]>(`/modules?project_id=${projectId}`);
+}
+
+// ── Labels ──────────────────────────────────────────────────
+
+export interface Label {
+  id: number;
+  project_id: number;
+  name: string;
+  color: string;
+}
+
+export async function listLabels(projectId: number) {
+  return request<Label[]>(`/labels?project_id=${projectId}`);
+}
+
+// ── Comments ────────────────────────────────────────────────
+
+export interface Comment {
+  id: number;
+  issue_id: number;
+  user_id: number;
+  author: string;
+  author_display_name: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listComments(issueId: number) {
+  return request<Comment[]>(`/issues/${issueId}/comments`);
+}
+
+export async function createComment(issueId: number, content: string) {
+  return request<Comment>(`/issues/${issueId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+// ── Search ──────────────────────────────────────────────────
+
+export interface SearchResult {
+  result_type: string;
+  id: number;
+  identifier: string | null;
+  title: string;
+  snippet: string;
+  project_id: number | null;
+}
+
+export async function search(query: string, projectId?: number) {
+  const params = new URLSearchParams({ query });
+  if (projectId) params.set("project_id", String(projectId));
+  return request<SearchResult[]>(`/search?${params}`);
+}
+
+// ── Board ───────────────────────────────────────────────────
+
+export async function getBoard(
+  projectId: number,
+  groupBy: "status" | "priority" | "module" = "status"
+) {
+  return request<Record<string, Issue[]>>(
+    `/projects/${projectId}/board?group_by=${groupBy}`
+  );
+}
+
 // ── Tool config templates ───────────────────────────────────
 
 export interface ToolTemplate {

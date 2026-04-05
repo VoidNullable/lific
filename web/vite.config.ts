@@ -9,8 +9,17 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    // If 5173 is taken, fail fast instead of switching ports (avoids “module load failed”
+    // when the browser tab still points at the old URL).
+    port: 5173,
+    strictPort: true,
+    // Use 127.0.0.1 (not "localhost") so Node's proxy doesn't prefer IPv6 ::1 while
+    // the API is only listening on IPv4 — a common cause of silent fetch failures in dev.
     proxy: {
-      "/api": "http://localhost:3456",
+      "/api": {
+        target: "http://127.0.0.1:3456",
+        changeOrigin: true,
+      },
     },
   },
 });
