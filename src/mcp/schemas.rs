@@ -177,3 +177,17 @@ pub struct ManageResourceInput {
     #[schemars(description = "Color hex (for label, e.g. #EF4444)")]
     pub color: Option<String>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddCommentInput {
+    #[schemars(description = "Issue identifier (e.g. LIF-1)")]
+    pub identifier: String,
+    #[schemars(description = "Comment content (markdown)")]
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListCommentsInput {
+    #[schemars(description = "Issue identifier (e.g. LIF-1)")]
+    pub identifier: String,
+}

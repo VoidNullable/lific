@@ -157,6 +157,20 @@ impl LificMcp {
                 if !issue.description.is_empty() {
                     out.push_str(&format!("\n{}\n", issue.description));
                 }
+                // Include comments
+                if let Ok(comments) =
+                    self.read(|conn| queries::comments::list_comments(conn, issue.id))
+                {
+                    if !comments.is_empty() {
+                        out.push_str(&format!("\n--- Comments ({}) ---\n", comments.len()));
+                        for c in &comments {
+                            out.push_str(&format!(
+                                "[{}] {} ({}): {}\n",
+                                c.created_at, c.author, c.author_display_name, c.content
+                            ));
+                        }
+                    }
+                }
                 out
             }
             Err(e) => format!("Error: {e}"),
@@ -832,6 +846,72 @@ impl LificMcp {
             ),
         }
     }
+
+    #[tool(
+        description = "Add a comment to an issue. The author is determined by the authenticated user. If no user is associated with the current API key, a system user is used."
+    )]
+    fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
+        let issue_id = match self.read(|conn| queries::resolve_identifier(conn, &input.identifier))
+        {
+            Ok(id) => id,
+            Err(e) => return format!("Error: {e}"),
+        };
+
+        // For MCP, we need a user_id. Look for the first admin user, or first user.
+        // In production, the MCP session will be tied to a user via API key.
+        // For now, use a best-effort lookup.
+        let user_id = match self.read(|conn| {
+            queries::users::list_users(conn).map(|users| {
+                users
+                    .iter()
+                    .find(|u| u.is_admin)
+                    .or(users.first())
+                    .map(|u| u.id)
+            })
+        }) {
+            Ok(Some(id)) => id,
+            _ => {
+                return "Error: no users exist. Create a user first with `lific user create`."
+                    .into()
+            }
+        };
+
+        match self.write(|conn| {
+            queries::comments::create_comment(conn, issue_id, user_id, &input.content)
+        }) {
+            Ok(c) => format!(
+                "Comment added to {} by {} at {}: {}",
+                input.identifier, c.author, c.created_at, c.content
+            ),
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+
+    #[tool(description = "List comments on an issue")]
+    fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
+        let issue_id = match self.read(|conn| queries::resolve_identifier(conn, &input.identifier))
+        {
+            Ok(id) => id,
+            Err(e) => return format!("Error: {e}"),
+        };
+
+        match self.read(|conn| queries::comments::list_comments(conn, issue_id)) {
+            Ok(comments) if comments.is_empty() => {
+                format!("No comments on {}.", input.identifier)
+            }
+            Ok(comments) => {
+                let mut out = format!("{} comment(s) on {}:\n", comments.len(), input.identifier);
+                for c in &comments {
+                    out.push_str(&format!(
+                        "[{}] {} ({}): {}\n",
+                        c.created_at, c.author, c.author_display_name, c.content
+                    ));
+                }
+                out
+            }
+            Err(e) => format!("Error: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1478,5 +1558,94 @@ mod tests {
         let s = fmt_issue(&issue);
         assert!(s.contains("[bug]"), "got: {s}");
         assert!(s.contains("blocks:T-2"), "got: {s}");
+    }
+
+    // ── comments ──
+
+    fn seed_user(mcp: &LificMcp) {
+        let conn = mcp.db.write().unwrap();
+        crate::db::queries::users::create_user(
+            &conn,
+            &models::CreateUser {
+                username: "testuser".into(),
+                email: "test@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: Some("Test User".into()),
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn add_and_list_comments() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Test issue");
+        seed_user(&m);
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "Hello from MCP".into(),
+        }));
+        assert!(result.contains("Comment added"), "got: {result}");
+        assert!(result.contains("testuser"), "got: {result}");
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "Second comment".into(),
+        }));
+        assert!(result.contains("Comment added"), "got: {result}");
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+        }));
+        assert!(result.contains("2 comment(s)"), "got: {result}");
+        assert!(result.contains("Hello from MCP"), "got: {result}");
+        assert!(result.contains("Second comment"), "got: {result}");
+    }
+
+    #[test]
+    fn get_issue_includes_comments() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Commented issue");
+        seed_user(&m);
+
+        m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "Visible in get_issue".into(),
+        }));
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+        }));
+        assert!(result.contains("Comments (1)"), "got: {result}");
+        assert!(result.contains("Visible in get_issue"), "got: {result}");
+    }
+
+    #[test]
+    fn list_comments_empty() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "No comments");
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+        }));
+        assert!(result.contains("No comments"), "got: {result}");
+    }
+
+    #[test]
+    fn add_comment_bad_identifier() {
+        let m = mcp();
+        seed_user(&m);
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "NOPE-999".into(),
+            content: "Orphan".into(),
+        }));
+        assert!(result.contains("Error"), "got: {result}");
     }
 }
