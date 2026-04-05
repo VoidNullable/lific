@@ -27,6 +27,7 @@ pub fn router(db: DbPool) -> Router {
             get(list_bots).post(create_bot),
         )
         .route("/api/auth/bots/{id}/disconnect", post(disconnect_bot))
+        .route("/api/auth/bots/{id}", delete(delete_bot))
         // Comments
         .route(
             "/api/issues/{issue_id}/comments",
@@ -356,12 +357,34 @@ async fn create_bot(
 
     let bot_username = format!("{tool}-{}", user.username);
 
-    // Create bot user
-    let bot_user = with_write(&db, |conn| {
-        queries::users::create_bot_user(conn, user.id, &bot_username, display_name)
-    })?;
+    // Check if a disconnected bot already exists — reconnect it instead of creating new
+    let existing_bot = with_read(&db, |conn| {
+        queries::users::find_bot_by_username(conn, &bot_username)
+    })
+    .ok()
+    .flatten();
 
-    // Create API key for the bot (uses the auth module's key generation)
+    let bot_user = if let Some(existing) = existing_bot {
+        // Bot exists — check if it already has an active key
+        let has_key = with_read(&db, |conn| {
+            queries::users::bot_has_active_key(conn, existing.id)
+        })?;
+
+        if has_key {
+            return Err(LificError::BadRequest(format!(
+                "{display_name} is already connected"
+            )));
+        }
+
+        existing
+    } else {
+        // Create fresh bot user
+        with_write(&db, |conn| {
+            queries::users::create_bot_user(conn, user.id, &bot_username, display_name)
+        })?
+    };
+
+    // Generate a new API key for the bot
     let plaintext_key = crate::auth::create_api_key(&db, &manager, &bot_username)?;
 
     // Assign the key to the bot user
@@ -392,6 +415,21 @@ async fn disconnect_bot(
     queries::users::disconnect_bot(&conn, id, user.id, user.is_admin)?;
 
     Ok(Json(serde_json::json!({"disconnected": true})))
+}
+
+async fn delete_bot(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let user = auth_user.ok_or_else(|| {
+        LificError::BadRequest("authentication required".into())
+    })?;
+
+    let conn = db.write()?;
+    queries::users::delete_bot(&conn, id, user.id, user.is_admin)?;
+
+    Ok(Json(serde_json::json!({"deleted": true})))
 }
 
 // ── Comment endpoints ────────────────────────────────────────

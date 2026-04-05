@@ -6,6 +6,7 @@
     listBots,
     createBot,
     disconnectBot,
+    deleteBot,
     TOOL_TEMPLATES,
     type AuthUser,
     type Bot,
@@ -25,8 +26,9 @@
   let createdKey = $state<string | null>(null);
   let connectError = $state("");
 
-  // Disconnect
+  // Disconnect / Delete
   let disconnectingId = $state<number | null>(null);
+  let deletingId = $state<number | null>(null);
 
   $effect(() => {
     loadUser();
@@ -89,6 +91,13 @@
     disconnectingId = null;
   }
 
+  async function handleDelete(id: number) {
+    deletingId = id;
+    await deleteBot(id);
+    await loadBots();
+    deletingId = null;
+  }
+
   function initials(name: string): string {
     return name
       .split(/[\s_-]+/)
@@ -106,10 +115,18 @@
     });
   }
 
+  function getToolBot(toolId: string): Bot | undefined {
+    return bots.find((b) => b.username.startsWith(toolId + "-"));
+  }
+
   function isToolConnected(toolId: string): boolean {
-    return bots.some(
-      (b) => b.username.startsWith(toolId + "-") && b.has_active_key
-    );
+    const bot = getToolBot(toolId);
+    return !!bot && bot.has_active_key;
+  }
+
+  function isToolDisconnected(toolId: string): boolean {
+    const bot = getToolBot(toolId);
+    return !!bot && !bot.has_active_key;
   }
 </script>
 
@@ -311,11 +328,14 @@
           <div class="grid grid-cols-2 max-sm:grid-cols-1 gap-3 mb-6">
             {#each TOOL_TEMPLATES as template (template.id)}
               {@const connected = isToolConnected(template.id)}
+              {@const disconnected = isToolDisconnected(template.id)}
               <button
                 class="text-left p-4 rounded-md border transition-all duration-200
                        {connected
                   ? 'border-[var(--success)] bg-[var(--success-bg)]'
-                  : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] hover:shadow-sm'}
+                  : disconnected
+                    ? 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] hover:shadow-sm border-dashed'
+                    : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)] hover:shadow-sm'}
                        disabled:opacity-50"
                 disabled={connected || !!selectedTool}
                 onclick={() => startConnect(template)}
@@ -330,6 +350,13 @@
                              text-[var(--success)]"
                     >
                       Connected
+                    </span>
+                  {:else if disconnected}
+                    <span
+                      class="text-[0.6875rem] font-semibold uppercase tracking-wide
+                             text-[var(--text-faint)]"
+                    >
+                      Reconnect
                     </span>
                   {/if}
                 </div>
@@ -387,18 +414,31 @@
                         {/if}
                       </span>
                     </div>
-                    {#if bot.has_active_key}
-                      <button
-                        class="shrink-0 text-[0.8125rem] text-[var(--error)]
-                               px-2 py-1 rounded transition-colors
-                               hover:bg-[var(--error-bg)]
-                               disabled:opacity-50 disabled:cursor-not-allowed"
-                        disabled={disconnectingId === bot.id}
-                        onclick={() => handleDisconnect(bot.id)}
-                      >
-                        {disconnectingId === bot.id ? "..." : "Disconnect"}
-                      </button>
-                    {/if}
+                    <div class="flex items-center gap-2 shrink-0">
+                      {#if bot.has_active_key}
+                        <button
+                          class="text-[0.8125rem] text-[var(--error)]
+                                 px-2 py-1 rounded transition-colors
+                                 hover:bg-[var(--error-bg)]
+                                 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={disconnectingId === bot.id}
+                          onclick={() => handleDisconnect(bot.id)}
+                        >
+                          {disconnectingId === bot.id ? "..." : "Disconnect"}
+                        </button>
+                      {:else}
+                        <button
+                          class="text-[0.8125rem] text-[var(--error)]
+                                 px-2 py-1 rounded transition-colors
+                                 hover:bg-[var(--error-bg)]
+                                 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={deletingId === bot.id}
+                          onclick={() => handleDelete(bot.id)}
+                        >
+                          {deletingId === bot.id ? "..." : "Remove"}
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                 {/each}
               </div>

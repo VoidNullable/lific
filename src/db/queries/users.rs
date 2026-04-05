@@ -328,6 +328,35 @@ pub fn create_bot_user(
     get_user_by_id(conn, bot_user_id)
 }
 
+/// Find a bot user by username (for reconnection checks).
+pub fn find_bot_by_username(
+    conn: &Connection,
+    username: &str,
+) -> Result<Option<crate::db::models::User>, LificError> {
+    match conn.query_row(
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+         FROM users WHERE username = ?1 AND is_bot = 1",
+        params![username],
+        row_to_user,
+    ) {
+        Ok(user) => Ok(Some(user)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Check if a bot has any active (non-revoked) API keys.
+pub fn bot_has_active_key(conn: &Connection, bot_id: i64) -> Result<bool, LificError> {
+    let has: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM api_keys WHERE user_id = ?1 AND revoked = 0",
+            params![bot_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    Ok(has)
+}
+
 /// List all bots owned by a specific user.
 pub fn list_bots(
     conn: &Connection,
@@ -380,6 +409,48 @@ pub fn disconnect_bot(
         "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
         params![bot_id],
     )?;
+
+    Ok(())
+}
+
+/// Permanently delete a bot user and all its API keys.
+/// Only the owner or an admin can do this.
+pub fn delete_bot(
+    conn: &Connection,
+    bot_id: i64,
+    requester_id: i64,
+    is_admin: bool,
+) -> Result<(), LificError> {
+    // Verify ownership
+    let owner_id: Option<i64> = conn
+        .query_row(
+            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
+            params![bot_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| LificError::NotFound("bot not found".into()))?;
+
+    if owner_id != Some(requester_id) && !is_admin {
+        return Err(LificError::BadRequest(
+            "you can only delete your own bots".into(),
+        ));
+    }
+
+    // Delete API keys first (FK constraint)
+    conn.execute("DELETE FROM api_keys WHERE user_id = ?1", params![bot_id])?;
+
+    // Delete any comments made by this bot (or reassign — deleting for now)
+    conn.execute("DELETE FROM comments WHERE user_id = ?1", params![bot_id])?;
+
+    // Delete the bot user
+    let changed = conn.execute(
+        "DELETE FROM users WHERE id = ?1 AND is_bot = 1",
+        params![bot_id],
+    )?;
+
+    if changed == 0 {
+        return Err(LificError::NotFound("bot not found".into()));
+    }
 
     Ok(())
 }

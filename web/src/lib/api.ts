@@ -152,6 +152,12 @@ export async function disconnectBot(id: number) {
   });
 }
 
+export async function deleteBot(id: number) {
+  return request<{ deleted: boolean }>(`/auth/bots/${id}`, {
+    method: "DELETE",
+  });
+}
+
 // ── Tool config templates ───────────────────────────────────
 
 export interface ToolTemplate {
