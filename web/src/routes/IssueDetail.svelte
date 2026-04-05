@@ -334,97 +334,12 @@
         {issue.identifier}
       </span>
 
-      <!-- Save indicator + actions -->
-      <div class="ml-auto flex items-center gap-2">
-        <span class="text-[0.75rem] text-[var(--text-faint)]">
-          {#if saving}
-            <span class="animate-pulse">Saving...</span>
-          {:else if lastSaved}
-            Saved at {lastSaved}
-          {/if}
-        </span>
-
-        <!-- Kebab menu -->
-        {#if editable}
-          <div class="relative">
-            <button
-              class="size-7 flex items-center justify-center rounded-md
-                     text-[var(--text-faint)] hover:text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              title="Actions"
-              onclick={(e) => {
-                e.stopPropagation();
-                if (confirmingDelete) {
-                  confirmingDelete = false;
-                  menuOpen = false;
-                } else {
-                  menuOpen = !menuOpen;
-                }
-              }}
-            >
-              <svg class="size-4" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M8 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM9.5 12.5a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0Z"/>
-              </svg>
-            </button>
-
-            {#if menuOpen && !confirmingDelete}
-              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-              <div
-                class="absolute right-0 top-full mt-1 z-20 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                onclick={(e) => e.stopPropagation()}
-              >
-                <button
-                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                         text-[0.8125rem] text-[var(--error)]
-                         hover:bg-[var(--error-bg)] transition-colors"
-                  onclick={() => { confirmingDelete = true; }}
-                >
-                  <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-                    <path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/>
-                  </svg>
-                  Delete issue
-                </button>
-              </div>
-            {/if}
-
-            {#if confirmingDelete}
-              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-              <div
-                class="absolute right-0 top-full mt-1 z-20 w-[240px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg p-3"
-                onclick={(e) => e.stopPropagation()}
-              >
-                <p class="text-[0.8125rem] text-[var(--text)] mb-1 font-medium">
-                  Delete {issue.identifier}?
-                </p>
-                <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
-                  This can't be undone.
-                </p>
-                <div class="flex items-center gap-2">
-                  <button
-                    class="text-[0.8125rem] font-medium text-white
-                           bg-[var(--error)] px-3 py-1.5 rounded-md
-                           hover:opacity-90 transition-opacity
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={deleting}
-                    onclick={confirmDelete}
-                  >
-                    {deleting ? "Deleting..." : "Delete"}
-                  </button>
-                  <button
-                    class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
-                           rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                    onclick={() => { confirmingDelete = false; menuOpen = false; }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            {/if}
-          </div>
+      <!-- Save indicator -->
+      <div class="ml-auto text-[0.75rem] text-[var(--text-faint)]">
+        {#if saving}
+          <span class="animate-pulse">Saving...</span>
+        {:else if lastSaved}
+          Saved at {lastSaved}
         {/if}
       </div>
     </div>
@@ -635,6 +550,91 @@
         <aside
           class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5"
         >
+          <!-- Manage -->
+          {#if editable}
+            <div class="flex items-center justify-between mb-5">
+              {@render sidebarField("Manage")}
+              <div class="relative">
+                <button
+                  class="flex items-center gap-1 text-[0.75rem] text-[var(--text-faint)]
+                         hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
+                         hover:bg-[var(--bg-subtle)]"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    if (confirmingDelete) {
+                      confirmingDelete = false;
+                      menuOpen = false;
+                    } else {
+                      menuOpen = !menuOpen;
+                    }
+                  }}
+                >
+                  <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM9.5 12.5a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0Z"/>
+                  </svg>
+                </button>
+
+                {#if menuOpen && !confirmingDelete}
+                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                  <div
+                    class="absolute right-0 top-full mt-1 z-20 w-[180px]
+                           bg-[var(--surface)] border border-[var(--border)]
+                           rounded-md shadow-lg py-1"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                             text-[0.8125rem] text-[var(--error)]
+                             hover:bg-[var(--error-bg)] transition-colors"
+                      onclick={() => { confirmingDelete = true; }}
+                    >
+                      <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
+                        <path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/>
+                      </svg>
+                      Delete issue
+                    </button>
+                  </div>
+                {/if}
+
+                {#if confirmingDelete}
+                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                  <div
+                    class="absolute right-0 top-full mt-1 z-20 w-[240px]
+                           bg-[var(--surface)] border border-[var(--border)]
+                           rounded-md shadow-lg p-3"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    <p class="text-[0.8125rem] text-[var(--text)] mb-1 font-medium">
+                      Delete {issue.identifier}?
+                    </p>
+                    <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
+                      This can't be undone.
+                    </p>
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="text-[0.8125rem] font-medium text-white
+                               bg-[var(--error)] px-3 py-1.5 rounded-md
+                               hover:opacity-90 transition-opacity
+                               disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={deleting}
+                        onclick={confirmDelete}
+                      >
+                        {deleting ? "Deleting..." : "Delete"}
+                      </button>
+                      <button
+                        class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
+                               rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                        onclick={() => { confirmingDelete = false; menuOpen = false; }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
           <div class="issue-meta-aside"><div class="issue-meta-field">{@render sidebarField("Status")}<div class="relative">
             <button
               class="flex items-center gap-2 text-[0.8125rem] rounded-md
