@@ -90,7 +90,7 @@
             id="username"
             type="text"
             bind:value={username}
-            placeholder="blake"
+            placeholder="jane"
             required
             autocomplete="username"
             aria-invalid={error ? "true" : undefined}

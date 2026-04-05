@@ -85,7 +85,7 @@
             id="identity"
             type="text"
             bind:value={identity}
-            placeholder="blake"
+            placeholder="jane"
             required
             autocomplete="username"
             aria-invalid={error ? "true" : undefined}
