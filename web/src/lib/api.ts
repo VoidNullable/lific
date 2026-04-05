@@ -85,3 +85,35 @@ export function clearSession() {
 export function hasSession(): boolean {
   return !!localStorage.getItem("lific_token");
 }
+
+// ── API Key management ──────────────────────────────────────
+
+export interface ApiKey {
+  id: number;
+  name: string;
+  created_at: string;
+  expires_at: string | null;
+  revoked: boolean;
+}
+
+export interface CreateKeyResponse {
+  name: string;
+  key: string;
+}
+
+export async function listKeys() {
+  return request<ApiKey[]>("/auth/keys");
+}
+
+export async function createKey(name: string) {
+  return request<CreateKeyResponse>("/auth/keys", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function revokeKey(id: number) {
+  return request<{ revoked: boolean }>(`/auth/keys/${id}`, {
+    method: "DELETE",
+  });
+}

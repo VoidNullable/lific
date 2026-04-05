@@ -280,6 +280,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .clone()
                 .unwrap_or_else(|| format!("http://{}:{}", cfg.server.host, cfg.server.port));
 
+            let manager_ext = Arc::new(manager.clone());
+
             let auth_state = auth::AuthState {
                 db: pool.clone(),
                 manager,
@@ -319,6 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                 )
                 .layer(axum::Extension(cfg.auth.clone()))
+                .layer(axum::Extension(manager_ext))
                 .layer(middleware::from_fn_with_state(
                     auth_state,
                     auth_middleware_wrapper,

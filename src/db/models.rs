@@ -271,6 +271,17 @@ pub struct Session {
     pub created_at: String,
 }
 
+// ── API Key (user-facing) ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserApiKey {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub revoked: bool,
+}
+
 // ── Comments ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

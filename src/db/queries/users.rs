@@ -288,6 +288,55 @@ pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<Use
     }
 }
 
+/// List API keys belonging to a specific user.
+pub fn list_user_keys(
+    conn: &Connection,
+    user_id: i64,
+) -> Result<Vec<crate::db::models::UserApiKey>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at, expires_at, revoked
+         FROM api_keys WHERE user_id = ?1
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![user_id], |row| {
+        Ok(crate::db::models::UserApiKey {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            created_at: row.get(2)?,
+            expires_at: row.get(3)?,
+            revoked: row.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Revoke an API key, but only if it belongs to the given user (or user is admin).
+pub fn revoke_user_key(
+    conn: &Connection,
+    key_id: i64,
+    user_id: i64,
+    is_admin: bool,
+) -> Result<(), LificError> {
+    let changed = if is_admin {
+        conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+            params![key_id],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE id = ?1 AND user_id = ?2 AND revoked = 0",
+            params![key_id, user_id],
+        )?
+    };
+
+    if changed == 0 {
+        return Err(LificError::NotFound(
+            "key not found or already revoked".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]

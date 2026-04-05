@@ -16,6 +16,11 @@ pub fn router(db: DbPool) -> Router {
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
+        .route(
+            "/api/auth/keys",
+            get(list_keys).post(create_key),
+        )
+        .route("/api/auth/keys/{id}", delete(revoke_key))
         // Comments
         .route(
             "/api/issues/{issue_id}/comments",
@@ -182,6 +187,68 @@ async fn auth_me(
             "no user associated with this token".into(),
         )),
     }
+}
+
+// ── Key management endpoints ─────────────────────────────────
+
+async fn list_keys(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+) -> Result<Json<Vec<UserApiKey>>, LificError> {
+    let user = auth_user.ok_or_else(|| {
+        LificError::BadRequest("authentication required".into())
+    })?;
+
+    with_read(&db, |conn| {
+        queries::users::list_user_keys(conn, user.id)
+    })
+    .map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct CreateKeyRequest {
+    name: String,
+}
+
+async fn create_key(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    Json(input): Json<CreateKeyRequest>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let user = auth_user.ok_or_else(|| {
+        LificError::BadRequest("authentication required".into())
+    })?;
+
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(LificError::BadRequest("key name cannot be empty".into()));
+    }
+
+    // Create the key and assign it to the user in one go
+    let plaintext = crate::auth::create_api_key(&db, &manager, &name)?;
+    let conn = db.write()?;
+    queries::users::assign_key_to_user(&conn, &name, user.id)?;
+
+    Ok(Json(serde_json::json!({
+        "name": name,
+        "key": plaintext,
+    })))
+}
+
+async fn revoke_key(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let user = auth_user.ok_or_else(|| {
+        LificError::BadRequest("authentication required".into())
+    })?;
+
+    let conn = db.write()?;
+    queries::users::revoke_user_key(&conn, id, user.id, user.is_admin)?;
+
+    Ok(Json(serde_json::json!({"revoked": true})))
 }
 
 // ── Comment endpoints ────────────────────────────────────────
