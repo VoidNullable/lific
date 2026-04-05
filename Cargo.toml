@@ -40,6 +40,9 @@ rand = "0.8"
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
+# Encoding
+urlencoding = "2"
+
 # Config
 toml = "0.8"
 dirs = "6"

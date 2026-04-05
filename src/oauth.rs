@@ -199,8 +199,61 @@ struct ApproveForm {
 
 async fn authorize_approve(
     State(oauth): State<OAuthState>,
+    headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<ApproveForm>,
 ) -> Response {
+    // Require authentication — the person approving must be identified.
+    // Check for a valid session token or API key in the Authorization header
+    // or in a cookie. For the HTML form flow, we also accept a form-submitted token.
+    let has_auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("Bearer "))
+        .unwrap_or(false);
+
+    if !has_auth {
+        // For the browser form flow, check if there's a cookie with a session token
+        let has_cookie = headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("lific_token="))
+            .unwrap_or(false);
+
+        if !has_cookie {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Html("<h1>Authentication required</h1><p>You must be signed in to approve OAuth access. <a href=\"/#/login\">Sign in</a></p>".to_string()),
+            )
+                .into_response();
+        }
+    }
+
+    // Validate the redirect_uri against the client's registered URIs
+    let redirect_ok = if let Ok(conn) = oauth.db.read() {
+        let registered: Result<String, _> = conn.query_row(
+            "SELECT redirect_uris FROM oauth_clients WHERE client_id = ?1",
+            params![form.client_id],
+            |row| row.get(0),
+        );
+        match registered {
+            Ok(uris_json) => {
+                let uris: Vec<String> = serde_json::from_str(&uris_json).unwrap_or_default();
+                uris.iter().any(|u| u == &form.redirect_uri)
+            }
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+
+    if !redirect_ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("Invalid client_id or redirect_uri does not match registered URIs.".to_string()),
+        )
+            .into_response();
+    }
+
     let code = uuid_v4();
     let expires = chrono::Utc::now() + chrono::Duration::minutes(10);
 
@@ -225,7 +278,8 @@ async fn authorize_approve(
     if let Some(state) = &form.state
         && !state.is_empty()
     {
-        redirect_url.push_str(&format!("&state={state}"));
+        let encoded = urlencoding::encode(state);
+        redirect_url.push_str(&format!("&state={encoded}"));
     }
 
     info!(client_id = %form.client_id, "OAuth authorization approved");
@@ -288,7 +342,7 @@ async fn token_exchange(
     };
 
     let code_row: Result<(String, String, String, i64), _> = conn.query_row(
-        "SELECT client_id, code_challenge, code_challenge_method, used FROM oauth_codes WHERE code = ?1",
+        "SELECT client_id, code_challenge, code_challenge_method, used FROM oauth_codes WHERE code = ?1 AND expires_at > datetime('now')",
         params![code],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     );
@@ -379,19 +433,14 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 }
 
 fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let random: u64 = nanos as u64 ^ (std::process::id() as u64 * 0x517cc1b727220a95);
+    let bytes: [u8; 16] = rand::random();
     format!(
         "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (nanos >> 32) as u32,
-        ((nanos >> 16) as u16),
-        random as u16 & 0x0fff,
-        (random >> 16) as u16 & 0x3fff | 0x8000,
-        random >> 32
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u16::from_be_bytes([bytes[4], bytes[5]]),
+        u16::from_be_bytes([bytes[6], bytes[7]]) & 0x0fff,
+        u16::from_be_bytes([bytes[8], bytes[9]]) & 0x3fff | 0x8000,
+        u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]])
     )
 }
 
