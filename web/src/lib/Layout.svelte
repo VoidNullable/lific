@@ -77,11 +77,11 @@
     ></div>
   </div>
 {:else if user}
-  <div class="min-h-dvh flex">
+  <div class="h-dvh flex overflow-hidden">
     <!-- Sidebar -->
     <aside
       class="w-[220px] shrink-0 flex flex-col border-r border-[var(--border)]
-             bg-[var(--surface)] select-none"
+             bg-[var(--surface)] select-none overflow-y-auto"
     >
       <!-- Brand -->
       <div class="px-4 py-3 border-b border-[var(--border)]">
@@ -241,7 +241,7 @@
     </aside>
 
     <!-- Main content -->
-    <main class="flex-1 min-w-0 bg-[var(--bg)]">
+    <main class="flex-1 min-w-0 bg-[var(--bg)] overflow-y-auto">
       {@render children()}
     </main>
   </div>
