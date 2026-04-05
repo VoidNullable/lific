@@ -267,6 +267,7 @@ pub fn assign_key_to_user(
 
 /// Get the user_id associated with an API key (by hash match).
 /// Returns None if the key has no user_id assigned.
+#[allow(dead_code)]
 pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<User>, LificError> {
     let user_id: Option<i64> = conn
         .query_row(
