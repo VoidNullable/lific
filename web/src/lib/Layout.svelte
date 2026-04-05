@@ -94,13 +94,24 @@
       <nav class="flex-1 py-2 overflow-y-auto">
         <!-- Projects -->
         {#if projects.length > 0}
-          <div class="px-3 pt-2 pb-1">
+          <div class="flex items-center justify-between px-3 pt-2 pb-1">
             <span
               class="text-[0.6875rem] font-semibold uppercase tracking-widest
                      text-[var(--text-faint)]"
             >
               Projects
             </span>
+            <button
+              class="size-4 flex items-center justify-center rounded
+                     text-[var(--text-faint)] hover:text-[var(--accent)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              title="New project"
+              onclick={() => navigate("/projects/new")}
+            >
+              <svg class="size-3" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M7.25 1a.75.75 0 0 1 .75.75V7h5.25a.75.75 0 0 1 0 1.5H8v5.25a.75.75 0 0 1-1.5 0V8.5H1.25a.75.75 0 0 1 0-1.5H6.5V1.75A.75.75 0 0 1 7.25 1Z"/>
+              </svg>
+            </button>
           </div>
           {#each projects as project (project.id)}
             {@const isProjectActive = activeProject === project.identifier}
@@ -145,13 +156,33 @@
                     </svg>
                     Issues
                   </button>
+                  <button
+                    class="w-full flex items-center gap-2 px-3 py-1 text-left
+                           text-[0.8125rem] rounded-md transition-colors
+                           {isActive(`/${project.identifier}/settings`)
+                      ? 'text-[var(--accent)] font-medium'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+                    onclick={() => navigate(`/${project.identifier}/settings`)}
+                  >
+                    <!-- Gear icon -->
+                    <svg class="size-3.5 shrink-0" viewBox="0 0 16 16" fill="currentColor">
+                      <path fill-rule="evenodd" d="M6.955.9A.75.75 0 0 1 7.68.316l.656.007a.75.75 0 0 1 .723.591l.24 1.108c.333.12.65.273.947.456l1.043-.44a.75.75 0 0 1 .89.243l.398.562a.75.75 0 0 1-.054.906l-.753.72a5.535 5.535 0 0 1 .06 1.062l.752.72a.75.75 0 0 1 .055.906l-.399.562a.75.75 0 0 1-.89.243l-1.042-.44c-.297.183-.614.336-.947.456l-.24 1.109a.75.75 0 0 1-.723.59l-.656.008a.75.75 0 0 1-.726-.584l-.26-1.117a5.503 5.503 0 0 1-.94-.457l-1.05.442a.75.75 0 0 1-.891-.244l-.398-.562a.75.75 0 0 1 .054-.906l.762-.726a5.535 5.535 0 0 1-.06-1.055l-.762-.726a.75.75 0 0 1-.054-.906l.398-.562a.75.75 0 0 1 .89-.244l1.05.443c.293-.183.607-.336.941-.457l.26-1.117A.75.75 0 0 1 6.955.9ZM8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" clip-rule="evenodd"/>
+                    </svg>
+                    Settings
+                  </button>
                 </div>
               {/if}
             </div>
           {/each}
         {:else}
-          <div class="px-4 py-6 text-[0.8125rem] text-[var(--text-faint)]">
-            No projects yet.
+          <div class="px-4 py-6">
+            <p class="text-[0.8125rem] text-[var(--text-faint)] mb-2">No projects yet.</p>
+            <button
+              class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+              onclick={() => navigate("/projects/new")}
+            >
+              Create a project
+            </button>
           </div>
         {/if}
       </nav>

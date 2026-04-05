@@ -5,6 +5,8 @@
   import IssueList from "./routes/IssueList.svelte";
   import IssueDetail from "./routes/IssueDetail.svelte";
   import IssueNew from "./routes/IssueNew.svelte";
+  import ProjectNew from "./routes/ProjectNew.svelte";
+  import ProjectSettings from "./routes/ProjectSettings.svelte";
   import Layout from "./lib/Layout.svelte";
   import { hasSession, listProjects } from "./lib/api";
 
@@ -26,12 +28,10 @@
   // Redirect logic
   $effect(() => {
     if (hasSession()) {
-      // Authenticated — redirect away from auth/root pages to the app
       if (route === "/" || route === "/login" || route === "/signup" || route === "/home") {
         redirectToDefault();
       }
     } else {
-      // Not authenticated — anything that isn't login/signup should go to login
       if (route !== "/login" && route !== "/signup") {
         navigate("/login");
       }
@@ -48,41 +48,37 @@
       navigate("/settings");
       return;
     }
-    // Network / proxy / auth failure: don't keep the infinite loading spinner on "/".
     navigate("/settings");
   }
 
-  // Parse route for project-scoped views
-  function parseRoute(r: string): {
-    type: "auth";
-    page: "login" | "signup";
-  } | {
-    type: "app";
-    page: "settings";
-  } | {
-    type: "app";
-    page: "issues";
-    project: string;
-  } | {
-    type: "app";
-    page: "issue-new";
-    project: string;
-  } | {
-    type: "app";
-    page: "issue-detail";
-    project: string;
-    identifier: string;
-  } | {
-    type: "loading";
-  } {
+  type ParsedRoute =
+    | { type: "auth"; page: "login" | "signup" }
+    | { type: "app"; page: "settings" }
+    | { type: "app"; page: "project-new" }
+    | { type: "app"; page: "project-settings"; project: string }
+    | { type: "app"; page: "issues"; project: string }
+    | { type: "app"; page: "issue-new"; project: string }
+    | { type: "app"; page: "issue-detail"; project: string; identifier: string }
+    | { type: "loading" };
+
+  function parseRoute(r: string): ParsedRoute {
     if (r === "/login" || r === "/signup") {
       return { type: "auth", page: r.slice(1) as "login" | "signup" };
     }
     if (r === "/settings") {
       return { type: "app", page: "settings" };
     }
+    if (r === "/projects/new") {
+      return { type: "app", page: "project-new" };
+    }
 
-    // Project-scoped: /{IDENTIFIER}/issues (identifier is typically uppercase, e.g. LIF)
+    // Project-scoped: /{IDENTIFIER}/settings
+    const projectSettingsMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/settings$/i);
+    if (projectSettingsMatch) {
+      return { type: "app", page: "project-settings", project: projectSettingsMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/issues
     const issueListMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/issues$/i);
     if (issueListMatch) {
       return { type: "app", page: "issues", project: issueListMatch[1] };
@@ -107,7 +103,6 @@
       };
     }
 
-    // Default: show loading (will redirect)
     return { type: "loading" };
   }
 
@@ -131,6 +126,10 @@
   <Layout {navigate} {route}>
     {#if parsed.page === "settings"}
       <Settings {navigate} />
+    {:else if parsed.page === "project-new"}
+      <ProjectNew {navigate} />
+    {:else if parsed.page === "project-settings"}
+      <ProjectSettings {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "issues"}
       <IssueList {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "issue-new"}

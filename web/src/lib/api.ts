@@ -178,6 +178,40 @@ export async function getProject(id: number) {
   return request<Project>(`/projects/${id}`);
 }
 
+export interface CreateProjectInput {
+  name: string;
+  identifier: string;
+  description?: string;
+  emoji?: string;
+}
+
+export async function createProject(input: CreateProjectInput) {
+  return request<Project>("/projects", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface UpdateProjectInput {
+  name?: string;
+  identifier?: string;
+  description?: string;
+  emoji?: string;
+}
+
+export async function updateProject(id: number, input: UpdateProjectInput) {
+  return request<Project>(`/projects/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteProject(id: number) {
+  return request<{ deleted: boolean }>(`/projects/${id}`, {
+    method: "DELETE",
+  });
+}
+
 // ── Issues ──────────────────────────────────────────────────
 
 export interface Issue {
