@@ -70,9 +70,7 @@ pub fn create_user(conn: &Connection, input: &CreateUser) -> Result<User, LificE
         rusqlite::Error::SqliteFailure(err, _)
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
-            LificError::BadRequest(format!(
-                "username '{username}' or email '{email}' already exists"
-            ))
+            LificError::BadRequest("an account with this username or email already exists".into())
         }
         other => other.into(),
     })?;

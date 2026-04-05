@@ -3,7 +3,7 @@ use axum::{
     extract::{Json, Path, Query, State},
     routing::{delete, get, post, put},
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{self, CorsLayer};
 
 use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
@@ -77,7 +77,18 @@ pub fn router(db: DbPool) -> Router {
         .route("/api/projects/{id}/board", get(get_board))
         // Health
         .route("/api/health", get(health))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(cors::Any) // API keys use Bearer auth, not cookies — CORS doesn't add security here.
+                                         // Restricting origin would break legitimate CLI/MCP clients.
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]),
+        )
         .with_state(db)
 }
 
