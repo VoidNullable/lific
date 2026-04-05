@@ -1,3 +1,4 @@
+pub(crate) mod comments;
 mod issues;
 mod pages;
 mod projects;

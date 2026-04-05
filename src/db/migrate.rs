@@ -24,6 +24,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "users and sessions",
         include_str!("../../migrations/005_users.sql"),
     ),
+    (
+        6,
+        "comments",
+        include_str!("../../migrations/006_comments.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

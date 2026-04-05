@@ -271,6 +271,32 @@ pub struct Session {
     pub created_at: String,
 }
 
+// ── Comments ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: i64,
+    pub issue_id: i64,
+    pub user_id: i64,
+    /// Author username (joined from users table on read)
+    pub author: String,
+    /// Author display name (joined from users table on read)
+    pub author_display_name: String,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateComment {
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateComment {
+    pub content: String,
+}
+
 // ── Search ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
