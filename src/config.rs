@@ -12,6 +12,20 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub backup: BackupConfig,
     pub log: LogConfig,
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Allow self-service signup via the API. If false, only admins can create users via CLI.
+    pub allow_signup: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { allow_signup: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

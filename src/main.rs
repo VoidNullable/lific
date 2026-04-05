@@ -187,6 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mcp_service.handle(request).await.into_response()
                     }),
                 )
+                .layer(axum::Extension(cfg.auth.clone()))
                 .layer(middleware::from_fn_with_state(
                     auth_state,
                     auth_middleware_wrapper,
@@ -242,6 +243,8 @@ async fn auth_middleware_wrapper(
 ) -> axum::response::Response {
     let path = request.uri().path();
     if path == "/api/health"
+        || path == "/api/auth/signup"
+        || path == "/api/auth/login"
         || path.starts_with("/.well-known/")
         || path.starts_with("/oauth/")
         || path == "/register"
