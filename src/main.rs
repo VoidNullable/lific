@@ -7,6 +7,7 @@ mod db;
 mod error;
 mod mcp;
 mod oauth;
+mod ratelimit;
 
 use std::sync::Arc;
 
@@ -312,6 +313,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mcp_config,
             );
 
+            // Login rate limiter: 5 attempts per 15 minutes per identity
+            let login_limiter = Arc::new(ratelimit::RateLimiter::new(
+                5,
+                std::time::Duration::from_secs(15 * 60),
+            ));
+
             // Routes behind auth: REST API + MCP
             let authed_routes = api::router(pool.clone())
                 .route(
@@ -320,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mcp_service.handle(request).await.into_response()
                     }),
                 )
+                .layer(axum::Extension(login_limiter))
                 .layer(axum::Extension(cfg.auth.clone()))
                 .layer(axum::Extension(manager_ext))
                 .layer(middleware::from_fn_with_state(

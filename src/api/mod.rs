@@ -155,10 +155,31 @@ async fn auth_signup(
 
 async fn auth_login(
     State(db): State<DbPool>,
+    limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     Json(input): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    // Rate limit by identity (username/email)
+    let key = input.identity.to_lowercase();
+    if let Some(Extension(ref rl)) = limiter {
+        if !rl.check(&key) {
+            let retry = rl.retry_after(&key);
+            return Err(LificError::BadRequest(format!(
+                "too many login attempts — try again in {retry} seconds"
+            )));
+        }
+    }
+
     let conn = db.write()?;
-    let user = queries::users::authenticate(&conn, &input.identity, &input.password)?;
+    let user = match queries::users::authenticate(&conn, &input.identity, &input.password) {
+        Ok(u) => u,
+        Err(e) => {
+            // Record the failure for rate limiting
+            if let Some(Extension(ref rl)) = limiter {
+                rl.record_failure(&key);
+            }
+            return Err(e);
+        }
+    };
     let session = queries::users::create_session(&conn, user.id, None)?;
 
     Ok(Json(serde_json::json!({
