@@ -177,7 +177,7 @@ pub async fn require_api_key(
             let conn = match auth.db.write() {
                 Ok(c) => c,
                 Err(_) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
                 }
             };
             crate::db::queries::users::validate_session(&conn, &token)

@@ -64,7 +64,10 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
             file.data.to_vec(),
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "Frontend not built. Run: cd web && bun run build")
+        None => (
+            StatusCode::NOT_FOUND,
+            "Frontend not built. Run: cd web && bun run build",
+        )
             .into_response(),
     }
 }
@@ -394,7 +397,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let handle = server.serve(transport).await?;
             handle.waiting().await?;
         }
-
     }
 
     Ok(())

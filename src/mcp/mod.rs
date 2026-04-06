@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rmcp::{
+    ServerHandler,
     handler::server::router::tool::ToolRouter,
     model::{ServerCapabilities, ServerInfo},
-    ServerHandler,
 };
 
-use crate::db::models::AuthUser;
 use crate::db::DbPool;
+use crate::db::models::AuthUser;
 
 /// Global storage for the most recent MCP request's authenticated user.
 /// This is a workaround for rmcp spawning tool calls on different tasks
@@ -77,8 +77,8 @@ impl ServerHandler for LificMcp {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
-           + rmcp::service::MaybeSendFuture
-           + '_ {
+    + rmcp::service::MaybeSendFuture
+    + '_ {
         std::future::ready(Ok(rmcp::model::ListToolsResult {
             tools: self.tool_router.list_all(),
             ..Default::default()
@@ -90,8 +90,8 @@ impl ServerHandler for LificMcp {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
-           + rmcp::service::MaybeSendFuture
-           + '_ {
+    + rmcp::service::MaybeSendFuture
+    + '_ {
         let tool_context =
             rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tool_context)

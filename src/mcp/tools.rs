@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::db::{models, queries, DbPool};
+use crate::db::{DbPool, models, queries};
 
-use super::schemas::*;
 use super::LificMcp;
+use super::schemas::*;
 
 impl LificMcp {
     pub(crate) fn create_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
@@ -875,7 +875,7 @@ impl LificMcp {
                 Ok(Some(id)) => id,
                 _ => {
                     return "Error: no users exist. Create a user first with `lific user create`."
-                        .into()
+                        .into();
                 }
             },
         };

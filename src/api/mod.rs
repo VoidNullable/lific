@@ -16,16 +16,10 @@ pub fn router(db: DbPool) -> Router {
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
-        .route(
-            "/api/auth/keys",
-            get(list_keys).post(create_key),
-        )
+        .route("/api/auth/keys", get(list_keys).post(create_key))
         .route("/api/auth/keys/{id}", delete(revoke_key))
         // Connected tools (bots)
-        .route(
-            "/api/auth/bots",
-            get(list_bots).post(create_bot),
-        )
+        .route("/api/auth/bots", get(list_bots).post(create_bot))
         .route("/api/auth/bots/{id}/disconnect", post(disconnect_bot))
         .route("/api/auth/bots/{id}", delete(delete_bot))
         // Comments
@@ -89,14 +83,17 @@ pub fn router(db: DbPool) -> Router {
         .layer(
             CorsLayer::new()
                 .allow_origin(cors::Any) // API keys use Bearer auth, not cookies — CORS doesn't add security here.
-                                         // Restricting origin would break legitimate CLI/MCP clients.
+                // Restricting origin would break legitimate CLI/MCP clients.
                 .allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
                     axum::http::Method::PUT,
                     axum::http::Method::DELETE,
                 ])
-                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]),
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ]),
         )
         .with_state(db)
 }
@@ -238,14 +235,11 @@ async fn auth_me(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("no user associated with this token".into())
-    })?;
+    let user = auth_user
+        .ok_or_else(|| LificError::BadRequest("no user associated with this token".into()))?;
 
     // Fetch full user from DB to get all fields (email, etc.)
-    let full = with_read(&db, |conn| {
-        queries::users::get_user_by_id(conn, user.id)
-    })?;
+    let full = with_read(&db, |conn| queries::users::get_user_by_id(conn, user.id))?;
 
     Ok(Json(serde_json::json!({
         "id": full.id,
@@ -262,14 +256,9 @@ async fn list_keys(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<Vec<UserApiKey>>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
-    with_read(&db, |conn| {
-        queries::users::list_user_keys(conn, user.id)
-    })
-    .map(Json)
+    with_read(&db, |conn| queries::users::list_user_keys(conn, user.id)).map(Json)
 }
 
 #[derive(serde::Deserialize)]
@@ -283,9 +272,7 @@ async fn create_key(
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -308,9 +295,7 @@ async fn revoke_key(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     queries::users::revoke_user_key(&conn, id, user.id, user.is_admin)?;
@@ -324,9 +309,7 @@ async fn list_bots(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<Vec<Bot>>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     with_read(&db, |conn| queries::users::list_bots(conn, user.id)).map(Json)
 }
@@ -343,9 +326,7 @@ async fn create_bot(
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let tool = input.tool.trim().to_lowercase();
     let display_name = match tool.as_str() {
@@ -409,9 +390,7 @@ async fn disconnect_bot(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     queries::users::disconnect_bot(&conn, id, user.id, user.is_admin)?;
@@ -424,9 +403,7 @@ async fn delete_bot(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     queries::users::delete_bot(&conn, id, user.id, user.is_admin)?;
@@ -440,10 +417,7 @@ async fn list_comments(
     State(db): State<DbPool>,
     Path(issue_id): Path<i64>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    with_read(&db, |conn| {
-        queries::comments::list_comments(conn, issue_id)
-    })
-    .map(Json)
+    with_read(&db, |conn| queries::comments::list_comments(conn, issue_id)).map(Json)
 }
 
 async fn create_comment(
@@ -452,9 +426,8 @@ async fn create_comment(
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required to comment".into())
-    })?;
+    let user = auth_user
+        .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
 
     with_write(&db, |conn| {
         queries::comments::create_comment(conn, issue_id, user.id, &input.content)
@@ -468,9 +441,7 @@ async fn update_comment_handler(
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can edit
     let existing = with_read(&db, |conn| queries::comments::get_comment(conn, id))?;
@@ -491,9 +462,7 @@ async fn delete_comment_handler(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| {
-        LificError::BadRequest("authentication required".into())
-    })?;
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can delete
     let existing = with_read(&db, |conn| queries::comments::get_comment(conn, id))?;
@@ -853,9 +822,7 @@ mod tests {
 
     fn test_app() -> Router {
         let db = crate::db::open_memory().expect("test db");
-        router(db).layer(Extension(crate::config::AuthConfig {
-            allow_signup: true,
-        }))
+        router(db).layer(Extension(crate::config::AuthConfig { allow_signup: true }))
     }
 
     /// Seed a project and return its id.
@@ -1169,7 +1136,11 @@ mod tests {
 
     // ── Auth endpoint tests ──────────────────────────────────
 
-    async fn json_post(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn json_post(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         app.clone()
             .oneshot(
                 Request::builder()
@@ -1359,9 +1330,7 @@ mod tests {
         drop(conn);
 
         let app = router(db)
-            .layer(Extension(crate::config::AuthConfig {
-                allow_signup: true,
-            }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -1526,9 +1495,7 @@ mod tests {
 
         // Build app as "other" (non-owner, non-admin)
         let app = router(db)
-            .layer(Extension(crate::config::AuthConfig {
-                allow_signup: true,
-            }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
                 username: other.username,
@@ -1637,9 +1604,7 @@ mod tests {
 
         // Build app as admin
         let app = router(db)
-            .layer(Extension(crate::config::AuthConfig {
-                allow_signup: true,
-            }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
                 username: admin.username,

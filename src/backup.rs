@@ -170,10 +170,8 @@ mod tests {
 
     fn make_temp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lific_backup_test_{}_{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lific_backup_test_{}_{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -190,10 +188,7 @@ mod tests {
 
         rotate_backups(&dir, "lific", 3);
 
-        let remaining: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
+        let remaining: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(remaining.len(), 3);
 
         // Oldest two (01, 02) should be gone, newest three (03, 04, 05) kept
@@ -260,7 +255,7 @@ mod tests {
                     identifier: "BKP".into(),
                     description: String::new(),
                     emoji: None,
-                lead_user_id: None,
+                    lead_user_id: None,
                 },
             )
             .unwrap();
@@ -279,9 +274,11 @@ mod tests {
         // Verify the backup is a valid SQLite DB with our data
         let backup_conn = rusqlite::Connection::open(backups[0].path()).unwrap();
         let name: String = backup_conn
-            .query_row("SELECT name FROM projects WHERE identifier = 'BKP'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT name FROM projects WHERE identifier = 'BKP'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(name, "BackupTest");
 
