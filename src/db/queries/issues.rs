@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -290,70 +290,73 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
 pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<Issue, LificError> {
     get_issue(conn, id)?;
 
-    if let Some(ref title) = input.title {
-        conn.execute(
-            "UPDATE issues SET title = ?1 WHERE id = ?2",
-            params![title, id],
-        )?;
-    }
-    if let Some(ref description) = input.description {
-        conn.execute(
-            "UPDATE issues SET description = ?1 WHERE id = ?2",
-            params![unescape_text(description), id],
-        )?;
-    }
-    if let Some(ref status) = input.status {
-        conn.execute(
-            "UPDATE issues SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-    }
-    if let Some(ref priority) = input.priority {
-        conn.execute(
-            "UPDATE issues SET priority = ?1 WHERE id = ?2",
-            params![priority, id],
-        )?;
-    }
-    if let Some(module_id) = input.module_id {
-        conn.execute(
-            "UPDATE issues SET module_id = ?1 WHERE id = ?2",
-            params![module_id, id],
-        )?;
-    }
-    if let Some(sort_order) = input.sort_order {
-        conn.execute(
-            "UPDATE issues SET sort_order = ?1 WHERE id = ?2",
-            params![sort_order, id],
-        )?;
-    }
-    if let Some(ref start_date) = input.start_date {
-        conn.execute(
-            "UPDATE issues SET start_date = ?1 WHERE id = ?2",
-            params![start_date, id],
-        )?;
-    }
-    if let Some(ref target_date) = input.target_date {
-        conn.execute(
-            "UPDATE issues SET target_date = ?1 WHERE id = ?2",
-            params![target_date, id],
-        )?;
-    }
-    if let Some(ref labels) = input.labels {
-        conn.execute("DELETE FROM issue_labels WHERE issue_id = ?1", params![id])?;
-        let project_id: i64 = conn.query_row(
-            "SELECT project_id FROM issues WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        for label_name in labels {
+    super::savepoint(conn, "update_issue", || {
+        if let Some(ref title) = input.title {
             conn.execute(
-                "INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
-                 SELECT ?1, l.id FROM labels l
-                 WHERE l.project_id = ?2 AND l.name = ?3",
-                params![id, project_id, label_name],
+                "UPDATE issues SET title = ?1 WHERE id = ?2",
+                params![title, id],
             )?;
         }
-    }
+        if let Some(ref description) = input.description {
+            conn.execute(
+                "UPDATE issues SET description = ?1 WHERE id = ?2",
+                params![unescape_text(description), id],
+            )?;
+        }
+        if let Some(ref status) = input.status {
+            conn.execute(
+                "UPDATE issues SET status = ?1 WHERE id = ?2",
+                params![status, id],
+            )?;
+        }
+        if let Some(ref priority) = input.priority {
+            conn.execute(
+                "UPDATE issues SET priority = ?1 WHERE id = ?2",
+                params![priority, id],
+            )?;
+        }
+        if let Some(module_id) = input.module_id {
+            conn.execute(
+                "UPDATE issues SET module_id = ?1 WHERE id = ?2",
+                params![module_id, id],
+            )?;
+        }
+        if let Some(sort_order) = input.sort_order {
+            conn.execute(
+                "UPDATE issues SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order, id],
+            )?;
+        }
+        if let Some(ref start_date) = input.start_date {
+            conn.execute(
+                "UPDATE issues SET start_date = ?1 WHERE id = ?2",
+                params![start_date, id],
+            )?;
+        }
+        if let Some(ref target_date) = input.target_date {
+            conn.execute(
+                "UPDATE issues SET target_date = ?1 WHERE id = ?2",
+                params![target_date, id],
+            )?;
+        }
+        if let Some(ref labels) = input.labels {
+            conn.execute("DELETE FROM issue_labels WHERE issue_id = ?1", params![id])?;
+            let project_id: i64 = conn.query_row(
+                "SELECT project_id FROM issues WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            for label_name in labels {
+                conn.execute(
+                    "INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
+                     SELECT ?1, l.id FROM labels l
+                     WHERE l.project_id = ?2 AND l.name = ?3",
+                    params![id, project_id, label_name],
+                )?;
+            }
+        }
+        Ok(())
+    })?;
 
     get_issue(conn, id)
 }

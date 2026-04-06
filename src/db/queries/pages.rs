@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -139,30 +139,33 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
 
 pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Page, LificError> {
     get_page(conn, id)?;
-    if let Some(ref title) = input.title {
-        conn.execute(
-            "UPDATE pages SET title = ?1 WHERE id = ?2",
-            params![title, id],
-        )?;
-    }
-    if let Some(ref content) = input.content {
-        conn.execute(
-            "UPDATE pages SET content = ?1 WHERE id = ?2",
-            params![unescape_text(content), id],
-        )?;
-    }
-    if let Some(ref folder_id) = input.folder_id {
-        conn.execute(
-            "UPDATE pages SET folder_id = ?1 WHERE id = ?2",
-            params![folder_id, id],
-        )?;
-    }
-    if let Some(sort_order) = input.sort_order {
-        conn.execute(
-            "UPDATE pages SET sort_order = ?1 WHERE id = ?2",
-            params![sort_order, id],
-        )?;
-    }
+    super::savepoint(conn, "update_page", || {
+        if let Some(ref title) = input.title {
+            conn.execute(
+                "UPDATE pages SET title = ?1 WHERE id = ?2",
+                params![title, id],
+            )?;
+        }
+        if let Some(ref content) = input.content {
+            conn.execute(
+                "UPDATE pages SET content = ?1 WHERE id = ?2",
+                params![unescape_text(content), id],
+            )?;
+        }
+        if let Some(ref folder_id) = input.folder_id {
+            conn.execute(
+                "UPDATE pages SET folder_id = ?1 WHERE id = ?2",
+                params![folder_id, id],
+            )?;
+        }
+        if let Some(sort_order) = input.sort_order {
+            conn.execute(
+                "UPDATE pages SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order, id],
+            )?;
+        }
+        Ok(())
+    })?;
     get_page(conn, id)
 }
 

@@ -143,24 +143,27 @@ pub fn update_module(
     id: i64,
     input: &UpdateModule,
 ) -> Result<Module, LificError> {
-    if let Some(ref name) = input.name {
-        conn.execute(
-            "UPDATE modules SET name = ?1 WHERE id = ?2",
-            params![name, id],
-        )?;
-    }
-    if let Some(ref description) = input.description {
-        conn.execute(
-            "UPDATE modules SET description = ?1 WHERE id = ?2",
-            params![unescape_text(description), id],
-        )?;
-    }
-    if let Some(ref status) = input.status {
-        conn.execute(
-            "UPDATE modules SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-    }
+    super::savepoint(conn, "update_module", || {
+        if let Some(ref name) = input.name {
+            conn.execute(
+                "UPDATE modules SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+        }
+        if let Some(ref description) = input.description {
+            conn.execute(
+                "UPDATE modules SET description = ?1 WHERE id = ?2",
+                params![unescape_text(description), id],
+            )?;
+        }
+        if let Some(ref status) = input.status {
+            conn.execute(
+                "UPDATE modules SET status = ?1 WHERE id = ?2",
+                params![status, id],
+            )?;
+        }
+        Ok(())
+    })?;
     conn.query_row(
         "SELECT id, project_id, name, description, status, created_at, updated_at FROM modules WHERE id = ?1",
         params![id],
@@ -208,18 +211,21 @@ pub fn create_label(conn: &Connection, input: &CreateLabel) -> Result<Label, Lif
 }
 
 pub fn update_label(conn: &Connection, id: i64, input: &UpdateLabel) -> Result<Label, LificError> {
-    if let Some(ref name) = input.name {
-        conn.execute(
-            "UPDATE labels SET name = ?1 WHERE id = ?2",
-            params![name, id],
-        )?;
-    }
-    if let Some(ref color) = input.color {
-        conn.execute(
-            "UPDATE labels SET color = ?1 WHERE id = ?2",
-            params![color, id],
-        )?;
-    }
+    super::savepoint(conn, "update_label", || {
+        if let Some(ref name) = input.name {
+            conn.execute(
+                "UPDATE labels SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+        }
+        if let Some(ref color) = input.color {
+            conn.execute(
+                "UPDATE labels SET color = ?1 WHERE id = ?2",
+                params![color, id],
+            )?;
+        }
+        Ok(())
+    })?;
     conn.query_row(
         "SELECT id, project_id, name, color FROM labels WHERE id = ?1",
         params![id],

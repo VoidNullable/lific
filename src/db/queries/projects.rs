@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -91,41 +91,44 @@ pub fn update_project(
     input: &UpdateProject,
 ) -> Result<Project, LificError> {
     get_project(conn, id)?;
-    if let Some(ref name) = input.name {
-        conn.execute(
-            "UPDATE projects SET name = ?1 WHERE id = ?2",
-            params![name, id],
-        )?;
-    }
-    if let Some(ref identifier) = input.identifier {
-        if identifier.len() > 5 {
-            return Err(LificError::BadRequest(
-                "identifier must be 5 characters or fewer".into(),
-            ));
+    super::savepoint(conn, "update_project", || {
+        if let Some(ref name) = input.name {
+            conn.execute(
+                "UPDATE projects SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
         }
-        conn.execute(
-            "UPDATE projects SET identifier = ?1 WHERE id = ?2",
-            params![identifier, id],
-        )?;
-    }
-    if let Some(ref description) = input.description {
-        conn.execute(
-            "UPDATE projects SET description = ?1 WHERE id = ?2",
-            params![unescape_text(description), id],
-        )?;
-    }
-    if let Some(ref emoji) = input.emoji {
-        conn.execute(
-            "UPDATE projects SET emoji = ?1 WHERE id = ?2",
-            params![emoji, id],
-        )?;
-    }
-    if let Some(lead_user_id) = input.lead_user_id {
-        conn.execute(
-            "UPDATE projects SET lead_user_id = ?1 WHERE id = ?2",
-            params![lead_user_id, id],
-        )?;
-    }
+        if let Some(ref identifier) = input.identifier {
+            if identifier.len() > 5 {
+                return Err(LificError::BadRequest(
+                    "identifier must be 5 characters or fewer".into(),
+                ));
+            }
+            conn.execute(
+                "UPDATE projects SET identifier = ?1 WHERE id = ?2",
+                params![identifier, id],
+            )?;
+        }
+        if let Some(ref description) = input.description {
+            conn.execute(
+                "UPDATE projects SET description = ?1 WHERE id = ?2",
+                params![unescape_text(description), id],
+            )?;
+        }
+        if let Some(ref emoji) = input.emoji {
+            conn.execute(
+                "UPDATE projects SET emoji = ?1 WHERE id = ?2",
+                params![emoji, id],
+            )?;
+        }
+        if let Some(lead_user_id) = input.lead_user_id {
+            conn.execute(
+                "UPDATE projects SET lead_user_id = ?1 WHERE id = ?2",
+                params![lead_user_id, id],
+            )?;
+        }
+        Ok(())
+    })?;
     get_project(conn, id)
 }
 
