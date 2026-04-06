@@ -151,7 +151,7 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
             params![unescape_text(content), id],
         )?;
     }
-    if let Some(folder_id) = input.folder_id {
+    if let Some(ref folder_id) = input.folder_id {
         conn.execute(
             "UPDATE pages SET folder_id = ?1 WHERE id = ?2",
             params![folder_id, id],

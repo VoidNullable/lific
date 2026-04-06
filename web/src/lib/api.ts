@@ -422,7 +422,7 @@ export async function createPage(input: CreatePageInput) {
 export interface UpdatePageInput {
   title?: string;
   content?: string;
-  folder_id?: number;
+  folder_id?: number | null;
 }
 
 export async function updatePage(id: number, input: UpdatePageInput) {

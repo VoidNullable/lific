@@ -201,7 +201,9 @@ pub struct CreatePage {
 pub struct UpdatePage {
     pub title: Option<String>,
     pub content: Option<String>,
-    pub folder_id: Option<i64>,
+    /// None = don't change, Some(None) = set to NULL, Some(Some(id)) = set to id
+    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    pub folder_id: Option<Option<i64>>,
     pub sort_order: Option<f64>,
 }
 
@@ -342,4 +344,16 @@ pub struct SearchResult {
     pub title: String,
     pub snippet: String,
     pub project_id: Option<i64>,
+}
+
+/// Deserializes a JSON field as Option<Option<T>>:
+/// - absent key → None (don't change)
+/// - "field": null → Some(None) (set to null)
+/// - "field": value → Some(Some(value))
+pub fn deserialize_nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }

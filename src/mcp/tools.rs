@@ -404,7 +404,7 @@ impl LificMcp {
                 &models::UpdatePage {
                     title: input.title.clone(),
                     content: input.content.clone(),
-                    folder_id,
+                    folder_id: folder_id.map(Some),
                     sort_order: None,
                 },
             )
