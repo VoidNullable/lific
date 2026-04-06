@@ -4,3 +4,4 @@
 *.db-shm
 .env
 AGENTS.md
+deploy.sh
