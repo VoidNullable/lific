@@ -1,12 +1,30 @@
 use axum::{
     Extension,
     extract::{Json, Path, State},
+    http::HeaderMap,
+    response::IntoResponse,
 };
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 
 use super::{with_read, with_write};
+
+/// Build a Set-Cookie header for the session token with security flags.
+fn session_cookie(token: &str, expires_at: &str) -> String {
+    use chrono::DateTime;
+    // Parse expiry for Max-Age calculation; fall back to 30 days
+    let max_age = DateTime::parse_from_rfc3339(expires_at)
+        .map(|exp| {
+            let exp_utc: DateTime<chrono::Utc> = exp.into();
+            (exp_utc - chrono::Utc::now()).num_seconds().max(0)
+        })
+        .unwrap_or(30 * 24 * 3600);
+
+    format!(
+        "lific_token={token}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Lax"
+    )
+}
 
 // ── Auth endpoints ───────────────────────────────────────────
 
@@ -24,7 +42,7 @@ pub(super) async fn auth_signup(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     Json(input): Json<SignupRequest>,
-) -> Result<Json<serde_json::Value>, LificError> {
+) -> Result<impl IntoResponse, LificError> {
     if !auth_cfg.allow_signup {
         return Err(LificError::BadRequest(
             "signup is disabled — contact an admin to create your account".into(),
@@ -45,24 +63,35 @@ pub(super) async fn auth_signup(
     )?;
     let session = crate::db::queries::users::create_session(&conn, user.id, None)?;
 
-    Ok(Json(serde_json::json!({
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "display_name": user.display_name,
-            "is_admin": user.is_admin,
-        },
-        "token": session.token,
-        "expires_at": session.expires_at,
-    })))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "set-cookie",
+        session_cookie(&session.token, &session.expires_at)
+            .parse()
+            .unwrap(),
+    );
+
+    Ok((
+        headers,
+        Json(serde_json::json!({
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "display_name": user.display_name,
+                "is_admin": user.is_admin,
+            },
+            "token": session.token,
+            "expires_at": session.expires_at,
+        })),
+    ))
 }
 
 pub(super) async fn auth_login(
     State(db): State<DbPool>,
     limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     Json(input): Json<LoginRequest>,
-) -> Result<Json<serde_json::Value>, LificError> {
+) -> Result<impl IntoResponse, LificError> {
     // Rate limit by identity (username/email)
     let key = input.identity.to_lowercase();
     if let Some(Extension(ref rl)) = limiter
@@ -88,23 +117,34 @@ pub(super) async fn auth_login(
         };
     let session = crate::db::queries::users::create_session(&conn, user.id, None)?;
 
-    Ok(Json(serde_json::json!({
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "display_name": user.display_name,
-            "is_admin": user.is_admin,
-        },
-        "token": session.token,
-        "expires_at": session.expires_at,
-    })))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "set-cookie",
+        session_cookie(&session.token, &session.expires_at)
+            .parse()
+            .unwrap(),
+    );
+
+    Ok((
+        headers,
+        Json(serde_json::json!({
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "display_name": user.display_name,
+                "is_admin": user.is_admin,
+            },
+            "token": session.token,
+            "expires_at": session.expires_at,
+        })),
+    ))
 }
 
 pub(super) async fn auth_logout(
     State(db): State<DbPool>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, LificError> {
+) -> Result<impl IntoResponse, LificError> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -117,7 +157,16 @@ pub(super) async fn auth_logout(
         crate::db::queries::users::delete_session(&conn, token)?;
     }
 
-    Ok(Json(serde_json::json!({"logged_out": true})))
+    // Clear the session cookie
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        "set-cookie",
+        "lific_token=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+            .parse()
+            .unwrap(),
+    );
+
+    Ok((resp_headers, Json(serde_json::json!({"logged_out": true}))))
 }
 
 pub(super) async fn auth_me(
