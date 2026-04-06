@@ -27,7 +27,7 @@ impl RateLimiter {
     /// Returns `true` if the attempt is allowed, `false` if rate-limited.
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap();
+        let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
 
         let entry = map.entry(key.to_string()).or_default();
 
@@ -45,7 +45,7 @@ impl RateLimiter {
     /// Record a failed attempt without checking first (for tracking after auth failure).
     pub fn record_failure(&self, key: &str) {
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap();
+        let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.entry(key.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         entry.push(now);
@@ -54,7 +54,7 @@ impl RateLimiter {
     /// How many seconds until the oldest attempt in the window expires.
     pub fn retry_after(&self, key: &str) -> u64 {
         let now = Instant::now();
-        let map = self.attempts.lock().unwrap();
+        let map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(key) {
             Some(entries) if !entries.is_empty() => {
                 let oldest = entries[0];
