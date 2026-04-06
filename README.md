@@ -17,7 +17,7 @@
 
 ---
 
-Most issue trackers ship 100+ tools and 80,000+ tokens of schema for AI assistants to parse. Lific ships 14 tools in ~2,000 tokens. It uses human-readable identifiers (`APP-42`, not UUIDs), runs as a single binary with an embedded SQLite database, and includes a web UI for when you want to look at things yourself.
+Lific ships 14 MCP tools in ~2,000 tokens of schema. It uses human-readable identifiers (`APP-42`, not UUIDs), runs as a single binary with an embedded SQLite database, and includes a web UI for when you want to look at things yourself.
 
 - **Issues** with status, priority, modules, labels, relations, and comments
 - **Pages** as markdown documents in recursive folders
