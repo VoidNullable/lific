@@ -394,7 +394,10 @@
               issues = [...issues];
               // Re-find the issue in the new flat order and restore focus
               const newIdx = flatIssues.findIndex((i) => i.id === focusedId);
-              if (newIdx >= 0) focusedIndex = newIdx;
+              if (newIdx >= 0) {
+                scrollOnFocus = true;
+                focusedIndex = newIdx;
+              }
             }
           });
         }
