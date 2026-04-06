@@ -2,7 +2,7 @@
 
 A lightweight issue tracker designed for AI-driven development. 
 
-If you use AI assistants to manage your projects (Claude, OpenCode, Cursor, etc.), Lific gives them a fast, structured issue tracker that gives a few high quality tools for managing a project's issue workflow.
+If you use AI assistants to manage your projects (Claude, OpenCode, Cursor, etc.), Lific gives them a fast, structured issue tracker with a small set of focused tools for managing issues, pages, and project workflows.
 
 ## Why
 
@@ -10,7 +10,7 @@ Most issue trackers were built for teams of people clicking around a web UI. The
 
 - **Schema size matters.** Every tool definition eats context window tokens. Lific exposes 14 tools in ~2,000 tokens. Plane's MCP server for example exposes 100+ tools at 80,000+ tokens.
 - **Identifiers should be readable.** `APP-42` instead of `5a61c25e-96ae-43f0-b25c-570ecefcb772`.
-- **Setup should be nothing.** Simple setup and basic authentication connect you securely without overhead
+- **Setup should be nothing.** Single binary, SQLite database, no external dependencies.
 - **Your data is yours.** SQLite file on your disk. Copy it, back it up, inspect it with any SQL tool.
 
 ## Install
@@ -28,13 +28,31 @@ lific init          # creates lific.toml with defaults
 lific start         # starts the server on port 3456
 ```
 
-On first start, Lific generates an API key and prints it once. Save it somewhere.
+Open the web UI at `http://localhost:3456` and create an account. The first account is automatically an admin.
 
-## Connecting AI Assistants
+## Connecting AI tools
 
-### OpenCode / Claude Code
+Once you have an account, go to **Settings > Connected Tools** in the web UI. Pick your tool (OpenCode, Cursor, Claude Code, Claude Desktop, Codex) and click Connect. Lific generates a bot identity that acts on your behalf and gives you the config snippet to paste into your tool's MCP configuration.
 
-Add to your MCP config (local stdio, no network):
+Each connection creates a bot account tied to your user. Comments and changes made by the bot show up as coming from that tool, attributed to you.
+
+### Manual / headless setup
+
+If you're running Lific on a remote server without the web UI, you can also connect via the REST API or point your MCP client directly at the `/mcp` endpoint with a bearer token.
+
+```json
+{
+  "lific": {
+    "type": "remote",
+    "url": "https://your-server/mcp",
+    "headers": {
+      "Authorization": "Bearer your-api-key"
+    }
+  }
+}
+```
+
+### Local stdio (no network)
 
 ```json
 {
@@ -45,26 +63,16 @@ Add to your MCP config (local stdio, no network):
 }
 ```
 
-### Remote (Tailscale, VPS, etc.)
+## Web UI
 
-`lific start` serves both a REST API and an MCP endpoint on the same port:
+Lific includes a web interface served from the same binary. No separate frontend deployment needed.
 
-- REST API: `http://localhost:3456/api/*`
-- MCP: `http://localhost:3456/mcp`
+- **Issues** with filters, search, inline editing, markdown descriptions, comments
+- **Pages** as markdown documents with a recursive folder tree and drag-and-drop organization
+- **Project management** with create, edit, delete, lead assignment, and icon picker
+- Dark/light theme with system preference detection
 
-Point your MCP client at the `/mcp` URL with a bearer token:
-
-```json
-{
-  "lific": {
-    "type": "remote",
-    "url": "https://your-server/mcp",
-    "headers": {
-      "Authorization": "Bearer lific_sk-live-..."
-    }
-  }
-}
-```
+The UI auto-links issue and page identifiers in markdown. Writing `LIF-42` in a description turns it into a clickable link.
 
 ## What the AI sees
 
@@ -79,7 +87,7 @@ Lific gives your AI assistant the following tools:
 | `create_issue`                             | Create with project, module, labels, priority                                                   |
 | `update_issue`                             | Partial updates by identifier                                                                   |
 | `get_board`                                | Board view grouped by status, priority, or module                                               |
-| `search`                                   | Full-text search across issues and pages. Ideal for having an agent onboard onto a new project. |
+| `search`                                   | Full-text search across issues and pages                                                        |
 | `link_issues` / `unlink_issues`            | Dependency tracking (blocks, relates_to, duplicate)                                             |
 | `get_page` / `create_page` / `update_page` | Markdown docs                                                                                   |
 | `manage_resource`                          | Create/update projects, modules, labels, folders                                                |
@@ -96,24 +104,13 @@ Everything uses human-readable identifiers. `project="APP"`, not `project_id=7`.
 
 Projects contain issues, modules, labels, pages, and folders. Issues have status (`backlog`, `todo`, `active`, `done`, `cancelled`), priority (`urgent`, `high`, `medium`, `low`, `none`), and optional module/label assignments. Issues link to each other with `blocks`, `relates_to`, and `duplicate` relations.
 
-Pages are markdown documents with identifiers like `APP-DOC-1`.
+Pages are markdown documents organized in folders, with identifiers like `APP-DOC-1`.
 
 That's it. No sprints, no story points, no custom fields, no workflows. If you need those, this isn't for you.
 
-## API keys
-
-```bash
-lific key create --name "my-laptop"    # prints key once, stores hash
-lific key list                          # shows names and status, never keys
-lific key revoke --name "my-laptop"     # instant invalidation
-lific key rotate --name "my-laptop"     # revoke old, generate new
-```
-
-Keys use Argon2id hashing with BLAKE3 checksums. Only hashes are stored. Multiple keys for different clients. The health endpoint (`/api/health`) is the only unauthenticated route.
-
 ## Backups
 
-Lific automatically backs up the database using SQLite's online backup API. Interval and retention are configurable in `lific.toml` (see Configuration below). On shutdown, the WAL is checkpointed so the `.db` file is always self-contained and safe to copy.
+Lific automatically backs up the database using SQLite's online backup API. Interval and retention are configurable in `lific.toml`. On shutdown, the WAL is checkpointed so the `.db` file is always self-contained and safe to copy.
 
 ## Configuration
 
@@ -147,18 +144,14 @@ cd lific
 cargo build --release
 ```
 
-Requires Rust 2024 edition. SQLite is bundled (no system dependency).
-
-## Importing from Plane
+The frontend is built separately and embedded in the binary:
 
 ```bash
-lific import-plane \
-  --url http://localhost:8585 \
-  --api-key plane_api_xxx \
-  --workspace my-workspace
+cd web && bun install && bun run build && cd ..
+cargo build --release
 ```
 
-Fetches projects, modules, labels, issues, and relations from the Plane API and imports them. Use `--skip {indentifier}` to exclude specific projects by identifier.
+Requires Rust 2024 edition. SQLite is bundled (no system dependency).
 
 ## License
 
