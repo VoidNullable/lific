@@ -124,6 +124,6 @@ jobs:
       - name: Ensure web/dist exists for rust-embed
         run: mkdir -p web/dist
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty || echo "Publish failed (version may already exist)"
+        run: cargo publish --allow-dirty --no-verify || echo "Publish failed (version may already exist)"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

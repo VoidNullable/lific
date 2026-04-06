@@ -35,6 +35,8 @@ jobs:
           fi
 
           echo "Version changed: ${PREVIOUS:-none} -> ${CURRENT}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
           echo "Created and pushed tag $TAG"
