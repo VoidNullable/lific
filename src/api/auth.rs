@@ -1,4 +1,7 @@
-use axum::{Extension, extract::{Json, Path, State}};
+use axum::{
+    Extension,
+    extract::{Json, Path, State},
+};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
@@ -72,16 +75,17 @@ pub(super) async fn auth_login(
     }
 
     let conn = db.write()?;
-    let user = match crate::db::queries::users::authenticate(&conn, &input.identity, &input.password) {
-        Ok(u) => u,
-        Err(e) => {
-            // Record the failure for rate limiting
-            if let Some(Extension(ref rl)) = limiter {
-                rl.record_failure(&key);
+    let user =
+        match crate::db::queries::users::authenticate(&conn, &input.identity, &input.password) {
+            Ok(u) => u,
+            Err(e) => {
+                // Record the failure for rate limiting
+                if let Some(Extension(ref rl)) = limiter {
+                    rl.record_failure(&key);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
     let session = crate::db::queries::users::create_session(&conn, user.id, None)?;
 
     Ok(Json(serde_json::json!({
@@ -124,7 +128,9 @@ pub(super) async fn auth_me(
         .ok_or_else(|| LificError::BadRequest("no user associated with this token".into()))?;
 
     // Fetch full user from DB to get all fields (email, etc.)
-    let full = with_read(&db, |conn| crate::db::queries::users::get_user_by_id(conn, user.id))?;
+    let full = with_read(&db, |conn| {
+        crate::db::queries::users::get_user_by_id(conn, user.id)
+    })?;
 
     Ok(Json(serde_json::json!({
         "id": full.id,
@@ -143,7 +149,10 @@ pub(super) async fn list_keys(
 ) -> Result<Json<Vec<UserApiKey>>, LificError> {
     let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
-    with_read(&db, |conn| crate::db::queries::users::list_user_keys(conn, user.id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::users::list_user_keys(conn, user.id)
+    })
+    .map(Json)
 }
 
 #[derive(serde::Deserialize)]
@@ -196,7 +205,10 @@ pub(super) async fn list_bots(
 ) -> Result<Json<Vec<Bot>>, LificError> {
     let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
-    with_read(&db, |conn| crate::db::queries::users::list_bots(conn, user.id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::users::list_bots(conn, user.id)
+    })
+    .map(Json)
 }
 
 #[derive(serde::Deserialize)]
@@ -307,7 +319,9 @@ pub(super) struct UserListItem {
     created_at: String,
 }
 
-pub(super) async fn list_users(State(db): State<DbPool>) -> Result<Json<Vec<UserListItem>>, LificError> {
+pub(super) async fn list_users(
+    State(db): State<DbPool>,
+) -> Result<Json<Vec<UserListItem>>, LificError> {
     with_read(&db, |conn| {
         let users = crate::db::queries::users::list_users(conn)?;
         Ok(users

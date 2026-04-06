@@ -23,10 +23,16 @@ pub fn router(db: DbPool) -> Router {
         .route("/api/auth/login", post(auth::auth_login))
         .route("/api/auth/logout", post(auth::auth_logout))
         .route("/api/auth/me", get(auth::auth_me))
-        .route("/api/auth/keys", get(auth::list_keys).post(auth::create_key))
+        .route(
+            "/api/auth/keys",
+            get(auth::list_keys).post(auth::create_key),
+        )
         .route("/api/auth/keys/{id}", delete(auth::revoke_key))
         // Connected tools (bots)
-        .route("/api/auth/bots", get(auth::list_bots).post(auth::create_bot))
+        .route(
+            "/api/auth/bots",
+            get(auth::list_bots).post(auth::create_bot),
+        )
         .route("/api/auth/bots/{id}/disconnect", post(auth::disconnect_bot))
         .route("/api/auth/bots/{id}", delete(auth::delete_bot))
         // Comments
@@ -39,7 +45,10 @@ pub fn router(db: DbPool) -> Router {
             put(comments::update_comment_handler).delete(comments::delete_comment_handler),
         )
         // Projects
-        .route("/api/projects", get(projects::list_projects).post(projects::create_project))
+        .route(
+            "/api/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
         .route(
             "/api/projects/{id}",
             get(projects::get_project)
@@ -47,38 +56,58 @@ pub fn router(db: DbPool) -> Router {
                 .delete(projects::delete_project_handler),
         )
         // Issues
-        .route("/api/issues", get(issues::list_issues).post(issues::create_issue))
+        .route(
+            "/api/issues",
+            get(issues::list_issues).post(issues::create_issue),
+        )
         .route(
             "/api/issues/{id}",
             get(issues::get_issue)
                 .put(issues::update_issue)
                 .delete(issues::delete_issue_handler),
         )
-        .route("/api/issues/resolve/{identifier}", get(issues::resolve_issue))
+        .route(
+            "/api/issues/resolve/{identifier}",
+            get(issues::resolve_issue),
+        )
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))
         .route("/api/issues/unlink", post(issues::unlink_issues))
         // Modules
-        .route("/api/modules", get(resources::list_modules).post(resources::create_module))
+        .route(
+            "/api/modules",
+            get(resources::list_modules).post(resources::create_module),
+        )
         .route(
             "/api/modules/{id}",
             put(resources::update_module).delete(resources::delete_module_handler),
         )
         // Labels
-        .route("/api/labels", get(resources::list_labels).post(resources::create_label))
+        .route(
+            "/api/labels",
+            get(resources::list_labels).post(resources::create_label),
+        )
         .route("/api/labels/{id}", delete(resources::delete_label_handler))
         // Pages
-        .route("/api/pages", get(pages::list_pages_handler).post(pages::create_page))
+        .route(
+            "/api/pages",
+            get(pages::list_pages_handler).post(pages::create_page),
+        )
         .route(
             "/api/pages/{id}",
-            get(pages::get_page).put(pages::update_page).delete(pages::delete_page_handler),
+            get(pages::get_page)
+                .put(pages::update_page)
+                .delete(pages::delete_page_handler),
         )
         // Folders
         .route(
             "/api/folders",
             get(resources::list_folders_handler).post(resources::create_folder),
         )
-        .route("/api/folders/{id}", delete(resources::delete_folder_handler))
+        .route(
+            "/api/folders/{id}",
+            delete(resources::delete_folder_handler),
+        )
         // Users (for dropdowns)
         .route("/api/users", get(auth::list_users))
         // Search
@@ -155,9 +184,7 @@ fn require_admin(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
     if user.is_admin {
         return Ok(());
     }
-    Err(LificError::Forbidden(
-        "only an admin can do this".into(),
-    ))
+    Err(LificError::Forbidden("only an admin can do this".into()))
 }
 
 // ── Cross-cutting endpoints ──────────────────────────────────
@@ -177,8 +204,8 @@ async fn search(
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use axum::{Extension, Router};
     use axum::http::Request;
+    use axum::{Extension, Router};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 

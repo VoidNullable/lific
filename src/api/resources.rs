@@ -1,4 +1,7 @@
-use axum::{Extension, extract::{Json, Path, Query, State}};
+use axum::{
+    Extension,
+    extract::{Json, Path, Query, State},
+};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
@@ -16,7 +19,10 @@ pub(super) async fn list_modules(
     State(db): State<DbPool>,
     Query(q): Query<ModuleQuery>,
 ) -> Result<Json<Vec<Module>>, LificError> {
-    with_read(&db, |conn| crate::db::queries::list_modules(conn, q.project_id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::list_modules(conn, q.project_id)
+    })
+    .map(Json)
 }
 
 pub(super) async fn create_module(
@@ -38,7 +44,10 @@ pub(super) async fn update_module(
         crate::db::queries::get_resource_project_id(conn, "modules", id)
     })?;
     require_project_lead(&db, &auth_user, project_id)?;
-    with_write(&db, |conn| crate::db::queries::update_module(conn, id, &input)).map(Json)
+    with_write(&db, |conn| {
+        crate::db::queries::update_module(conn, id, &input)
+    })
+    .map(Json)
 }
 
 pub(super) async fn delete_module_handler(
@@ -65,7 +74,10 @@ pub(super) async fn list_labels(
     State(db): State<DbPool>,
     Query(q): Query<LabelQuery>,
 ) -> Result<Json<Vec<Label>>, LificError> {
-    with_read(&db, |conn| crate::db::queries::list_labels(conn, q.project_id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::list_labels(conn, q.project_id)
+    })
+    .map(Json)
 }
 
 pub(super) async fn create_label(
@@ -101,7 +113,10 @@ pub(super) async fn list_folders_handler(
     State(db): State<DbPool>,
     Query(q): Query<FolderQuery>,
 ) -> Result<Json<Vec<Folder>>, LificError> {
-    with_read(&db, |conn| crate::db::queries::list_folders(conn, q.project_id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::list_folders(conn, q.project_id)
+    })
+    .map(Json)
 }
 
 pub(super) async fn create_folder(

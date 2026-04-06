@@ -1,4 +1,7 @@
-use axum::{Extension, extract::{Json, Path, State}};
+use axum::{
+    Extension,
+    extract::{Json, Path, State},
+};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
@@ -9,7 +12,10 @@ pub(super) async fn list_comments(
     State(db): State<DbPool>,
     Path(issue_id): Path<i64>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    with_read(&db, |conn| crate::db::queries::comments::list_comments(conn, issue_id)).map(Json)
+    with_read(&db, |conn| {
+        crate::db::queries::comments::list_comments(conn, issue_id)
+    })
+    .map(Json)
 }
 
 pub(super) async fn create_comment(
@@ -36,7 +42,9 @@ pub(super) async fn update_comment_handler(
     let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can edit
-    let existing = with_read(&db, |conn| crate::db::queries::comments::get_comment(conn, id))?;
+    let existing = with_read(&db, |conn| {
+        crate::db::queries::comments::get_comment(conn, id)
+    })?;
     if existing.user_id != user.id && !user.is_admin {
         return Err(LificError::BadRequest(
             "you can only edit your own comments".into(),
@@ -57,14 +65,18 @@ pub(super) async fn delete_comment_handler(
     let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can delete
-    let existing = with_read(&db, |conn| crate::db::queries::comments::get_comment(conn, id))?;
+    let existing = with_read(&db, |conn| {
+        crate::db::queries::comments::get_comment(conn, id)
+    })?;
     if existing.user_id != user.id && !user.is_admin {
         return Err(LificError::BadRequest(
             "you can only delete your own comments".into(),
         ));
     }
 
-    with_write(&db, |conn| crate::db::queries::comments::delete_comment(conn, id))?;
+    with_write(&db, |conn| {
+        crate::db::queries::comments::delete_comment(conn, id)
+    })?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 

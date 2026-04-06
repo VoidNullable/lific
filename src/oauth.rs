@@ -873,10 +873,12 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert!(val["revocation_endpoint"].as_str().is_some());
-        assert!(val["revocation_endpoint"]
-            .as_str()
-            .unwrap()
-            .ends_with("/oauth/revoke"));
+        assert!(
+            val["revocation_endpoint"]
+                .as_str()
+                .unwrap()
+                .ends_with("/oauth/revoke")
+        );
     }
 
     // ── LIF-51: scope is stored on tokens ────────────────────

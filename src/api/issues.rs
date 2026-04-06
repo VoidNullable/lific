@@ -42,7 +42,10 @@ pub(super) async fn update_issue(
     Path(id): Path<i64>,
     Json(input): Json<UpdateIssue>,
 ) -> Result<Json<Issue>, LificError> {
-    with_write(&db, |conn| crate::db::queries::update_issue(conn, id, &input)).map(Json)
+    with_write(&db, |conn| {
+        crate::db::queries::update_issue(conn, id, &input)
+    })
+    .map(Json)
 }
 
 pub(super) async fn delete_issue_handler(

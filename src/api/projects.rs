@@ -1,11 +1,16 @@
-use axum::{Extension, extract::{Json, Path, Query, State}};
+use axum::{
+    Extension,
+    extract::{Json, Path, Query, State},
+};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 
 use super::{require_admin, require_project_lead, with_read, with_write};
 
-pub(super) async fn list_projects(State(db): State<DbPool>) -> Result<Json<Vec<Project>>, LificError> {
+pub(super) async fn list_projects(
+    State(db): State<DbPool>,
+) -> Result<Json<Vec<Project>>, LificError> {
     with_read(&db, crate::db::queries::list_projects).map(Json)
 }
 
@@ -30,7 +35,10 @@ pub(super) async fn update_project(
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, LificError> {
     require_project_lead(&db, &auth_user, id)?;
-    with_write(&db, |conn| crate::db::queries::update_project(conn, id, &input)).map(Json)
+    with_write(&db, |conn| {
+        crate::db::queries::update_project(conn, id, &input)
+    })
+    .map(Json)
 }
 
 pub(super) async fn delete_project_handler(
@@ -75,11 +83,13 @@ pub(super) async fn get_board(
     })?;
 
     let module_names: std::collections::HashMap<i64, String> = if q.group_by == "module" {
-        with_read(&db, |conn| crate::db::queries::list_modules(conn, project_id))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|m| (m.id, m.name))
-            .collect()
+        with_read(&db, |conn| {
+            crate::db::queries::list_modules(conn, project_id)
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| (m.id, m.name))
+        .collect()
     } else {
         std::collections::HashMap::new()
     };
@@ -252,8 +262,8 @@ mod tests {
     #[tokio::test]
     async fn board_groups_by_module_resolves_names() {
         let db = crate::db::open_memory().expect("test db");
-        let app =
-            crate::api::router(db.clone()).layer(Extension(crate::config::AuthConfig { allow_signup: true }));
+        let app = crate::api::router(db.clone())
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }));
         let (project_id, _) = seed_project(&app).await;
 
         // Create a module via direct DB access

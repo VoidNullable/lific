@@ -21,7 +21,10 @@ pub(super) async fn list_pages_handler(
     .map(Json)
 }
 
-pub(super) async fn get_page(State(db): State<DbPool>, Path(id): Path<i64>) -> Result<Json<Page>, LificError> {
+pub(super) async fn get_page(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+) -> Result<Json<Page>, LificError> {
     with_read(&db, |conn| crate::db::queries::get_page(conn, id)).map(Json)
 }
 
@@ -37,7 +40,10 @@ pub(super) async fn update_page(
     Path(id): Path<i64>,
     Json(input): Json<UpdatePage>,
 ) -> Result<Json<Page>, LificError> {
-    with_write(&db, |conn| crate::db::queries::update_page(conn, id, &input)).map(Json)
+    with_write(&db, |conn| {
+        crate::db::queries::update_page(conn, id, &input)
+    })
+    .map(Json)
 }
 
 pub(super) async fn delete_page_handler(

@@ -267,7 +267,9 @@ pub async fn require_api_key(
     let key_row = key_row.or_else(|| {
         let conn = auth.db.read().ok()?;
         let mut stmt = conn
-            .prepare("SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0")
+            .prepare(
+                "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0",
+            )
             .ok()?;
         let rows: Vec<ApiKeyRow> = stmt
             .query_map([], |row| {
