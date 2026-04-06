@@ -392,3 +392,22 @@
 .prose.text-sm h2 { font-size: 1rem; }
 .prose.text-sm h3 { font-size: 0.875rem; }
 .prose.text-sm pre { padding: 0.625rem 0.75rem; }
+
+/* Auto-linked identifiers (LIF-42, LIF-DOC-3) */
+.prose .identifier-link {
+  font-family: var(--font-mono);
+  font-size: 0.8125em;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.prose .identifier-link:hover {
+  background: var(--accent);
+  color: var(--accent-text);
+}
