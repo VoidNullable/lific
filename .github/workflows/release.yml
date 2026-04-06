@@ -13,7 +13,7 @@ env:
 
 jobs:
   test:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,10 +26,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: blacksmith-2vcpu-ubuntu-2404
+            os: ubuntu-latest
             name: lific-linux-x86_64
           - target: aarch64-unknown-linux-gnu
-            os: blacksmith-2vcpu-ubuntu-2404
+            os: ubuntu-latest
             name: lific-linux-aarch64
             cross: true
           - target: x86_64-apple-darwin
@@ -80,7 +80,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -111,7 +111,7 @@ jobs:
 
   publish:
     needs: release
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
