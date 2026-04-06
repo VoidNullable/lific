@@ -1,13 +1,20 @@
 [package]
 name = "lific"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2024"
 description = "Local-first, lightweight issue tracker. Single binary, SQLite-backed, MCP-native."
 license = "Apache-2.0"
 repository = "https://github.com/VoidNullable/lific"
 keywords = ["issue-tracker", "project-management", "mcp", "sqlite", "local-first"]
 categories = ["command-line-utilities", "development-tools"]
-
+include = [
+    "src/**/*",
+    "migrations/**/*",
+    "web/dist/**/*",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+]
 
 [dependencies]
 # HTTP
