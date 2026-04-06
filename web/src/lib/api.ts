@@ -158,6 +158,20 @@ export async function deleteBot(id: number) {
   });
 }
 
+// ── Users ───────────────────────────────────────────────────
+
+export interface UserSummary {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  created_at: string;
+}
+
+export async function listUsers() {
+  return request<UserSummary[]>("/users");
+}
+
 // ── Projects ────────────────────────────────────────────────
 
 export interface Project {
@@ -166,6 +180,7 @@ export interface Project {
   identifier: string;
   description: string;
   emoji: string | null;
+  lead_user_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -183,6 +198,7 @@ export interface CreateProjectInput {
   identifier: string;
   description?: string;
   emoji?: string;
+  lead_user_id?: number;
 }
 
 export async function createProject(input: CreateProjectInput) {
@@ -197,6 +213,7 @@ export interface UpdateProjectInput {
   identifier?: string;
   description?: string;
   emoji?: string;
+  lead_user_id?: number;
 }
 
 export async function updateProject(id: number, input: UpdateProjectInput) {
@@ -352,6 +369,89 @@ export async function createComment(issueId: number, content: string) {
   return request<Comment>(`/issues/${issueId}/comments`, {
     method: "POST",
     body: JSON.stringify({ content }),
+  });
+}
+
+// ── Pages ───────────────────────────────────────────────────
+
+export interface Page {
+  id: number;
+  project_id: number | null;
+  sequence: number | null;
+  identifier: string;
+  folder_id: number | null;
+  title: string;
+  content: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Folder {
+  id: number;
+  project_id: number;
+  parent_id: number | null;
+  name: string;
+  sort_order: number;
+}
+
+export async function listPages(projectId: number, folderId?: number) {
+  const params = new URLSearchParams({ project_id: String(projectId) });
+  if (folderId !== undefined) params.set("folder_id", String(folderId));
+  return request<Page[]>(`/pages?${params}`);
+}
+
+export async function getPage(id: number) {
+  return request<Page>(`/pages/${id}`);
+}
+
+export interface CreatePageInput {
+  project_id: number;
+  folder_id?: number;
+  title: string;
+  content?: string;
+}
+
+export async function createPage(input: CreatePageInput) {
+  return request<Page>("/pages", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface UpdatePageInput {
+  title?: string;
+  content?: string;
+  folder_id?: number;
+}
+
+export async function updatePage(id: number, input: UpdatePageInput) {
+  return request<Page>(`/pages/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deletePage(id: number) {
+  return request<{ deleted: boolean }>(`/pages/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listFolders(projectId: number) {
+  return request<Folder[]>(`/folders?project_id=${projectId}`);
+}
+
+export async function createFolder(input: { project_id: number; name: string; parent_id?: number }) {
+  return request<Folder>("/folders", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteFolder(id: number) {
+  return request<{ deleted: boolean }>(`/folders/${id}`, {
+    method: "DELETE",
   });
 }
 

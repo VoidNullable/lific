@@ -7,6 +7,7 @@ pub struct Project {
     pub identifier: String,
     pub description: String,
     pub emoji: Option<String>,
+    pub lead_user_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -18,6 +19,7 @@ pub struct CreateProject {
     #[serde(default)]
     pub description: String,
     pub emoji: Option<String>,
+    pub lead_user_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +28,7 @@ pub struct UpdateProject {
     pub identifier: Option<String>,
     pub description: Option<String>,
     pub emoji: Option<String>,
+    pub lead_user_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

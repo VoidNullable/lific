@@ -7,7 +7,7 @@ use super::unescape_text;
 
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, identifier, description, emoji, created_at, updated_at
+        "SELECT id, name, identifier, description, emoji, lead_user_id, created_at, updated_at
          FROM projects ORDER BY name",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -17,8 +17,9 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
             identifier: row.get(2)?,
             description: row.get(3)?,
             emoji: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            lead_user_id: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -40,7 +41,7 @@ pub fn resolve_project_identifier(conn: &Connection, identifier: &str) -> Result
 
 pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
     conn.query_row(
-        "SELECT id, name, identifier, description, emoji, created_at, updated_at
+        "SELECT id, name, identifier, description, emoji, lead_user_id, created_at, updated_at
          FROM projects WHERE id = ?1",
         params![id],
         |row| {
@@ -50,8 +51,9 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
                 identifier: row.get(2)?,
                 description: row.get(3)?,
                 emoji: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                lead_user_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         },
     )
@@ -64,14 +66,20 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
 }
 
 pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Project, LificError> {
+    if input.identifier.len() > 5 {
+        return Err(LificError::BadRequest(
+            "identifier must be 5 characters or fewer".into(),
+        ));
+    }
     conn.execute(
-        "INSERT INTO projects (name, identifier, description, emoji)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO projects (name, identifier, description, emoji, lead_user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             input.name,
             input.identifier,
             unescape_text(&input.description),
-            input.emoji
+            input.emoji,
+            input.lead_user_id
         ],
     )?;
     get_project(conn, conn.last_insert_rowid())
@@ -90,6 +98,11 @@ pub fn update_project(
         )?;
     }
     if let Some(ref identifier) = input.identifier {
+        if identifier.len() > 5 {
+            return Err(LificError::BadRequest(
+                "identifier must be 5 characters or fewer".into(),
+            ));
+        }
         conn.execute(
             "UPDATE projects SET identifier = ?1 WHERE id = ?2",
             params![identifier, id],
@@ -105,6 +118,12 @@ pub fn update_project(
         conn.execute(
             "UPDATE projects SET emoji = ?1 WHERE id = ?2",
             params![emoji, id],
+        )?;
+    }
+    if let Some(lead_user_id) = input.lead_user_id {
+        conn.execute(
+            "UPDATE projects SET lead_user_id = ?1 WHERE id = ?2",
+            params![lead_user_id, id],
         )?;
     }
     get_project(conn, id)
@@ -138,6 +157,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: "A test project".into(),
                 emoji: Some("🧪".into()),
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -162,6 +182,7 @@ mod tests {
                 identifier: "LIF".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -189,6 +210,7 @@ mod tests {
                 identifier: "DUP".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -200,6 +222,7 @@ mod tests {
                 identifier: "DUP".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         );
         assert!(result.is_err());
@@ -216,6 +239,7 @@ mod tests {
                 identifier: "OLD".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -228,6 +252,7 @@ mod tests {
                 identifier: None,
                 description: Some("Now with description".into()),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -248,6 +273,7 @@ mod tests {
                 identifier: "DEL".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -276,6 +302,7 @@ mod tests {
                     identifier: ident.into(),
                     description: String::new(),
                     emoji: None,
+                    lead_user_id: None,
                 },
             )
             .unwrap();
@@ -296,6 +323,7 @@ mod tests {
                 identifier: "ESC".into(),
                 description: "line1\\nline2\\ttab".into(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();

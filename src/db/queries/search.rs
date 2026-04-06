@@ -94,6 +94,7 @@ mod tests {
                 identifier: ident.into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap()

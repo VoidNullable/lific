@@ -78,6 +78,8 @@ pub fn router(db: DbPool) -> Router {
             get(list_folders_handler).post(create_folder),
         )
         .route("/api/folders/{id}", delete(delete_folder_handler))
+        // Users (for dropdowns)
+        .route("/api/users", get(list_users))
         // Search
         .route("/api/search", get(search))
         // Board view
@@ -503,6 +505,35 @@ async fn delete_comment_handler(
 
     with_write(&db, |conn| queries::comments::delete_comment(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+// ── User endpoints ──────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct UserListItem {
+    id: i64,
+    username: String,
+    display_name: String,
+    is_admin: bool,
+    created_at: String,
+}
+
+async fn list_users(State(db): State<DbPool>) -> Result<Json<Vec<UserListItem>>, LificError> {
+    with_read(&db, |conn| {
+        let users = queries::users::list_users(conn)?;
+        Ok(users
+            .into_iter()
+            .filter(|u| !u.is_bot)
+            .map(|u| UserListItem {
+                id: u.id,
+                username: u.username,
+                display_name: u.display_name,
+                is_admin: u.is_admin,
+                created_at: u.created_at,
+            })
+            .collect())
+    })
+    .map(Json)
 }
 
 // ── Project endpoints ────────────────────────────────────────
@@ -1304,6 +1335,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -1465,6 +1497,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();
@@ -1572,6 +1605,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();

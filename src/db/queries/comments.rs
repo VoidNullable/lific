@@ -140,6 +140,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: String::new(),
                 emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap();

@@ -13,6 +13,7 @@
     type Comment,
   } from "../lib/api";
   import Markdown from "../lib/Markdown.svelte";
+  import { ArrowLeft, Ellipsis, Trash2, Plus, X, Check, CircleCheck, CircleX, CircleAlert } from "lucide-svelte";
 
   let {
     navigate,
@@ -322,9 +323,7 @@
                hover:bg-[var(--bg-subtle)]"
         onclick={() => navigate(`/${projectIdentifier}/issues`)}
       >
-        <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd" />
-        </svg>
+        <ArrowLeft size={14} />
         Issues
       </button>
 
@@ -569,9 +568,7 @@
                     }
                   }}
                 >
-                  <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM9.5 12.5a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0Z"/>
-                  </svg>
+              <Ellipsis size={14} />
                 </button>
 
                 {#if menuOpen && !confirmingDelete}
@@ -588,9 +585,7 @@
                              hover:bg-[var(--error-bg)] transition-colors"
                       onclick={() => { confirmingDelete = true; }}
                     >
-                      <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-                        <path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/>
-                      </svg>
+                      <Trash2 size={14} />
                       Delete issue
                     </button>
                   </div>
@@ -789,9 +784,7 @@
                         onclick={(e) => { e.stopPropagation(); toggleLabel(lbl); }}
                         title="Remove label"
                       >
-                        <svg class="size-2.5" viewBox="0 0 16 16" fill="currentColor">
-                          <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/>
-                        </svg>
+                        <X size={10} />
                       </button>
                     {/if}
                   </span>
@@ -815,9 +808,7 @@
                     moduleOpen = false;
                   }}
                 >
-                  <svg class="size-3" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M7.25 1a.75.75 0 0 1 .75.75V7h5.25a.75.75 0 0 1 0 1.5H8v5.25a.75.75 0 0 1-1.5 0V8.5H1.25a.75.75 0 0 1 0-1.5H6.5V1.75A.75.75 0 0 1 7.25 1Z"/>
-                  </svg>
+                  <Plus size={12} />
                 </button>
               {/if}
             </div>
@@ -852,9 +843,7 @@
                         {label.name}
                       </span>
                       {#if isAttached}
-                        <svg class="size-3.5 text-[var(--accent)]" viewBox="0 0 16 16" fill="currentColor">
-                          <path fill-rule="evenodd" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/>
-                        </svg>
+                        <Check size={14} class="text-[var(--accent)]" />
                       {/if}
                     </button>
                   {/each}
@@ -931,20 +920,18 @@
 
 {#snippet priorityIcon(priority: string)}
   {#if priority === "urgent"}
-    <svg class="size-3.5 text-[var(--error)]" viewBox="0 0 16 16" fill="currentColor">
-      <path fill-rule="evenodd" d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM7.25 5a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-1.5 0V5Zm.75 6.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z" clip-rule="evenodd"/>
-    </svg>
+    <CircleAlert size={14} class="text-[var(--error)]" />
   {:else if priority === "high"}
-    <svg class="size-3.5 text-orange-500" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M3.5 9.5a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Zm2.5 0a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5H6Zm2.5 0a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5ZM3.5 5a.75.75 0 0 0 0 1.5h.5A.75.75 0 0 0 4 5h-.5ZM6 5a.75.75 0 0 0 0 1.5h.5A.75.75 0 0 0 7 5H6Zm2.5 0a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5ZM11 5a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5H11Z"/>
+    <svg class="size-3.5 text-orange-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="5" y1="12" x2="19" y2="12"/><line x1="5" y1="6" x2="19" y2="6"/><line x1="5" y1="18" x2="19" y2="18"/>
     </svg>
   {:else if priority === "medium"}
-    <svg class="size-3.5 text-[var(--accent)]" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M3.5 9.5a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Zm2.5 0a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5H6Zm-2.5-4.5a.75.75 0 0 0 0 1.5h.5A.75.75 0 0 0 4 5h-.5ZM6 5a.75.75 0 0 0 0 1.5h.5A.75.75 0 0 0 7 5H6Z"/>
+    <svg class="size-3.5 text-[var(--accent)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/>
     </svg>
   {:else if priority === "low"}
-    <svg class="size-3.5 text-[var(--text-muted)]" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M3.5 9.5a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Zm-0-4.5a.75.75 0 0 0 0 1.5h.5A.75.75 0 0 0 4 5h-.5Z"/>
+    <svg class="size-3.5 text-[var(--text-muted)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="5" y1="12" x2="19" y2="12"/>
     </svg>
   {:else}
     <span class="size-3.5"></span>

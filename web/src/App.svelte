@@ -7,6 +7,8 @@
   import IssueNew from "./routes/IssueNew.svelte";
   import ProjectNew from "./routes/ProjectNew.svelte";
   import ProjectSettings from "./routes/ProjectSettings.svelte";
+  import PageList from "./routes/PageList.svelte";
+  import PageDetail from "./routes/PageDetail.svelte";
   import Layout from "./lib/Layout.svelte";
   import { hasSession, listProjects } from "./lib/api";
 
@@ -59,6 +61,8 @@
     | { type: "app"; page: "issues"; project: string }
     | { type: "app"; page: "issue-new"; project: string }
     | { type: "app"; page: "issue-detail"; project: string; identifier: string }
+    | { type: "app"; page: "pages"; project: string }
+    | { type: "app"; page: "page-detail"; project: string; pageId: number }
     | { type: "loading" };
 
   function parseRoute(r: string): ParsedRoute {
@@ -103,10 +107,28 @@
       };
     }
 
+    // Project-scoped: /{IDENTIFIER}/pages
+    const pageListMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/pages$/i);
+    if (pageListMatch) {
+      return { type: "app", page: "pages", project: pageListMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/pages/{ID}
+    const pageDetailMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/pages\/(\d+)$/i);
+    if (pageDetailMatch) {
+      return {
+        type: "app",
+        page: "page-detail",
+        project: pageDetailMatch[1],
+        pageId: parseInt(pageDetailMatch[2]),
+      };
+    }
+
     return { type: "loading" };
   }
 
   let parsed = $derived(parseRoute(route));
+  let onProjectChange = $state<(() => void) | undefined>();
 </script>
 
 {#if parsed.type === "auth"}
@@ -123,13 +145,13 @@
     ></div>
   </div>
 {:else}
-  <Layout {navigate} {route}>
+  <Layout {navigate} {route} bind:onProjectChange>
     {#if parsed.page === "settings"}
       <Settings {navigate} />
     {:else if parsed.page === "project-new"}
       <ProjectNew {navigate} />
     {:else if parsed.page === "project-settings"}
-      <ProjectSettings {navigate} projectIdentifier={parsed.project} />
+      <ProjectSettings {navigate} projectIdentifier={parsed.project} {onProjectChange} />
     {:else if parsed.page === "issues"}
       <IssueList {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "issue-new"}
@@ -140,6 +162,10 @@
         projectIdentifier={parsed.project}
         issueIdentifier={parsed.identifier}
       />
+    {:else if parsed.page === "pages"}
+      <PageList {navigate} projectIdentifier={parsed.project} />
+    {:else if parsed.page === "page-detail"}
+      <PageDetail {navigate} projectIdentifier={parsed.project} pageId={parsed.pageId} />
     {/if}
   </Layout>
 {/if}

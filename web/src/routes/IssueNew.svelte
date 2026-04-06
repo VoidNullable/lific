@@ -8,6 +8,7 @@
     type Module,
     type Label,
   } from "../lib/api";
+  import { ArrowLeft, Plus, X, Check } from "lucide-svelte";
 
   let {
     navigate,
@@ -177,9 +178,7 @@
                hover:bg-[var(--bg-subtle)]"
         onclick={discard}
       >
-        <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd" />
-        </svg>
+        <ArrowLeft size={14} />
         Issues
       </button>
 
@@ -411,9 +410,7 @@
                         onclick={(e) => { e.stopPropagation(); toggleLabel(lbl); }}
                         title="Remove label"
                       >
-                        <svg class="size-2.5" viewBox="0 0 16 16" fill="currentColor">
-                          <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/>
-                        </svg>
+                        <X size={10} />
                       </button>
                     </span>
                   {/each}
@@ -435,9 +432,7 @@
                     moduleOpen = false;
                   }}
                 >
-                  <svg class="size-3" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M7.25 1a.75.75 0 0 1 .75.75V7h5.25a.75.75 0 0 1 0 1.5H8v5.25a.75.75 0 0 1-1.5 0V8.5H1.25a.75.75 0 0 1 0-1.5H6.5V1.75A.75.75 0 0 1 7.25 1Z"/>
-                  </svg>
+                  <Plus size={12} />
                 </button>
               </div>
 
@@ -465,9 +460,7 @@
                         {label.name}
                       </span>
                       {#if isAttached}
-                        <svg class="size-3.5 text-[var(--accent)]" viewBox="0 0 16 16" fill="currentColor">
-                          <path fill-rule="evenodd" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/>
-                        </svg>
+                        <Check size={14} class="text-[var(--accent)]" />
                       {/if}
                     </button>
                   {/each}

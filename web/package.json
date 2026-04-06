@@ -21,6 +21,9 @@
     "vite": "^8.0.1"
   },
   "dependencies": {
-    "marked": "^17.0.6"
+    "lucide": "^1.7.0",
+    "lucide-svelte": "^1.0.1",
+    "marked": "^17.0.6",
+    "unicode-emoji-json": "^0.8.0"
   }
 }

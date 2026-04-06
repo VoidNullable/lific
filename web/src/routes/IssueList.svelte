@@ -10,6 +10,7 @@
     type Module,
     type Label,
   } from "../lib/api";
+  import { Plus, Search, CircleCheckBig, CircleX } from "lucide-svelte";
 
   let {
     navigate,
@@ -199,21 +200,15 @@
                  rounded-md hover:bg-[var(--accent-hover)] transition-colors"
           onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
         >
-          <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M7.25 1a.75.75 0 0 1 .75.75V7h5.25a.75.75 0 0 1 0 1.5H8v5.25a.75.75 0 0 1-1.5 0V8.5H1.25a.75.75 0 0 1 0-1.5H6.5V1.75A.75.75 0 0 1 7.25 1Z"/>
-          </svg>
+          <Plus size={14} />
           New
         </button>
 
         <!-- Search -->
         <div class="relative">
-        <svg
-          class="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5
-                 text-[var(--text-faint)] pointer-events-none"
-          viewBox="0 0 16 16" fill="currentColor"
-        >
-          <path fill-rule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clip-rule="evenodd"/>
-        </svg>
+          <div class="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
+            <Search size={14} />
+          </div>
         <input
           type="text"
           placeholder="Search issues..."
@@ -378,20 +373,18 @@
   >
     <!-- Status indicator (clickable to cycle) -->
     <button
-      class="size-4 rounded-full border-2 shrink-0 transition-colors
-             {statusBorderColor(issue.status)}
-             hover:border-[var(--accent)] group/status"
+      class="size-4 shrink-0 transition-colors flex items-center justify-center
+             {issue.status === 'done' || issue.status === 'cancelled'
+        ? 'border-0'
+        : 'rounded-full border-2 ' + statusBorderColor(issue.status)}
+             hover:text-[var(--accent)]"
       title="Status: {issue.status} (click to cycle)"
       onclick={(e) => cycleStatus(issue, e)}
     >
       {#if issue.status === "done"}
-        <svg class="size-full text-[var(--success)]" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z" clip-rule="evenodd"/>
-        </svg>
+        <CircleCheckBig size={16} class="text-[var(--success)]" />
       {:else if issue.status === "cancelled"}
-        <svg class="size-full text-[var(--text-faint)]" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16ZM5.28 5.28a.75.75 0 0 1 1.06 0L8 6.94l1.66-1.66a.75.75 0 1 1 1.06 1.06L9.06 8l1.66 1.66a.75.75 0 1 1-1.06 1.06L8 9.06l-1.66 1.66a.75.75 0 0 1-1.06-1.06L6.94 8 5.28 6.34a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/>
-        </svg>
+        <CircleX size={16} class="text-[var(--text-faint)]" />
       {/if}
     </button>
 

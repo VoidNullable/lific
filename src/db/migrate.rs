@@ -34,6 +34,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "bot owners",
         include_str!("../../migrations/007_bot_owners.sql"),
     ),
+    (
+        8,
+        "project lead",
+        include_str!("../../migrations/008_project_lead.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

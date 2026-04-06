@@ -2,17 +2,24 @@
   import {
     listProjects,
     listIssues,
+    listUsers,
     updateProject,
     deleteProject,
     type Project,
+    type UserSummary,
   } from "../lib/api";
+  import IconPicker from "../lib/IconPicker.svelte";
+  import Select from "../lib/Select.svelte";
+  import { ArrowLeft } from "lucide-svelte";
 
   let {
     navigate,
     projectIdentifier,
+    onProjectChange,
   }: {
     navigate: (path: string) => void;
     projectIdentifier: string;
+    onProjectChange?: () => void;
   } = $props();
 
   let project = $state<Project | null>(null);
@@ -24,8 +31,10 @@
   let identifier = $state("");
   let description = $state("");
   let emoji = $state("");
+  let leadUserId = $state<number | null>(null);
   let saving = $state(false);
   let saveSuccess = $state(false);
+  let users = $state<UserSummary[]>([]);
 
   // Delete
   let issueCount = $state(0);
@@ -59,6 +68,11 @@
     identifier = found.identifier;
     description = found.description;
     emoji = found.emoji ?? "";
+    leadUserId = found.lead_user_id;
+
+    // Load users for lead dropdown
+    const usersRes = await listUsers();
+    if (usersRes.ok) users = usersRes.data;
 
     // Fetch issue count for the delete warning
     const issueRes = await listIssues({ project_id: found.id, limit: 1 });
@@ -71,12 +85,33 @@
     loading = false;
   }
 
+  let userOptions = $derived([
+    { value: null, label: "No lead" },
+    ...users.map((u) => ({
+      value: u.id,
+      label: u.display_name || u.username,
+      username: u.username,
+      is_admin: u.is_admin,
+      created_at: u.created_at,
+    })),
+  ]);
+
+  function formatMemberSince(iso: string): string {
+    const d = new Date(iso + "Z");
+    return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  }
+
+  function userInitials(name: string): string {
+    return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
+  }
+
   let hasChanges = $derived(
     project != null && (
       name.trim() !== project.name ||
       identifier.trim().toUpperCase() !== project.identifier ||
       description.trim() !== project.description ||
-      (emoji.trim() || "") !== (project.emoji ?? "")
+      (emoji.trim() || "") !== (project.emoji ?? "") ||
+      leadUserId !== project.lead_user_id
     )
   );
 
@@ -86,7 +121,7 @@
     saveSuccess = false;
     error = "";
 
-    const input: Record<string, string | undefined> = {};
+    const input: Record<string, unknown> = {};
     if (name.trim() !== project.name) input.name = name.trim();
     if (identifier.trim().toUpperCase() !== project.identifier) {
       input.identifier = identifier.trim().toUpperCase();
@@ -94,11 +129,13 @@
     if (description.trim() !== project.description) input.description = description.trim();
     const newEmoji = emoji.trim() || undefined;
     if (newEmoji !== (project.emoji ?? undefined)) input.emoji = newEmoji ?? "";
+    if (leadUserId !== project.lead_user_id) input.lead_user_id = leadUserId;
 
     const res = await updateProject(project.id, input);
     if (res.ok) {
       project = res.data;
       saveSuccess = true;
+      onProjectChange?.();
       // If identifier changed, update the URL
       if (res.data.identifier !== projectIdentifier) {
         navigate(`/${res.data.identifier}/settings`);
@@ -159,9 +196,7 @@
                hover:bg-[var(--bg-subtle)]"
         onclick={() => navigate(`/${project!.identifier}/issues`)}
       >
-        <svg class="size-3.5" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 1.06L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd" />
-        </svg>
+        <ArrowLeft size={14} />
         {project!.name}
       </button>
 
@@ -198,7 +233,8 @@
             <input
               type="text"
               bind:value={identifier}
-              class="w-full px-3 py-2 text-[0.875rem] rounded-md font-mono uppercase
+              maxlength="5"
+              class="w-[120px] px-3 py-2 text-[0.875rem] rounded-md font-mono uppercase
                      border border-[var(--border)] bg-[var(--surface)]
                      text-[var(--text)]"
             />
@@ -219,17 +255,25 @@
             ></textarea>
           </div>
 
-          <div>
-            <label class="block text-[0.8125rem] font-medium text-[var(--text)] mb-1.5">
-              Emoji
-            </label>
-            <input
-              type="text"
-              bind:value={emoji}
-              class="w-[80px] px-3 py-2 text-[1rem] rounded-md text-center
-                     border border-[var(--border)] bg-[var(--surface)]"
-              maxlength="2"
-            />
+          <div class="flex gap-4 items-start">
+            <div class="flex-1">
+              <label class="block text-[0.8125rem] font-medium text-[var(--text)] mb-1.5">
+                Lead
+              </label>
+              <Select
+                options={userOptions}
+                bind:value={leadUserId}
+                placeholder="No lead"
+                renderSelected={selectedUser}
+                renderOption={userOption}
+              />
+            </div>
+            <div>
+              <label class="block text-[0.8125rem] font-medium text-[var(--text)] mb-1.5">
+                Icon
+              </label>
+              <IconPicker value={emoji} onchange={(v) => { emoji = v; }} />
+            </div>
           </div>
 
           <div class="flex items-center gap-3 pt-2">
@@ -326,3 +370,56 @@
     </div>
   </div>
 {/if}
+
+{#snippet selectedUser(opt: { value: string | number | null; label: string; [key: string]: unknown })}
+  <div class="flex items-center gap-2">
+    {#if opt.value !== null}
+      <div
+        class="size-5 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+               flex items-center justify-center text-[0.5625rem] font-semibold shrink-0"
+      >
+        {userInitials(opt.label)}
+      </div>
+    {/if}
+    <span class="text-[0.875rem] text-[var(--text)]">{opt.label}</span>
+  </div>
+{/snippet}
+
+{#snippet userOption(opt: { value: string | number | null; label: string; [key: string]: unknown }, isSelected: boolean)}
+  {#if opt.value === null}
+    <span class="text-[0.875rem] text-[var(--text-faint)]">{opt.label}</span>
+  {:else}
+    <div class="flex items-center gap-2.5">
+      <div
+        class="size-7 rounded-full flex items-center justify-center
+               text-[0.625rem] font-semibold shrink-0
+               {isSelected
+          ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+          : 'bg-[var(--bg-subtle)] text-[var(--text-muted)]'}"
+      >
+        {userInitials(opt.label)}
+      </div>
+      <div class="min-w-0">
+        <div class="flex items-center gap-1.5">
+          <span
+            class="text-[0.875rem] truncate
+                   {isSelected ? 'text-[var(--accent)] font-medium' : 'text-[var(--text)]'}"
+          >
+            {opt.label}
+          </span>
+          {#if opt.is_admin}
+            <span
+              class="text-[0.625rem] font-semibold uppercase tracking-wide
+                     px-1 py-0.5 rounded bg-[var(--accent-subtle)] text-[var(--accent)]"
+            >
+              Admin
+            </span>
+          {/if}
+        </div>
+        <span class="text-[0.75rem] text-[var(--text-faint)]">
+          Member since {formatMemberSince(opt.created_at as string)}
+        </span>
+      </div>
+    </div>
+  {/if}
+{/snippet}

@@ -647,6 +647,7 @@ impl LificMcp {
                             identifier: ident.clone(),
                             description: input.description.clone().unwrap_or_default(),
                             emoji: None,
+                            lead_user_id: None,
                         },
                     )
                 }) {
@@ -671,6 +672,7 @@ impl LificMcp {
                             identifier: input.identifier.clone(),
                             description: input.description.clone(),
                             emoji: None,
+                            lead_user_id: None,
                         },
                     )
                 }) {

@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN lead_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
