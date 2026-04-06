@@ -10,7 +10,11 @@
     type Module,
     type Label,
   } from "../lib/api";
-  import { Plus, Search, CircleCheckBig, CircleX } from "lucide-svelte";
+  import {
+    Plus, Search, ChevronRight, CircleCheckBig, CircleX, X,
+    Circle, CircleDot, CircleDashed, Layers, SignalHigh, SignalMedium, SignalLow, Signal, AlertTriangle,
+  } from "lucide-svelte";
+  import Select from "../lib/Select.svelte";
 
   let {
     navigate,
@@ -36,6 +40,46 @@
 
   const STATUSES = ["backlog", "todo", "active", "done", "cancelled"];
   const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
+
+  let statusOptions = $derived([
+    { value: "", label: "Status" },
+    ...STATUSES.map((s) => ({ value: s, label: s })),
+  ]);
+  let priorityOptions = $derived([
+    { value: "", label: "Priority" },
+    ...PRIORITIES.map((p) => ({ value: p, label: p })),
+  ]);
+  let labelOptions = $derived([
+    { value: "", label: "Label" },
+    ...labels.map((l) => ({ value: l.name, label: l.name, color: l.color })),
+  ]);
+  let moduleOptions = $derived([
+    { value: "", label: "Module" },
+    ...modules.map((m) => ({ value: m.name, label: m.name })),
+  ]);
+
+  // CSS variable value for a status — used in both snippets
+  function statusCssColor(s: string): string {
+    switch (s) {
+      case "backlog": return "var(--text-faint)";
+      case "todo": return "var(--text-muted)";
+      case "active": return "var(--accent)";
+      case "done": return "var(--success)";
+      case "cancelled": return "var(--text-faint)";
+      default: return "var(--text-faint)";
+    }
+  }
+
+  function priorityCssColor(p: string): string {
+    switch (p) {
+      case "urgent": return "var(--error)";
+      case "high": return "#f97316";
+      case "medium": return "var(--accent)";
+      case "low": return "var(--text-muted)";
+      case "none": return "var(--text-faint)";
+      default: return "var(--text-faint)";
+    }
+  }
 
   // Re-run when the project prop changes (read it synchronously so Svelte tracks it)
   $effect(() => {
@@ -178,123 +222,182 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <!-- Header -->
-  <div class="shrink-0 border-b border-[var(--border)] bg-[var(--surface)]">
-    <div class="flex items-center justify-between px-6 py-3">
-      <div class="flex items-center gap-3">
-        <h1 class="text-[1.125rem] font-semibold text-[var(--text)] tracking-tight">
-          Issues
-        </h1>
-        {#if !loading}
-          <span class="text-[0.8125rem] text-[var(--text-faint)]">
-            {filteredIssues.length}
-          </span>
-        {/if}
-      </div>
-
-      <div class="flex items-center gap-2">
-        <!-- Create -->
-        <button
-          class="flex items-center gap-1.5 text-[0.8125rem] font-medium
-                 text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1.5
-                 rounded-md hover:bg-[var(--accent-hover)] transition-colors"
-          onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
+  <!-- Toolbar -->
+  <div
+    class="shrink-0 flex items-center gap-3 px-6 py-2.5
+           border-b border-[var(--border)] bg-[var(--surface)]"
+  >
+    <!-- Breadcrumb: Project > Issues  (count) -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <button
+        class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
+               hover:text-[var(--text)] transition-colors"
+        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+      >
+        {projectIdentifier}
+      </button>
+      <ChevronRight size={12} class="text-[var(--text-faint)]" />
+      <span class="text-[0.8125rem] font-medium text-[var(--text)]">
+        Issues
+      </span>
+      {#if !loading}
+        <span
+          class="text-[0.6875rem] text-[var(--text-faint)] bg-[var(--bg-subtle)]
+                 px-1.5 py-0.5 rounded-full font-medium tabular-nums"
         >
-          <Plus size={14} />
-          New
-        </button>
-
-        <!-- Search -->
-        <div class="relative">
-          <div class="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
-            <Search size={14} />
-          </div>
-        <input
-          type="text"
-          placeholder="Search issues..."
-          bind:value={searchQuery}
-          class="w-[200px] pl-8 pr-3 py-1.5 text-[0.8125rem] rounded-md
-                 border border-[var(--border)] bg-[var(--bg)]
-                 text-[var(--text)] placeholder:text-[var(--text-faint)]
-                 focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]
-                 transition-all"
-        />
-        </div>
-      </div>
+          {filteredIssues.length}
+        </span>
+      {/if}
     </div>
 
-    <!-- Filter bar -->
-    <div class="flex items-center gap-2 px-6 pb-3 flex-wrap">
-      <!-- Status filter -->
-      <select
-        bind:value={filterStatus}
-        class="text-[0.8125rem] rounded-md border border-[var(--border)]
-               bg-[var(--surface)] text-[var(--text)] px-2.5 py-1
-               focus:border-[var(--accent)] focus:outline-none
-               {filterStatus ? 'border-[var(--accent)] text-[var(--accent)]' : ''}"
-      >
-        <option value="">All statuses</option>
-        {#each STATUSES as status}
-          <option value={status}>{status}</option>
-        {/each}
-      </select>
+    <!-- Separator -->
+    <div class="w-px h-4 bg-[var(--border)]"></div>
 
-      <!-- Priority filter -->
-      <select
-        bind:value={filterPriority}
-        class="text-[0.8125rem] rounded-md border border-[var(--border)]
-               bg-[var(--surface)] text-[var(--text)] px-2.5 py-1
-               focus:border-[var(--accent)] focus:outline-none
-               {filterPriority ? 'border-[var(--accent)] text-[var(--accent)]' : ''}"
-      >
-        <option value="">All priorities</option>
-        {#each PRIORITIES as priority}
-          <option value={priority}>{priority}</option>
-        {/each}
-      </select>
+    <!-- Filters -->
+    <div class="flex items-center gap-1.5">
+      <!-- Status -->
+      <Select options={statusOptions} bind:value={filterStatus} placeholder="Status" size="sm" class="w-auto">
+        {#snippet renderSelected(opt)}
+          <span class="flex items-center gap-1.5 text-[0.8125rem]">
+            {#if opt.value}
+              {@render statusIcon(String(opt.value), 13)}
+              <span class="text-[var(--text)] capitalize">{opt.label}</span>
+            {:else}
+              <span class="text-[var(--text-muted)]">{opt.label}</span>
+            {/if}
+          </span>
+        {/snippet}
+        {#snippet renderOption(opt, isSelected)}
+          <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+            {#if opt.value}
+              {@render statusIcon(String(opt.value), 14)}
+              <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'} capitalize">{opt.label}</span>
+            {:else}
+              <span class="text-[var(--text-muted)]">{opt.label}</span>
+            {/if}
+          </span>
+        {/snippet}
+      </Select>
 
-      <!-- Label filter -->
+      <!-- Priority -->
+      <Select options={priorityOptions} bind:value={filterPriority} placeholder="Priority" size="sm" class="w-auto">
+        {#snippet renderSelected(opt)}
+          <span class="flex items-center gap-1.5 text-[0.8125rem]">
+            {#if opt.value}
+              {@render priorityIcon(String(opt.value), 13)}
+              <span class="capitalize" style="color: {priorityCssColor(String(opt.value))}">{opt.label}</span>
+            {:else}
+              <span class="text-[var(--text-muted)]">{opt.label}</span>
+            {/if}
+          </span>
+        {/snippet}
+        {#snippet renderOption(opt, isSelected)}
+          <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+            {#if opt.value}
+              {@render priorityIcon(String(opt.value), 14)}
+              <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'} capitalize">{opt.label}</span>
+            {:else}
+              <span class="text-[var(--text-muted)]">{opt.label}</span>
+            {/if}
+          </span>
+        {/snippet}
+      </Select>
+
+      <!-- Labels -->
       {#if labels.length > 0}
-        <select
-          bind:value={filterLabel}
-          class="text-[0.8125rem] rounded-md border border-[var(--border)]
-                 bg-[var(--surface)] text-[var(--text)] px-2.5 py-1
-                 focus:border-[var(--accent)] focus:outline-none
-                 {filterLabel ? 'border-[var(--accent)] text-[var(--accent)]' : ''}"
-        >
-          <option value="">All labels</option>
-          {#each labels as label}
-            <option value={label.name}>{label.name}</option>
-          {/each}
-        </select>
+        <Select options={labelOptions} bind:value={filterLabel} placeholder="Label" size="sm" class="w-auto">
+          {#snippet renderSelected(opt)}
+            <span class="flex items-center gap-1.5 text-[0.8125rem]">
+              {#if opt.value && opt.color}
+                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="text-[var(--text)]">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+          {#snippet renderOption(opt, isSelected)}
+            <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+              {#if opt.value && opt.color}
+                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+        </Select>
       {/if}
 
-      <!-- Module filter -->
+      <!-- Modules -->
       {#if modules.length > 0}
-        <select
-          bind:value={filterModule}
-          class="text-[0.8125rem] rounded-md border border-[var(--border)]
-                 bg-[var(--surface)] text-[var(--text)] px-2.5 py-1
-                 focus:border-[var(--accent)] focus:outline-none
-                 {filterModule ? 'border-[var(--accent)] text-[var(--accent)]' : ''}"
-        >
-          <option value="">All modules</option>
-          {#each modules as mod}
-            <option value={mod.name}>{mod.name}</option>
-          {/each}
-        </select>
+        <Select options={moduleOptions} bind:value={filterModule} placeholder="Module" size="sm" class="w-auto">
+          {#snippet renderSelected(opt)}
+            <span class="flex items-center gap-1.5 text-[0.8125rem]">
+              {#if opt.value}
+                <Layers size={13} class="shrink-0 text-[var(--text-muted)]" />
+                <span class="text-[var(--text)]">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+          {#snippet renderOption(opt, isSelected)}
+            <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+              {#if opt.value}
+                <Layers size={14} class="shrink-0 text-[var(--text-muted)]" />
+                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+        </Select>
       {/if}
 
-      <!-- Clear filters -->
       {#if hasActiveFilters()}
         <button
-          class="text-[0.8125rem] text-[var(--accent)] px-2 py-1
-                 rounded-md hover:bg-[var(--accent-subtle)] transition-colors"
+          class="flex items-center gap-1 text-[0.75rem] text-[var(--text-muted)]
+                 hover:text-[var(--text)] px-1.5 py-1 rounded-md
+                 hover:bg-[var(--bg-subtle)] transition-colors"
           onclick={clearFilters}
+          title="Clear all filters"
         >
-          Clear filters
+          <X size={12} />
+          Clear
         </button>
       {/if}
+    </div>
+
+    <!-- Spacer -->
+    <div class="flex-1"></div>
+
+    <!-- Search + New -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <div class="relative">
+        <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
+          <Search size={13} />
+        </div>
+        <input
+          type="text"
+          placeholder="Search..."
+          bind:value={searchQuery}
+          class="w-[160px] pl-7 pr-2.5 py-1 text-[0.8125rem] rounded-md
+                 border border-[var(--border)] bg-[var(--surface)]
+                 text-[var(--text)] placeholder:text-[var(--text-faint)]
+                 focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-subtle)]
+                 focus:w-[220px] transition-all"
+        />
+      </div>
+      <button
+        class="flex items-center gap-1 text-[0.8125rem] font-medium
+               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
+               rounded-md hover:bg-[var(--accent-hover)] transition-colors"
+        onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
+      >
+        <Plus size={14} />
+        New
+      </button>
     </div>
   </div>
 
@@ -335,7 +438,7 @@
                    bg-[var(--bg)] border-b border-[var(--border)]"
           >
             <span class="inline-flex items-center gap-1.5">
-              <span class="size-2 rounded-full {statusColor(status)}"></span>
+              {@render statusIcon(status, 14)}
               <span
                 class="text-[0.75rem] font-semibold uppercase tracking-widest
                        text-[var(--text-muted)]"
@@ -374,18 +477,11 @@
     <!-- Status indicator (clickable to cycle) -->
     <button
       class="size-4 shrink-0 transition-colors flex items-center justify-center
-             {issue.status === 'done' || issue.status === 'cancelled'
-        ? 'border-0'
-        : 'rounded-full border-2 ' + statusBorderColor(issue.status)}
              hover:text-[var(--accent)]"
       title="Status: {issue.status} (click to cycle)"
       onclick={(e) => cycleStatus(issue, e)}
     >
-      {#if issue.status === "done"}
-        <CircleCheckBig size={16} class="text-[var(--success)]" />
-      {:else if issue.status === "cancelled"}
-        <CircleX size={16} class="text-[var(--text-faint)]" />
-      {/if}
+      {@render statusIcon(issue.status, 16)}
     </button>
 
     <!-- Identifier -->
@@ -443,29 +539,35 @@
   </div>
 {/snippet}
 
+{#snippet statusIcon(status: string, size: number)}
+  {#if status === "done"}
+    <CircleCheckBig {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "cancelled"}
+    <CircleX {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "active"}
+    <CircleDot {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "backlog"}
+    <CircleDashed {size} style="color: {statusCssColor(status)}" />
+  {:else}
+    <Circle {size} style="color: {statusCssColor(status)}" />
+  {/if}
+{/snippet}
+
+{#snippet priorityIcon(priority: string, size: number)}
+  {#if priority === "urgent"}
+    <AlertTriangle {size} style="color: {priorityCssColor(priority)}" />
+  {:else if priority === "high"}
+    <SignalHigh {size} style="color: {priorityCssColor(priority)}" />
+  {:else if priority === "medium"}
+    <SignalMedium {size} style="color: {priorityCssColor(priority)}" />
+  {:else if priority === "low"}
+    <SignalLow {size} style="color: {priorityCssColor(priority)}" />
+  {:else}
+    <Signal {size} style="color: {priorityCssColor(priority)}" />
+  {/if}
+{/snippet}
+
 <script lang="ts" module>
-  function statusColor(status: string): string {
-    switch (status) {
-      case "backlog": return "bg-[var(--text-faint)]";
-      case "todo": return "bg-[var(--text-muted)]";
-      case "active": return "bg-[var(--accent)]";
-      case "done": return "bg-[var(--success)]";
-      case "cancelled": return "bg-[var(--text-faint)]";
-      default: return "bg-[var(--text-faint)]";
-    }
-  }
-
-  function statusBorderColor(status: string): string {
-    switch (status) {
-      case "backlog": return "border-[var(--text-faint)]";
-      case "todo": return "border-[var(--text-muted)]";
-      case "active": return "border-[var(--accent)]";
-      case "done": return "border-[var(--success)]";
-      case "cancelled": return "border-[var(--text-faint)]";
-      default: return "border-[var(--text-faint)]";
-    }
-  }
-
   function priorityColor(priority: string): string {
     switch (priority) {
       case "urgent": return "text-[var(--error)]";

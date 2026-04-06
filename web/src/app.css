@@ -9,7 +9,7 @@
  */
 
 @theme {
-  --font-display: "DM Serif Display", Georgia, serif;
+  --font-display: "Space Grotesk", "DM Sans", -apple-system, sans-serif;
   --font-body: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
 
@@ -131,8 +131,9 @@
 
   h1, h2, h3 {
     font-family: var(--font-display);
-    font-weight: 400;
+    font-weight: 600;
     line-height: 1.2;
+    letter-spacing: -0.02em;
     color: var(--text);
   }
 
@@ -247,7 +248,8 @@
 .prose h3,
 .prose h4 {
   font-family: var(--font-display);
-  font-weight: 400;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--text);
   margin-top: 1.5em;
   margin-bottom: 0.5em;

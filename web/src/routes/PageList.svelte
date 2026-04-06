@@ -224,18 +224,42 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <!-- Header -->
+  <!-- Toolbar -->
   <div
-    class="shrink-0 flex items-center justify-between px-6 py-3
+    class="shrink-0 flex items-center gap-3 px-6 py-2.5
            border-b border-[var(--border)] bg-[var(--surface)]"
   >
-    <h1 class="text-[1.125rem] font-semibold text-[var(--text)] tracking-tight">
-      Pages
-    </h1>
-    <div class="flex items-center gap-2">
+    <!-- Breadcrumb: Project > Pages -->
+    <div class="flex items-center gap-1.5 shrink-0">
       <button
-        class="flex items-center gap-1.5 text-[0.8125rem]
-               text-[var(--text-muted)] px-2.5 py-1.5 rounded-md
+        class="text-[0.8125rem] font-mono font-medium text-[var(--text-muted)]
+               hover:text-[var(--text)] transition-colors"
+        onclick={() => navigate(`/${projectIdentifier}/settings`)}
+      >
+        {projectIdentifier}
+      </button>
+      <ChevronRight size={12} class="text-[var(--text-faint)]" />
+      <span class="text-[0.8125rem] font-medium text-[var(--text)]">
+        Pages
+      </span>
+      {#if !loading}
+        <span
+          class="text-[0.6875rem] text-[var(--text-faint)] bg-[var(--bg-subtle)]
+                 px-1.5 py-0.5 rounded-full font-medium tabular-nums"
+        >
+          {pages.length}
+        </span>
+      {/if}
+    </div>
+
+    <!-- Spacer -->
+    <div class="flex-1"></div>
+
+    <!-- Actions -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <button
+        class="flex items-center gap-1 text-[0.8125rem]
+               text-[var(--text-muted)] px-2.5 py-1 rounded-md
                hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]
                transition-colors"
         onclick={() => startCreate("folder")}
@@ -244,8 +268,8 @@
         Folder
       </button>
       <button
-        class="flex items-center gap-1.5 text-[0.8125rem] font-medium
-               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1.5
+        class="flex items-center gap-1 text-[0.8125rem] font-medium
+               text-[var(--accent-text)] bg-[var(--accent)] px-2.5 py-1
                rounded-md hover:bg-[var(--accent-hover)] transition-colors"
         onclick={() => startCreate("page")}
       >

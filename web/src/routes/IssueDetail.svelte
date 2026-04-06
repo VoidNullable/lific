@@ -13,7 +13,22 @@
     type Comment,
   } from "../lib/api";
   import Markdown from "../lib/Markdown.svelte";
-  import { ArrowLeft, Ellipsis, Trash2, Plus, X, Check, CircleCheck, CircleX, CircleAlert } from "lucide-svelte";
+  import {
+    ArrowLeft, Ellipsis, Trash2, Plus, X, Check,
+    CircleCheck, CircleX, CircleAlert,
+    Circle, CircleDot, CircleDashed, CircleCheckBig,
+  } from "lucide-svelte";
+
+  function statusCssColor(s: string): string {
+    switch (s) {
+      case "backlog": return "var(--text-faint)";
+      case "todo": return "var(--text-muted)";
+      case "active": return "var(--accent)";
+      case "done": return "var(--success)";
+      case "cancelled": return "var(--text-faint)";
+      default: return "var(--text-faint)";
+    }
+  }
 
   let {
     navigate,
@@ -656,7 +671,7 @@
                 labelsOpen = false;
               }}
             >
-              <span class="size-2.5 rounded-full {statusDotClass(issue.status)}"></span>
+              {@render statusIcon(issue.status, 14)}
               <span class="capitalize text-[var(--text)]">{issue.status}</span>
             </button>
             {#if statusOpen}
@@ -677,7 +692,7 @@
                       : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
                     onclick={() => setStatus(s.value)}
                   >
-                    <span class="size-2 rounded-full {statusDotClass(s.value)}"></span>
+                    {@render statusIcon(s.value, 14)}
                     {s.label}
                   </button>
                 {/each}
@@ -950,18 +965,21 @@
   {/if}
 {/snippet}
 
-<script lang="ts" module>
-  function statusDotClass(status: string): string {
-    switch (status) {
-      case "backlog": return "bg-[var(--text-faint)]";
-      case "todo": return "bg-[var(--text-muted)]";
-      case "active": return "bg-[var(--accent)]";
-      case "done": return "bg-[var(--success)]";
-      case "cancelled": return "bg-[var(--text-faint)]";
-      default: return "bg-[var(--text-faint)]";
-    }
-  }
+{#snippet statusIcon(status: string, size: number)}
+  {#if status === "done"}
+    <CircleCheckBig {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "cancelled"}
+    <CircleX {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "active"}
+    <CircleDot {size} style="color: {statusCssColor(status)}" />
+  {:else if status === "backlog"}
+    <CircleDashed {size} style="color: {statusCssColor(status)}" />
+  {:else}
+    <Circle {size} style="color: {statusCssColor(status)}" />
+  {/if}
+{/snippet}
 
+<script lang="ts" module>
   function priorityTextClass(priority: string): string {
     switch (priority) {
       case "urgent": return "text-[var(--error)]";
