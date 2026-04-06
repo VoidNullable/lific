@@ -6,7 +6,7 @@
 
 <p align="center">
   Issue tracking built for AI-driven development.<br>
-  Single binary. SQLite. 14 MCP tools in ~2,000 tokens.
+  Single binary. SQLite. MCP schema under ~2,500 tokens.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 
 ---
 
-Lific ships 14 MCP tools in ~2,000 tokens of schema. It uses human-readable identifiers (`APP-42`, not UUIDs), runs as a single binary with an embedded SQLite database, and includes a web UI for when you want to look at things yourself.
+Lific's full MCP schema fits in ~2,500 tokens. It uses human-readable identifiers (`APP-42`, not UUIDs), runs as a single binary with an embedded SQLite database, and includes a web UI for when you want to look at things yourself.
 
 - **Issues** with status, priority, modules, labels, relations, and comments
 - **Pages** as markdown documents in recursive folders
@@ -88,7 +88,7 @@ Or run locally via stdio (no network):
 ## MCP tools
 
 <details>
-<summary>14 tools, ~2,000 tokens of schema</summary>
+<summary>Full tool list (~2,500 tokens of schema)</summary>
 
 | Tool | What it does |
 |------|-------------|
@@ -101,6 +101,7 @@ Or run locally via stdio (no network):
 | `search` | Full-text search across issues and pages |
 | `link_issues` / `unlink_issues` | Dependency tracking (blocks, relates_to, duplicate) |
 | `get_page` / `create_page` / `update_page` | Markdown documents |
+| `add_comment` / `list_comments` | Comments on issues |
 | `manage_resource` | Create/update projects, modules, labels, folders |
 | `delete` | Delete anything by identifier |
 
