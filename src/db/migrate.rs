@@ -72,11 +72,15 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     for &(version, name, sql) in MIGRATIONS {
         if version > current_version {
             info!(version, name, "applying migration");
-            conn.execute_batch(sql)?;
-            conn.execute(
-                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
-                rusqlite::params![version, name],
-            )?;
+            let sp = format!("migrate_v{version}");
+            crate::db::queries::savepoint(conn, &sp, || {
+                conn.execute_batch(sql)?;
+                conn.execute(
+                    "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                    rusqlite::params![version, name],
+                )?;
+                Ok(())
+            })?;
         }
     }
 
