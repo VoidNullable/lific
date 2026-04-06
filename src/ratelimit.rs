@@ -2,8 +2,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Maximum number of keys before a forced full sweep is triggered.
+const MAX_KEYS: usize = 10_000;
+
 /// Simple in-memory rate limiter.
 /// Tracks attempts per key (e.g. username or IP) within a sliding window.
+/// Expired keys are evicted periodically to prevent unbounded memory growth.
 #[derive(Debug)]
 pub struct RateLimiter {
     /// (key -> list of attempt timestamps)
@@ -23,15 +27,29 @@ impl RateLimiter {
         }
     }
 
+    /// Remove all keys whose attempt lists are empty or fully expired.
+    fn sweep(map: &mut HashMap<String, Vec<Instant>>, window: Duration) {
+        let now = Instant::now();
+        map.retain(|_, entries| {
+            entries.retain(|t| now.duration_since(*t) < window);
+            !entries.is_empty()
+        });
+    }
+
     /// Record an attempt for the given key.
     /// Returns `true` if the attempt is allowed, `false` if rate-limited.
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
 
+        // Evict expired keys if map is getting large
+        if map.len() > MAX_KEYS {
+            Self::sweep(&mut map, self.window);
+        }
+
         let entry = map.entry(key.to_string()).or_default();
 
-        // Prune expired entries
+        // Prune expired entries for this key
         entry.retain(|t| now.duration_since(*t) < self.window);
 
         if entry.len() >= self.max_attempts {
@@ -46,6 +64,11 @@ impl RateLimiter {
     pub fn record_failure(&self, key: &str) {
         let now = Instant::now();
         let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+
+        if map.len() > MAX_KEYS {
+            Self::sweep(&mut map, self.window);
+        }
+
         let entry = map.entry(key.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         entry.push(now);
@@ -103,5 +126,20 @@ mod tests {
         let rl = RateLimiter::new(1, Duration::from_secs(60));
         rl.check("user1");
         assert!(rl.retry_after("user1") > 0);
+    }
+
+    #[test]
+    fn sweep_removes_expired_keys() {
+        let mut map: HashMap<String, Vec<Instant>> = HashMap::new();
+        let window = Duration::from_millis(1);
+
+        // Insert an entry that will be expired by the time we sweep
+        map.insert("old".into(), vec![Instant::now()]);
+
+        // Wait for it to expire
+        std::thread::sleep(Duration::from_millis(5));
+
+        RateLimiter::sweep(&mut map, window);
+        assert!(map.is_empty(), "expired keys should be evicted");
     }
 }
