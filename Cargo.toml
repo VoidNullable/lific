@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2024"
 description = "Local-first, lightweight issue tracker. Single binary, SQLite-backed, MCP-native."
 license = "MIT"
-repository = "https://github.com/Void-n-Null/lific"
+repository = "https://github.com/VoidNullable/lific"
 keywords = ["issue-tracker", "project-management", "mcp", "sqlite", "local-first"]
 categories = ["command-line-utilities", "development-tools"]
 
