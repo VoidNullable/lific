@@ -367,7 +367,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let app = authed_routes
                 .merge(oauth::router(oauth_state))
-                .fallback(get(serve_frontend));
+                .fallback(get(serve_frontend))
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)); // 2 MB
 
             let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
