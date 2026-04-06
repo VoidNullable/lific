@@ -1,44 +1,64 @@
-# <img src="IssyLogo.png" width="40" alt="" style="vertical-align: middle;"> Lific
+<p align="center">
+  <img src="IssyLogo.png" alt="Lific" width="120">
+</p>
 
-A lightweight issue tracker designed for AI-driven development. 
+<h3 align="center">Lific</h3>
 
-If you use AI assistants to manage your projects (Claude, OpenCode, Cursor, etc.), Lific gives them a fast, structured issue tracker with a small set of focused tools for managing issues, pages, and project workflows.
+<p align="center">
+  Issue tracking built for AI-driven development.<br>
+  Single binary. SQLite. 14 MCP tools in ~2,000 tokens.
+</p>
 
-## Why
+<p align="center">
+  <a href="https://github.com/Void-n-Null/lific/actions/workflows/ci.yml"><img src="https://github.com/Void-n-Null/lific/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Void-n-Null/lific/releases"><img src="https://img.shields.io/github/v/release/Void-n-Null/lific" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Void-n-Null/lific" alt="License"></a>
+</p>
 
-Most issue trackers were built for teams of people clicking around a web UI. They work fine for that. But if your primary interface is an AI assistant managing issues through MCP, the priorities are different:
+---
 
-- **Schema size matters.** Every tool definition eats context window tokens. Lific exposes 14 tools in ~2,000 tokens. Plane's MCP server for example exposes 100+ tools at 80,000+ tokens.
-- **Identifiers should be readable.** `APP-42` instead of `5a61c25e-96ae-43f0-b25c-570ecefcb772`.
-- **Setup should be nothing.** Single binary, SQLite database, no external dependencies.
-- **Your data is yours.** SQLite file on your disk. Copy it, back it up, inspect it with any SQL tool.
+Most issue trackers ship 100+ tools and 80,000+ tokens of schema for AI assistants to parse. Lific ships 14 tools in ~2,000 tokens. It uses human-readable identifiers (`APP-42`, not UUIDs), runs as a single binary with an embedded SQLite database, and includes a web UI for when you want to look at things yourself.
+
+- **Issues** with status, priority, modules, labels, relations, and comments
+- **Pages** as markdown documents in recursive folders
+- **Web UI** with inline editing, drag-and-drop, dark/light theme
+- **MCP + REST API** for AI assistants and automation
+- **User accounts** with per-tool bot identities
+- **Automatic backups** with configurable retention
 
 ## Install
 
-```
+```bash
 cargo install lific
 ```
 
-Or grab a binary from [GitHub Releases](https://github.com/Void-n-Null/lific/releases).
+Or grab a binary from the [releases page](https://github.com/Void-n-Null/lific/releases).
 
 ## Quickstart
 
 ```bash
-lific init          # creates lific.toml with defaults
-lific start         # starts the server on port 3456
+lific init     # creates lific.toml
+lific start    # starts on port 3456
 ```
 
-Open the web UI at `http://localhost:3456` and create an account. The first account is automatically an admin.
+Open `http://localhost:3456`, create an account (first account is admin), and you're running.
 
-## Connecting AI tools
+## Connecting your AI tools
 
-Once you have an account, go to **Settings > Connected Tools** in the web UI. Pick your tool (OpenCode, Cursor, Claude Code, Claude Desktop, Codex) and click Connect. Lific generates a bot identity that acts on your behalf and gives you the config snippet to paste into your tool's MCP configuration.
+Go to **Settings > Connected Tools** in the web UI. Pick your tool, click Connect, paste the generated config snippet. Supported out of the box:
 
-Each connection creates a bot account tied to your user. Comments and changes made by the bot show up as coming from that tool, attributed to you.
+- OpenCode
+- Cursor
+- Claude Code
+- Claude Desktop
+- Codex
 
-### Manual / headless setup
+Each connection creates a bot identity tied to your account. Changes show up attributed to you, tagged with which tool made them.
 
-If you're running Lific on a remote server without the web UI, you can also connect via the REST API or point your MCP client directly at the `/mcp` endpoint with a bearer token.
+<details>
+<summary>Manual setup (headless / remote server)</summary>
+
+Point your MCP client at the `/mcp` endpoint:
 
 ```json
 {
@@ -52,7 +72,7 @@ If you're running Lific on a remote server without the web UI, you can also conn
 }
 ```
 
-### Local stdio (no network)
+Or run locally via stdio (no network):
 
 ```json
 {
@@ -63,76 +83,59 @@ If you're running Lific on a remote server without the web UI, you can also conn
 }
 ```
 
-## Web UI
+</details>
 
-Lific includes a web interface served from the same binary. No separate frontend deployment needed.
+## MCP tools
 
-- **Issues** with filters, search, inline editing, markdown descriptions, comments
-- **Pages** as markdown documents with a recursive folder tree and drag-and-drop organization
-- **Project management** with create, edit, delete, lead assignment, and icon picker
-- Dark/light theme with system preference detection
+<details>
+<summary>14 tools, ~2,000 tokens of schema</summary>
 
-The UI auto-links issue and page identifiers in markdown. Writing `LIF-42` in a description turns it into a clickable link.
+| Tool | What it does |
+|------|-------------|
+| `list_resources` | Discover projects, modules, labels, folders, pages, issues |
+| `list_issues` | Filter by status, priority, module, label, or workable |
+| `get_issue` | Full issue details with relations and labels |
+| `create_issue` | Create with project, module, labels, priority |
+| `update_issue` | Partial updates by identifier |
+| `get_board` | Board view grouped by status, priority, or module |
+| `search` | Full-text search across issues and pages |
+| `link_issues` / `unlink_issues` | Dependency tracking (blocks, relates_to, duplicate) |
+| `get_page` / `create_page` / `update_page` | Markdown documents |
+| `manage_resource` | Create/update projects, modules, labels, folders |
+| `delete` | Delete anything by identifier |
 
-## What the AI sees
+Everything uses human-readable identifiers: `project="APP"` not `project_id=7`.
 
-Lific gives your AI assistant the following tools:
+**Workable filter:** `list_issues(project="APP", workable=true)` returns only issues with all blockers resolved. One call to answer "what can I start right now?"
 
+</details>
 
-| Tool                                       | What it does                                                                                    |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `list_resources`                           | Discover projects, modules, labels, folders, pages, issues                                      |
-| `list_issues`                              | Filter by status, priority, module, label, or workable                                          |
-| `get_issue`                                | Full details for a specific issue with relations and labels                                     |
-| `create_issue`                             | Create with project, module, labels, priority                                                   |
-| `update_issue`                             | Partial updates by identifier                                                                   |
-| `get_board`                                | Board view grouped by status, priority, or module                                               |
-| `search`                                   | Full-text search across issues and pages                                                        |
-| `link_issues` / `unlink_issues`            | Dependency tracking (blocks, relates_to, duplicate)                                             |
-| `get_page` / `create_page` / `update_page` | Markdown docs                                                                                   |
-| `manage_resource`                          | Create/update projects, modules, labels, folders                                                |
-| `delete`                                   | Delete anything by identifier                                                                   |
+## Roadmap
 
+- [x] Projects, issues, labels, modules, relations
+- [x] Markdown pages in recursive folders
+- [x] Comments on issues
+- [x] Web UI with inline editing and drag-and-drop
+- [x] Full-text search
+- [x] User accounts with bot identities
+- [x] OAuth 2.1
+- [x] Automatic SQLite backups
+- [ ] Milestones with changelog generation
+- [ ] Git-aware issue references (parse commits for identifiers)
+- [ ] Activity log per issue
+- [ ] File attachments
+- [ ] Webhooks
+- [ ] VS Code extension
+- [ ] Real-time updates via WebSocket
 
-Everything uses human-readable identifiers. `project="APP"`, not `project_id=7`. `module="Backend"`, not `module_id=3`.
-
-### Workable filter
-
-`list_issues(project="APP", workable=true)` returns only issues where all blockers are resolved. One call to answer "what can I actually start right now?" instead of manually tracing dependency chains.
-
-## What's in, what's coming
-
-**Shipping now:**
-- Projects, issues, labels, modules
-- Issue relations (blocks, relates_to, duplicate)
-- Markdown pages organized in recursive folders
-- Comments on issues
-- Web UI with inline editing, drag-and-drop, dark/light theme
-- Full-text search across everything
-- Board view (status/priority/module grouping)
-- User accounts with bot identities per connected tool
-- OAuth 2.1 for external clients
-- Automatic SQLite backups
-
-**Planned:**
-- Milestones with changelog generation
-- Git-aware issue references (parse commit messages for identifiers)
-- Activity log per issue
-- File attachments on issues and pages
-- Webhooks on issue changes
-- VS Code extension
-- Real-time updates via WebSocket
-
-**Not planned:**
-Sprints, story points, custom fields, workflow automations. If you need those, this isn't for you.
-
-## Backups
-
-Lific automatically backs up the database using SQLite's online backup API. Interval and retention are configurable in `lific.toml`. On shutdown, the WAL is checkpointed so the `.db` file is always self-contained and safe to copy.
+Not planned: sprints, story points, custom fields, workflow automations.
 
 ## Configuration
 
-`lific init` creates a `lific.toml`:
+<details>
+<summary><code>lific.toml</code></summary>
+
+`lific init` generates this:
 
 ```toml
 [server]
@@ -154,23 +157,23 @@ level = "info"
 
 CLI flags (`--db`, `--port`, `--host`) override config values.
 
+</details>
+
 ## Building from source
 
 ```bash
 git clone https://github.com/Void-n-Null/lific
 cd lific
-cargo build --release
-```
-
-The frontend is built separately and embedded in the binary:
-
-```bash
 cd web && bun install && bun run build && cd ..
 cargo build --release
 ```
 
-Requires Rust 2024 edition. SQLite is bundled (no system dependency).
+Requires Rust 2024 edition. SQLite is bundled.
+
+## Contributing
+
+Issues and PRs welcome. If you're planning something big, open an issue first so we can talk about it before you put in the work.
 
 ## License
 
-MIT
+[MIT](LICENSE)
