@@ -859,24 +859,12 @@ impl LificMcp {
         };
 
         // Resolve the authenticated user from the task-local set by the HTTP handler.
-        // Falls back to first admin/user for stdio MCP or test contexts.
+        // Requires authentication — we never guess who the author is.
         let user_id = match super::current_auth_user() {
             Some(u) => u.id,
-            None => match self.read(|conn| {
-                queries::users::list_users(conn).map(|users| {
-                    users
-                        .iter()
-                        .find(|u| u.is_admin)
-                        .or(users.first())
-                        .map(|u| u.id)
-                })
-            }) {
-                Ok(Some(id)) => id,
-                _ => {
-                    return "Error: no users exist. Create a user first with `lific user create`."
-                        .into();
-                }
-            },
+            None => {
+                return "Error: authentication required to add comments. Use an API key or session token.".into();
+            }
         };
 
         match self.write(|conn| {
@@ -1567,7 +1555,7 @@ mod tests {
 
     fn seed_user(mcp: &LificMcp) {
         let conn = mcp.db.write().unwrap();
-        crate::db::queries::users::create_user(
+        let user = crate::db::queries::users::create_user(
             &conn,
             &models::CreateUser {
                 username: "testuser".into(),
@@ -1579,6 +1567,15 @@ mod tests {
             },
         )
         .unwrap();
+        // Set the authenticated user context so add_comment works in tests
+        *crate::mcp::MCP_REQUEST_USER
+            .lock()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = Some(models::AuthUser {
+            id: user.id,
+            username: user.username.clone(),
+            display_name: user.display_name,
+            is_admin: user.is_admin,
+        });
     }
 
     #[test]
