@@ -107,11 +107,16 @@ async fn register_client(
         serde_json::to_string(&req.redirect_uris).unwrap_or_else(|_| "[]".into());
 
     let db = state.db.clone();
-    if let Ok(conn) = db.write() {
-        let _ = conn.execute(
-            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, ?2, ?3)",
-            params![client_id, client_name, redirect_uris_json],
-        );
+    let conn = match db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    if let Err(e) = conn.execute(
+        "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, ?2, ?3)",
+        params![client_id, client_name, redirect_uris_json],
+    ) {
+        tracing::error!(error = %e, "failed to register OAuth client");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
     info!(client_id = %client_id, name = %client_name, "OAuth client registered");
@@ -287,20 +292,25 @@ async fn authorize_approve(
     let expires = chrono::Utc::now() + chrono::Duration::minutes(10);
     let scope = form.scope.as_deref().unwrap_or("mcp");
 
-    if let Ok(conn) = oauth.db.write() {
-        let _ = conn.execute(
-            "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                code,
-                form.client_id,
-                form.redirect_uri,
-                form.code_challenge.unwrap_or_default(),
-                form.code_challenge_method.unwrap_or_else(|| "S256".into()),
-                expires.to_rfc3339(),
-                scope,
-            ],
-        );
+    let conn = match oauth.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    if let Err(e) = conn.execute(
+        "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, scope)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            code,
+            form.client_id,
+            form.redirect_uri,
+            form.code_challenge.unwrap_or_default(),
+            form.code_challenge_method.unwrap_or_else(|| "S256".into()),
+            expires.to_rfc3339(),
+            scope,
+        ],
+    ) {
+        tracing::error!(error = %e, "failed to store OAuth authorization code");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
     let mut redirect_url = form.redirect_uri.clone();
@@ -438,10 +448,13 @@ async fn token_exchange(
     }
 
     // Mark code as used
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE oauth_codes SET used = 1 WHERE code = ?1",
         params![code],
-    );
+    ) {
+        tracing::error!(error = %e, "failed to mark OAuth code as used");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
 
     // Generate access token — store SHA-256 hash, return raw token only once
     let access_token = format!("lific_at_{}", uuid_v4());
@@ -449,10 +462,13 @@ async fn token_exchange(
     let expires_in: u64 = 3600 * 24 * 30; // 30 days
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, ?2, ?3, ?4)",
         params![token_hash, stored_client_id, expires_at.to_rfc3339(), scope],
-    );
+    ) {
+        tracing::error!(error = %e, "failed to store OAuth token");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
 
     info!(client_id = %stored_client_id, scope = %scope, "OAuth token issued");
 
@@ -482,11 +498,17 @@ async fn revoke_token(
     // is invalid, already revoked, or unrecognized — to prevent token scanning.
     // Hash the token before lookup since we store SHA-256 hashes.
     let token_hash = hex_encode(&Sha256::digest(req.token.as_bytes()));
-    if let Ok(conn) = state.db.write() {
-        let _ = conn.execute(
-            "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
-            params![token_hash],
-        );
+    // RFC 7009: always return 200, but log DB errors instead of silently discarding
+    match state.db.write() {
+        Ok(conn) => {
+            if let Err(e) = conn.execute(
+                "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
+                params![token_hash],
+            ) {
+                tracing::error!(error = %e, "failed to revoke OAuth token");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "failed to acquire DB lock for token revocation"),
     }
 
     StatusCode::OK.into_response()
