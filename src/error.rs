@@ -13,6 +13,9 @@ pub enum LificError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -23,6 +26,7 @@ impl IntoResponse for LificError {
             LificError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             LificError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             LificError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            LificError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             LificError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
 

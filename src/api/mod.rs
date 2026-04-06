@@ -116,6 +116,42 @@ where
     f(&conn)
 }
 
+/// Check if the authenticated user can manage a project (update settings, manage structure).
+/// Returns Ok(()) if: no user context (OAuth/legacy key), user is admin, or user is project lead.
+fn require_project_lead(
+    db: &DbPool,
+    auth_user: &Option<AuthUser>,
+    project_id: i64,
+) -> Result<(), LificError> {
+    let Some(user) = auth_user else {
+        return Ok(()); // No user context (OAuth/legacy key) — allow
+    };
+    if user.is_admin {
+        return Ok(());
+    }
+    let project = with_read(db, |conn| queries::get_project(conn, project_id))?;
+    if project.lead_user_id == Some(user.id) {
+        return Ok(());
+    }
+    Err(LificError::Forbidden(
+        "only the project lead or an admin can do this".into(),
+    ))
+}
+
+/// Check if the authenticated user is an admin.
+/// Returns Ok(()) if: no user context (OAuth/legacy key) or user is admin.
+fn require_admin(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
+    let Some(user) = auth_user else {
+        return Ok(()); // No user context — allow
+    };
+    if user.is_admin {
+        return Ok(());
+    }
+    Err(LificError::Forbidden(
+        "only an admin can do this".into(),
+    ))
+}
+
 async fn health() -> &'static str {
     "ok"
 }
@@ -528,15 +564,19 @@ async fn create_project(
 async fn update_project(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, LificError> {
+    require_project_lead(&db, &auth_user, id)?;
     with_write(&db, |conn| queries::update_project(conn, id, &input)).map(Json)
 }
 
 async fn delete_project_handler(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    require_admin(&auth_user)?;
     with_write(&db, |conn| queries::delete_project(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -640,23 +680,35 @@ async fn list_modules(
 
 async fn create_module(
     State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateModule>,
 ) -> Result<Json<Module>, LificError> {
+    require_project_lead(&db, &auth_user, input.project_id)?;
     with_write(&db, |conn| queries::create_module(conn, &input)).map(Json)
 }
 
 async fn update_module(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateModule>,
 ) -> Result<Json<Module>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        queries::get_resource_project_id(conn, "modules", id)
+    })?;
+    require_project_lead(&db, &auth_user, project_id)?;
     with_write(&db, |conn| queries::update_module(conn, id, &input)).map(Json)
 }
 
 async fn delete_module_handler(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        queries::get_resource_project_id(conn, "modules", id)
+    })?;
+    require_project_lead(&db, &auth_user, project_id)?;
     with_write(&db, |conn| queries::delete_module(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -675,15 +727,22 @@ async fn list_labels(
 
 async fn create_label(
     State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateLabel>,
 ) -> Result<Json<Label>, LificError> {
+    require_project_lead(&db, &auth_user, input.project_id)?;
     with_write(&db, |conn| queries::create_label(conn, &input)).map(Json)
 }
 
 async fn delete_label_handler(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        queries::get_resource_project_id(conn, "labels", id)
+    })?;
+    require_project_lead(&db, &auth_user, project_id)?;
     with_write(&db, |conn| queries::delete_label(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -745,15 +804,22 @@ async fn list_folders_handler(
 
 async fn create_folder(
     State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateFolder>,
 ) -> Result<Json<Folder>, LificError> {
+    require_project_lead(&db, &auth_user, input.project_id)?;
     with_write(&db, |conn| queries::create_folder(conn, &input)).map(Json)
 }
 
 async fn delete_folder_handler(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        queries::get_resource_project_id(conn, "folders", id)
+    })?;
+    require_project_lead(&db, &auth_user, project_id)?;
     with_write(&db, |conn| queries::delete_folder(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -832,7 +898,14 @@ mod tests {
 
     fn test_app() -> Router {
         let db = crate::db::open_memory().expect("test db");
-        router(db).layer(Extension(crate::config::AuthConfig { allow_signup: true }))
+        router(db)
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
+            .layer(Extension(Some(AuthUser {
+                id: 0,
+                username: "test-admin".into(),
+                display_name: "Test Admin".into(),
+                is_admin: true,
+            })))
     }
 
     /// Seed a project and return its id.
@@ -1702,5 +1775,229 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── Project lead permission tests ────────────────────────
+
+    /// Build a test app authenticated as a specific user.
+    fn app_as_user(db: DbPool, user: &crate::db::models::User) -> Router {
+        router(db)
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
+            .layer(Extension(Some(AuthUser {
+                id: user.id,
+                username: user.username.clone(),
+                display_name: user.display_name.clone(),
+                is_admin: user.is_admin,
+            })))
+    }
+
+    /// Set up a DB with an admin, a project lead, a regular user, and a project.
+    fn setup_lead_test() -> (DbPool, crate::db::models::User, crate::db::models::User, crate::db::models::User, i64) {
+        let db = crate::db::open_memory().expect("test db");
+        let conn = db.write().unwrap();
+
+        let admin = crate::db::queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: "admin".into(),
+                email: "admin@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let lead = crate::db::queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: "lead".into(),
+                email: "lead@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let regular = crate::db::queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: "regular".into(),
+                email: "regular@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let project = crate::db::queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Lead Test".into(),
+                identifier: "LDT".into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: Some(lead.id),
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        (db, admin, lead, regular, project.id)
+    }
+
+    #[tokio::test]
+    async fn project_lead_can_update_own_project() {
+        let (db, _, lead, _, project_id) = setup_lead_test();
+        let app = app_as_user(db, &lead);
+
+        let update = serde_json::json!({"name": "Renamed by lead"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["name"], "Renamed by lead");
+    }
+
+    #[tokio::test]
+    async fn admin_can_update_any_project() {
+        let (db, admin, _, _, project_id) = setup_lead_test();
+        let app = app_as_user(db, &admin);
+
+        let update = serde_json::json!({"name": "Renamed by admin"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn regular_user_cannot_update_project() {
+        let (db, _, _, regular, project_id) = setup_lead_test();
+        let app = app_as_user(db, &regular);
+
+        let update = serde_json::json!({"name": "Hijacked"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn only_admin_can_delete_project() {
+        let (db, admin, lead, _, project_id) = setup_lead_test();
+
+        // Lead cannot delete
+        let lead_app = app_as_user(db.clone(), &lead);
+        let resp = lead_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Admin can delete
+        let admin_app = app_as_user(db, &admin);
+        let resp = admin_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn lead_can_manage_modules() {
+        let (db, _, lead, regular, project_id) = setup_lead_test();
+
+        // Lead can create a module
+        let lead_app = app_as_user(db.clone(), &lead);
+        let body = serde_json::json!({
+            "project_id": project_id,
+            "name": "Backend",
+            "status": "active"
+        });
+        let resp = json_post(&lead_app, "/api/modules", body).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Regular user cannot create a module
+        let reg_app = app_as_user(db, &regular);
+        let body = serde_json::json!({
+            "project_id": project_id,
+            "name": "Forbidden Module",
+            "status": "active"
+        });
+        let resp = json_post(&reg_app, "/api/modules", body).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn lead_can_manage_labels() {
+        let (db, _, lead, regular, project_id) = setup_lead_test();
+
+        // Lead can create a label
+        let lead_app = app_as_user(db.clone(), &lead);
+        let body = serde_json::json!({
+            "project_id": project_id,
+            "name": "bug",
+            "color": "#FF0000"
+        });
+        let resp = json_post(&lead_app, "/api/labels", body).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Regular user cannot
+        let reg_app = app_as_user(db, &regular);
+        let body = serde_json::json!({
+            "project_id": project_id,
+            "name": "forbidden-label",
+            "color": "#FF0000"
+        });
+        let resp = json_post(&reg_app, "/api/labels", body).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
