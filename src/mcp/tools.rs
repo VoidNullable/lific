@@ -160,15 +160,14 @@ impl LificMcp {
                 // Include comments
                 if let Ok(comments) =
                     self.read(|conn| queries::comments::list_comments(conn, issue.id))
+                    && !comments.is_empty()
                 {
-                    if !comments.is_empty() {
-                        out.push_str(&format!("\n--- Comments ({}) ---\n", comments.len()));
-                        for c in &comments {
-                            out.push_str(&format!(
-                                "[{}] {} ({}): {}\n",
-                                c.created_at, c.author, c.author_display_name, c.content
-                            ));
-                        }
+                    out.push_str(&format!("\n--- Comments ({}) ---\n", comments.len()));
+                    for c in &comments {
+                        out.push_str(&format!(
+                            "[{}] {} ({}): {}\n",
+                            c.created_at, c.author, c.author_display_name, c.content
+                        ));
                     }
                 }
                 out

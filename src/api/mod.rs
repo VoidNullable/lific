@@ -177,13 +177,13 @@ async fn auth_login(
 ) -> Result<Json<serde_json::Value>, LificError> {
     // Rate limit by identity (username/email)
     let key = input.identity.to_lowercase();
-    if let Some(Extension(ref rl)) = limiter {
-        if !rl.check(&key) {
-            let retry = rl.retry_after(&key);
-            return Err(LificError::BadRequest(format!(
-                "too many login attempts — try again in {retry} seconds"
-            )));
-        }
+    if let Some(Extension(ref rl)) = limiter
+        && !rl.check(&key)
+    {
+        let retry = rl.retry_after(&key);
+        return Err(LificError::BadRequest(format!(
+            "too many login attempts — try again in {retry} seconds"
+        )));
     }
 
     let conn = db.write()?;

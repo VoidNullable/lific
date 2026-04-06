@@ -19,6 +19,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: Ensure web/dist exists for rust-embed
+        run: mkdir -p web/dist
+
       - name: Format
         run: cargo fmt --check
 
