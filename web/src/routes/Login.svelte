@@ -34,6 +34,7 @@
   >
     <div></div>
     <div class="animate-reveal delay-150">
+      <img src="/logo.webp" alt="Lific" width="128" height="128" class="mb-6" />
       <h1 class="font-display text-[clamp(2.5rem,5vw,3.5rem)] leading-[1.1] tracking-tight text-[var(--panel-text)] mb-4">
         Lific
       </h1>
@@ -53,7 +54,10 @@
     <div class="w-full max-w-[360px] animate-reveal delay-300">
 
       <!-- Mobile brand -->
-      <h1 class="md:hidden font-display text-2xl text-[var(--text)] mb-6">Lific</h1>
+      <div class="md:hidden flex items-center gap-3 mb-6">
+        <img src="/logo.webp" alt="Lific" width="40" height="40" />
+        <h1 class="font-display text-2xl text-[var(--text)]">Lific</h1>
+      </div>
 
       <div class="mb-10">
         <h2 class="font-display text-[clamp(1.5rem,3vw,2rem)] text-[var(--text)] mb-1">Sign in</h2>
