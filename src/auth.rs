@@ -53,10 +53,11 @@ pub fn create_api_key(
 
     let plaintext = api_key.key().expose_secret().to_string();
     let hash = api_key.expose_hash().hash().to_string();
+    let key_id = api_key.expose_hash().key_id().to_string();
 
     conn.execute(
-        "INSERT INTO api_keys (name, key_hash) VALUES (?1, ?2)",
-        params![name, hash],
+        "INSERT INTO api_keys (name, key_hash, key_id) VALUES (?1, ?2, ?3)",
+        params![name, hash, key_id],
     )?;
 
     Ok(plaintext)
@@ -225,70 +226,114 @@ pub async fn require_api_key(
     // ── API keys (lific_sk- prefix) ──────────────────────────────
     let secure_token = SecureString::from(token);
 
-    // Load all active key hashes with their user_id
-    let keys: Vec<ApiKeyRow> = {
+    // Fast checksum pre-check: reject malformed keys in ~20μs without touching DB
+    match auth.manager.verify_checksum(&secure_token) {
+        Ok(true) => {} // valid checksum, proceed to DB lookup
+        _ => {
+            warn!("rejected API key with invalid checksum");
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Invalid API key",
+            )
+                .into_response();
+        }
+    }
+
+    // Compute deterministic key ID (BLAKE3, ~microseconds) for O(1) DB lookup
+    let key_id = auth.manager.extract_key_id(&secure_token);
+
+    // Look up the single matching key by key_id (indexed query)
+    let key_row: Option<ApiKeyRow> = {
         let conn = match auth.db.read() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
         };
-        let mut stmt = match conn
-            .prepare("SELECT id, key_hash, user_id FROM api_keys WHERE revoked = 0")
-        {
-            Ok(s) => s,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        match stmt.query_map([], |row| {
-            Ok(ApiKeyRow {
-                id: row.get(0)?,
-                hash: row.get(1)?,
-                user_id: row.get(2)?,
-            })
-        }) {
-            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        }
+        conn.query_row(
+            "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0",
+            params![key_id],
+            |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    hash: row.get(1)?,
+                    user_id: row.get(2)?,
+                })
+            },
+        )
+        .ok()
     };
 
-    if keys.is_empty() {
-        warn!("no API keys configured — rejecting request");
+    // Fallback: keys created before migration 010 have no key_id — scan those
+    let key_row = key_row.or_else(|| {
+        let conn = auth.db.read().ok()?;
+        let mut stmt = conn
+            .prepare("SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0")
+            .ok()?;
+        let rows: Vec<ApiKeyRow> = stmt
+            .query_map([], |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    hash: row.get(1)?,
+                    user_id: row.get(2)?,
+                })
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for row in rows {
+            if let Ok(KeyStatus::Valid) = auth.manager.verify(&secure_token, &row.hash) {
+                // Backfill the key_id so future lookups are O(1)
+                if let Ok(wconn) = auth.db.write() {
+                    let _ = wconn.execute(
+                        "UPDATE api_keys SET key_id = ?1 WHERE id = ?2",
+                        params![key_id, row.id],
+                    );
+                }
+                return Some(row);
+            }
+        }
+        None
+    });
+
+    let Some(key) = key_row else {
+        warn!("rejected invalid API key");
         return (
             StatusCode::UNAUTHORIZED,
             [("WWW-Authenticate", www_auth.as_str())],
-            "No API keys configured. Create one with: lific key create --name <name>",
+            "Invalid API key",
         )
             .into_response();
-    }
+    };
 
-    for key in &keys {
-        match auth.manager.verify(&secure_token, &key.hash) {
-            Ok(KeyStatus::Valid) => {
-                // Resolve user if the key has a user_id
-                let auth_user = key.user_id.and_then(|uid| {
-                    let conn = auth.db.read().ok()?;
-                    crate::db::queries::users::get_user_by_id(&conn, uid)
-                        .ok()
-                        .map(|u| crate::db::models::AuthUser {
-                            id: u.id,
-                            username: u.username,
-                            display_name: u.display_name,
-                            is_admin: u.is_admin,
-                        })
-                });
-                request.extensions_mut().insert(auth_user);
-                return next.run(request).await;
-            }
-            Ok(KeyStatus::Invalid) => continue,
-            Err(_) => continue,
+    // Verify the key against the stored Argon2 hash
+    match auth.manager.verify(&secure_token, &key.hash) {
+        Ok(KeyStatus::Valid) => {
+            // Resolve user if the key has a user_id
+            let auth_user = key.user_id.and_then(|uid| {
+                let conn = auth.db.read().ok()?;
+                crate::db::queries::users::get_user_by_id(&conn, uid)
+                    .ok()
+                    .map(|u| crate::db::models::AuthUser {
+                        id: u.id,
+                        username: u.username,
+                        display_name: u.display_name,
+                        is_admin: u.is_admin,
+                    })
+            });
+            request.extensions_mut().insert(auth_user);
+            next.run(request).await
+        }
+        _ => {
+            warn!("API key hash verification failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Invalid API key",
+            )
+                .into_response()
         }
     }
-
-    warn!("rejected invalid API key or OAuth token");
-    (
-        StatusCode::UNAUTHORIZED,
-        [("WWW-Authenticate", www_auth.as_str())],
-        "Invalid API key",
-    )
-        .into_response()
 }
 
 /// Internal struct for loading API key rows during auth.
@@ -413,5 +458,85 @@ mod tests {
         let manager = create_key_manager().unwrap();
         create_api_key(&pool, &manager, "first").unwrap();
         assert!(has_any_keys(&pool));
+    }
+
+    #[test]
+    fn create_key_stores_key_id() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "id-test").unwrap();
+
+        let conn = pool.read().unwrap();
+        let stored_key_id: Option<String> = conn
+            .query_row(
+                "SELECT key_id FROM api_keys WHERE name = 'id-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // key_id should be stored and be a 32-char hex string
+        let key_id = stored_key_id.expect("key_id should be stored");
+        assert_eq!(key_id.len(), 32);
+        assert!(key_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Extracting key_id from the plaintext should match
+        let secure_key = SecureString::from(key);
+        let extracted_id = manager.extract_key_id(&secure_key);
+        assert_eq!(extracted_id, key_id);
+    }
+
+    #[test]
+    fn key_id_lookup_finds_correct_key() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+
+        // Create multiple keys
+        let key1 = create_api_key(&pool, &manager, "key-1").unwrap();
+        let _key2 = create_api_key(&pool, &manager, "key-2").unwrap();
+
+        // Extract key_id from key1 and look it up
+        let secure_key = SecureString::from(key1.clone());
+        let key_id = manager.extract_key_id(&secure_key);
+
+        let conn = pool.read().unwrap();
+        let found_name: String = conn
+            .query_row(
+                "SELECT name FROM api_keys WHERE key_id = ?1 AND revoked = 0",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found_name, "key-1");
+    }
+
+    #[test]
+    fn legacy_key_without_key_id_still_verifiable() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "legacy").unwrap();
+
+        // Simulate a pre-migration key by clearing key_id
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "UPDATE api_keys SET key_id = NULL WHERE name = 'legacy'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Verify still works by scanning NULL key_id rows
+        let secure_key = SecureString::from(key);
+        let conn = pool.read().unwrap();
+        let hash: String = conn
+            .query_row(
+                "SELECT key_hash FROM api_keys WHERE name = 'legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let status = manager.verify(&secure_key, &hash).unwrap();
+        assert!(matches!(status, KeyStatus::Valid));
     }
 }

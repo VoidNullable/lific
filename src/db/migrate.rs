@@ -44,6 +44,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "oauth scope",
         include_str!("../../migrations/009_oauth_scope.sql"),
     ),
+    (
+        10,
+        "api key id",
+        include_str!("../../migrations/010_api_key_id.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.
