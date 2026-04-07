@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="LificHero.png" alt="Lific — Issue tracking built for AI-driven development" width="800">
+  <img src="LificHero.png" alt="Lific Issue tracking built for AI-driven development" width="800">
 </p>
 
 <p align="center">
@@ -33,11 +33,11 @@ lific init     # creates lific.toml + lific.db
 lific start    # starts on port 3456
 ```
 
-On first run, Lific generates an API key and prints it to the console. Save it — it won't be shown again. This key is used for MCP and API access.
+On first run, Lific generates an API key and prints it to the console. It won't be shown again. This key is used for MCP and API access.
 
 Open `http://localhost:3456` to use the web UI. The first account you create is the admin.
 
-The CLI also works directly against the database — no server or auth required:
+The CLI also works directly against the database. No server or auth required:
 
 ```bash
 lific project list
@@ -106,7 +106,7 @@ Each connection creates a bot identity tied to your account. Changes show up att
 
 Everything uses human-readable identifiers: `project="APP"` not `project_id=7`.
 
-**Workable filter:** `list_issues(project="APP", workable=true)` returns only issues with all blockers resolved — one call to answer "what can I work on right now?"
+**Workable filter:** `list_issues(project="APP", workable=true)` returns only issues with all blockers resolved. One call can answer "what can I work on right now?"
 
 ## Features
 
@@ -120,7 +120,7 @@ Everything uses human-readable identifiers: `project="APP"` not `project_id=7`.
 | **User accounts** | Individual auth, per-tool bot identities, project lead permissions |
 | **OAuth 2.1** | PKCE, dynamic client registration, token revocation |
 | **Backups** | Automatic SQLite snapshots with configurable retention |
-| **CLI** | Full CRUD for issues, projects, pages, modules, labels, folders — no server needed |
+| **CLI** | Full CRUD for issues, projects, pages, modules, labels, folders. No server needed |
 | **Single binary** | No runtime dependencies, embedded SQLite, ~15MB |
 
 ## Configuration
