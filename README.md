@@ -142,8 +142,8 @@ CLI flags (`--db`, `--port`, `--host`) override config values.
 
 ### Requirements
 
-- **Rust 1.88+** (edition 2024) -- required
-- **Bun** -- optional, only needed if you want the web UI
+- **Rust 1.88+** (edition 2024) required
+- **Bun** optional, only needed if you want the web UI
 
 SQLite is bundled via `rusqlite` and compiled into the binary. No system SQLite required.
 
