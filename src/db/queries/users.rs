@@ -190,7 +190,15 @@ fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
 
 // ── Sessions ─────────────────────────────────────────────────
 
-/// Create a new session for a user. Returns the session with a generated token.
+/// Hash a session token with SHA-256 for storage.
+fn hash_session_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(token.as_bytes());
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Create a new session for a user. Returns the session with the plaintext token
+/// (shown once to the client). The SHA-256 hash is stored in the database.
 /// Sessions expire after `duration_hours` (default 24 * 7 = 1 week).
 pub fn create_session(
     conn: &Connection,
@@ -199,23 +207,34 @@ pub fn create_session(
 ) -> Result<Session, LificError> {
     let hours = duration_hours.unwrap_or(24 * 7); // 1 week default
     let token = generate_session_token();
+    let token_hash = hash_session_token(&token);
 
     conn.execute(
         "INSERT INTO sessions (token, user_id, expires_at)
          VALUES (?1, ?2, datetime('now', ?3))",
-        params![token, user_id, format!("+{hours} hours")],
+        params![token_hash, user_id, format!("+{hours} hours")],
     )?;
 
-    conn.query_row(
-        "SELECT token, user_id, expires_at, created_at FROM sessions WHERE token = ?1",
-        params![token],
-        row_to_session,
-    )
-    .map_err(Into::into)
+    // Return the plaintext token to the caller (shown to the client once)
+    Ok(Session {
+        token,
+        user_id,
+        expires_at: conn.query_row(
+            "SELECT expires_at FROM sessions WHERE token = ?1",
+            params![token_hash],
+            |row| row.get(0),
+        )?,
+        created_at: conn.query_row(
+            "SELECT created_at FROM sessions WHERE token = ?1",
+            params![token_hash],
+            |row| row.get(0),
+        )?,
+    })
 }
 
 /// Validate a session token. Returns the associated user if the session
 /// exists and has not expired. Expired sessions are cleaned up lazily.
+/// The incoming plaintext token is hashed with SHA-256 before lookup.
 pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificError> {
     // Delete expired sessions while we're here (lazy cleanup)
     let _ = conn.execute(
@@ -223,10 +242,12 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
         [],
     );
 
+    let token_hash = hash_session_token(token);
+
     let user_id: i64 = conn
         .query_row(
             "SELECT user_id FROM sessions WHERE token = ?1 AND expires_at > datetime('now')",
-            params![token],
+            params![token_hash],
             |row| row.get(0),
         )
         .map_err(|e| match e {
@@ -239,9 +260,10 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
     get_user_by_id(conn, user_id)
 }
 
-/// Delete a session (logout).
+/// Delete a session (logout). Hashes the plaintext token before lookup.
 pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> {
-    conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+    let token_hash = hash_session_token(token);
+    conn.execute("DELETE FROM sessions WHERE token = ?1", params![token_hash])?;
     Ok(())
 }
 
