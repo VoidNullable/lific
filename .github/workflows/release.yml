@@ -2,8 +2,9 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [master]
+    paths:
+      - 'Cargo.toml'
 
 permissions:
   contents: write
@@ -12,7 +13,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect version change
+        id: check
+        run: |
+          CURRENT="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          PREVIOUS="$(git show HEAD~1:Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || echo '')"
+          TAG="v${CURRENT}"
+
+          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT" = "$PREVIOUS" ]; then
+            echo "Version unchanged ($CURRENT), skipping release"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping release"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version changed: ${PREVIOUS:-none} -> ${CURRENT}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +58,8 @@ jobs:
       - run: cargo test
 
   build:
-    needs: test
+    needs: [detect, test]
+    if: needs.detect.outputs.changed == 'true'
     strategy:
       matrix:
         include:
@@ -85,10 +121,18 @@ jobs:
           path: ${{ matrix.name }}
 
   release:
-    needs: build
+    needs: [detect, build]
+    if: needs.detect.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.detect.outputs.tag }}" -m "Release ${{ needs.detect.outputs.tag }}"
+          git push origin "${{ needs.detect.outputs.tag }}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -105,6 +149,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.detect.outputs.tag }}
           generate_release_notes: true
           files: |
             binaries/lific-linux-x86_64
@@ -116,7 +161,8 @@ jobs:
             binaries/sha256sums.txt
 
   publish:
-    needs: release
+    needs: [detect, release]
+    if: needs.detect.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
