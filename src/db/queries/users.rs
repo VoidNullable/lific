@@ -274,15 +274,6 @@ pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificE
     Ok(())
 }
 
-fn row_to_session(row: &rusqlite::Row) -> Result<Session, rusqlite::Error> {
-    Ok(Session {
-        token: row.get(0)?,
-        user_id: row.get(1)?,
-        expires_at: row.get(2)?,
-        created_at: row.get(3)?,
-    })
-}
-
 /// Generate a session token with the lific_sess_ prefix.
 fn generate_session_token() -> String {
     let bytes: [u8; 32] = rand::random();

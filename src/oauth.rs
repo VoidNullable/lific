@@ -17,7 +17,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Per-process CSRF secret, generated randomly on startup.
 static CSRF_SECRET: std::sync::LazyLock<[u8; 32]> =
-    std::sync::LazyLock::new(|| rand::random());
+    std::sync::LazyLock::new(rand::random);
 
 /// Generate a CSRF token: timestamp.hmac(timestamp)
 fn generate_csrf_token() -> String {
