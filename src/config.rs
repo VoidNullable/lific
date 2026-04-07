@@ -37,6 +37,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// Public URL for OAuth discovery (e.g. https://your-server.example.com/lific)
     pub public_url: Option<String>,
+    /// Allowed CORS origins. If empty, allows all origins (not recommended for production).
+    /// Example: ["https://your-app.example.com"]
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 3456,
             public_url: None,
+            cors_origins: Vec::new(),
         }
     }
 }

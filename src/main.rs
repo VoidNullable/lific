@@ -333,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
 
             // Routes behind auth: REST API + MCP
-            let authed_routes = api::router(pool.clone())
+            let authed_routes = api::router(pool.clone(), &cfg.server.cors_origins)
                 .route(
                     "/mcp",
                     any(move |request: Request<Body>| async move {

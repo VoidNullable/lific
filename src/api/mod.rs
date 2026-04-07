@@ -16,7 +16,17 @@ use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 
 /// Build the full API router.
-pub fn router(db: DbPool) -> Router {
+pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new().allow_origin(cors::Any)
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new().allow_origin(origins)
+    };
+
     Router::new()
         // Auth
         .route("/api/auth/signup", post(auth::auth_signup))
@@ -117,9 +127,7 @@ pub fn router(db: DbPool) -> Router {
         // Health
         .route("/api/health", get(health))
         .layer(
-            CorsLayer::new()
-                .allow_origin(cors::Any)
-                .allow_methods([
+            cors.allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
                     axum::http::Method::PUT,
@@ -214,7 +222,7 @@ pub(crate) mod test_helpers {
 
     pub fn test_app() -> Router {
         let db = crate::db::open_memory().expect("test db");
-        super::router(db)
+        super::router(db, &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: 0,
@@ -274,7 +282,7 @@ pub(crate) mod test_helpers {
 
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
-        super::router(db)
+        super::router(db, &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,

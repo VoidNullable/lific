@@ -262,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn board_groups_by_module_resolves_names() {
         let db = crate::db::open_memory().expect("test db");
-        let app = crate::api::router(db.clone())
+        let app = crate::api::router(db.clone(), &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }));
         let (project_id, _) = seed_project(&app).await;
 

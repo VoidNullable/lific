@@ -137,7 +137,7 @@ mod tests {
 
         drop(conn);
 
-        let app = crate::api::router(db)
+        let app = crate::api::router(db, &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
@@ -301,7 +301,7 @@ mod tests {
         drop(conn);
 
         // Build app as "other" (non-owner, non-admin)
-        let app = crate::api::router(db)
+        let app = crate::api::router(db, &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
@@ -410,7 +410,7 @@ mod tests {
         drop(conn);
 
         // Build app as admin
-        let app = crate::api::router(db)
+        let app = crate::api::router(db, &[])
             .layer(Extension(crate::config::AuthConfig { allow_signup: true }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,

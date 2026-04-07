@@ -441,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn auth_signup_disabled_rejects() {
         let db = crate::db::open_memory().expect("test db");
-        let app = crate::api::router(db).layer(axum::Extension(crate::config::AuthConfig {
+        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
             allow_signup: false,
         }));
 
