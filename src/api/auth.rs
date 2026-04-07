@@ -41,12 +41,24 @@ pub(super) struct SignupRequest {
 pub(super) async fn auth_signup(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
+    limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     Json(input): Json<SignupRequest>,
 ) -> Result<impl IntoResponse, LificError> {
     if !auth_cfg.allow_signup {
         return Err(LificError::BadRequest(
             "signup is disabled — contact an admin to create your account".into(),
         ));
+    }
+
+    // Rate limit signups to prevent Argon2 CPU exhaustion
+    let key = format!("signup:{}", input.email.to_lowercase());
+    if let Some(Extension(ref rl)) = limiter
+        && !rl.check(&key)
+    {
+        let retry = rl.retry_after(&key);
+        return Err(LificError::BadRequest(format!(
+            "too many signup attempts — try again in {retry} seconds"
+        )));
     }
 
     let conn = db.write()?;
