@@ -193,7 +193,7 @@ fn render_issue_markdown(
     out.push_str(&format!("# {}\n\n", issue.title));
     if !issue.description.trim().is_empty() {
         out.push_str(issue.description.trim_end());
-        out.push_str("\n");
+        out.push('\n');
     }
     if !comments.is_empty() {
         out.push_str("\n## Comments\n\n");
@@ -235,7 +235,7 @@ fn render_page_markdown(project: Option<&Project>, page: &Page) -> String {
     out.push_str(&format!("# {}\n\n", page.title));
     if !page.content.trim().is_empty() {
         out.push_str(page.content.trim_end());
-        out.push_str("\n");
+        out.push('\n');
     }
     out
 }

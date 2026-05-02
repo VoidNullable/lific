@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handle CRUD commands (direct database access, no server needed)
     if is_crud_command(&cli.command) {
         let pool = db::open(&cfg.database.path)?;
-        return cli::exec::run(&pool, &cli.command, cli.json).map_err(Into::into);
+        return cli::exec::run(&pool, &cli.command, cli.json);
     }
 
     match cli.command {
@@ -338,14 +338,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // If public_url is set, allow its hostname through the DNS rebinding check
             // so reverse proxies (Tailscale funnel, nginx, etc.) can forward requests.
-            if let Some(ref url) = cfg.server.public_url {
-                if let Ok(parsed) = url.parse::<axum::http::Uri>() {
-                    if let Some(authority) = parsed.authority() {
+            if let Some(ref url) = cfg.server.public_url
+                && let Ok(parsed) = url.parse::<axum::http::Uri>()
+                    && let Some(authority) = parsed.authority() {
                         let host: String = authority.host().to_string();
                         mcp_allowed_hosts.push(host);
                     }
-                }
-            }
 
             let mcp_config = StreamableHttpServerConfig::default()
                 .with_stateful_mode(false)

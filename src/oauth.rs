@@ -93,7 +93,7 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
     // Require some host after `://`.
     let rest = &after_scheme[3..];
     let host_end = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .find(['/', '?', '#'])
         .unwrap_or(rest.len());
     if rest[..host_end].is_empty() {
         return Err("redirect_uri must include a host");

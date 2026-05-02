@@ -238,67 +238,66 @@ mod tests {
     #[tokio::test]
     async fn comment_edit_other_rejected() {
         let db = crate::db::open_memory().expect("test db");
-        let conn = db.write().unwrap();
 
-        let owner = crate::db::queries::users::create_user(
-            &conn,
-            &CreateUser {
-                username: "owner".into(),
-                email: "owner@test.com".into(),
-                password: "testpassword1".into(),
-                display_name: None,
-                is_admin: false,
-                is_bot: false,
-            },
-        )
-        .unwrap();
-
-        let other = crate::db::queries::users::create_user(
-            &conn,
-            &CreateUser {
-                username: "other".into(),
-                email: "other@test.com".into(),
-                password: "testpassword1".into(),
-                display_name: None,
-                is_admin: false,
-                is_bot: false,
-            },
-        )
-        .unwrap();
-
-        let project = crate::db::queries::create_project(
-            &conn,
-            &CreateProject {
-                name: "Test".into(),
-                identifier: "TST".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
-            },
-        )
-        .unwrap();
-
-        let issue = crate::db::queries::create_issue(
-            &conn,
-            &CreateIssue {
-                project_id: project.id,
-                title: "Test".into(),
-                description: String::new(),
-                status: "todo".into(),
-                priority: "medium".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-            },
-        )
-        .unwrap();
-
-        // Owner creates a comment
-        let comment =
-            crate::db::queries::comments::create_comment(&conn, issue.id, owner.id, "Mine")
-                .unwrap();
-        drop(conn);
+        // Scope the write guard tightly so it cannot be held across the
+        // awaits below (clippy::await_holding_lock).
+        let (other, comment_id) = {
+            let conn = db.write().unwrap();
+            let owner = crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "owner".into(),
+                    email: "owner@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let other = crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "other".into(),
+                    email: "other@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "Test".into(),
+                    identifier: "TST".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id: project.id,
+                    title: "Test".into(),
+                    description: String::new(),
+                    status: "todo".into(),
+                    priority: "medium".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                },
+            )
+            .unwrap();
+            let comment =
+                crate::db::queries::comments::create_comment(&conn, issue.id, owner.id, "Mine")
+                    .unwrap();
+            (other, comment.id)
+        };
 
         // Build app as "other" (non-owner, non-admin)
         let app = crate::api::router(db, &[])
@@ -317,7 +316,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/comments/{}", comment.id))
+                    .uri(format!("/api/comments/{comment_id}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -332,7 +331,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/comments/{}", comment.id))
+                    .uri(format!("/api/comments/{comment_id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -344,70 +343,70 @@ mod tests {
     #[tokio::test]
     async fn comment_admin_can_delete_others() {
         let db = crate::db::open_memory().expect("test db");
-        let conn = db.write().unwrap();
 
-        let regular = crate::db::queries::users::create_user(
-            &conn,
-            &CreateUser {
-                username: "regular".into(),
-                email: "reg@test.com".into(),
-                password: "testpassword1".into(),
-                display_name: None,
-                is_admin: false,
-                is_bot: false,
-            },
-        )
-        .unwrap();
-
-        let admin = crate::db::queries::users::create_user(
-            &conn,
-            &CreateUser {
-                username: "admin".into(),
-                email: "admin@test.com".into(),
-                password: "testpassword1".into(),
-                display_name: None,
-                is_admin: true,
-                is_bot: false,
-            },
-        )
-        .unwrap();
-
-        let project = crate::db::queries::create_project(
-            &conn,
-            &CreateProject {
-                name: "Test".into(),
-                identifier: "TST".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
-            },
-        )
-        .unwrap();
-
-        let issue = crate::db::queries::create_issue(
-            &conn,
-            &CreateIssue {
-                project_id: project.id,
-                title: "Test".into(),
-                description: String::new(),
-                status: "todo".into(),
-                priority: "medium".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-            },
-        )
-        .unwrap();
-
-        let comment = crate::db::queries::comments::create_comment(
-            &conn,
-            issue.id,
-            regular.id,
-            "Regular user's comment",
-        )
-        .unwrap();
-        drop(conn);
+        // Scope the write guard tightly so it cannot be held across the
+        // awaits below (clippy::await_holding_lock).
+        let (admin, comment_id) = {
+            let conn = db.write().unwrap();
+            let regular = crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "regular".into(),
+                    email: "reg@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let admin = crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "admin".into(),
+                    email: "admin@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "Test".into(),
+                    identifier: "TST".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id: project.id,
+                    title: "Test".into(),
+                    description: String::new(),
+                    status: "todo".into(),
+                    priority: "medium".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                },
+            )
+            .unwrap();
+            let comment = crate::db::queries::comments::create_comment(
+                &conn,
+                issue.id,
+                regular.id,
+                "Regular user's comment",
+            )
+            .unwrap();
+            (admin, comment.id)
+        };
 
         // Build app as admin
         let app = crate::api::router(db, &[])
@@ -425,7 +424,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/comments/{}", comment.id))
+                    .uri(format!("/api/comments/{comment_id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

@@ -409,9 +409,8 @@ mod tests {
         );
         let status = manager.verify(&wrong_key, &hash);
         // Either returns Invalid or an error (checksum mismatch) -- both mean rejection
-        match status {
-            Ok(KeyStatus::Valid) => panic!("wrong key should not validate"),
-            _ => {} // Invalid or Error -- both correct
+        if let Ok(KeyStatus::Valid) = status {
+            panic!("wrong key should not validate");
         }
     }
 

@@ -23,7 +23,11 @@ jobs:
         run: mkdir -p web/dist
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        # --all-targets covers tests + binaries + examples so lint regressions
+        # in test code (e.g. clippy::await_holding_lock) get caught here too.
+        # -D warnings keeps the bar high; if a future Rust release adds noisy
+        # style lints, allow them per-lint in code rather than weakening CI.
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --all-targets

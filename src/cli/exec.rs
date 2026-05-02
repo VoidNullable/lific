@@ -172,11 +172,10 @@ fn issue(
                 if !issue.labels.is_empty() {
                     println!("  Labels:   {}", issue.labels.join(", "));
                 }
-                if let Some(mid) = issue.module_id {
-                    if let Ok(name) = queries::get_module_name(&conn, mid) {
+                if let Some(mid) = issue.module_id
+                    && let Ok(name) = queries::get_module_name(&conn, mid) {
                         println!("  Module:   {name}");
                     }
-                }
                 if !issue.blocks.is_empty() {
                     println!("  Blocks:   {}", issue.blocks.join(", "));
                 }
