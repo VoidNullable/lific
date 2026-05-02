@@ -28,6 +28,10 @@ pub struct ListIssuesInput {
     pub workable: Option<bool>,
     #[schemars(description = "Max results (default 50)")]
     pub limit: Option<i64>,
+    #[schemars(
+        description = "Zero-indexed offset for paging. The output appends a hint like 'has_more: use offset=N' when more results exist."
+    )]
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -152,6 +156,12 @@ pub struct ListResourcesInput {
     pub project: Option<String>,
     #[schemars(description = "Folder name (for page filtering)")]
     pub folder: Option<String>,
+    #[schemars(description = "Max results (applies to issue/page lists; default 100 for issues)")]
+    pub limit: Option<i64>,
+    #[schemars(
+        description = "Zero-indexed offset for paging (applies to issue/page lists). Output appends a hint when more results exist."
+    )]
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

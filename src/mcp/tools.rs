@@ -45,6 +45,16 @@ fn resolve_folder(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, 
     queries::resolve_folder_name(&conn, project_id, name).map_err(|e| e.to_string())
 }
 
+/// Append a paging hint to `out` if `has_more` is true.
+/// `next_offset` is the offset the agent should use to fetch the next page.
+fn append_pagination_hint(out: &mut String, has_more: bool, next_offset: i64) {
+    if has_more {
+        out.push_str(&format!(
+            "\n... more results available — call again with offset={next_offset}\n"
+        ));
+    }
+}
+
 #[tool_router]
 impl LificMcp {
     #[tool(description = "Search across all issues and pages by text")]
@@ -97,6 +107,9 @@ impl LificMcp {
             },
             None => None,
         };
+        let limit = input.limit.unwrap_or(50).max(1);
+        let offset = input.offset.unwrap_or(0).max(0);
+        // Over-fetch by one to detect whether more results exist beyond this page.
         match self.read(|conn| {
             queries::list_issues(
                 conn,
@@ -107,17 +120,22 @@ impl LificMcp {
                     module_id,
                     label: input.label.clone(),
                     workable: input.workable,
-                    limit: input.limit,
-                    offset: None,
+                    limit: Some(limit + 1),
+                    offset: Some(offset),
                 },
             )
         }) {
             Ok(issues) if issues.is_empty() => "No issues found.".into(),
-            Ok(issues) => {
+            Ok(mut issues) => {
+                let has_more = issues.len() as i64 > limit;
+                if has_more {
+                    issues.truncate(limit as usize);
+                }
                 let mut out = format!("{} issues:\n", issues.len());
                 for i in &issues {
                     out.push_str(&format!("- {}\n", fmt_issue(i)));
                 }
+                append_pagination_hint(&mut out, has_more, offset + limit);
                 out
             }
             Err(e) => format!("Error: {e}"),
@@ -263,6 +281,7 @@ impl LificMcp {
             Ok(id) => id,
             Err(e) => return format!("Error: {e}"),
         };
+        const BOARD_CAP: i64 = 500;
         match self.read(|conn| {
             queries::list_issues(
                 conn,
@@ -273,12 +292,17 @@ impl LificMcp {
                     module_id: None,
                     label: None,
                     workable: None,
-                    limit: Some(500),
+                    // Over-fetch by one to detect truncation.
+                    limit: Some(BOARD_CAP + 1),
                     offset: None,
                 },
             )
         }) {
-            Ok(issues) => {
+            Ok(mut issues) => {
+                let truncated = issues.len() as i64 > BOARD_CAP;
+                if truncated {
+                    issues.truncate(BOARD_CAP as usize);
+                }
                 let group_by = input.group_by.as_deref().unwrap_or("status");
                 let module_names: std::collections::HashMap<i64, String> = if group_by == "module" {
                     if let Ok(conn) = self.db.read() {
@@ -307,6 +331,11 @@ impl LificMcp {
                     groups.entry(key).or_default().push(issue);
                 }
                 let mut out = String::new();
+                if truncated {
+                    out.push_str(&format!(
+                        "warning: board view capped at {BOARD_CAP} issues — older issues are not shown. Use list_issues with offset for full paging.\n\n"
+                    ));
+                }
                 for (group, items) in &groups {
                     out.push_str(&format!("── {} ({}) ──\n", group, items.len()));
                     for i in items {
@@ -543,6 +572,8 @@ impl LificMcp {
                     Ok(id) => id,
                     Err(e) => return format!("Error: {e}"),
                 };
+                let limit = input.limit.unwrap_or(100).max(1);
+                let offset = input.offset.unwrap_or(0).max(0);
                 match self.read(|conn| {
                     queries::list_issues(
                         conn,
@@ -553,12 +584,16 @@ impl LificMcp {
                             module_id: None,
                             label: None,
                             workable: None,
-                            limit: Some(100),
-                            offset: None,
+                            limit: Some(limit + 1),
+                            offset: Some(offset),
                         },
                     )
                 }) {
-                    Ok(issues) => {
+                    Ok(mut issues) => {
+                        let has_more = issues.len() as i64 > limit;
+                        if has_more {
+                            issues.truncate(limit as usize);
+                        }
                         let mut out =
                             format!("{} issues (use list_issues for filtering):\n", issues.len());
                         for i in &issues {
@@ -567,6 +602,7 @@ impl LificMcp {
                                 i.identifier, i.status, i.title
                             ));
                         }
+                        append_pagination_hint(&mut out, has_more, offset + limit);
                         out
                     }
                     Err(e) => format!("Error: {e}"),
@@ -1237,6 +1273,7 @@ mod tests {
             label: None,
             workable: None,
             limit: None,
+            offset: None,
         }));
         assert!(result.contains("1 issues"), "got: {result}");
         assert!(result.contains("Todo one"), "got: {result}");
@@ -1254,6 +1291,7 @@ mod tests {
             label: None,
             workable: None,
             limit: None,
+            offset: None,
         }));
         assert_eq!(result, "No issues found.");
     }
@@ -1269,8 +1307,90 @@ mod tests {
             label: None,
             workable: None,
             limit: None,
+            offset: None,
         }));
         assert!(result.starts_with("Error"), "got: {result}");
+    }
+
+    #[test]
+    fn list_issues_pagination_emits_has_more_hint() {
+        let m = mcp();
+        seed_project(&m, "Pages", "PAG");
+        // Seed 5 issues; ask for 2 — should report has_more with offset=2.
+        for i in 0..5 {
+            seed_issue(&m, "PAG", &format!("Issue {i}"));
+        }
+        let page1 = m.list_issues(Parameters(ListIssuesInput {
+            project: "PAG".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: Some(2),
+            offset: None,
+        }));
+        assert!(page1.contains("2 issues"), "got: {page1}");
+        assert!(
+            page1.contains("offset=2"),
+            "expected has_more hint, got: {page1}"
+        );
+
+        // Page 2: offset=2, limit=2 — still more.
+        let page2 = m.list_issues(Parameters(ListIssuesInput {
+            project: "PAG".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: Some(2),
+            offset: Some(2),
+        }));
+        assert!(page2.contains("2 issues"), "got: {page2}");
+        assert!(
+            page2.contains("offset=4"),
+            "expected has_more hint, got: {page2}"
+        );
+
+        // Page 3: offset=4, limit=2 — only 1 remaining, no hint.
+        let page3 = m.list_issues(Parameters(ListIssuesInput {
+            project: "PAG".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: Some(2),
+            offset: Some(4),
+        }));
+        assert!(page3.contains("1 issues"), "got: {page3}");
+        assert!(
+            !page3.contains("more results available"),
+            "should NOT have hint on last page, got: {page3}"
+        );
+    }
+
+    #[test]
+    fn list_issues_no_hint_when_under_limit() {
+        let m = mcp();
+        seed_project(&m, "Small", "SML");
+        seed_issue(&m, "SML", "Only one");
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "SML".into(),
+            status: None,
+            priority: None,
+            module: None,
+            label: None,
+            workable: None,
+            limit: Some(10),
+            offset: None,
+        }));
+        assert!(result.contains("1 issues"), "got: {result}");
+        assert!(
+            !result.contains("more results available"),
+            "got: {result}"
+        );
     }
 
     // ── link / unlink ──
@@ -1435,6 +1555,8 @@ mod tests {
             resource_type: "project".into(),
             project: None,
             folder: None,
+            limit: None,
+            offset: None,
         }));
         assert!(result.contains("2 projects"), "got: {result}");
         assert!(result.contains("AAA"), "got: {result}");
@@ -1449,6 +1571,8 @@ mod tests {
                 resource_type: rt.into(),
                 project: None,
                 folder: None,
+                limit: None,
+                offset: None,
             }));
             assert!(result.contains("project required"), "{rt} got: {result}");
         }
@@ -1461,8 +1585,28 @@ mod tests {
             resource_type: "widget".into(),
             project: None,
             folder: None,
+            limit: None,
+            offset: None,
         }));
         assert!(result.contains("Unknown type"), "got: {result}");
+    }
+
+    #[test]
+    fn list_resources_issues_pagination() {
+        let m = mcp();
+        seed_project(&m, "Bulk", "BLK");
+        for i in 0..4 {
+            seed_issue(&m, "BLK", &format!("Issue {i}"));
+        }
+        let result = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "issue".into(),
+            project: Some("BLK".into()),
+            folder: None,
+            limit: Some(2),
+            offset: None,
+        }));
+        assert!(result.contains("2 issues"), "got: {result}");
+        assert!(result.contains("offset=2"), "got: {result}");
     }
 
     // ── delete ──
