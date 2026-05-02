@@ -392,9 +392,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     auth_middleware_wrapper,
                 ));
 
+            // OAuth client registration rate limiter: 10 clients per IP per hour.
+            // /oauth/register is unauthenticated per RFC 7591; without this anyone
+            // can flood the server with throwaway clients (LIF-64).
+            let oauth_register_limiter = Arc::new(ratelimit::RateLimiter::new(
+                10,
+                std::time::Duration::from_secs(60 * 60),
+            ));
+
             let oauth_state = oauth::OAuthState {
                 db: pool.clone(),
                 issuer,
+                register_limiter: oauth_register_limiter,
             };
 
             let app = authed_routes

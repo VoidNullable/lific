@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
     extract::{Json, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -9,9 +11,10 @@ use hmac::{Hmac, Mac};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::db::DbPool;
+use crate::ratelimit::RateLimiter;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,6 +55,78 @@ fn validate_csrf_token(token: &str) -> bool {
 pub struct OAuthState {
     pub db: DbPool,
     pub issuer: String, // e.g. https://fedora.tailb93ac8.ts.net/lific
+    /// Per-IP rate limiter for the unauthenticated /oauth/register endpoint.
+    /// Prevents anyone from flooding the server with throwaway clients.
+    pub register_limiter: Arc<RateLimiter>,
+}
+
+/// Validate a redirect URI submitted to dynamic client registration.
+///
+/// We only accept absolute `http://` or `https://` URLs. This explicitly
+/// rejects schemes that have been used in past OAuth attacks (e.g.
+/// `javascript:`, `data:`, `file:`, `vbscript:`, `blob:`, `about:`,
+/// custom app schemes, and bare scheme-less strings).
+///
+/// Note: we deliberately do NOT block private/loopback hosts because
+/// `http://localhost/callback` is the standard pattern for desktop
+/// OAuth clients.
+pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err("redirect_uri must not be empty");
+    }
+    // Lowercase the scheme prefix only; the rest of the URI is case-sensitive.
+    let lower_prefix: String = trimmed
+        .chars()
+        .take_while(|c| *c != ':')
+        .flat_map(char::to_lowercase)
+        .collect();
+    match lower_prefix.as_str() {
+        "http" | "https" => {}
+        _ => return Err("redirect_uri must use http or https scheme"),
+    }
+    // Require the scheme to be followed by `://` (rejects e.g. `http:evil`).
+    let after_scheme = &trimmed[lower_prefix.len()..];
+    if !after_scheme.starts_with("://") {
+        return Err("redirect_uri must be an absolute URL (scheme://host/...)");
+    }
+    // Require some host after `://`.
+    let rest = &after_scheme[3..];
+    let host_end = rest
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    if rest[..host_end].is_empty() {
+        return Err("redirect_uri must include a host");
+    }
+    Ok(())
+}
+
+/// Best-effort client IP extraction from common reverse-proxy headers,
+/// falling back to a global "unknown" bucket. Behind tailscale funnel /
+/// nginx the `X-Forwarded-For` header is set; for local connections the
+/// fallback bucket is fine because it just means *all* unknown sources
+/// share the same rate limit (still better than nothing).
+fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get("x-forwarded-for")
+        && let Ok(s) = v.to_str()
+    {
+        // First IP in the comma-separated list is the original client.
+        if let Some(first) = s.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(v) = headers.get("x-real-ip")
+        && let Ok(s) = v.to_str()
+    {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 pub fn router(state: OAuthState) -> Router {
@@ -127,14 +202,55 @@ struct RegisterRequest {
 
 async fn register_client(
     State(state): State<OAuthState>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
+    // ── Rate limit per source IP ──
+    // /oauth/register is unauthenticated by spec (RFC 7591), so without this
+    // anyone on the internet can mint unlimited clients.
+    let ip = client_ip_for_rate_limit(&headers);
+    let key = format!("oauth_register:{ip}");
+    if !state.register_limiter.check(&key) {
+        let retry = state.register_limiter.retry_after(&key);
+        warn!(ip = %ip, "oauth client registration rate limited");
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "too_many_requests",
+                "error_description": format!("too many client registrations — try again in {retry} seconds")
+            })),
+        )
+            .into_response();
+        if let Ok(v) = retry.to_string().parse() {
+            resp.headers_mut().insert("retry-after", v);
+        }
+        return resp;
+    }
+
     if req.redirect_uris.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "invalid_redirect_uri"})),
+            Json(serde_json::json!({
+                "error": "invalid_redirect_uri",
+                "error_description": "at least one redirect_uri is required"
+            })),
         )
             .into_response();
+    }
+
+    // ── Validate every submitted redirect_uri ──
+    for uri in &req.redirect_uris {
+        if let Err(reason) = validate_redirect_uri(uri) {
+            warn!(ip = %ip, uri = %uri, reason = %reason, "rejected oauth registration");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_redirect_uri",
+                    "error_description": reason
+                })),
+            )
+                .into_response();
+        }
     }
 
     let client_id = uuid_v4();
@@ -673,10 +789,18 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_oauth_app() -> (Router, DbPool) {
+        test_oauth_app_with_register_limit(1000)
+    }
+
+    /// Build a test OAuth router with a configurable register-limit cap.
+    /// Most tests need a generous cap so unrelated registrations don't
+    /// trip the limiter; the rate-limit tests pass a small cap.
+    fn test_oauth_app_with_register_limit(cap: usize) -> (Router, DbPool) {
         let db = crate::db::open_memory().expect("test db");
         let state = OAuthState {
             db: db.clone(),
             issuer: "https://example.com".into(),
+            register_limiter: Arc::new(RateLimiter::new(cap, std::time::Duration::from_secs(3600))),
         };
         (router(state), db)
     }
@@ -1087,5 +1211,162 @@ mod tests {
 
         assert_eq!(validate_oauth_token_with_scope(&db, token), None);
         assert!(!validate_oauth_token(&db, token));
+    }
+
+    // ── LIF-64: redirect_uri validation + register rate limit ─────────────
+
+    #[test]
+    fn validate_redirect_uri_accepts_http_and_https() {
+        assert!(validate_redirect_uri("http://localhost/callback").is_ok());
+        assert!(validate_redirect_uri("http://127.0.0.1:8080/cb").is_ok());
+        assert!(validate_redirect_uri("https://app.example.com/oauth/callback").is_ok());
+        assert!(validate_redirect_uri("HTTP://localhost/callback").is_ok());
+        assert!(validate_redirect_uri("HTTPS://example.com/").is_ok());
+    }
+
+    #[test]
+    fn validate_redirect_uri_rejects_dangerous_schemes() {
+        for evil in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox()",
+            "about:blank",
+            "blob:https://evil/x",
+            "ftp://example.com/",
+            "myapp://callback",
+        ] {
+            assert!(
+                validate_redirect_uri(evil).is_err(),
+                "should reject: {evil}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_redirect_uri_rejects_malformed() {
+        assert!(validate_redirect_uri("").is_err());
+        assert!(validate_redirect_uri("   ").is_err());
+        assert!(validate_redirect_uri("http:evil").is_err());
+        assert!(validate_redirect_uri("not-a-url").is_err());
+        assert!(validate_redirect_uri("https://").is_err());
+        assert!(validate_redirect_uri("http:///path").is_err());
+    }
+
+    #[tokio::test]
+    async fn register_rejects_javascript_redirect_uri() {
+        let (app, _) = test_oauth_app();
+        let body = serde_json::json!({
+            "redirect_uris": ["javascript:alert(1)"],
+            "client_name": "Evil"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["error"], "invalid_redirect_uri");
+    }
+
+    #[tokio::test]
+    async fn register_rejects_when_any_redirect_is_invalid() {
+        // One good, one bad — must reject the whole request.
+        let (app, _) = test_oauth_app();
+        let body = serde_json::json!({
+            "redirect_uris": ["http://localhost/cb", "data:text/html,x"],
+            "client_name": "Mixed"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn register_rate_limits_after_cap() {
+        // Cap at 2 registrations per IP (window from test_oauth_app helper).
+        let (app, _) = test_oauth_app_with_register_limit(2);
+        let body = serde_json::json!({
+            "redirect_uris": ["http://localhost/callback"],
+            "client_name": "RL Test"
+        });
+        let send = || {
+            let app = app.clone();
+            let body = body.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/register")
+                        .header("content-type", "application/json")
+                        .header("x-forwarded-for", "192.0.2.42")
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        assert_eq!(send().await.status(), StatusCode::CREATED);
+        assert_eq!(send().await.status(), StatusCode::CREATED);
+        let limited = send().await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited.headers().get("retry-after").is_some());
+    }
+
+    #[tokio::test]
+    async fn register_rate_limit_is_per_ip() {
+        // Distinct X-Forwarded-For values should each get their own bucket.
+        let (app, _) = test_oauth_app_with_register_limit(1);
+        let body = serde_json::json!({
+            "redirect_uris": ["http://localhost/callback"],
+            "client_name": "Per-IP Test"
+        });
+        let send = |ip: &'static str| {
+            let app = app.clone();
+            let body = body.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/register")
+                        .header("content-type", "application/json")
+                        .header("x-forwarded-for", ip)
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // First IP: allowed.
+        assert_eq!(send("198.51.100.1").await.status(), StatusCode::CREATED);
+        // Same IP again: limited (cap=1).
+        assert_eq!(
+            send("198.51.100.1").await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Different IP: allowed (independent bucket).
+        assert_eq!(send("198.51.100.2").await.status(), StatusCode::CREATED);
     }
 }
