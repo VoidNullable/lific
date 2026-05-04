@@ -939,7 +939,7 @@ impl LificMcp {
         let user_id = match super::current_auth_user() {
             Some(u) => u.id,
             None => {
-                match self.read(|conn| queries::users::first_admin(conn)) {
+                match self.read(queries::users::first_admin) {
                     Ok(Some(admin)) => admin.id,
                     Ok(None) => {
                         return "Error: no admin user exists to attribute comments to.".into();
