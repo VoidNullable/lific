@@ -188,6 +188,27 @@ fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
     })
 }
 
+/// Return the first admin user (by creation time), if any.
+/// Used as a fallback author for MCP stdio sessions where no HTTP auth is present.
+pub fn first_admin(conn: &Connection) -> Result<Option<AuthUser>, LificError> {
+    match conn.query_row(
+        "SELECT id, username, display_name, is_admin FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1",
+        [],
+        |row| {
+            Ok(AuthUser {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                display_name: row.get(2)?,
+                is_admin: row.get(3)?,
+            })
+        },
+    ) {
+        Ok(user) => Ok(Some(user)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // ── Sessions ─────────────────────────────────────────────────
 
 /// Hash a session token with SHA-256 for storage.

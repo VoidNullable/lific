@@ -935,11 +935,17 @@ impl LificMcp {
         };
 
         // Resolve the authenticated user from the task-local set by the HTTP handler.
-        // Requires authentication — we never guess who the author is.
+        // For stdio/local MCP sessions (no HTTP auth), fall back to the first admin user.
         let user_id = match super::current_auth_user() {
             Some(u) => u.id,
             None => {
-                return "Error: authentication required to add comments. Use an API key or session token.".into();
+                match self.read(|conn| queries::users::first_admin(conn)) {
+                    Ok(Some(admin)) => admin.id,
+                    Ok(None) => {
+                        return "Error: no admin user exists to attribute comments to.".into();
+                    }
+                    Err(e) => return format!("Error: {e}"),
+                }
             }
         };
 
@@ -1831,5 +1837,40 @@ mod tests {
             content: "Orphan".into(),
         }));
         assert!(result.contains("Error"), "got: {result}");
+    }
+
+    #[test]
+    fn add_comment_falls_back_to_first_admin() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Test issue");
+
+        // Create an admin user but do NOT set MCP_REQUEST_USER — simulates stdio/local auth.
+        let conn = m.db.write().unwrap();
+        queries::users::create_user(
+            &conn,
+            &models::CreateUser {
+                username: "admin".into(),
+                email: "admin@local.test".into(),
+                password: "adminpass123".into(),
+                display_name: Some("Admin User".into()),
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        // Clear any leftover auth context
+        *crate::mcp::MCP_REQUEST_USER
+            .lock()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = None;
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "Comment via stdio fallback".into(),
+        }));
+        assert!(result.contains("Comment added"), "got: {result}");
+        assert!(result.contains("admin"), "got: {result}");
     }
 }
