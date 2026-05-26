@@ -14,6 +14,7 @@
     type Comment,
   } from "../lib/api";
   import Markdown from "../lib/Markdown.svelte";
+  import CommentThread from "../lib/CommentThread.svelte";
   import {
     ArrowLeft, Ellipsis, Trash2, Plus, X, Check,
     CircleCheck, CircleX, CircleAlert,
@@ -92,9 +93,7 @@
   let moduleOpen = $state(false);
   let labelsOpen = $state(false);
 
-  // Comment
-  let commentDraft = $state("");
-  let commentSubmitting = $state(false);
+  // (Comment draft state lives inside the CommentThread component now.)
 
   // Save indicator
   let saving = $state(false);
@@ -135,7 +134,6 @@
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
-    commentDraft = "";
     lastSaved = null;
     loadIssue(id);
   });
@@ -332,15 +330,12 @@
 
   // ── Comments ─────────────────────────────────────────
 
-  async function submitComment() {
-    if (!issue || !commentDraft.trim()) return;
-    commentSubmitting = true;
-    const res = await createComment(issue.id, commentDraft.trim());
-    if (res.ok) {
-      comments = [...comments, res.data];
-      commentDraft = "";
-    }
-    commentSubmitting = false;
+  async function handleNewComment(content: string) {
+    if (!issue) return null;
+    const res = await createComment(issue.id, content);
+    if (!res.ok) return null;
+    comments = [...comments, res.data];
+    return res.data;
   }
 
   // ── Helpers ──────────────────────────────────────────
@@ -356,31 +351,9 @@
     });
   }
 
-  function formatRelative(iso: string): string {
-    const d = new Date(iso + "Z");
-    const now = new Date();
-    const diffMs = now.getTime() - d.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHrs = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-    if (diffMins < 1) return "just now";
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  }
-
   function moduleName(id: number | null): string {
     if (!id) return "None";
     return modules.find((m) => m.id === id)?.name ?? "Unknown";
-  }
-
-  function initials(name: string): string {
-    return name
-      .split(/[\s_-]+/)
-      .slice(0, 2)
-      .map((w) => w[0]?.toUpperCase() ?? "")
-      .join("");
   }
 </script>
 
@@ -562,94 +535,8 @@
             {/if}
           </section>
 
-          <!-- Comments -->
-          <section>
-            <h2
-              class="text-[0.8125rem] font-semibold uppercase tracking-widest
-                     text-[var(--text-faint)] mb-4"
-            >
-              Comments
-              {#if comments.length > 0}
-                <span class="font-normal ml-1">{comments.length}</span>
-              {/if}
-            </h2>
-
-            {#if comments.length === 0}
-              <p class="text-[0.875rem] text-[var(--text-faint)] mb-6">
-                No comments yet.
-              </p>
-            {:else}
-              <div class="space-y-0 mb-6">
-                {#each comments as comment (comment.id)}
-                  <div
-                    class="flex gap-3 py-4
-                           border-t border-[var(--border)] first:border-t-0"
-                  >
-                    <!-- Avatar -->
-                    <div
-                      class="size-7 rounded-full bg-[var(--accent-subtle)]
-                             text-[var(--accent)] flex items-center justify-center
-                             text-[0.625rem] font-semibold shrink-0 mt-0.5"
-                    >
-                      {initials(comment.author_display_name || comment.author)}
-                    </div>
-
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-baseline gap-2 mb-1">
-                        <span class="text-[0.8125rem] font-medium text-[var(--text)]">
-                          {comment.author_display_name || comment.author}
-                        </span>
-                        <span
-                          class="text-[0.75rem] text-[var(--text-faint)]"
-                          title={formatDate(comment.created_at)}
-                        >
-                          {formatRelative(comment.created_at)}
-                        </span>
-                      </div>
-                      <Markdown
-                        content={comment.content}
-                        class="text-sm"
-                      />
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-
-            <!-- New comment -->
-            {#if editable}
-              <div class="border-t border-[var(--border)] pt-4">
-                <textarea
-                  bind:value={commentDraft}
-                  class="w-full min-h-[80px] text-[0.875rem] leading-relaxed
-                         bg-[var(--surface)] border border-[var(--border)]
-                         rounded-md p-3 text-[var(--text)]
-                         resize-y outline-none placeholder:text-[var(--text-faint)]
-                         focus:border-[var(--accent)]
-                         focus:shadow-[0_0_0_3px_var(--accent-subtle)]"
-                  placeholder="Leave a comment... (markdown supported)"
-                  onkeydown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submitComment();
-                  }}
-                ></textarea>
-                <div class="flex items-center justify-between mt-2">
-                  <span class="text-[0.75rem] text-[var(--text-faint)]">
-                    Ctrl+Enter to submit
-                  </span>
-                  <button
-                    class="text-[0.8125rem] font-medium text-[var(--accent-text)]
-                           bg-[var(--accent)] px-3 py-1.5 rounded-md
-                           hover:bg-[var(--accent-hover)] transition-colors
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={!commentDraft.trim() || commentSubmitting}
-                    onclick={submitComment}
-                  >
-                    {commentSubmitting ? "Posting..." : "Comment"}
-                  </button>
-                </div>
-              </div>
-            {/if}
-          </section>
+          <!-- Comments (shared with PageDetail via web/src/lib/CommentThread.svelte) -->
+          <CommentThread {comments} {editable} onSubmit={handleNewComment} />
         </div>
 
         <!-- Sidebar: issue-meta-* classes in app.css (explicit gaps; compact joins avoid stray flex whitespace nodes) -->

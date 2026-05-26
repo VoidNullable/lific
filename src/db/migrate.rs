@@ -54,6 +54,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "default project lead",
         include_str!("../../migrations/011_default_project_lead.sql"),
     ),
+    (
+        12,
+        "page comments",
+        include_str!("../../migrations/012_page_comments.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

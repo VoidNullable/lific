@@ -52,6 +52,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             get(comments::list_comments).post(comments::create_comment),
         )
         .route(
+            "/api/pages/{page_id}/comments",
+            get(comments::list_page_comments).post(comments::create_page_comment),
+        )
+        .route(
             "/api/comments/{id}",
             put(comments::update_comment_handler).delete(comments::delete_comment_handler),
         )

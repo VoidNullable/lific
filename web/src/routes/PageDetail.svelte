@@ -4,9 +4,13 @@
     updatePage,
     deletePage,
     downloadPageExport,
+    listPageComments,
+    createPageComment,
     type Page,
+    type Comment,
   } from "../lib/api";
   import Markdown from "../lib/Markdown.svelte";
+  import CommentThread from "../lib/CommentThread.svelte";
   import { ArrowLeft, Download, Ellipsis, Trash2 } from "lucide-svelte";
 
   let {
@@ -22,6 +26,7 @@
   } = $props();
 
   let page = $state<Page | null>(null);
+  let comments = $state<Comment[]>([]);
   let loading = $state(true);
   let error = $state("");
 
@@ -53,10 +58,24 @@
   async function loadPage(id: number) {
     loading = true;
     error = "";
+    comments = [];
     const res = await getPage(id);
     if (!res.ok) { error = res.error; loading = false; return; }
     page = res.data;
+
+    // Load page comments in parallel with the rest of the render.
+    const cmtRes = await listPageComments(page.id);
+    if (cmtRes.ok) comments = cmtRes.data;
+
     loading = false;
+  }
+
+  async function handleNewComment(content: string) {
+    if (!page) return null;
+    const res = await createPageComment(page.id, content);
+    if (!res.ok) return null;
+    comments = [...comments, res.data];
+    return res.data;
   }
 
   function handleWindowClick() {
@@ -393,6 +412,11 @@
             </div>
           {/if}
         </section>
+
+        <!-- Comments (LIF-106). Same component IssueDetail uses. -->
+        <div class="mt-10 pt-6 border-t border-[var(--border)]">
+          <CommentThread {comments} {editable} onSubmit={handleNewComment} />
+        </div>
 
         <!-- Meta -->
         <div class="mt-10 pt-6 border-t border-[var(--border)] flex gap-8">

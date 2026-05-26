@@ -590,7 +590,10 @@ fn comment(
         CommentAction::List { identifier } => {
             let conn = pool.read()?;
             let id = queries::resolve_identifier(&conn, identifier)?;
-            let comments = queries::comments::list_comments(&conn, id)?;
+            let comments = queries::comments::list_comments(
+                &conn,
+                queries::comments::CommentParent::Issue(id),
+            )?;
 
             if json {
                 print_json(&comments);
@@ -636,7 +639,12 @@ fn comment(
                     })?
             };
 
-            let comment = queries::comments::create_comment(&conn, issue_id, user_id, content)?;
+            let comment = queries::comments::create_comment(
+                &conn,
+                queries::comments::CommentParent::Issue(issue_id),
+                user_id,
+                content,
+            )?;
 
             if json {
                 print_json(&comment);

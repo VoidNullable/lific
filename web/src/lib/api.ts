@@ -394,7 +394,10 @@ export async function listLabels(projectId: number) {
 
 export interface Comment {
   id: number;
-  issue_id: number;
+  /** Set for issue comments; null for page comments. */
+  issue_id: number | null;
+  /** Set for page comments; null for issue comments. */
+  page_id: number | null;
   user_id: number;
   author: string;
   author_display_name: string;
@@ -409,6 +412,17 @@ export async function listComments(issueId: number) {
 
 export async function createComment(issueId: number, content: string) {
   return request<Comment>(`/issues/${issueId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export async function listPageComments(pageId: number) {
+  return request<Comment[]>(`/pages/${pageId}/comments`);
+}
+
+export async function createPageComment(pageId: number, content: string) {
+  return request<Comment>(`/pages/${pageId}/comments`, {
     method: "POST",
     body: JSON.stringify({ content }),
   });

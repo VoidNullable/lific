@@ -45,6 +45,30 @@ fn resolve_folder(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, 
     queries::resolve_folder_name(&conn, project_id, name).map_err(|e| e.to_string())
 }
 
+/// Heuristic to tell page identifiers (`PRO-DOC-1`, `DOC-1`) apart from issue
+/// identifiers (`PRO-42`). Both shapes use uppercase project prefixes and
+/// numeric sequences, but the literal `DOC` segment is unique to pages.
+fn looks_like_page_identifier(s: &str) -> bool {
+    s.starts_with("DOC-") || s.contains("-DOC-")
+}
+
+/// Resolve an identifier string into a CommentParent (Issue or Page) so MCP
+/// `add_comment` / `list_comments` accept both shapes through one entry point.
+fn resolve_comment_parent(
+    mcp: &LificMcp,
+    identifier: &str,
+) -> Result<queries::comments::CommentParent, String> {
+    if looks_like_page_identifier(identifier) {
+        let conn = mcp.db.read().map_err(|e| e.to_string())?;
+        let id = queries::resolve_page_identifier(&conn, identifier).map_err(|e| e.to_string())?;
+        Ok(queries::comments::CommentParent::Page(id))
+    } else {
+        let conn = mcp.db.read().map_err(|e| e.to_string())?;
+        let id = queries::resolve_identifier(&conn, identifier).map_err(|e| e.to_string())?;
+        Ok(queries::comments::CommentParent::Issue(id))
+    }
+}
+
 /// Append a paging hint to `out` if `has_more` is true.
 /// `next_offset` is the offset the agent should use to fetch the next page.
 fn append_pagination_hint(out: &mut String, has_more: bool, next_offset: i64) {
@@ -176,9 +200,12 @@ impl LificMcp {
                     out.push_str(&format!("\n{}\n", issue.description));
                 }
                 // Include comments
-                if let Ok(comments) =
-                    self.read(|conn| queries::comments::list_comments(conn, issue.id))
-                    && !comments.is_empty()
+                if let Ok(comments) = self.read(|conn| {
+                    queries::comments::list_comments(
+                        conn,
+                        queries::comments::CommentParent::Issue(issue.id),
+                    )
+                }) && !comments.is_empty()
                 {
                     out.push_str(&format!("\n--- Comments ({}) ---\n", comments.len()));
                     for c in &comments {
@@ -943,12 +970,11 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Add a comment to an issue. The author is the user who owns the API key authenticating this MCP session."
+        description = "Add a comment to an issue or page. Accepts an issue identifier (LIF-42) or a page identifier (LIF-DOC-3 or DOC-3 for workspace pages). The author is the user who owns the API key authenticating this MCP session."
     )]
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
-        let issue_id = match self.read(|conn| queries::resolve_identifier(conn, &input.identifier))
-        {
-            Ok(id) => id,
+        let parent = match resolve_comment_parent(self, &input.identifier) {
+            Ok(p) => p,
             Err(e) => return format!("Error: {e}"),
         };
 
@@ -968,7 +994,7 @@ impl LificMcp {
         };
 
         match self.write(|conn| {
-            queries::comments::create_comment(conn, issue_id, user_id, &input.content)
+            queries::comments::create_comment(conn, parent, user_id, &input.content)
         }) {
             Ok(c) => format!(
                 "Comment added to {} by {} at {}: {}",
@@ -978,15 +1004,16 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "List comments on an issue")]
+    #[tool(
+        description = "List comments on an issue or page. Accepts an issue identifier (LIF-42) or a page identifier (LIF-DOC-3 or DOC-3 for workspace pages)."
+    )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
-        let issue_id = match self.read(|conn| queries::resolve_identifier(conn, &input.identifier))
-        {
-            Ok(id) => id,
+        let parent = match resolve_comment_parent(self, &input.identifier) {
+            Ok(p) => p,
             Err(e) => return format!("Error: {e}"),
         };
 
-        match self.read(|conn| queries::comments::list_comments(conn, issue_id)) {
+        match self.read(|conn| queries::comments::list_comments(conn, parent)) {
             Ok(comments) if comments.is_empty() => {
                 format!("No comments on {}.", input.identifier)
             }
@@ -1890,5 +1917,92 @@ mod tests {
         }));
         assert!(result.contains("Comment added"), "got: {result}");
         assert!(result.contains("admin"), "got: {result}");
+    }
+
+    // ── LIF-106: page comments via add_comment/list_comments dispatch ────
+
+    #[test]
+    fn add_comment_on_page_identifier_creates_page_comment() {
+        let m = mcp();
+        seed_project(&m, "Pages", "PGC");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PGC".into()),
+            title: "Design".into(),
+            content: None,
+            folder: None,
+        }));
+        seed_user(&m);
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PGC-DOC-1".into(),
+            content: "Comment on a page".into(),
+        }));
+        assert!(result.contains("Comment added"), "got: {result}");
+        assert!(result.contains("PGC-DOC-1"), "got: {result}");
+
+        let listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PGC-DOC-1".into(),
+        }));
+        assert!(listing.contains("1 comment(s)"), "got: {listing}");
+        assert!(listing.contains("Comment on a page"), "got: {listing}");
+    }
+
+    #[test]
+    fn page_and_issue_comments_do_not_cross_contaminate_via_mcp() {
+        let m = mcp();
+        seed_project(&m, "Mix", "MIX");
+        seed_issue(&m, "MIX", "An issue");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("MIX".into()),
+            title: "A page".into(),
+            content: None,
+            folder: None,
+        }));
+        seed_user(&m);
+
+        m.add_comment(Parameters(AddCommentInput {
+            identifier: "MIX-1".into(),
+            content: "issue thread".into(),
+        }));
+        m.add_comment(Parameters(AddCommentInput {
+            identifier: "MIX-DOC-1".into(),
+            content: "page thread".into(),
+        }));
+
+        let issue_listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "MIX-1".into(),
+        }));
+        assert!(issue_listing.contains("issue thread"), "got: {issue_listing}");
+        assert!(!issue_listing.contains("page thread"), "got: {issue_listing}");
+
+        let page_listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "MIX-DOC-1".into(),
+        }));
+        assert!(page_listing.contains("page thread"), "got: {page_listing}");
+        assert!(!page_listing.contains("issue thread"), "got: {page_listing}");
+    }
+
+    #[test]
+    fn add_comment_on_workspace_page() {
+        let m = mcp();
+        // Workspace pages have no project prefix: identifier is DOC-N.
+        m.create_page(Parameters(CreatePageInput {
+            project: None,
+            title: "Workspace note".into(),
+            content: None,
+            folder: None,
+        }));
+        seed_user(&m);
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "DOC-1".into(),
+            content: "comment on workspace page".into(),
+        }));
+        assert!(result.contains("Comment added"), "got: {result}");
+
+        let listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "DOC-1".into(),
+        }));
+        assert!(listing.contains("comment on workspace page"), "got: {listing}");
     }
 }

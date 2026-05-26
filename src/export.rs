@@ -26,7 +26,10 @@ pub fn export_issue(conn: &Connection, identifier: &str) -> Result<ExportBundle,
     let issue_id = queries::resolve_identifier(conn, identifier)?;
     let issue = queries::get_issue(conn, issue_id)?;
     let project = queries::get_project(conn, issue.project_id)?;
-    let comments = queries::comments::list_comments(conn, issue.id)?;
+    let comments = queries::comments::list_comments(
+        conn,
+        queries::comments::CommentParent::Issue(issue.id),
+    )?;
     let path = format!(
         "{}/issues/{}.md",
         project.identifier,
@@ -86,7 +89,10 @@ pub fn export_project(conn: &Connection, identifier: &str) -> Result<ExportBundl
 
     let mut files = Vec::new();
     for issue in issues {
-        let comments = queries::comments::list_comments(conn, issue.id)?;
+        let comments = queries::comments::list_comments(
+            conn,
+            queries::comments::CommentParent::Issue(issue.id),
+        )?;
         files.push(ExportFile {
             path: format!(
                 "{}/issues/{}.md",
@@ -348,8 +354,13 @@ mod tests {
             },
         )
         .unwrap();
-        queries::comments::create_comment(&conn, issue.id, user.id, "First exported comment")
-            .unwrap();
+        queries::comments::create_comment(
+            &conn,
+            queries::comments::CommentParent::Issue(issue.id),
+            user.id,
+            "First exported comment",
+        )
+        .unwrap();
         let parent = queries::create_folder(
             &conn,
             &CreateFolder {

@@ -306,7 +306,10 @@ pub struct UserApiKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comment {
     pub id: i64,
-    pub issue_id: i64,
+    /// Set when the comment belongs to an issue. Mutually exclusive with `page_id`.
+    pub issue_id: Option<i64>,
+    /// Set when the comment belongs to a page. Mutually exclusive with `issue_id`.
+    pub page_id: Option<i64>,
     pub user_id: i64,
     /// Author username (joined from users table on read)
     pub author: String,
