@@ -378,28 +378,42 @@ async fn authorize_approve(
             .into_response();
     };
 
-    // Actually validate the token against the database.
-    // OAuth routes bypass the auth middleware, so we must validate here.
-    let is_valid = if token.starts_with("lific_sess_") {
+    // Validate the token against the database AND capture the approving
+    // user's identity so it can be bound to the issued code (LIF-79). OAuth
+    // routes bypass the auth middleware, so we validate here.
+    //
+    // auth_outcome:
+    //   None           -> token invalid -> reject
+    //   Some(None)     -> authenticated but no resolvable user (a legacy
+    //                     OAuth token issued before LIF-79) -> proceed and
+    //                     bind no user, preserving the old behavior
+    //   Some(Some(id)) -> authenticated as user `id` -> bind it to the code
+    let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
         let conn = match oauth.db.write() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
         };
-        crate::db::queries::users::validate_session(&conn, &token).is_ok()
+        crate::db::queries::users::validate_session(&conn, &token)
+            .ok()
+            .map(|u| Some(u.id))
     } else if token.starts_with("lific_at_") {
-        // OAuth tokens can also approve (valid authenticated identity)
-        validate_oauth_token(&oauth.db, &token)
+        // OAuth tokens can also approve (valid authenticated identity).
+        if validate_oauth_token(&oauth.db, &token) {
+            Some(oauth_token_user_id(&oauth.db, &token))
+        } else {
+            None
+        }
     } else {
-        false
+        None
     };
 
-    if !is_valid {
+    let Some(approving_user_id) = auth_outcome else {
         return (
             StatusCode::UNAUTHORIZED,
             Html("<h1>Invalid session</h1><p>Your session has expired or is invalid. <a href=\"/#/login\">Sign in again</a></p>".to_string()),
         )
             .into_response();
-    }
+    };
 
     // Validate the redirect_uri against the client's registered URIs
     let redirect_ok = if let Ok(conn) = oauth.db.read() {
@@ -436,8 +450,8 @@ async fn authorize_approve(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
     if let Err(e) = conn.execute(
-        "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, scope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, scope, user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             code,
             form.client_id,
@@ -446,6 +460,7 @@ async fn authorize_approve(
             form.code_challenge_method.unwrap_or_else(|| "S256".into()),
             expires.to_rfc3339(),
             scope,
+            approving_user_id,
         ],
     ) {
         tracing::error!(error = %e, "failed to store OAuth authorization code");
@@ -521,13 +536,13 @@ async fn token_exchange(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
 
-    let code_row: Result<(String, String, String, String, i64, String), _> = conn.query_row(
-        "SELECT client_id, redirect_uri, code_challenge, code_challenge_method, used, scope FROM oauth_codes WHERE code = ?1 AND expires_at > datetime('now')",
+    let code_row: Result<(String, String, String, String, i64, String, Option<i64>), _> = conn.query_row(
+        "SELECT client_id, redirect_uri, code_challenge, code_challenge_method, used, scope, user_id FROM oauth_codes WHERE code = ?1 AND expires_at > datetime('now')",
         params![code],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     );
 
-    let (stored_client_id, stored_redirect_uri, code_challenge, challenge_method, used, scope) = match code_row {
+    let (stored_client_id, stored_redirect_uri, code_challenge, challenge_method, used, scope, code_user_id) = match code_row {
         Ok(row) => row,
         Err(_) => {
             return (
@@ -607,8 +622,8 @@ async fn token_exchange(
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
     if let Err(e) = conn.execute(
-        "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, ?2, ?3, ?4)",
-        params![token_hash, stored_client_id, expires_at.to_rfc3339(), scope],
+        "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![token_hash, stored_client_id, expires_at.to_rfc3339(), scope, code_user_id],
     ) {
         tracing::error!(error = %e, "failed to store OAuth token");
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -751,6 +766,26 @@ pub fn validate_oauth_token_with_scope(db: &DbPool, token: &str) -> Option<Strin
         |row| row.get(0),
     )
     .ok()
+}
+
+/// Resolve the user bound to a (valid, non-revoked, unexpired) OAuth access
+/// token, if any (LIF-79). Returns `None` when the token is invalid OR when it
+/// is a legacy token issued before user binding existed — callers treat both
+/// as "no user identity." Tokens are stored as SHA-256 hashes.
+pub fn oauth_token_user_id(db: &DbPool, token: &str) -> Option<i64> {
+    if !token.starts_with("lific_at_") {
+        return None;
+    }
+    let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+    let conn = db.read().ok()?;
+    conn.query_row(
+        "SELECT user_id FROM oauth_tokens
+         WHERE access_token = ?1 AND revoked = 0 AND expires_at > datetime('now')",
+        params![token_hash],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -1340,5 +1375,146 @@ mod tests {
         );
         // Different IP: allowed (independent bucket).
         assert_eq!(send("198.51.100.2").await.status(), StatusCode::CREATED);
+    }
+
+    // ── LIF-79: OAuth codes/tokens bound to approving user ───────────────
+
+    #[tokio::test]
+    async fn token_is_bound_to_approving_user() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db); // creates user "oauthtest"
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        let user_id: i64 = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE username = 'oauthtest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // A real PKCE pair so the later token exchange passes verification.
+        let verifier = "test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789";
+        let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
+        let csrf = generate_csrf_token();
+        let body = format!(
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}",
+            client_id,
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
+            urlencoding::encode(&csrf),
+        );
+
+        // Approve via the session cookie.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "approve should redirect, got {}",
+            resp.status()
+        );
+        let location = resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = location
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // The authorization code carries the approver's id.
+        {
+            let conn = db.read().unwrap();
+            let code_user: Option<i64> = conn
+                .query_row(
+                    "SELECT user_id FROM oauth_codes WHERE code = ?1",
+                    params![code],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(code_user, Some(user_id), "code should bind the approver");
+        }
+
+        // Exchange the code; the issued token must carry the same identity.
+        let token_body = format!(
+            "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
+            code,
+            urlencoding::encode("http://localhost/callback"),
+            client_id,
+            verifier,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(token_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "token exchange should succeed"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let access_token = val["access_token"].as_str().unwrap();
+
+        // The middleware will resolve this token to the approving user.
+        assert_eq!(oauth_token_user_id(&db, access_token), Some(user_id));
+    }
+
+    #[tokio::test]
+    async fn legacy_token_without_user_resolves_to_none() {
+        // Tokens issued before LIF-79 have NULL user_id and must keep working,
+        // resolving to no user (anonymous) rather than erroring.
+        let (_, db) = test_oauth_app();
+        let token = "lific_at_legacy-no-user-binding";
+        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('legacy-c', 'Test', '[\"http://localhost\"]')",
+                [],
+            )
+            .unwrap();
+            // user_id intentionally omitted → NULL
+            conn.execute(
+                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, 'legacy-c', ?2, 'mcp')",
+                params![token_hash, expires],
+            )
+            .unwrap();
+        }
+        assert!(validate_oauth_token(&db, token), "token still valid");
+        assert_eq!(
+            oauth_token_user_id(&db, token),
+            None,
+            "legacy token has no bound user"
+        );
     }
 }

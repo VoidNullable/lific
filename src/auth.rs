@@ -209,10 +209,21 @@ pub async fn require_api_key(
     // ── OAuth tokens (lific_at_ prefix) ──────────────────────────
     if token.starts_with("lific_at_") {
         if crate::oauth::validate_oauth_token(&auth.db, &token) {
-            // OAuth tokens don't have user association yet
-            request
-                .extensions_mut()
-                .insert(None::<crate::db::models::AuthUser>);
+            // Resolve the user bound to this token at approval time (LIF-79).
+            // Tokens issued before user binding existed have no user_id and
+            // stay anonymous (None), preserving the previous behavior.
+            let auth_user = crate::oauth::oauth_token_user_id(&auth.db, &token)
+                .and_then(|uid| {
+                    let conn = auth.db.read().ok()?;
+                    crate::db::queries::users::get_user_by_id(&conn, uid).ok()
+                })
+                .map(|u| crate::db::models::AuthUser {
+                    id: u.id,
+                    username: u.username,
+                    display_name: u.display_name,
+                    is_admin: u.is_admin,
+                });
+            request.extensions_mut().insert(auth_user);
             return next.run(request).await;
         }
         return (

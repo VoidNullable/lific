@@ -64,6 +64,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "page labels",
         include_str!("../../migrations/013_page_labels.sql"),
     ),
+    (
+        14,
+        "oauth user binding",
+        include_str!("../../migrations/014_oauth_user_id.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.
