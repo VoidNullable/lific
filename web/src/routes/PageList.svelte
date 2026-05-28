@@ -25,6 +25,30 @@
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
+  import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
+
+  // LIF-118: fuzzy search tuning constants.
+  //
+  //   SCORE_THRESHOLD  — minimum match score to surface. The scorer caps
+  //                      fuzzy (non-substring) matches at 0.7; 0.25 keeps
+  //                      reasonable subsequence hits but trims the long
+  //                      tail of "technically matched" noise.
+  //   RESULT_CAP       — hard cap so a generic 1-char query doesn't blow
+  //                      up the DOM. Sorted by score desc, so the user
+  //                      always sees the strongest matches.
+  //   CONTENT_SCAN_MAX — cap content scanned per page. The scorer is
+  //                      linear in haystack length; this keeps worst-case
+  //                      cost per keystroke bounded even if a project
+  //                      has a few huge pages.
+  //   CONTENT_WEIGHT   — content matches discount relative to title.
+  //                      Content false positives are more common in long
+  //                      bodies, so we want title/identifier hits to win
+  //                      ties.
+  const SCORE_THRESHOLD = 0.25;
+  const RESULT_CAP = 50;
+  const CONTENT_SCAN_MAX = 4000;
+  const CONTENT_WEIGHT = 0.6;
+  const IDENTIFIER_WEIGHT = 0.9;
 
   let {
     navigate,
@@ -57,23 +81,55 @@
   // the issue list's filterLabel convention).
   let filterLabel = $state("");
 
-  // LIF-117: client-side search. Mirrors IssueList's pattern — a collapsed
-  // icon in the toolbar expands to an input on click, and filters the
-  // already-loaded pages by title/identifier substring. When active, the
-  // tree is replaced by a flat result list (folders become irrelevant in
-  // a search context).
+  // LIF-117/118: client-side search. A collapsed icon in the toolbar
+  // expands to an input on click, and fuzzy-scores the already-loaded
+  // pages across title, identifier, and content. When active, the tree
+  // is replaced by a flat ranked result list (folders become irrelevant
+  // in a search context).
   let searchQuery = $state("");
   let searchExpanded = $state(false);
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
-  let filteredPages = $derived.by(() => {
-    if (!searchQuery.trim()) return [] as Page[];
-    const q = searchQuery.toLowerCase();
-    return pages.filter(
-      (p) =>
-        p.title.toLowerCase().includes(q) ||
-        p.identifier.toLowerCase().includes(q),
-    );
+  // A search hit carries enough info to render the row: which page, the
+  // composite score (for sorting), and an optional snippet pulled from
+  // the content body when content was the *reason* the page matched.
+  interface SearchHit {
+    page: Page;
+    score: number;
+    snippet: string | null;
+  }
+
+  let filteredPages = $derived.by<SearchHit[]>(() => {
+    const q = searchQuery.trim();
+    if (!q) return [];
+
+    const hits: SearchHit[] = [];
+    for (const page of pages) {
+      const titleHit = fuzzyMatch(q, page.title);
+      const idHit = fuzzyMatch(q, page.identifier);
+      // Cap content scan: scorer is O(haystack) and pages can be long.
+      const body = page.content.slice(0, CONTENT_SCAN_MAX);
+      const contentHit = fuzzyMatch(q, body);
+
+      const titleScore = titleHit?.score ?? 0;
+      const idScore = (idHit?.score ?? 0) * IDENTIFIER_WEIGHT;
+      const contentScore = (contentHit?.score ?? 0) * CONTENT_WEIGHT;
+
+      const best = Math.max(titleScore, idScore, contentScore);
+      if (best < SCORE_THRESHOLD) continue;
+
+      // Snippet only when content was the winning signal — otherwise the
+      // title/identifier already explains the match.
+      const snippet =
+        contentHit && contentScore === best && best > 0
+          ? buildSnippet(body, contentHit.matchStart, contentHit.matchEnd)
+          : null;
+
+      hits.push({ page, score: best, snippet });
+    }
+
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, RESULT_CAP);
   });
 
   function openSearch() {
@@ -471,9 +527,11 @@
         </button>
       </div>
     {:else if searchQuery.trim()}
-      <!-- LIF-117: flat search results. Folders are omitted in this mode
-           because the user is looking for a specific page by name; the
-           tree structure would just be visual noise. -->
+      <!-- LIF-117/118: flat ranked search results. Folders are omitted
+           in this mode because the user is looking for a specific page
+           by name or content; the tree structure would just be visual
+           noise. Results are scored across title/identifier/content and
+           sorted by relevance. -->
       <div class="px-6 py-4">
         {#if filteredPages.length === 0}
           <div class="flex flex-col items-center py-16 gap-3">
@@ -489,36 +547,51 @@
             </button>
           </div>
         {:else}
-          {#each filteredPages as page (page.id)}
+          {#if filteredPages.length === RESULT_CAP}
+            <div class="text-[0.6875rem] text-[var(--text-faint)] uppercase tracking-widest font-semibold mb-2 px-1.5">
+              Top {RESULT_CAP} matches — narrow the query for fewer results
+            </div>
+          {/if}
+          {#each filteredPages as hit (hit.page.id)}
             <button
-              class="w-full flex items-center gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
+              class="w-full flex flex-col items-stretch gap-0.5 py-1.5 px-1.5 -mx-1.5 rounded-md
                      text-left group transition-colors hover:bg-[var(--bg-subtle)]"
-              onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
+              onclick={() => navigate(`/${projectIdentifier}/pages/${hit.page.id}`)}
             >
-              <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
-              <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
-                {page.title}
-              </span>
-              <span class="text-[0.75rem] font-mono text-[var(--text-faint)] shrink-0">
-                {page.identifier}
-              </span>
-              {#if page.labels.length > 0}
-                <div class="flex items-center gap-1 shrink-0">
-                  {#each page.labels.slice(0, 2) as lbl}
-                    {@const labelObj = labels.find((l) => l.name === lbl)}
-                    <span
-                      class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
-                             border border-[var(--border)]"
-                      style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
-                    >
-                      {lbl}
-                    </span>
-                  {/each}
-                  {#if page.labels.length > 2}
-                    <span class="text-[0.6875rem] text-[var(--text-faint)]">
-                      +{page.labels.length - 2}
-                    </span>
-                  {/if}
+              <div class="flex items-center gap-2">
+                <FileText size={18} class="shrink-0 text-[var(--text-faint)] group-hover:text-[var(--accent)]" />
+                <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
+                  {hit.page.title}
+                </span>
+                <span class="text-[0.75rem] font-mono text-[var(--text-faint)] shrink-0">
+                  {hit.page.identifier}
+                </span>
+                {#if hit.page.labels.length > 0}
+                  <div class="flex items-center gap-1 shrink-0">
+                    {#each hit.page.labels.slice(0, 2) as lbl}
+                      {@const labelObj = labels.find((l) => l.name === lbl)}
+                      <span
+                        class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
+                               border border-[var(--border)]"
+                        style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+                      >
+                        {lbl}
+                      </span>
+                    {/each}
+                    {#if hit.page.labels.length > 2}
+                      <span class="text-[0.6875rem] text-[var(--text-faint)]">
+                        +{hit.page.labels.length - 2}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+              {#if hit.snippet}
+                <!-- LIF-118: content snippet — only shown when content
+                     was the winning signal, so title alone wouldn't
+                     explain why this page surfaced. -->
+                <div class="text-[0.8125rem] text-[var(--text-muted)] truncate pl-[26px]">
+                  {hit.snippet}
                 </div>
               {/if}
             </button>
