@@ -192,6 +192,10 @@ pub struct Page {
     pub sort_order: f64,
     pub created_at: String,
     pub updated_at: String,
+    /// Labels attached to this page (populated on read). Empty for
+    /// workspace-level pages — labels are project-scoped (LIF-105).
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +205,10 @@ pub struct CreatePage {
     pub title: String,
     #[serde(default)]
     pub content: String,
+    /// Label names to attach. Silently ignored for workspace pages (no
+    /// project_id), since labels are project-scoped (LIF-105).
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +219,10 @@ pub struct UpdatePage {
     #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
     pub folder_id: Option<Option<i64>>,
     pub sort_order: Option<f64>,
+    /// Replace the full label set. None = don't touch, Some(vec) = replace
+    /// (delete-all + insert-by-name, mirroring `UpdateIssue`). Silently
+    /// no-ops for workspace pages.
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

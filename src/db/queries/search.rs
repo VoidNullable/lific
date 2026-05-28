@@ -148,6 +148,7 @@ mod tests {
                 folder_id: None,
                 title: "Design Doc".into(),
                 content: "This covers the WebSocket protocol design".into(),
+                labels: vec![],
             },
         )
         .unwrap();

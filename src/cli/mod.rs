@@ -279,6 +279,10 @@ pub enum PageAction {
         /// Filter by folder name
         #[arg(short, long)]
         folder: Option<String>,
+
+        /// Filter by label name (LIF-105)
+        #[arg(short, long)]
+        label: Option<String>,
     },
 
     /// Get a single page by identifier (e.g. LIF-DOC-1)
@@ -304,6 +308,10 @@ pub enum PageAction {
         /// Page content (markdown)
         #[arg(short, long, default_value = "")]
         content: String,
+
+        /// Labels to attach (comma-separated). Ignored for workspace pages.
+        #[arg(short, long)]
+        labels: Option<String>,
     },
 
     /// Update an existing page
@@ -322,6 +330,10 @@ pub enum PageAction {
         /// Move to folder name
         #[arg(short, long)]
         folder: Option<String>,
+
+        /// Replace labels (comma-separated). Ignored for workspace pages.
+        #[arg(short, long)]
+        labels: Option<String>,
     },
 }
 

@@ -399,7 +399,11 @@ fn project(
 
 fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        PageAction::List { project, folder } => {
+        PageAction::List {
+            project,
+            folder,
+            label,
+        } => {
             let conn = pool.read()?;
             let project_id = if let Some(ident) = project {
                 Some(queries::resolve_project_identifier(&conn, ident)?)
@@ -413,7 +417,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                 None
             };
 
-            let pages = queries::list_pages(&conn, project_id, folder_id)?;
+            let pages = queries::list_pages(&conn, project_id, folder_id, label.as_deref())?;
 
             if json {
                 print_json(&pages);
@@ -432,7 +436,15 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                             first_line.to_string()
                         }
                     };
-                    println!("  {:<12} {} - {}", p.identifier, p.title, preview);
+                    let labels = if p.labels.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", p.labels.join(", "))
+                    };
+                    println!(
+                        "  {:<12} {} - {}{}",
+                        p.identifier, p.title, preview, labels
+                    );
                 }
             }
         }
@@ -446,6 +458,9 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                 print_json(&page);
             } else {
                 println!("{} - {}", page.identifier, page.title);
+                if !page.labels.is_empty() {
+                    println!("  Labels: {}", page.labels.join(", "));
+                }
                 if !page.content.is_empty() {
                     println!();
                     println!("{}", page.content);
@@ -458,6 +473,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             project,
             folder,
             content,
+            labels,
         } => {
             let conn = pool.write()?;
             let project_id = if let Some(ident) = project {
@@ -472,6 +488,18 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                 None
             };
 
+            // Same comma-split shape `issue create` uses, so users get
+            // one mental model across both CLIs.
+            let label_list: Vec<String> = labels
+                .as_deref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let page = queries::create_page(
                 &conn,
                 &CreatePage {
@@ -479,6 +507,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     folder_id,
                     title: title.clone(),
                     content: content.clone(),
+                    labels: label_list,
                 },
             )?;
 
@@ -494,6 +523,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             title,
             content,
             folder,
+            labels,
         } => {
             let conn = pool.write()?;
             let id = queries::resolve_page_identifier(&conn, identifier)?;
@@ -509,6 +539,13 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                 None
             };
 
+            let label_list = labels.as_deref().map(|s| {
+                s.split(',')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            });
+
             let page = queries::update_page(
                 &conn,
                 id,
@@ -517,6 +554,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     content: content.clone(),
                     folder_id,
                     sort_order: None,
+                    labels: label_list,
                 },
             )?;
 
@@ -1153,6 +1191,7 @@ mod tests {
                 project: Some("TST".into()),
                 folder: None,
                 content: "# Architecture\n\nOverview".into(),
+                labels: None,
             },
         };
         run(&pool, &cmd, false).unwrap();

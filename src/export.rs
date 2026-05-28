@@ -85,7 +85,7 @@ pub fn export_project(conn: &Connection, identifier: &str) -> Result<ExportBundl
             offset: None,
         },
     )?;
-    let pages = queries::list_pages(conn, Some(project.id), None)?;
+    let pages = queries::list_pages(conn, Some(project.id), None, None)?;
 
     let mut files = Vec::new();
     for issue in issues {
@@ -386,6 +386,7 @@ mod tests {
                 folder_id: Some(child.id),
                 title: "Getting Started".into(),
                 content: "Welcome".into(),
+                labels: vec![],
             },
         )
         .unwrap();

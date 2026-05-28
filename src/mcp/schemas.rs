@@ -118,6 +118,10 @@ pub struct CreatePageInput {
     pub content: Option<String>,
     #[schemars(description = "Folder name to place page in")]
     pub folder: Option<String>,
+    #[schemars(
+        description = "Label names to attach. Labels are project-scoped, so this is ignored on workspace pages (LIF-105)."
+    )]
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -130,6 +134,10 @@ pub struct UpdatePageInput {
     pub content: Option<String>,
     #[schemars(description = "Move to folder name")]
     pub folder: Option<String>,
+    #[schemars(
+        description = "Replace labels. Pass [] to clear all. Labels are project-scoped (LIF-105)."
+    )]
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -184,6 +192,8 @@ pub struct ListResourcesInput {
     pub project: Option<String>,
     #[schemars(description = "Folder name (for page filtering)")]
     pub folder: Option<String>,
+    #[schemars(description = "Label name (for issue or page filtering — LIF-105)")]
+    pub label: Option<String>,
     #[schemars(description = "Max results (applies to issue/page lists; default 100 for issues)")]
     pub limit: Option<i64>,
     #[schemars(

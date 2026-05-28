@@ -59,6 +59,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "page comments",
         include_str!("../../migrations/012_page_comments.sql"),
     ),
+    (
+        13,
+        "page labels",
+        include_str!("../../migrations/013_page_labels.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

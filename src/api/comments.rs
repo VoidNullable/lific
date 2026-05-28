@@ -515,6 +515,7 @@ mod tests {
                     folder_id: None,
                     title: "Doc 1".into(),
                     content: "Body".into(),
+                    labels: vec![],
                 },
             )
             .unwrap();
@@ -658,6 +659,7 @@ mod tests {
                     folder_id: None,
                     title: "Page".into(),
                     content: String::new(),
+                    labels: vec![],
                 },
             )
             .unwrap();
@@ -745,6 +747,7 @@ mod tests {
                     folder_id: None,
                     title: "Page".into(),
                     content: String::new(),
+                    labels: vec![],
                 },
             )
             .unwrap();
@@ -834,6 +837,7 @@ mod tests {
                     folder_id: None,
                     title: "p".into(),
                     content: String::new(),
+                    labels: vec![],
                 },
             )
             .unwrap();

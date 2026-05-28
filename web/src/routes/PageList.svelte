@@ -3,6 +3,7 @@
     listPages,
     listFolders,
     listProjects,
+    listLabels,
     createPage,
     createFolder,
     deleteFolder,
@@ -10,6 +11,7 @@
     type Page,
     type Folder,
     type Project,
+    type Label,
   } from "../lib/api";
   import {
     FileText,
@@ -18,7 +20,9 @@
     Plus,
     ChevronRight,
     Trash2,
+    X,
   } from "lucide-svelte";
+  import Select from "../lib/Select.svelte";
 
   let {
     navigate,
@@ -31,6 +35,9 @@
   let project = $state<Project | null>(null);
   let pages = $state<Page[]>([]);
   let folders = $state<Folder[]>([]);
+  // LIF-105: project labels powering the filter dropdown and chip color
+  // lookups in the tree. Empty until the project resolves.
+  let labels = $state<Label[]>([]);
   let loading = $state(true);
   let error = $state("");
 
@@ -44,9 +51,26 @@
   let createTarget = $state<{ type: "page" | "folder"; parentId: number | null } | null>(null);
   let createName = $state("");
 
+  // LIF-105: server-side label filter. Empty string = no filter (mirrors
+  // the issue list's filterLabel convention).
+  let filterLabel = $state("");
+
+  let labelOptions = $derived([
+    { value: "", label: "Label" },
+    ...labels.map((l) => ({ value: l.name, label: l.name, color: l.color })),
+  ]);
+
   $effect(() => {
     const id = projectIdentifier;
     loadData(id);
+  });
+
+  // Refetch pages when the label filter changes (matches the issue-list
+  // pattern of pushing every filter through the server, so it composes
+  // cleanly with later filters like folder).
+  $effect(() => {
+    filterLabel;
+    if (project) reloadPages();
   });
 
   async function loadData(ident: string) {
@@ -58,16 +82,24 @@
     if (!found) { error = `Project ${ident} not found`; loading = false; return; }
     project = found;
 
-    const [pRes, fRes] = await Promise.all([
-      listPages(found.id),
+    const [pRes, fRes, lRes] = await Promise.all([
+      listPages(found.id, undefined, filterLabel || undefined),
       listFolders(found.id),
+      listLabels(found.id),
     ]);
     if (pRes.ok) pages = pRes.data;
     if (fRes.ok) {
       folders = fRes.data;
       expandedFolders = new Set(fRes.data.map((f: Folder) => f.id));
     }
+    if (lRes.ok) labels = lRes.data;
     loading = false;
+  }
+
+  async function reloadPages() {
+    if (!project) return;
+    const res = await listPages(project.id, undefined, filterLabel || undefined);
+    if (res.ok) pages = res.data;
   }
 
   // Tree helpers
@@ -252,6 +284,54 @@
       {/if}
     </div>
 
+    <!-- LIF-105: label filter. Only shown when the project has labels
+         defined — keeps the toolbar clean for label-less projects. The
+         Select component is the same one IssueList's filter uses so the
+         visual vocabulary stays consistent. -->
+    {#if labels.length > 0}
+      <div class="ml-3 flex items-center gap-1.5">
+        <Select
+          options={labelOptions}
+          bind:value={filterLabel}
+          placeholder="Label"
+          size="sm"
+          class="w-auto"
+        >
+          {#snippet renderSelected(opt)}
+            <span class="flex items-center gap-1.5 text-[0.8125rem]">
+              {#if opt.value && opt.color}
+                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="text-[var(--text)]">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+          {#snippet renderOption(opt, isSelected)}
+            <span class="flex items-center gap-2 text-[0.8125rem] {isSelected ? 'font-medium' : ''}">
+              {#if opt.value && opt.color}
+                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
+              {:else}
+                <span class="text-[var(--text-muted)]">{opt.label}</span>
+              {/if}
+            </span>
+          {/snippet}
+        </Select>
+        {#if filterLabel}
+          <button
+            class="flex items-center gap-1 text-[0.75rem] text-[var(--text-muted)]
+                   hover:text-[var(--text)] px-1.5 py-1 rounded-md
+                   hover:bg-[var(--bg-subtle)] transition-colors"
+            onclick={() => { filterLabel = ""; }}
+            title="Clear label filter"
+          >
+            <X size={12} />
+          </button>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Spacer -->
     <div class="flex-1"></div>
 
@@ -429,6 +509,30 @@
       <span class="text-[0.9375rem] text-[var(--text)] truncate flex-1">
         {page.title}
       </span>
+
+      <!-- LIF-105: label chips. Up to 2 then a "+N" overflow, matching
+           the IssueList row layout so the visual vocabulary stays
+           consistent across both list types. -->
+      {#if page.labels.length > 0}
+        <div class="flex items-center gap-1 shrink-0">
+          {#each page.labels.slice(0, 2) as lbl}
+            {@const labelObj = labels.find((l) => l.name === lbl)}
+            <span
+              class="text-[0.6875rem] font-medium px-1.5 py-0.5 rounded-full
+                     border border-[var(--border)]"
+              style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+            >
+              {lbl}
+            </span>
+          {/each}
+          {#if page.labels.length > 2}
+            <span class="text-[0.6875rem] text-[var(--text-faint)]">
+              +{page.labels.length - 2}
+            </span>
+          {/if}
+        </div>
+      {/if}
+
       <span class="text-[0.8125rem] text-[var(--text-faint)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
         {formatRelative(page.updated_at)}
       </span>

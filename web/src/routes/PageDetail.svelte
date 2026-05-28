@@ -6,12 +6,14 @@
     downloadPageExport,
     listPageComments,
     createPageComment,
+    listLabels,
     type Page,
     type Comment,
+    type Label,
   } from "../lib/api";
   import Markdown from "../lib/Markdown.svelte";
   import CommentThread from "../lib/CommentThread.svelte";
-  import { ArrowLeft, Download, Ellipsis, Trash2 } from "lucide-svelte";
+  import { ArrowLeft, Download, Ellipsis, Trash2, Plus, X, Check } from "lucide-svelte";
 
   let {
     navigate,
@@ -27,6 +29,10 @@
 
   let page = $state<Page | null>(null);
   let comments = $state<Comment[]>([]);
+  // LIF-105: project labels available for attachment. Loaded after the
+  // page resolves so we know which project to query. Stays empty for
+  // workspace pages (project_id === null) — labels are project-scoped.
+  let labels = $state<Label[]>([]);
   let loading = $state(true);
   let error = $state("");
 
@@ -50,6 +56,11 @@
   let exportError = $state("");
   let exporting = $state(false);
 
+  // LIF-105: label picker popover state. Same shape IssueDetail uses
+  // (a single boolean toggled by the "+" affordance, closed on
+  // outside-click via the window handler).
+  let labelsOpen = $state(false);
+
   $effect(() => {
     const id = pageId;
     loadPage(id);
@@ -59,13 +70,22 @@
     loading = true;
     error = "";
     comments = [];
+    labels = [];
     const res = await getPage(id);
     if (!res.ok) { error = res.error; loading = false; return; }
     page = res.data;
 
-    // Load page comments in parallel with the rest of the render.
-    const cmtRes = await listPageComments(page.id);
-    if (cmtRes.ok) comments = cmtRes.data;
+    // Load page comments and project labels in parallel. Workspace pages
+    // skip the labels fetch since they can't carry any (LIF-105 deferred).
+    const tasks: Promise<unknown>[] = [
+      listPageComments(page.id).then((r) => { if (r.ok) comments = r.data; }),
+    ];
+    if (page.project_id !== null) {
+      tasks.push(
+        listLabels(page.project_id).then((r) => { if (r.ok) labels = r.data; }),
+      );
+    }
+    await Promise.all(tasks);
 
     loading = false;
   }
@@ -81,6 +101,20 @@
   function handleWindowClick() {
     menuOpen = false;
     confirmingDelete = false;
+    labelsOpen = false;
+  }
+
+  // LIF-105: toggle a label name on/off, then persist the full set.
+  // Replace semantics on the wire (backend does delete-all + reinsert),
+  // so we send the entire array. Local optimistic update keeps the UI
+  // snappy in the gap before the response.
+  async function toggleLabel(name: string) {
+    if (!page) return;
+    const current = [...page.labels];
+    const idx = current.indexOf(name);
+    if (idx >= 0) current.splice(idx, 1);
+    else current.push(name);
+    await saveField("labels", current);
   }
 
   // ── Save ─────────────────────────────────────────────
@@ -333,7 +367,7 @@
             bind:value={draftTitle}
             class="w-full text-[1.75rem] font-display tracking-tight
                    bg-transparent border-none outline-none
-                   text-[var(--text)] py-1 mb-6"
+                   text-[var(--text)] py-1 mb-3"
             onblur={commitTitle}
             onkeydown={(e) => {
               if (e.key === "Enter") commitTitle();
@@ -345,12 +379,108 @@
           <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
           <h1
             class="text-[1.75rem] font-display tracking-tight text-[var(--text)]
-                   py-1 mb-6 rounded transition-colors
+                   py-1 mb-3 rounded transition-colors
                    {editable ? 'cursor-text hover:bg-[var(--bg-subtle)]' : ''}"
             onclick={startEditTitle}
           >
             {page.title}
           </h1>
+        {/if}
+
+        <!-- LIF-105: labels strip. Sits below the title and above the
+             body content, mirroring the chip+picker UX in IssueDetail's
+             sidebar but laid out horizontally since pages have no
+             sidebar. Workspace pages skip this block entirely — labels
+             are project-scoped (the picker would have nothing to show). -->
+        {#if page.project_id !== null}
+          <div class="flex flex-wrap gap-1.5 items-center mb-6">
+            {#if page.labels.length > 0}
+              {#each page.labels as lbl}
+                {@const labelObj = labels.find((l) => l.name === lbl)}
+                <span
+                  class="inline-flex items-center gap-1 text-[0.75rem]
+                         font-medium px-2 py-0.5 rounded-full border"
+                  style={labelObj
+                    ? `color: ${labelObj.color}; border-color: ${labelObj.color}40; background: ${labelObj.color}10;`
+                    : ""}
+                >
+                  {lbl}
+                  {#if editable}
+                    <button
+                      class="size-3 rounded-full hover:bg-[var(--bg-subtle)]
+                             inline-flex items-center justify-center opacity-60
+                             hover:opacity-100 transition-opacity"
+                      onclick={(e) => { e.stopPropagation(); toggleLabel(lbl); }}
+                      title="Remove label"
+                    >
+                      <X size={10} />
+                    </button>
+                  {/if}
+                </span>
+              {/each}
+            {:else if !editable}
+              <!-- Read-only viewer for a label-less page gets nothing
+                   here. Editors still see the "+" affordance below. -->
+              <span class="text-[0.8125rem] text-[var(--text-faint)] italic">
+                No labels
+              </span>
+            {/if}
+
+            {#if editable}
+              <div class="relative">
+                <button
+                  class="size-5 rounded border border-dashed border-[var(--border)]
+                         text-[var(--text-faint)] hover:border-[var(--accent)]
+                         hover:text-[var(--accent)] flex items-center justify-center
+                         transition-colors"
+                  title="Add label"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    labelsOpen = !labelsOpen;
+                  }}
+                >
+                  <Plus size={12} />
+                </button>
+
+                {#if labelsOpen}
+                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                  <div
+                    class="absolute left-0 top-full mt-1 z-20 w-[200px]
+                           bg-[var(--surface)] border border-[var(--border)]
+                           rounded-md shadow-lg py-1"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    {#if labels.length === 0}
+                      <div class="px-3 py-2 text-[0.8125rem] text-[var(--text-faint)]">
+                        No labels defined in this project.
+                      </div>
+                    {:else}
+                      {#each labels as label}
+                        {@const isAttached = page.labels.includes(label.name)}
+                        <button
+                          class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                                 text-[0.8125rem] transition-colors
+                                 hover:bg-[var(--bg-subtle)]"
+                          onclick={() => toggleLabel(label.name)}
+                        >
+                          <span
+                            class="size-2.5 rounded-full shrink-0"
+                            style="background: {label.color};"
+                          ></span>
+                          <span class="flex-1 {isAttached ? 'font-medium' : ''}">
+                            {label.name}
+                          </span>
+                          {#if isAttached}
+                            <Check size={14} class="text-[var(--accent)]" />
+                          {/if}
+                        </button>
+                      {/each}
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {/if}
 
         <!-- Body content -->

@@ -222,6 +222,7 @@ mod tests {
                 folder_id: None,
                 title: "Test page".into(),
                 content: "Body".into(),
+                labels: vec![],
             },
         )
         .unwrap();

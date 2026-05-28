@@ -506,6 +506,9 @@ impl LificMcp {
         }) {
             Ok(page) => {
                 let mut out = format!("{} — {}\n", page.identifier, page.title);
+                if !page.labels.is_empty() {
+                    out.push_str(&format!("Labels: {}\n", page.labels.join(", ")));
+                }
                 if !page.content.is_empty() {
                     out.push_str(&format!("\n{}\n", page.content));
                 }
@@ -567,6 +570,7 @@ impl LificMcp {
                     folder_id,
                     title: input.title.clone(),
                     content: input.content.clone().unwrap_or_default(),
+                    labels: input.labels.clone().unwrap_or_default(),
                 },
             )
         }) {
@@ -599,6 +603,7 @@ impl LificMcp {
                     content: input.content.clone(),
                     folder_id: folder_id.map(Some),
                     sort_order: None,
+                    labels: input.labels.clone(),
                 },
             )
         }) {
@@ -648,6 +653,7 @@ impl LificMcp {
                 content: None,
                 folder_id: None,
                 sort_order: None,
+                labels: None,
             };
             match field {
                 "title" => patch.title = Some(updated),
@@ -803,12 +809,24 @@ impl LificMcp {
                     },
                     _ => None,
                 };
-                match self.read(|conn| queries::list_pages(conn, project_id, folder_id)) {
+                let label = input.label.as_deref();
+                match self.read(|conn| queries::list_pages(conn, project_id, folder_id, label)) {
                     Ok(pages) if pages.is_empty() => "No pages found.".into(),
                     Ok(pages) => {
                         let mut out = format!("{} pages:\n", pages.len());
                         for p in &pages {
-                            out.push_str(&format!("- {} | {}\n", p.identifier, p.title));
+                            // Mirror `fmt_issue`: only suffix the label
+                            // bracket when there's something to show, so
+                            // unlabeled pages stay terse.
+                            let labels = if p.labels.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{}]", p.labels.join(", "))
+                            };
+                            out.push_str(&format!(
+                                "- {} | {}{}\n",
+                                p.identifier, p.title, labels
+                            ));
                         }
                         out
                     }
@@ -1671,6 +1689,7 @@ mod tests {
             title: "Design Doc".into(),
             content: Some("# Overview\nSome content".into()),
             folder: None,
+            labels: None,
         }));
         assert!(created.contains("PG-DOC-1"), "got: {created}");
 
@@ -1685,6 +1704,7 @@ mod tests {
             title: Some("Updated Doc".into()),
             content: None,
             folder: None,
+            labels: None,
         }));
         assert!(updated.contains("Updated Doc"), "got: {updated}");
     }
@@ -1697,6 +1717,7 @@ mod tests {
             title: "Global Note".into(),
             content: None,
             folder: None,
+            labels: None,
         }));
         assert!(created.contains("DOC-"), "got: {created}");
     }
@@ -1710,6 +1731,7 @@ mod tests {
             title: "Temp".into(),
             content: None,
             folder: None,
+            labels: None,
         }));
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "page".into(),
@@ -1759,6 +1781,7 @@ mod tests {
             resource_type: "project".into(),
             project: None,
             folder: None,
+            label: None,
             limit: None,
             offset: None,
         }));
@@ -1775,6 +1798,7 @@ mod tests {
                 resource_type: rt.into(),
                 project: None,
                 folder: None,
+                label: None,
                 limit: None,
                 offset: None,
             }));
@@ -1789,6 +1813,7 @@ mod tests {
             resource_type: "widget".into(),
             project: None,
             folder: None,
+            label: None,
             limit: None,
             offset: None,
         }));
@@ -1806,6 +1831,7 @@ mod tests {
             resource_type: "issue".into(),
             project: Some("BLK".into()),
             folder: None,
+            label: None,
             limit: Some(2),
             offset: None,
         }));
@@ -2083,6 +2109,7 @@ mod tests {
             title: "Design".into(),
             content: None,
             folder: None,
+            labels: None,
         }));
         seed_user(&m);
 
@@ -2110,6 +2137,7 @@ mod tests {
             title: "A page".into(),
             content: None,
             folder: None,
+            labels: None,
         }));
         seed_user(&m);
 
@@ -2144,6 +2172,7 @@ mod tests {
             title: "Workspace note".into(),
             content: None,
             folder: None,
+            labels: None,
         }));
         seed_user(&m);
 
@@ -2426,6 +2455,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("# Heading\nold body".into()),
             folder: None,
+            labels: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -2453,6 +2483,7 @@ mod tests {
             title: "Draft Spec".into(),
             content: Some("body".into()),
             folder: None,
+            labels: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -2487,6 +2518,7 @@ mod tests {
             title: "Original Title".into(),
             content: Some("change me".into()),
             folder: Some("Specs".into()),
+            labels: None,
         }));
 
         m.edit_page(Parameters(EditPageInput {
@@ -2509,6 +2541,7 @@ mod tests {
             resource_type: "page".into(),
             project: Some("EPP".into()),
             folder: Some("Specs".into()),
+            label: None,
             limit: None,
             offset: None,
         }));
@@ -2524,6 +2557,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("hello".into()),
             folder: None,
+            labels: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -2546,6 +2580,7 @@ mod tests {
             title: "Doc".into(),
             content: Some("body".into()),
             folder: None,
+            labels: None,
         }));
 
         let result = m.edit_page(Parameters(EditPageInput {
@@ -2557,5 +2592,162 @@ mod tests {
         }));
         assert!(result.starts_with("Error"), "got: {result}");
         assert!(result.contains("invalid field"), "got: {result}");
+    }
+
+    // ── LIF-105: page labels (MCP surface) ─────────────────────────
+
+    /// Helper: seed two labels in a project, return the project identifier.
+    fn seed_labels_for_pages(m: &LificMcp, project_ident: &str, project_name: &str) {
+        seed_project(m, project_name, project_ident);
+        for (name, color) in [("design", "#22C55E"), ("draft", "#F59E0B")] {
+            m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: "label".into(),
+                action: "create".into(),
+                project: Some(project_ident.into()),
+                name: Some(name.into()),
+                color: Some(color.into()),
+                identifier: None,
+                description: None,
+                current_name: None,
+                status: None,
+            }));
+        }
+    }
+
+    #[test]
+    fn mcp_create_page_with_labels_returns_them_in_get() {
+        let m = mcp();
+        seed_labels_for_pages(&m, "PGL", "Pages with Labels");
+
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: Some("PGL".into()),
+            title: "Spec".into(),
+            content: None,
+            folder: None,
+            labels: Some(vec!["design".into()]),
+        }));
+        assert!(created.contains("PGL-DOC-1"), "got: {created}");
+
+        let detail = m.get_page(Parameters(GetPageInput {
+            identifier: "PGL-DOC-1".into(),
+        }));
+        // get_page emits `Labels: <names>` when non-empty (mirrors get_issue).
+        assert!(detail.contains("Labels: design"), "got: {detail}");
+    }
+
+    #[test]
+    fn mcp_update_page_replaces_labels() {
+        let m = mcp();
+        seed_labels_for_pages(&m, "PUL", "Page Update Labels");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PUL".into()),
+            title: "Spec".into(),
+            content: None,
+            folder: None,
+            labels: Some(vec!["design".into()]),
+        }));
+
+        m.update_page(Parameters(UpdatePageInput {
+            identifier: "PUL-DOC-1".into(),
+            title: None,
+            content: None,
+            folder: None,
+            labels: Some(vec!["draft".into()]),
+        }));
+
+        let detail = m.get_page(Parameters(GetPageInput {
+            identifier: "PUL-DOC-1".into(),
+        }));
+        assert!(detail.contains("Labels: draft"), "got: {detail}");
+        assert!(!detail.contains("design"), "got: {detail}");
+    }
+
+    #[test]
+    fn mcp_list_resources_pages_renders_label_brackets() {
+        // The MCP page list line is `- {id} | {title}[ [labels]]` —
+        // matches the issue list formatter so an agent reading both
+        // surfaces sees one mental model.
+        let m = mcp();
+        seed_labels_for_pages(&m, "PLI", "Page List");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PLI".into()),
+            title: "Tagged".into(),
+            content: None,
+            folder: None,
+            labels: Some(vec!["design".into()]),
+        }));
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PLI".into()),
+            title: "Bare".into(),
+            content: None,
+            folder: None,
+            labels: None,
+        }));
+
+        let listing = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "page".into(),
+            project: Some("PLI".into()),
+            folder: None,
+            label: None,
+            limit: None,
+            offset: None,
+        }));
+        assert!(listing.contains("Tagged [design]"), "got: {listing}");
+        // Bare page should NOT carry an empty `[]` bracket — keeps the
+        // common case terse.
+        assert!(listing.contains("| Bare\n"), "got: {listing}");
+    }
+
+    #[test]
+    fn mcp_list_resources_pages_label_filter() {
+        let m = mcp();
+        seed_labels_for_pages(&m, "PLF", "Page Label Filter");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PLF".into()),
+            title: "Designy".into(),
+            content: None,
+            folder: None,
+            labels: Some(vec!["design".into()]),
+        }));
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PLF".into()),
+            title: "Plain".into(),
+            content: None,
+            folder: None,
+            labels: None,
+        }));
+
+        let filtered = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "page".into(),
+            project: Some("PLF".into()),
+            folder: None,
+            label: Some("design".into()),
+            limit: None,
+            offset: None,
+        }));
+        assert!(filtered.contains("Designy"), "got: {filtered}");
+        assert!(!filtered.contains("Plain"), "got: {filtered}");
+    }
+
+    #[test]
+    fn mcp_workspace_page_create_with_labels_silently_drops_them() {
+        let m = mcp();
+        // No seed_project: workspace pages live outside any project. The
+        // labels list is silently ignored (project-scoped labels can't
+        // attach without a project).
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: None,
+            title: "Floating".into(),
+            content: None,
+            folder: None,
+            labels: Some(vec!["anything".into()]),
+        }));
+        assert!(created.contains("DOC-1"), "got: {created}");
+
+        let detail = m.get_page(Parameters(GetPageInput {
+            identifier: "DOC-1".into(),
+        }));
+        // No `Labels:` line present.
+        assert!(!detail.contains("Labels:"), "got: {detail}");
     }
 }
