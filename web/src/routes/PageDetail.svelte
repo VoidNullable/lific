@@ -167,7 +167,6 @@
   deleteLabel={page?.identifier ?? ""}
   onDelete={handleDelete}
   {comments}
-  commentsDivider
   onNewComment={handleNewComment}
   layout="wide"
 >

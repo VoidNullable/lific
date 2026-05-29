@@ -17,7 +17,7 @@
   // owns only the body's read/edit mode (so the topbar toggle and the
   // "E" shortcut can drive EditableMarkdown without the route caring).
 
-  import CommentThread from "./CommentThread.svelte";
+  import Comments from "./Comments.svelte";
   import EditableMarkdown from "./EditableMarkdown.svelte";
   import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
@@ -60,7 +60,6 @@
     onDelete,
     // Comments (optional)
     comments,
-    commentsDivider = false,
     onNewComment,
     // Layout
     layout = "two-column",
@@ -95,7 +94,6 @@
     deleteConfirmBody?: string;
     onDelete?: () => Promise<boolean>;
     comments?: Comment[];
-    commentsDivider?: boolean;
     onNewComment?: (content: string) => Promise<Comment | null>;
     layout?: "two-column" | "wide";
     sidebar?: Snippet;
@@ -235,13 +233,7 @@
   />
 
   {#if onNewComment && comments}
-    <div
-      class={commentsDivider
-        ? "mt-10 pt-6 border-t border-[var(--border)]"
-        : "mt-8"}
-    >
-      <CommentThread {comments} {editable} onSubmit={onNewComment} />
-    </div>
+    <Comments {comments} {editable} onSubmit={onNewComment} />
   {/if}
 
   {#if metaFooter}{@render metaFooter()}{/if}
