@@ -15,7 +15,7 @@
     Plus, Search, ChevronRight, CircleCheckBig, CircleX, X,
     Circle, CircleDot, CircleDashed, Layers, SignalHigh, SignalMedium, SignalLow, Signal, AlertTriangle,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
-    ArrowDownUp, ArrowDown, ArrowUp, Hash, Clock,
+    ArrowDownUp, ArrowDown, ArrowUp, Hash, Clock, History,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
@@ -330,7 +330,7 @@
   //   age      desc = newest first
   //   number   asc  = smallest issue # first
   //   number   desc = largest issue # first
-  type SortField = "priority" | "age" | "number";
+  type SortField = "priority" | "age" | "number" | "updated";
   type SortDir = "asc" | "desc";
   let sortField = $state<SortField>("priority");
   let sortDir = $state<SortDir>("asc"); // default: urgent first
@@ -367,6 +367,9 @@
       case "age":
         r = a.created_at.localeCompare(b.created_at);
         break;
+      case "updated":
+        r = a.updated_at.localeCompare(b.updated_at);
+        break;
       case "number":
         r = a.sequence - b.sequence;
         break;
@@ -388,7 +391,8 @@
       sortDir = sortDir === "asc" ? "desc" : "asc";
     } else {
       sortField = field;
-      sortDir = "asc";
+      // "updated" means "last activity"; newest-first is the natural default.
+      sortDir = field === "updated" ? "desc" : "asc";
     }
   }
 
@@ -1016,7 +1020,7 @@
         <Tooltip
           content={sortOpen
             ? null
-            : `Sort: ${sortField === "age" ? "Age" : sortField === "number" ? "Issue #" : "Priority"} ${sortDir === "asc" ? "ascending" : "descending"}`}
+            : `Sort: ${sortField === "age" ? "Age" : sortField === "updated" ? "Updated" : sortField === "number" ? "Issue #" : "Priority"} ${sortDir === "asc" ? "ascending" : "descending"}`}
           placement="bottom"
         >
           <button
@@ -1040,9 +1044,11 @@
             <span>
               {sortField === "age"
                 ? "Age"
-                : sortField === "number"
-                  ? "Issue #"
-                  : "Priority"}
+                : sortField === "updated"
+                  ? "Updated"
+                  : sortField === "number"
+                    ? "Issue #"
+                    : "Priority"}
             </span>
           </button>
         </Tooltip>
@@ -1086,6 +1092,7 @@
             {/snippet}
             {@render sortRow("priority", "Priority", Signal)}
             {@render sortRow("age", "Age", Clock)}
+            {@render sortRow("updated", "Updated", History)}
             {@render sortRow("number", "Issue number", Hash)}
             <div class="px-3 pt-2 pb-1 mt-1 text-[0.6875rem]
                         text-[var(--text-faint)] border-t

@@ -74,6 +74,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "module icon",
         include_str!("../../migrations/015_module_icon.sql"),
     ),
+    (
+        17,
+        "issue activity triggers",
+        include_str!("../../migrations/017_issue_activity_triggers.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

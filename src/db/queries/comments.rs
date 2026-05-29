@@ -437,6 +437,55 @@ mod tests {
         assert!(comments.is_empty());
     }
 
+    /// Read an issue's raw updated_at timestamp directly from the table.
+    fn issue_updated_at(conn: &Connection, issue_id: i64) -> String {
+        conn.query_row(
+            "SELECT updated_at FROM issues WHERE id = ?1",
+            params![issue_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    // LIF-116: creating a comment is "activity" on the parent issue, so the
+    // trigger added in migration 017 must bump issues.updated_at. SQLite's
+    // datetime('now') is 1-second resolution, so we sleep > 1s to guarantee a
+    // strictly-greater timestamp.
+    #[test]
+    fn creating_comment_bumps_issue_updated_at() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+
+        let before = issue_updated_at(&conn, issue_id);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Activity").unwrap();
+        let after = issue_updated_at(&conn, issue_id);
+
+        assert!(
+            after > before,
+            "expected comment creation to bump issue updated_at: before={before}, after={after}"
+        );
+    }
+
+    // LIF-116: deleting a comment is also activity; the AFTER DELETE trigger
+    // bumps updated_at using OLD.issue_id.
+    #[test]
+    fn deleting_comment_bumps_issue_updated_at() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+
+        let c = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Temp").unwrap();
+        let before = issue_updated_at(&conn, issue_id);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        delete_comment(&conn, c.id).unwrap();
+        let after = issue_updated_at(&conn, issue_id);
+
+        assert!(
+            after > before,
+            "expected comment deletion to bump issue updated_at: before={before}, after={after}"
+        );
+    }
+
     #[test]
     fn multiple_users_comment() {
         let (pool, issue_id, _, user1_id) = setup();

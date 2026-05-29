@@ -894,4 +894,70 @@ mod tests {
         .unwrap();
         assert_eq!(limited.len(), 3);
     }
+
+    /// Read an issue's raw updated_at timestamp directly from the table.
+    fn issue_updated_at(conn: &rusqlite::Connection, issue_id: i64) -> String {
+        conn.query_row(
+            "SELECT updated_at FROM issues WHERE id = ?1",
+            params![issue_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    // LIF-116: attaching a label is activity on the issue; the AFTER INSERT
+    // trigger on issue_labels (migration 017) bumps issues.updated_at.
+    // datetime('now') is 1-second resolution, so we sleep > 1s first.
+    #[test]
+    fn attaching_label_bumps_issue_updated_at() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let label_id = seed_label(&conn, pid, "bug");
+        let issue = quick_issue(&conn, pid, "Labelable", "todo", "none");
+
+        let before = issue_updated_at(&conn, issue.id);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        conn.execute(
+            "INSERT INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+            params![issue.id, label_id],
+        )
+        .unwrap();
+        let after = issue_updated_at(&conn, issue.id);
+
+        assert!(
+            after > before,
+            "expected attaching a label to bump issue updated_at: before={before}, after={after}"
+        );
+    }
+
+    // LIF-116: detaching a label is activity too; the AFTER DELETE trigger
+    // bumps updated_at using OLD.issue_id.
+    #[test]
+    fn detaching_label_bumps_issue_updated_at() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let label_id = seed_label(&conn, pid, "bug");
+        let issue = quick_issue(&conn, pid, "Labelable", "todo", "none");
+        conn.execute(
+            "INSERT INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+            params![issue.id, label_id],
+        )
+        .unwrap();
+
+        let before = issue_updated_at(&conn, issue.id);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        conn.execute(
+            "DELETE FROM issue_labels WHERE issue_id = ?1 AND label_id = ?2",
+            params![issue.id, label_id],
+        )
+        .unwrap();
+        let after = issue_updated_at(&conn, issue.id);
+
+        assert!(
+            after > before,
+            "expected detaching a label to bump issue updated_at: before={before}, after={after}"
+        );
+    }
 }
