@@ -536,13 +536,43 @@ async fn token_exchange(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
 
-    let code_row: Result<(String, String, String, String, i64, String, Option<i64>), _> = conn.query_row(
+    // Named row type keeps the query_row result readable and avoids
+    // clippy::type_complexity on the 7-column tuple (LIF-79 added user_id).
+    struct AuthCodeRow {
+        client_id: String,
+        redirect_uri: String,
+        code_challenge: String,
+        challenge_method: String,
+        used: i64,
+        scope: String,
+        user_id: Option<i64>,
+    }
+
+    let code_row: Result<AuthCodeRow, _> = conn.query_row(
         "SELECT client_id, redirect_uri, code_challenge, code_challenge_method, used, scope, user_id FROM oauth_codes WHERE code = ?1 AND expires_at > datetime('now')",
         params![code],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        |row| {
+            Ok(AuthCodeRow {
+                client_id: row.get(0)?,
+                redirect_uri: row.get(1)?,
+                code_challenge: row.get(2)?,
+                challenge_method: row.get(3)?,
+                used: row.get(4)?,
+                scope: row.get(5)?,
+                user_id: row.get(6)?,
+            })
+        },
     );
 
-    let (stored_client_id, stored_redirect_uri, code_challenge, challenge_method, used, scope, code_user_id) = match code_row {
+    let AuthCodeRow {
+        client_id: stored_client_id,
+        redirect_uri: stored_redirect_uri,
+        code_challenge,
+        challenge_method,
+        used,
+        scope,
+        user_id: code_user_id,
+    } = match code_row {
         Ok(row) => row,
         Err(_) => {
             return (
