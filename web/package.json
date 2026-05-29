@@ -24,6 +24,7 @@
     "lucide": "^1.7.0",
     "lucide-svelte": "^1.0.1",
     "marked": "^17.0.6",
+    "mermaid": "^11.15.0",
     "svelte-dnd-action": "^0.9.69",
     "unicode-emoji-json": "^0.8.0"
   }
