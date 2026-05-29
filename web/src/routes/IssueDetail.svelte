@@ -13,28 +13,13 @@
     type Label,
     type Comment,
   } from "../lib/api";
-  import CommentThread from "../lib/CommentThread.svelte";
-  import EditableMarkdown from "../lib/EditableMarkdown.svelte";
-  import ModeToggle from "../lib/ModeToggle.svelte";
+  import DocumentDetail from "../lib/DocumentDetail.svelte";
+  import LabelEditor from "../lib/LabelEditor.svelte";
+  import { formatDate } from "../lib/format";
   import {
-    ArrowLeft, Ellipsis, Trash2, Plus, X, Check,
-    CircleCheck, CircleX, CircleAlert,
-    Circle, CircleDot, CircleDashed, CircleCheckBig,
-    Download, ArrowUpRight,
+    CircleAlert, Circle, CircleDot, CircleDashed, CircleCheckBig, CircleX,
+    ArrowUpRight,
   } from "lucide-svelte";
-  import { getContext } from "svelte";
-
-  // Register our toolbar with Layout's chrome topbar slot. Same pattern
-  // IssueList/Board uses — keeps the chrome L visually seamless across
-  // list → detail transitions.
-  const topbarCtx = getContext<{
-    set: (s: import("svelte").Snippet | undefined) => void;
-  } | undefined>("lific:topbar");
-
-  $effect(() => {
-    topbarCtx?.set(topbarContent);
-    return () => topbarCtx?.set(undefined);
-  });
 
   function statusCssColor(s: string): string {
     switch (s) {
@@ -62,27 +47,22 @@
   // Back-arrow destination mirrors whichever list layout the user was
   // last viewing for this project (set by IssueList). Falling back to
   // the flat issues list preserves prior behavior when nothing's stored.
-  function backRoute(): string {
-    let layout = "list";
+  function storedLayout(): "board" | "list" {
     try {
       const raw = localStorage.getItem(`lific:list:layout:${projectIdentifier}`);
-      if (raw === "board" || raw === "list") layout = raw;
+      if (raw === "board" || raw === "list") return raw;
     } catch {
       // ignore
     }
-    return layout === "board"
+    return "list";
+  }
+  function backHref(): string {
+    return storedLayout() === "board"
       ? `/${projectIdentifier}/board`
       : `/${projectIdentifier}/issues`;
   }
-  function backLabel(): string {
-    let layout = "list";
-    try {
-      const raw = localStorage.getItem(`lific:list:layout:${projectIdentifier}`);
-      if (raw === "board" || raw === "list") layout = raw;
-    } catch {
-      // ignore
-    }
-    return layout === "board" ? "Board" : "Issues";
+  function backText(): string {
+    return storedLayout() === "board" ? "Board" : "Issues";
   }
 
   let issue = $state<Issue | null>(null);
@@ -92,31 +72,18 @@
   let loading = $state(true);
   let error = $state("");
 
-  // Editing states
-  let editingTitle = $state(false);
-  let draftTitle = $state("");
-  // LIF-109: description editing now lives inside <EditableMarkdown>.
-  // Mode is bindable so the toolbar button + "E" keyboard shortcut
-  // share the same toggle as the floating bottom-right pill.
-  let descriptionMode = $state<"read" | "edit">("read");
-  let descriptionRef = $state<EditableMarkdown | null>(null);
-
-  // Dropdown states
+  // Sidebar dropdown states (issue-specific; the body's read/edit mode
+  // lives inside DocumentDetail).
   let statusOpen = $state(false);
   let priorityOpen = $state(false);
   let moduleOpen = $state(false);
   let labelsOpen = $state(false);
 
-  // (Comment draft state lives inside the CommentThread component now.)
-
   // Save indicator
   let saving = $state(false);
   let lastSaved = $state<string | null>(null);
 
-  // Kebab menu
-  let menuOpen = $state(false);
-  let confirmingDelete = $state(false);
-  let deleting = $state(false);
+  // Export
   let exportError = $state("");
   let exporting = $state(false);
 
@@ -138,11 +105,6 @@
 
   $effect(() => {
     const id = issueIdentifier;
-    // Reset all editing state when switching issues
-    editingTitle = false;
-    descriptionMode = "read";
-    menuOpen = false;
-    confirmingDelete = false;
     statusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
@@ -162,7 +124,6 @@
     }
     issue = res.data;
 
-    // Load metadata and comments in parallel
     const [modRes, lblRes, cmtRes] = await Promise.all([
       listModules(issue.project_id),
       listLabels(issue.project_id),
@@ -173,92 +134,21 @@
     if (cmtRes.ok) comments = cmtRes.data;
 
     loading = false;
-
-    // Auto-enter description edit mode if content is empty
-    if (editable && issue && !issue.description.trim()) {
-      requestAnimationFrame(() => descriptionRef?.focus());
-    }
   }
 
-  // ── Keyboard shortcuts ──────────────────────────────
-  function handleKeydown(e: KeyboardEvent) {
-    // Ctrl+S / Cmd+S — save whatever is being edited.
-    // Title gets handled here; description's textarea handles its own
-    // Ctrl+S internally so it can capture the current draft cleanly.
-    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-      if (editingTitle) {
-        e.preventDefault();
-        commitTitle();
-        return;
-      }
-    }
-
-    // LIF-109: "E" enters edit mode for the description from anywhere
-    // outside an input. Matches the affordance advertised by the
-    // toolbar Edit button and the floating pill.
-    if (e.key === "e" || e.key === "E") {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const el = document.activeElement;
-      if (el) {
-        const tag = el.tagName;
-        if (
-          tag === "INPUT" ||
-          tag === "TEXTAREA" ||
-          tag === "SELECT" ||
-          (el as HTMLElement).isContentEditable
-        ) return;
-      }
-      if (editable && issue && descriptionMode === "read") {
-        e.preventDefault();
-        descriptionRef?.focus();
-        return;
-      }
-    }
-
-    if (e.key !== "Escape") return;
-    // Don't intercept Esc when editing or in an input
-    const el = document.activeElement;
-    if (el) {
-      const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable) return;
-    }
-    if (editingTitle || descriptionMode === "edit" || statusOpen || priorityOpen || moduleOpen || labelsOpen || menuOpen) return;
-    e.preventDefault();
-    navigate(backRoute());
-  }
-
-  // Close all dropdowns on outside click
+  // Close sidebar dropdowns on outside click. (LabelEditor + the topbar
+  // DeleteMenu manage their own outside-click close.)
   function handleWindowClick() {
     statusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
-    menuOpen = false;
-    confirmingDelete = false;
   }
 
-  // ── Delete ────────────────────────────────────────────
-
-  async function confirmDelete() {
-    if (!issue) return;
-    deleting = true;
-    const res = await deleteIssue(issue.id);
-    if (res.ok) {
-      navigate(backRoute());
-    } else {
-      deleting = false;
-      confirmingDelete = false;
-      menuOpen = false;
-    }
-  }
-
-  async function exportMarkdown() {
-    if (!issue || exporting) return;
-    exporting = true;
-    exportError = "";
-    const res = await downloadIssueExport(issue.identifier);
-    if (!res.ok) exportError = res.error;
-    exporting = false;
+  function closeOtherDropdowns() {
+    statusOpen = false;
+    priorityOpen = false;
+    moduleOpen = false;
   }
 
   // ── Save helpers ─────────────────────────────────────
@@ -277,28 +167,9 @@
     saving = false;
   }
 
-  // ── Title editing ────────────────────────────────────
-
-  function startEditTitle() {
-    if (!editable || !issue) return;
-    draftTitle = issue.title;
-    editingTitle = true;
+  async function saveTitle(next: string) {
+    await saveField("title", next);
   }
-
-  async function commitTitle() {
-    if (!issue) return;
-    editingTitle = false;
-    const trimmed = draftTitle.trim();
-    if (trimmed && trimmed !== issue.title) {
-      await saveField("title", trimmed);
-    }
-  }
-
-  function cancelTitle() {
-    editingTitle = false;
-  }
-
-  // ── Description editing (delegated to EditableMarkdown) ──
 
   async function saveDescription(next: string) {
     if (!issue) return;
@@ -322,23 +193,19 @@
   async function setModule(id: number | null) {
     moduleOpen = false;
     if (!issue) return;
-    const current = issue.module_id;
-    if (id !== current) await saveField("module_id", id);
+    if (id !== issue.module_id) await saveField("module_id", id);
   }
 
   async function toggleLabel(name: string) {
     if (!issue) return;
     const current = [...issue.labels];
     const idx = current.indexOf(name);
-    if (idx >= 0) {
-      current.splice(idx, 1);
-    } else {
-      current.push(name);
-    }
+    if (idx >= 0) current.splice(idx, 1);
+    else current.push(name);
     await saveField("labels", current);
   }
 
-  // ── Comments ─────────────────────────────────────────
+  // ── Comments / export / delete ───────────────────────
 
   async function handleNewComment(content: string) {
     if (!issue) return null;
@@ -348,17 +215,23 @@
     return res.data;
   }
 
-  // ── Helpers ──────────────────────────────────────────
+  async function exportMarkdown() {
+    if (!issue || exporting) return;
+    exporting = true;
+    exportError = "";
+    const res = await downloadIssueExport(issue.identifier);
+    if (!res.ok) exportError = res.error;
+    exporting = false;
+  }
 
-  function formatDate(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
+  async function handleDelete(): Promise<boolean> {
+    if (!issue) return false;
+    const res = await deleteIssue(issue.id);
+    if (res.ok) {
+      navigate(backHref());
+      return true;
+    }
+    return false;
   }
 
   function moduleName(id: number | null): string {
@@ -367,187 +240,44 @@
   }
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
+<svelte:window onclick={handleWindowClick} />
 
-{#if loading}
-  <div class="h-full flex items-center justify-center">
-    <div
-      class="size-6 rounded-full border-2 border-[var(--border)]
-             border-t-[var(--accent)] animate-spin"
-    ></div>
-  </div>
-{:else if error}
-  <div class="h-full flex flex-col items-center justify-center gap-3">
-    <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-    <button
-      class="text-[0.8125rem] text-[var(--accent)] hover:underline"
-      onclick={() => navigate(backRoute())}
-    >
-      Back to {backLabel().toLowerCase()}
-    </button>
-  </div>
-{:else if issue}
-  <div class="h-full flex flex-col">
-    <!-- Content -->
-    <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
-        <!-- Main column -->
-        <div class="flex-1 min-w-0 px-8 py-6">
-          <!-- Title -->
-          {#if editingTitle}
-            <!-- svelte-ignore a11y_autofocus -->
-            <input
-              type="text"
-              bind:value={draftTitle}
-              class="w-full text-[1.5rem] font-display tracking-tight
-                     bg-transparent border-none outline-none
-                     text-[var(--text)] py-1 mb-4
-                     border-b-2 border-b-[var(--accent)]
-                     focus:border-b-[var(--accent)]"
-              onblur={commitTitle}
-              onkeydown={(e) => {
-                if (e.key === "Enter") commitTitle();
-                if (e.key === "Escape") cancelTitle();
-              }}
-              autofocus
-            />
-          {:else if editable}
-            <button
-              type="button"
-              class="text-[1.5rem] font-display font-normal tracking-tight text-[var(--text)]
-                     py-1 mb-4 rounded transition-colors w-full text-left
-                     bg-transparent border-0 p-0 cursor-text hover:bg-[var(--bg-subtle)]"
-              onclick={startEditTitle}
-              onkeydown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  startEditTitle();
-                }
-              }}
-            >
-              {issue.title}
-            </button>
-          {:else}
-            <h1
-              class="text-[1.5rem] font-display tracking-tight text-[var(--text)] py-1 mb-4"
-            >
-              {issue.title}
-            </h1>
-          {/if}
-
-          <!--
-            Description (LIF-109). EditableMarkdown owns the read↔edit
-            toggle, the sticky bottom-right pill, the locked container
-            height across mode swaps, and anchor preservation so the
-            swap doesn't visually jump. The compact toolbar button
-            above and the route-level "E" shortcut both drive
-            `descriptionRef.toggle()` / `descriptionRef.focus()`.
-          -->
-          <section class="mb-8">
-            <EditableMarkdown
-              bind:this={descriptionRef}
-              bind:mode={descriptionMode}
-              value={issue.description}
-              {editable}
-              {saving}
-              placeholder="Add a description... (markdown supported)"
-              emptyEditCta="Click to add a description..."
-              emptyReadText="No description"
-              proseMinHeight="60px"
-              onSave={saveDescription}
-            />
-          </section>
-
-          <!-- Comments (shared with PageDetail via web/src/lib/CommentThread.svelte) -->
-          <CommentThread {comments} {editable} onSubmit={handleNewComment} />
-        </div>
-
-        <!-- Sidebar: issue-meta-* classes in app.css (explicit gaps; compact joins avoid stray flex whitespace nodes) -->
-        <aside
-          class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5"
-        >
-          <!-- Manage -->
-          {#if editable}
-            <div class="flex items-center justify-between mb-5">
-              {@render sidebarField("Manage")}
-              <div class="relative">
-                <button
-                  class="flex items-center gap-1 text-[0.75rem] text-[var(--text-faint)]
-                         hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
-                         hover:bg-[var(--bg-subtle)]"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    if (confirmingDelete) {
-                      confirmingDelete = false;
-                      menuOpen = false;
-                    } else {
-                      menuOpen = !menuOpen;
-                    }
-                  }}
-                >
-              <Ellipsis size={14} />
-                </button>
-
-                {#if menuOpen && !confirmingDelete}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                  <div
-                    class="absolute right-0 top-full mt-1 z-20 w-[180px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg py-1"
-                    onclick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                             text-[0.8125rem] text-[var(--error)]
-                             hover:bg-[var(--error-bg)] transition-colors"
-                      onclick={() => { confirmingDelete = true; }}
-                    >
-                      <Trash2 size={14} />
-                      Delete issue
-                    </button>
-                  </div>
-                {/if}
-
-                {#if confirmingDelete}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                  <div
-                    class="absolute right-0 top-full mt-1 z-20 w-[240px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg p-3"
-                    onclick={(e) => e.stopPropagation()}
-                  >
-                    <p class="text-[0.8125rem] text-[var(--text)] mb-1 font-medium">
-                      Delete {issue.identifier}?
-                    </p>
-                    <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
-                      This can't be undone.
-                    </p>
-                    <div class="flex items-center gap-2">
-                      <button
-                        class="text-[0.8125rem] font-medium text-white
-                               bg-[var(--error)] px-3 py-1.5 rounded-md
-                               hover:opacity-90 transition-opacity
-                               disabled:opacity-50 disabled:cursor-not-allowed"
-                        disabled={deleting}
-                        onclick={confirmDelete}
-                      >
-                        {deleting ? "Deleting..." : "Delete"}
-                      </button>
-                      <button
-                        class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
-                               rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                        onclick={() => { confirmingDelete = false; menuOpen = false; }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/if}
-
-          <div class="issue-meta-aside"><div class="issue-meta-field">{@render sidebarField("Status")}<div class="relative">
+<DocumentDetail
+  {navigate}
+  {loading}
+  {error}
+  identifier={issue?.identifier ?? issueIdentifier}
+  backRoute={backHref()}
+  backLabel={backText()}
+  {editable}
+  title={issue?.title ?? ""}
+  titleSize="md"
+  onSaveTitle={saveTitle}
+  body={issue?.description ?? ""}
+  bodyPlaceholder="Add a description... (markdown supported)"
+  bodyEmptyEditCta="Click to add a description..."
+  bodyEmptyReadText="No description"
+  bodyProseMinHeight="60px"
+  onSaveBody={saveDescription}
+  autofocusWhenEmpty
+  {saving}
+  {lastSaved}
+  onExport={exportMarkdown}
+  {exporting}
+  {exportError}
+  deleteNoun="issue"
+  deleteLabel={issue?.identifier ?? ""}
+  onDelete={handleDelete}
+  {comments}
+  onNewComment={handleNewComment}
+  layout="two-column"
+>
+  {#snippet sidebar()}
+    {#if issue}
+      <div class="issue-meta-aside">
+        <div class="issue-meta-field">
+          {@render sidebarField("Status")}
+          <div class="relative">
             <button
               class="flex items-center gap-2 text-[0.8125rem] rounded-md
                      px-2 py-1 -mx-2 transition-colors w-full text-left
@@ -588,7 +318,12 @@
                 {/each}
               </div>
             {/if}
-          </div></div><div class="issue-meta-field">{@render sidebarField("Priority")}<div class="relative">
+          </div>
+        </div>
+
+        <div class="issue-meta-field">
+          {@render sidebarField("Priority")}
+          <div class="relative">
             <button
               class="flex items-center gap-2 flex-nowrap text-[0.8125rem] rounded-md
                      px-2 py-1 -mx-2 transition-colors w-full text-left
@@ -631,14 +366,14 @@
                 {/each}
               </div>
             {/if}
-          </div></div><div class="issue-meta-field">{@render sidebarField("Module")}<div class="relative">
-            <!-- Assignment dropdown trigger + jump-to-module link.
-                 LIF-121: with a real module detail page now in place,
-                 clicking the chip text opens the assignment dropdown
-                 (existing behavior) but the arrow icon at the right
-                 jumps to the module's detail page so users can pivot
-                 from "what module is this in" to "what else is in
-                 this module" without breaking the read flow. -->
+          </div>
+        </div>
+
+        <div class="issue-meta-field">
+          {@render sidebarField("Module")}
+          <div class="relative">
+            <!-- Trigger opens the assignment dropdown; the arrow jumps to
+                 the module's detail page (LIF-121). -->
             <div class="flex items-center -mx-2">
               <button
                 class="flex items-center gap-2 text-[0.8125rem] rounded-md
@@ -704,156 +439,99 @@
                 {/each}
               </div>
             {/if}
-          </div></div><div class="issue-meta-field">{@render sidebarField("Labels")}<div class="relative">
-            <div class="flex flex-wrap gap-1.5 items-center">
-              {#if issue.labels.length > 0}
-                {#each issue.labels as lbl}
-                  {@const labelObj = labels.find((l) => l.name === lbl)}
-                  <span
-                    class="inline-flex items-center gap-1 text-[0.75rem]
-                           font-medium px-2 py-0.5 rounded-full border"
-                    style={labelObj
-                      ? `color: ${labelObj.color}; border-color: ${labelObj.color}40; background: ${labelObj.color}10;`
-                      : ""}
-                  >
-                    {lbl}
-                    {#if editable}
-                      <button
-                        class="size-3 rounded-full hover:bg-[var(--bg-subtle)]
-                               inline-flex items-center justify-center opacity-60
-                               hover:opacity-100 transition-opacity"
-                        onclick={(e) => { e.stopPropagation(); toggleLabel(lbl); }}
-                        title="Remove label"
-                      >
-                        <X size={10} />
-                      </button>
-                    {/if}
-                  </span>
-                {/each}
-              {:else}
-                <span class="text-[0.8125rem] text-[var(--text-faint)]">None</span>
-              {/if}
+          </div>
+        </div>
 
-              {#if editable}
-                <button
-                  class="size-5 rounded border border-dashed border-[var(--border)]
-                         text-[var(--text-faint)] hover:border-[var(--accent)]
-                         hover:text-[var(--accent)] flex items-center justify-center
-                         transition-colors"
-                  title="Add label"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    labelsOpen = !labelsOpen;
-                    statusOpen = false;
-                    priorityOpen = false;
-                    moduleOpen = false;
-                  }}
-                >
-                  <Plus size={12} />
-                </button>
-              {/if}
-            </div>
+        <div class="issue-meta-field">
+          {@render sidebarField("Labels")}
+          <LabelEditor
+            attached={issue.labels}
+            all={labels}
+            {editable}
+            onToggle={toggleLabel}
+            bind:open={labelsOpen}
+            onOpen={closeOtherDropdowns}
+          />
+        </div>
 
-            {#if labelsOpen}
-              <div
-                class="absolute left-0 top-full mt-1 z-20 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                role="presentation"
-                onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-              >
-                {#if labels.length === 0}
-                  <div class="px-3 py-2 text-[0.8125rem] text-[var(--text-faint)]">
-                    No labels defined
-                  </div>
-                {:else}
-                  {#each labels as label}
-                    {@const isAttached = issue.labels.includes(label.name)}
+        <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
+
+        {#if (issue.blocks && issue.blocks.length > 0) || (issue.blocked_by && issue.blocked_by.length > 0) || (issue.relates_to && issue.relates_to.length > 0)}
+          <div class="issue-meta-relations">
+            {#if issue.blocked_by && issue.blocked_by.length > 0}
+              <div class="issue-meta-field">
+                {@render sidebarField("Blocked by")}
+                <div class="flex flex-wrap gap-1.5">
+                  {#each issue.blocked_by as rel}
                     <button
-                      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                             text-[0.8125rem] transition-colors
-                             hover:bg-[var(--bg-subtle)]"
-                      onclick={() => toggleLabel(label.name)}
+                      class="text-[0.75rem] font-mono text-[var(--error)]
+                             bg-[var(--error-bg)] px-1.5 py-0.5 rounded
+                             hover:underline transition-colors"
+                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
                     >
-                      <span
-                        class="size-2.5 rounded-full shrink-0"
-                        style="background: {label.color};"
-                      ></span>
-                      <span class="flex-1 {isAttached ? 'font-medium' : ''}">
-                        {label.name}
-                      </span>
-                      {#if isAttached}
-                        <Check size={14} class="text-[var(--accent)]" />
-                      {/if}
+                      {rel}
                     </button>
                   {/each}
-                {/if}
+                </div>
               </div>
             {/if}
-          </div></div><div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>{#if (issue.blocks && issue.blocks.length > 0) || (issue.blocked_by && issue.blocked_by.length > 0) || (issue.relates_to && issue.relates_to.length > 0)}
-            <div class="issue-meta-relations">
-              {#if issue.blocked_by && issue.blocked_by.length > 0}
-                <div class="issue-meta-field">{@render sidebarField("Blocked by")}<div class="flex flex-wrap gap-1.5">
-                    {#each issue.blocked_by as rel}
-                      <button
-                        class="text-[0.75rem] font-mono text-[var(--error)]
-                               bg-[var(--error-bg)] px-1.5 py-0.5 rounded
-                               hover:underline transition-colors"
-                        onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
-                      >
-                        {rel}
-                      </button>
-                    {/each}
-                  </div></div>
-              {/if}
-              {#if issue.blocks && issue.blocks.length > 0}
-                <div class="issue-meta-field">{@render sidebarField("Blocks")}<div class="flex flex-wrap gap-1.5">
-                    {#each issue.blocks as rel}
-                      <button
-                        class="text-[0.75rem] font-mono text-[var(--accent)]
-                               bg-[var(--accent-subtle)] px-1.5 py-0.5 rounded
-                               hover:underline transition-colors"
-                        onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
-                      >
-                        {rel}
-                      </button>
-                    {/each}
-                  </div></div>
-              {/if}
-              {#if issue.relates_to && issue.relates_to.length > 0}
-                <div class="issue-meta-field">{@render sidebarField("Related")}<div class="flex flex-wrap gap-1.5">
-                    {#each issue.relates_to as rel}
-                      <button
-                        class="text-[0.75rem] font-mono text-[var(--text-muted)]
-                               bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
-                               hover:underline transition-colors"
-                        onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
-                      >
-                        {rel}
-                      </button>
-                    {/each}
-                  </div></div>
-              {/if}
-            </div>
+            {#if issue.blocks && issue.blocks.length > 0}
+              <div class="issue-meta-field">
+                {@render sidebarField("Blocks")}
+                <div class="flex flex-wrap gap-1.5">
+                  {#each issue.blocks as rel}
+                    <button
+                      class="text-[0.75rem] font-mono text-[var(--accent)]
+                             bg-[var(--accent-subtle)] px-1.5 py-0.5 rounded
+                             hover:underline transition-colors"
+                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
+                    >
+                      {rel}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            {#if issue.relates_to && issue.relates_to.length > 0}
+              <div class="issue-meta-field">
+                {@render sidebarField("Related")}
+                <div class="flex flex-wrap gap-1.5">
+                  {#each issue.relates_to as rel}
+                    <button
+                      class="text-[0.75rem] font-mono text-[var(--text-muted)]
+                             bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
+                             hover:underline transition-colors"
+                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
+                    >
+                      {rel}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
 
-            <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
-          {/if}<div class="issue-meta-dates">
-            <div class="issue-meta-field">{@render sidebarField("Created")}<p
-              class="text-[0.8125rem] text-[var(--text-muted)] leading-snug m-0"
-            >
+          <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
+        {/if}
+
+        <div class="issue-meta-dates">
+          <div class="issue-meta-field">
+            {@render sidebarField("Created")}
+            <p class="text-[0.8125rem] text-[var(--text-muted)] leading-snug m-0">
               {formatDate(issue.created_at)}
-            </p></div><div class="issue-meta-field">{@render sidebarField("Updated")}<p
-              class="text-[0.8125rem] text-[var(--text-muted)] leading-snug m-0"
-            >
+            </p>
+          </div>
+          <div class="issue-meta-field">
+            {@render sidebarField("Updated")}
+            <p class="text-[0.8125rem] text-[var(--text-muted)] leading-snug m-0">
               {formatDate(issue.updated_at)}
-            </p></div>
-          </div></div>
-        </aside>
+            </p>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
-{/if}
+    {/if}
+  {/snippet}
+</DocumentDetail>
 
 {#snippet sidebarField(label: string)}
   <p class="issue-meta-field-label">{label}</p>
@@ -890,70 +568,6 @@
     <CircleDashed {size} style="color: {statusCssColor(status)}" />
   {:else}
     <Circle {size} style="color: {statusCssColor(status)}" />
-  {/if}
-{/snippet}
-
-<!--
-  Chrome topbar contents. Registered via context against Layout's
-  topbar slot so it sits in the --chrome zone (continuous with the
-  sidebar) rather than as a banded strip inside the recessed content
-  panel. Mirrors the IssueList / Board layout for consistency.
--->
-{#snippet topbarContent()}
-  {#if issue}
-    <div class="flex items-center gap-3 px-6 py-2 w-full">
-      <!-- Left zone: scope -->
-      <div class="flex items-center gap-1.5 shrink-0">
-        <button
-          class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text-muted)]
-                 hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
-                 hover:bg-[var(--bg-subtle)]"
-          onclick={() => navigate(backRoute())}
-        >
-          <ArrowLeft size={14} />
-          {backLabel()}
-        </button>
-        <span class="text-[var(--text-faint)]">/</span>
-        <span class="text-[0.8125rem] font-mono text-[var(--text-muted)]">
-          {issue.identifier}
-        </span>
-      </div>
-
-      <!-- Right zone: mode toggle + save indicator + export -->
-      <div class="ml-auto flex items-center gap-2 shrink-0">
-        {#if exportError}
-          <span class="text-[0.75rem] text-[var(--error)]">{exportError}</span>
-        {/if}
-
-        {#if editable && issue.description.trim()}
-          <ModeToggle
-            mode={descriptionMode}
-            size="sm"
-            disabled={saving}
-            onSelect={(next) => descriptionRef?.setMode(next)}
-          />
-        {/if}
-
-        <span class="text-[0.75rem] text-[var(--text-faint)] min-w-[5rem] text-right">
-          {#if saving}
-            <span class="animate-pulse">Saving...</span>
-          {:else if lastSaved}
-            Saved at {lastSaved}
-          {/if}
-        </span>
-
-        <!-- Toolbar pill: matches the ModeToggle's outer dimensions
-             so the two pills read as one button family side-by-side. -->
-        <button
-          class="toolbar-pill"
-          onclick={exportMarkdown}
-          disabled={exporting}
-        >
-          <Download size={14} />
-          {exporting ? "Exporting..." : "Export"}
-        </button>
-      </div>
-    </div>
   {/if}
 {/snippet}
 

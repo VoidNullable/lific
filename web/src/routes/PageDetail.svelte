@@ -11,22 +11,9 @@
     type Comment,
     type Label,
   } from "../lib/api";
-  import CommentThread from "../lib/CommentThread.svelte";
-  import EditableMarkdown from "../lib/EditableMarkdown.svelte";
-  import ModeToggle from "../lib/ModeToggle.svelte";
-  import { ArrowLeft, Download, Ellipsis, Trash2, Plus, X, Check } from "lucide-svelte";
-  import { getContext } from "svelte";
-
-  // Register our toolbar with Layout's chrome topbar slot. Same pattern
-  // IssueList/Board uses — keeps the chrome L visually seamless.
-  const topbarCtx = getContext<{
-    set: (s: import("svelte").Snippet | undefined) => void;
-  } | undefined>("lific:topbar");
-
-  $effect(() => {
-    topbarCtx?.set(topbarContent);
-    return () => topbarCtx?.set(undefined);
-  });
+  import DocumentDetail from "../lib/DocumentDetail.svelte";
+  import LabelEditor from "../lib/LabelEditor.svelte";
+  import { formatDate } from "../lib/format";
 
   let {
     navigate,
@@ -42,40 +29,23 @@
 
   let page = $state<Page | null>(null);
   let comments = $state<Comment[]>([]);
-  // LIF-105: project labels available for attachment. Loaded after the
-  // page resolves so we know which project to query. Stays empty for
+  // LIF-105: project labels available for attachment. Stays empty for
   // workspace pages (project_id === null) — labels are project-scoped.
   let labels = $state<Label[]>([]);
   let loading = $state(true);
   let error = $state("");
 
-  // Editing
-  let editingTitle = $state(false);
-  let draftTitle = $state("");
-  // LIF-109: body editing now lives inside <EditableMarkdown>. Mode is
-  // bindable so the compact toolbar button and the route-level "E"
-  // keyboard shortcut can drive the same toggle.
-  let bodyMode = $state<"read" | "edit">("read");
-  let bodyRef = $state<EditableMarkdown | null>(null);
-
-  // Save
+  // Save indicator
   let saving = $state(false);
   let lastSaved = $state<string | null>(null);
 
-  // Delete
-  let menuOpen = $state(false);
-  let confirmingDelete = $state(false);
-  let deleting = $state(false);
+  // Export
   let exportError = $state("");
   let exporting = $state(false);
 
-  // LIF-105: label picker popover state. Same shape IssueDetail uses
-  // (a single boolean toggled by the "+" affordance, closed on
-  // outside-click via the window handler).
-  let labelsOpen = $state(false);
-
   $effect(() => {
     const id = pageId;
+    lastSaved = null;
     loadPage(id);
   });
 
@@ -88,8 +58,8 @@
     if (!res.ok) { error = res.error; loading = false; return; }
     page = res.data;
 
-    // Load page comments and project labels in parallel. Workspace pages
-    // skip the labels fetch since they can't carry any (LIF-105 deferred).
+    // Load page comments and (project) labels in parallel. Workspace
+    // pages skip the labels fetch — they can't carry any (LIF-105).
     const tasks: Promise<unknown>[] = [
       listPageComments(page.id).then((r) => { if (r.ok) comments = r.data; }),
     ];
@@ -101,33 +71,6 @@
     await Promise.all(tasks);
 
     loading = false;
-  }
-
-  async function handleNewComment(content: string) {
-    if (!page) return null;
-    const res = await createPageComment(page.id, content);
-    if (!res.ok) return null;
-    comments = [...comments, res.data];
-    return res.data;
-  }
-
-  function handleWindowClick() {
-    menuOpen = false;
-    confirmingDelete = false;
-    labelsOpen = false;
-  }
-
-  // LIF-105: toggle a label name on/off, then persist the full set.
-  // Replace semantics on the wire (backend does delete-all + reinsert),
-  // so we send the entire array. Local optimistic update keeps the UI
-  // snappy in the gap before the response.
-  async function toggleLabel(name: string) {
-    if (!page) return;
-    const current = [...page.labels];
-    const idx = current.indexOf(name);
-    if (idx >= 0) current.splice(idx, 1);
-    else current.push(name);
-    await saveField("labels", current);
   }
 
   // ── Save ─────────────────────────────────────────────
@@ -146,18 +89,36 @@
     saving = false;
   }
 
-  // ── Delete ───────────────────────────────────────────
+  async function saveTitle(next: string) {
+    await saveField("title", next);
+  }
 
-  async function confirmDelete() {
+  async function saveBody(next: string) {
     if (!page) return;
-    deleting = true;
-    const res = await deletePage(page.id);
-    if (res.ok) {
-      navigate(`/${projectIdentifier}/pages`);
-    } else {
-      deleting = false;
-      confirmingDelete = false;
+    if (next !== page.content) {
+      await saveField("content", next);
     }
+  }
+
+  // LIF-105: toggle a label name on/off, then persist the full set
+  // (backend does delete-all + reinsert, so we send the entire array).
+  async function toggleLabel(name: string) {
+    if (!page) return;
+    const current = [...page.labels];
+    const idx = current.indexOf(name);
+    if (idx >= 0) current.splice(idx, 1);
+    else current.push(name);
+    await saveField("labels", current);
+  }
+
+  // ── Comments / export / delete ───────────────────────
+
+  async function handleNewComment(content: string) {
+    if (!page) return null;
+    const res = await createPageComment(page.id, content);
+    if (!res.ok) return null;
+    comments = [...comments, res.data];
+    return res.data;
   }
 
   async function exportMarkdown() {
@@ -169,401 +130,89 @@
     exporting = false;
   }
 
-  // ── Title ────────────────────────────────────────────
-
-  function startEditTitle() {
-    if (!editable || !page) return;
-    draftTitle = page.title;
-    editingTitle = true;
-  }
-
-  async function commitTitle() {
-    if (!page) return;
-    editingTitle = false;
-    const trimmed = draftTitle.trim();
-    if (trimmed && trimmed !== page.title) {
-      await saveField("title", trimmed);
+  async function handleDelete(): Promise<boolean> {
+    if (!page) return false;
+    const res = await deletePage(page.id);
+    if (res.ok) {
+      navigate(`/${projectIdentifier}/pages`);
+      return true;
     }
-  }
-
-  // ── Content (delegated to EditableMarkdown) ──────────
-
-  async function saveBody(next: string) {
-    if (!page) return;
-    if (next !== page.content) {
-      await saveField("content", next);
-    }
-  }
-
-  // ── Keyboard shortcuts ───────────────────────────────
-  //
-  // "E" enters edit mode for the page body when no input/textarea is
-  // focused. Esc bubbles through to the textarea inside the component.
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== "e" && e.key !== "E") return;
-    if (!editable || !page) return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const el = document.activeElement;
-    if (el) {
-      const tag = el.tagName;
-      if (
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        tag === "SELECT" ||
-        (el as HTMLElement).isContentEditable
-      ) {
-        return;
-      }
-    }
-    if (bodyMode === "edit") return;
-    e.preventDefault();
-    bodyRef?.focus();
-  }
-
-  function formatDate(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
+    return false;
   }
 </script>
 
-<svelte:window onclick={handleWindowClick} onkeydown={handleKeydown} />
-
-{#if loading}
-  <div class="h-full flex items-center justify-center">
-    <div
-      class="size-6 rounded-full border-2 border-[var(--border)]
-             border-t-[var(--accent)] animate-spin"
-    ></div>
-  </div>
-{:else if error}
-  <div class="h-full flex flex-col items-center justify-center gap-3">
-    <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-    <button
-      class="text-[0.8125rem] text-[var(--accent)] hover:underline"
-      onclick={() => navigate(`/${projectIdentifier}/pages`)}
-    >
-      Back to pages
-    </button>
-  </div>
-{:else if page}
-  <div class="h-full flex flex-col">
-    <!-- Content -->
-    <div class="flex-1 overflow-y-auto">
-      <div class="px-10 py-8">
-        <!-- Title -->
-        {#if editingTitle}
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            type="text"
-            bind:value={draftTitle}
-            class="w-full text-[1.75rem] font-display tracking-tight
-                   bg-transparent border-none outline-none
-                   text-[var(--text)] py-1 mb-3"
-            onblur={commitTitle}
-            onkeydown={(e) => {
-              if (e.key === "Enter") commitTitle();
-              if (e.key === "Escape") { editingTitle = false; }
-            }}
-            autofocus
-          />
-        {:else}
-          <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-          <h1
-            class="text-[1.75rem] font-display tracking-tight text-[var(--text)]
-                   py-1 mb-3 rounded transition-colors
-                   {editable ? 'cursor-text hover:bg-[var(--bg-subtle)]' : ''}"
-            onclick={startEditTitle}
-          >
-            {page.title}
-          </h1>
-        {/if}
-
-        <!-- LIF-105: labels strip. Sits below the title and above the
-             body content, mirroring the chip+picker UX in IssueDetail's
-             sidebar but laid out horizontally since pages have no
-             sidebar. Workspace pages skip this block entirely — labels
-             are project-scoped (the picker would have nothing to show). -->
-        {#if page.project_id !== null}
-          <div class="flex flex-wrap gap-1.5 items-center mb-6">
-            {#if page.labels.length > 0}
-              {#each page.labels as lbl}
-                {@const labelObj = labels.find((l) => l.name === lbl)}
-                <span
-                  class="inline-flex items-center gap-1 text-[0.75rem]
-                         font-medium px-2 py-0.5 rounded-full border"
-                  style={labelObj
-                    ? `color: ${labelObj.color}; border-color: ${labelObj.color}40; background: ${labelObj.color}10;`
-                    : ""}
-                >
-                  {lbl}
-                  {#if editable}
-                    <button
-                      class="size-3 rounded-full hover:bg-[var(--bg-subtle)]
-                             inline-flex items-center justify-center opacity-60
-                             hover:opacity-100 transition-opacity"
-                      onclick={(e) => { e.stopPropagation(); toggleLabel(lbl); }}
-                      title="Remove label"
-                    >
-                      <X size={10} />
-                    </button>
-                  {/if}
-                </span>
-              {/each}
-            {:else if !editable}
-              <!-- Read-only viewer for a label-less page gets nothing
-                   here. Editors still see the "+" affordance below. -->
-              <span class="text-[0.8125rem] text-[var(--text-faint)] italic">
-                No labels
-              </span>
-            {/if}
-
-            {#if editable}
-              <div class="relative">
-                <button
-                  class="size-5 rounded border border-dashed border-[var(--border)]
-                         text-[var(--text-faint)] hover:border-[var(--accent)]
-                         hover:text-[var(--accent)] flex items-center justify-center
-                         transition-colors"
-                  title="Add label"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    labelsOpen = !labelsOpen;
-                  }}
-                >
-                  <Plus size={12} />
-                </button>
-
-                {#if labelsOpen}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                  <div
-                    class="absolute left-0 top-full mt-1 z-20 w-[200px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg py-1"
-                    onclick={(e) => e.stopPropagation()}
-                  >
-                    {#if labels.length === 0}
-                      <div class="px-3 py-2 text-[0.8125rem] text-[var(--text-faint)]">
-                        No labels defined in this project.
-                      </div>
-                    {:else}
-                      {#each labels as label}
-                        {@const isAttached = page.labels.includes(label.name)}
-                        <button
-                          class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                                 text-[0.8125rem] transition-colors
-                                 hover:bg-[var(--bg-subtle)]"
-                          onclick={() => toggleLabel(label.name)}
-                        >
-                          <span
-                            class="size-2.5 rounded-full shrink-0"
-                            style="background: {label.color};"
-                          ></span>
-                          <span class="flex-1 {isAttached ? 'font-medium' : ''}">
-                            {label.name}
-                          </span>
-                          {#if isAttached}
-                            <Check size={14} class="text-[var(--accent)]" />
-                          {/if}
-                        </button>
-                      {/each}
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        <!--
-          Body content (LIF-109). EditableMarkdown owns the read↔edit
-          mode toggle, the sticky bottom-right pill, locked container
-          height across the swap, and anchor preservation so the swap
-          doesn't visually jump. The compact toolbar button above and
-          the route-level "E" shortcut both drive `bodyRef.toggle()` /
-          `bodyRef.focus()`.
-        -->
-        <EditableMarkdown
-          bind:this={bodyRef}
-          bind:mode={bodyMode}
-          value={page.content}
+<DocumentDetail
+  {navigate}
+  {loading}
+  {error}
+  identifier={page?.identifier ?? ""}
+  backRoute={`/${projectIdentifier}/pages`}
+  backLabel="Pages"
+  {editable}
+  title={page?.title ?? ""}
+  titleSize="lg"
+  onSaveTitle={saveTitle}
+  body={page?.content ?? ""}
+  bodyPlaceholder="Start writing... (markdown supported)"
+  bodyEmptyEditCta="Click to start writing..."
+  bodyEmptyReadText="Empty page"
+  bodyProseMinHeight="120px"
+  onSaveBody={saveBody}
+  {saving}
+  {lastSaved}
+  onExport={exportMarkdown}
+  {exporting}
+  {exportError}
+  deleteNoun="page"
+  deleteLabel={page?.identifier ?? ""}
+  onDelete={handleDelete}
+  {comments}
+  commentsDivider
+  onNewComment={handleNewComment}
+  layout="wide"
+>
+  {#snippet belowTitle()}
+    <!-- LIF-105: labels strip. Sits between title and body, mirroring
+         the issue sidebar's chip+picker UX but laid out horizontally
+         since pages have no sidebar. Workspace pages skip it entirely —
+         labels are project-scoped. -->
+    {#if page && page.project_id !== null}
+      <div class="mb-6">
+        <LabelEditor
+          attached={page.labels}
+          all={labels}
           {editable}
-          {saving}
-          placeholder="Start writing... (markdown supported)"
-          emptyEditCta="Click to start writing..."
-          emptyReadText="Empty page"
-          proseMinHeight="120px"
-          onSave={saveBody}
+          onToggle={toggleLabel}
+          emptyText="No labels"
+          emptyItalic
+          hideEmptyWhenEditable
+          popoverWidth="w-[200px]"
+          emptyPickerText="No labels defined in this project."
         />
+      </div>
+    {/if}
+  {/snippet}
 
-        <!-- Comments (LIF-106). Same component IssueDetail uses. -->
-        <div class="mt-10 pt-6 border-t border-[var(--border)]">
-          <CommentThread {comments} {editable} onSubmit={handleNewComment} />
+  {#snippet metaFooter()}
+    {#if page}
+      <div class="mt-10 pt-6 border-t border-[var(--border)] flex gap-8">
+        <div>
+          <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
+            Created
+          </span>
+          <span class="text-[0.8125rem] text-[var(--text-muted)]">
+            {formatDate(page.created_at)}
+          </span>
         </div>
-
-        <!-- Meta -->
-        <div class="mt-10 pt-6 border-t border-[var(--border)] flex gap-8">
-          <div>
-            <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
-              Created
-            </span>
-            <span class="text-[0.8125rem] text-[var(--text-muted)]">
-              {formatDate(page.created_at)}
-            </span>
-          </div>
-          <div>
-            <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
-              Updated
-            </span>
-            <span class="text-[0.8125rem] text-[var(--text-muted)]">
-              {formatDate(page.updated_at)}
-            </span>
-          </div>
+        <div>
+          <span class="block text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-0.5">
+            Updated
+          </span>
+          <span class="text-[0.8125rem] text-[var(--text-muted)]">
+            {formatDate(page.updated_at)}
+          </span>
         </div>
       </div>
-    </div>
-  </div>
-{/if}
-
-<!--
-  Chrome topbar contents. Registered via context against Layout's
-  topbar slot so it sits in the --chrome zone (continuous with the
-  sidebar) rather than as a banded strip inside the recessed content
-  panel. Mirrors the IssueList / Board layout for consistency.
--->
-{#snippet topbarContent()}
-  {#if page}
-    <div class="flex items-center gap-3 px-6 py-2 w-full">
-      <!-- Left zone: scope -->
-      <div class="flex items-center gap-1.5 shrink-0">
-        <button
-          class="flex items-center gap-1.5 text-[0.8125rem] text-[var(--text-muted)]
-                 hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
-                 hover:bg-[var(--bg-subtle)]"
-          onclick={() => navigate(`/${projectIdentifier}/pages`)}
-        >
-          <ArrowLeft size={14} />
-          Pages
-        </button>
-        <span class="text-[var(--text-faint)]">/</span>
-        <span class="text-[0.8125rem] font-mono text-[var(--text-muted)]">
-          {page.identifier}
-        </span>
-      </div>
-
-      <!-- Right zone: mode toggle + save indicator + export + menu -->
-      <div class="ml-auto flex items-center gap-2 shrink-0">
-        {#if exportError}
-          <span class="text-[0.75rem] text-[var(--error)]">{exportError}</span>
-        {/if}
-
-        {#if editable && page.content.trim()}
-          <ModeToggle
-            mode={bodyMode}
-            size="sm"
-            disabled={saving}
-            onSelect={(next) => bodyRef?.setMode(next)}
-          />
-        {/if}
-
-        <span class="text-[0.75rem] text-[var(--text-faint)] min-w-[5rem] text-right">
-          {#if saving}
-            <span class="animate-pulse">Saving...</span>
-          {:else if lastSaved}
-            Saved at {lastSaved}
-          {/if}
-        </span>
-
-        <!-- Toolbar pill: matches the ModeToggle's outer dimensions
-             (padding / type / icon / radius / border / track color)
-             so the two pills read as one button family side-by-side. -->
-        <button
-          class="toolbar-pill"
-          onclick={exportMarkdown}
-          disabled={exporting}
-        >
-          <Download size={14} />
-          {exporting ? "Exporting..." : "Export"}
-        </button>
-
-        {#if editable}
-          <div class="relative">
-            <button
-              class="size-7 flex items-center justify-center rounded-md
-                     text-[var(--text-faint)] hover:text-[var(--text)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              onclick={(e) => {
-                e.stopPropagation();
-                if (confirmingDelete) { confirmingDelete = false; menuOpen = false; }
-                else { menuOpen = !menuOpen; }
-              }}
-            >
-              <Ellipsis size={14} />
-            </button>
-
-            {#if menuOpen && !confirmingDelete}
-              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-              <div
-                class="absolute right-0 top-full mt-1.5 z-30 w-[180px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg py-1"
-                onclick={(e) => e.stopPropagation()}
-              >
-                <button
-                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                         text-[0.8125rem] text-[var(--error)]
-                         hover:bg-[var(--error-bg)] transition-colors"
-                  onclick={() => { confirmingDelete = true; }}
-                >
-                  <Trash2 size={14} />
-                  Delete page
-                </button>
-              </div>
-            {/if}
-
-            {#if confirmingDelete}
-              <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-              <div
-                class="absolute right-0 top-full mt-1.5 z-30 w-[240px]
-                       bg-[var(--surface)] border border-[var(--border)]
-                       rounded-md shadow-lg p-3"
-                onclick={(e) => e.stopPropagation()}
-              >
-                <p class="text-[0.8125rem] text-[var(--text)] mb-1 font-medium">
-                  Delete {page.identifier}?
-                </p>
-                <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
-                  This can't be undone.
-                </p>
-                <div class="flex items-center gap-2">
-                  <button
-                    class="text-[0.8125rem] font-medium text-white
-                           bg-[var(--error)] px-3 py-1.5 rounded-md
-                           hover:opacity-90 transition-opacity
-                           disabled:opacity-50"
-                    disabled={deleting}
-                    onclick={confirmDelete}
-                  >
-                    {deleting ? "Deleting..." : "Delete"}
-                  </button>
-                  <button
-                    class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
-                           rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                    onclick={() => { confirmingDelete = false; menuOpen = false; }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    </div>
-  {/if}
-{/snippet}
+    {/if}
+  {/snippet}
+</DocumentDetail>

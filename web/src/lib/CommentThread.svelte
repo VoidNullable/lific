@@ -5,6 +5,7 @@
   //
   // Extracted from IssueDetail.svelte for LIF-106 so PageDetail can reuse it.
   import Markdown from "./Markdown.svelte";
+  import { formatDate, formatRelative } from "./format";
   import type { Comment } from "./api";
 
   let {
@@ -31,31 +32,6 @@
     const created = await onSubmit(trimmed);
     if (created) draft = "";
     submitting = false;
-  }
-
-  function formatDate(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-
-  function formatRelative(iso: string): string {
-    const d = new Date(iso + "Z");
-    const now = new Date();
-    const diffMs = now.getTime() - d.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHrs = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-    if (diffMins < 1) return "just now";
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   }
 
   function initials(name: string): string {

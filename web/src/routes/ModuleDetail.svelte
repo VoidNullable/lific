@@ -22,8 +22,10 @@
   } from "../lib/api";
   import EditableMarkdown from "../lib/EditableMarkdown.svelte";
   import ModeToggle from "../lib/ModeToggle.svelte";
+  import DeleteMenu from "../lib/DeleteMenu.svelte";
+  import { formatDate } from "../lib/format";
   import {
-    ArrowLeft, Ellipsis, Trash2, Plus, ChevronDown,
+    ArrowLeft, Plus, ChevronDown,
     CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle,
     CircleAlert,
   } from "lucide-svelte";
@@ -65,11 +67,8 @@
   let saving = $state(false);
   let lastSaved = $state<string | null>(null);
 
-  // Status dropdown + kebab
+  // Status dropdown
   let statusOpen = $state(false);
-  let menuOpen = $state(false);
-  let confirmingDelete = $state(false);
-  let deleting = $state(false);
 
   const STATUSES: { value: string; label: string }[] = [
     { value: "active", label: "Active" },
@@ -91,8 +90,6 @@
     editingName = false;
     descriptionMode = "read";
     statusOpen = false;
-    menuOpen = false;
-    confirmingDelete = false;
     lastSaved = null;
     loadModule(id);
   });
@@ -117,8 +114,6 @@
 
   function handleWindowClick() {
     statusOpen = false;
-    menuOpen = false;
-    confirmingDelete = false;
   }
 
   // ── Save helpers ─────────────────────────────────────
@@ -172,16 +167,14 @@
 
   // ── Delete ───────────────────────────────────────────
 
-  async function confirmDelete() {
-    if (!mod) return;
-    deleting = true;
+  async function handleDelete(): Promise<boolean> {
+    if (!mod) return false;
     const res = await deleteModule(mod.id);
     if (res.ok) {
       navigate(`/${projectIdentifier}/modules`);
-    } else {
-      deleting = false;
-      confirmingDelete = false;
+      return true;
     }
+    return false;
   }
 
   // ── Keyboard shortcuts ───────────────────────────────
@@ -210,17 +203,6 @@
   function newIssueInModule() {
     if (!mod) return;
     navigate(`/${projectIdentifier}/issues/new?module=${mod.id}`);
-  }
-
-  function formatDate(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
   }
 
   function statusLabel(value: string): string {
@@ -289,6 +271,16 @@
             <Plus size={13} />
             Issue
           </button>
+
+          <DeleteMenu
+            noun="module"
+            label={mod.name}
+            confirmBody={issues.length === 0
+              ? "This module is empty. It will be removed."
+              : `${issues.length} issue${issues.length === 1 ? "" : "s"} will be unassigned from this module but not deleted.`}
+            onDelete={handleDelete}
+            align="right"
+          />
         {/if}
       </div>
     </div>
@@ -448,86 +440,6 @@
 
         <!-- Sidebar -->
         <aside class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5">
-          {#if editable}
-            <div class="flex items-center justify-between mb-5">
-              <p class="text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-                Manage
-              </p>
-              <div class="relative">
-                <button
-                  class="flex items-center gap-1 text-[0.75rem] text-[var(--text-faint)]
-                         hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
-                         hover:bg-[var(--bg-subtle)]"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    if (confirmingDelete) { confirmingDelete = false; menuOpen = false; }
-                    else { menuOpen = !menuOpen; }
-                  }}
-                >
-                  <Ellipsis size={14} />
-                </button>
-
-                {#if menuOpen && !confirmingDelete}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                  <div
-                    class="absolute right-0 top-full mt-1 z-30 w-[200px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg py-1"
-                    onclick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                             text-[0.8125rem] text-[var(--error)]
-                             hover:bg-[var(--error-bg)] transition-colors"
-                      onclick={() => { confirmingDelete = true; }}
-                    >
-                      <Trash2 size={14} />
-                      Delete module
-                    </button>
-                  </div>
-                {/if}
-
-                {#if confirmingDelete}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-                  <div
-                    class="absolute right-0 top-full mt-1 z-30 w-[260px]
-                           bg-[var(--surface)] border border-[var(--border)]
-                           rounded-md shadow-lg p-3"
-                    onclick={(e) => e.stopPropagation()}
-                  >
-                    <p class="text-[0.8125rem] text-[var(--text)] mb-1 font-medium">
-                      Delete {mod.name}?
-                    </p>
-                    <p class="text-[0.75rem] text-[var(--text-muted)] mb-3">
-                      {issues.length === 0
-                        ? "This module is empty. It will be removed."
-                        : `${issues.length} issue${issues.length === 1 ? "" : "s"} will be unassigned from this module but not deleted.`}
-                    </p>
-                    <div class="flex items-center gap-2">
-                      <button
-                        class="text-[0.8125rem] font-medium text-white
-                               bg-[var(--error)] px-3 py-1.5 rounded-md
-                               hover:opacity-90 transition-opacity
-                               disabled:opacity-50"
-                        disabled={deleting}
-                        onclick={confirmDelete}
-                      >
-                        {deleting ? "Deleting..." : "Delete"}
-                      </button>
-                      <button
-                        class="text-[0.8125rem] text-[var(--text-muted)] px-3 py-1.5
-                               rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-                        onclick={() => { confirmingDelete = false; menuOpen = false; }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/if}
-
           <!-- Status -->
           <div class="mb-5">
             <p class="text-[0.6875rem] font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2">
