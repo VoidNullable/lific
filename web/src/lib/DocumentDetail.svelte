@@ -18,6 +18,7 @@
   // "E" shortcut can drive EditableMarkdown without the route caring).
 
   import Comments from "./Comments.svelte";
+  import QuoteSelectionToolbar from "./QuoteSelectionToolbar.svelte";
   import EditableMarkdown from "./EditableMarkdown.svelte";
   import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
@@ -118,6 +119,12 @@
   let bodyMode = $state<"read" | "edit">("read");
   let bodyRef = $state<EditableMarkdown | null>(null);
 
+  // LIF-111 — refs for the quote-in-comment selection helper. `contentEl`
+  // scopes which selections count (the main content column); `commentsRef`
+  // lets the toolbar push a blockquote into the composer.
+  let contentEl = $state<HTMLElement | null>(null);
+  let commentsRef = $state<Comments | null>(null);
+
   // Reset to read mode whenever we switch documents.
   $effect(() => {
     identifier; // track
@@ -194,7 +201,7 @@
     <div class="flex-1 overflow-y-auto">
       {#if layout === "two-column"}
         <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
-          <div class="flex-1 min-w-0 px-8 py-6">
+          <div bind:this={contentEl} class="flex-1 min-w-0 px-8 py-6">
             {@render mainColumn()}
           </div>
           {#if sidebar}
@@ -206,12 +213,19 @@
           {/if}
         </div>
       {:else}
-        <div class="px-10 py-8">
+        <div bind:this={contentEl} class="px-10 py-8">
           {@render mainColumn()}
         </div>
       {/if}
     </div>
   </div>
+
+  {#if editable && onNewComment && bodyMode === "read"}
+    <QuoteSelectionToolbar
+      container={contentEl}
+      onQuote={(t) => commentsRef?.insertQuote(t)}
+    />
+  {/if}
 {/if}
 
 {#snippet mainColumn()}
@@ -233,7 +247,7 @@
   />
 
   {#if onNewComment && comments}
-    <Comments {comments} {editable} onSubmit={onNewComment} />
+    <Comments bind:this={commentsRef} {comments} {editable} onSubmit={onNewComment} />
   {/if}
 
   {#if metaFooter}{@render metaFooter()}{/if}

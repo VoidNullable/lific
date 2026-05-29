@@ -16,6 +16,7 @@
   import type { Comment } from "./api";
   import { MessageSquare, CornerDownLeft } from "lucide-svelte";
   import { fly } from "svelte/transition";
+  import { tick } from "svelte";
 
   let {
     comments,
@@ -71,6 +72,24 @@
       .slice(0, 2)
       .map((w) => w[0]?.toUpperCase() ?? "")
       .join("");
+  }
+
+  // LIF-111 — called by the quote-in-comment toolbar (via DocumentDetail).
+  // Prepends a markdown blockquote of the selected text to the composer,
+  // then focuses it, resizes, drops the caret at the end, and scrolls the
+  // composer into view.
+  export async function insertQuote(text: string) {
+    const quoted = text.split("\n").map((l) => "> " + l).join("\n") + "\n\n";
+    draft = quoted + draft;
+    await tick();
+    const el = textareaEl;
+    if (el) {
+      el.focus();
+      resize();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   }
 </script>
 
