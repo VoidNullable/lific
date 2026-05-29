@@ -22,6 +22,7 @@
   import { Layers, Plus, ChevronRight, CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle } from "lucide-svelte";
   import Tooltip from "../lib/Tooltip.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
+  import IconPicker from "../lib/IconPicker.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -53,8 +54,12 @@
   // declared module).
   let creating = $state(false);
   let createName = $state("");
+  let createEmoji = $state("");
   let createError = $state("");
   let createSaving = $state(false);
+  // Ref to the inline-create card so a blur that lands on the icon picker
+  // (also inside the card) doesn't trip the empty-name auto-cancel.
+  let createRowEl = $state<HTMLElement | null>(null);
 
   // Display order across status groups. Matches the natural lifecycle
   // (active → planned → paused → backlog → done → cancelled) so users
@@ -137,13 +142,24 @@
   function startCreate() {
     creating = true;
     createName = "";
+    createEmoji = "";
     createError = "";
   }
 
   function cancelCreate() {
     creating = false;
     createName = "";
+    createEmoji = "";
     createError = "";
+  }
+
+  // Cancel only when the focus is leaving the create card entirely AND
+  // nothing's been entered. Clicking the icon picker keeps focus inside
+  // the card, so it won't cancel.
+  function handleCreateBlur(e: FocusEvent) {
+    const next = e.relatedTarget as Node | null;
+    if (next && createRowEl?.contains(next)) return;
+    if (!createName.trim() && !createEmoji) cancelCreate();
   }
 
   async function commitCreate() {
@@ -156,12 +172,14 @@
       project_id: project.id,
       name,
       status: "active",
+      ...(createEmoji ? { emoji: createEmoji } : {}),
     });
     createSaving = false;
     if (res.ok) {
       modules = [...modules, res.data];
       creating = false;
       createName = "";
+      createEmoji = "";
       navigate(`/${projectIdentifier}/modules/${res.data.id}`);
     } else {
       createError = res.error;
@@ -245,10 +263,14 @@
              user hasn't picked a status yet — defaults to Active on commit. -->
         {#if creating}
           <div
-            class="mb-6 flex items-start gap-3 p-3 rounded-md border
+            bind:this={createRowEl}
+            class="mb-6 flex items-center gap-3 p-3 rounded-md border
                    border-[var(--accent)] bg-[var(--accent-subtle)]"
           >
-            <Layers size={18} class="shrink-0 text-[var(--accent)] mt-0.5" />
+            <IconPicker
+              value={createEmoji}
+              onchange={(v) => { createEmoji = v; }}
+            />
             <div class="flex-1 min-w-0">
               <!-- svelte-ignore a11y_autofocus -->
               <input
@@ -263,7 +285,7 @@
                   if (e.key === "Enter") commitCreate();
                   if (e.key === "Escape") cancelCreate();
                 }}
-                onblur={() => { if (!createName.trim()) cancelCreate(); }}
+                onblur={handleCreateBlur}
               />
               {#if createError}
                 <p class="text-[0.75rem] text-[var(--error)] mt-1">{createError}</p>
