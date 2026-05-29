@@ -21,7 +21,14 @@
   );
 </script>
 
-{#if value && isLucide && iconNode}
+{#if value === "lific:logo"}
+  <img
+    src="/logo.webp"
+    alt="Lific"
+    class="{className} object-contain inline-block"
+    style="width: {size}px; height: {size}px;"
+  />
+{:else if value && isLucide && iconNode}
   <LucideIcon {iconNode} {size} class={className} />
 {:else if value && !isLucide}
   <span class={className} style="font-size: {size}px; line-height: 1;">{value}</span>

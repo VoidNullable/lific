@@ -18,6 +18,11 @@
   let scrollContainer = $state<HTMLElement | null>(null);
   let scrollTop = $state(0);
 
+  // Sentinel value for the Lific logo, smuggled into the emoji grid as if
+  // it were just another emoji. Renderers special-case it to draw the
+  // actual logo image. Not a real unicode char — purely a stored marker.
+  const LIFIC_LOGO = "lific:logo";
+
   // ── Emoji data from unicode-emoji-json ─────────────
   // Pre-process into a flat searchable list, excluding skin tone variants and flags
   type EmojiEntry = { emoji: string; name: string; group: string };
@@ -31,11 +36,15 @@
     "Travel & Places", "Activities", "Food & Drink",
     "People & Body", "Symbols",
   ];
-  const sortedEmojis = ALL_EMOJIS.sort((a, b) => {
-    const ai = GROUP_ORDER.indexOf(a.group);
-    const bi = GROUP_ORDER.indexOf(b.group);
-    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-  });
+  // Logo rides at the very front (searchable by "lific" / "logo").
+  const sortedEmojis: EmojiEntry[] = [
+    { emoji: LIFIC_LOGO, name: "lific logo", group: "Lific" },
+    ...ALL_EMOJIS.sort((a, b) => {
+      const ai = GROUP_ORDER.indexOf(a.group);
+      const bi = GROUP_ORDER.indexOf(b.group);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    }),
+  ];
 
   // ── Lucide icons ─────────────────────────────────────
   const allIconNames = Object.keys(lucideIcons).sort();
@@ -156,7 +165,9 @@
     onclick={toggle}
     title="Choose icon"
   >
-    {#if value && isLucide && iconNode}
+    {#if value === LIFIC_LOGO}
+      <img src="/logo.webp" alt="Lific" width="20" height="20" class="object-contain" />
+    {:else if value && isLucide && iconNode}
       <LucideIcon iconNode={iconNode} size={20} class="text-[var(--text)]" />
     {:else if value && !isLucide}
       {value}
@@ -284,7 +295,7 @@
                     title={item.name}
                     onclick={() => select(item.emoji)}
                   >
-                    {item.emoji}
+                    {@render emojiCell(item.emoji)}
                   </button>
                 {/each}
               </div>
@@ -300,7 +311,7 @@
                   title={item.name}
                   onclick={() => select(item.emoji)}
                 >
-                  {item.emoji}
+                  {@render emojiCell(item.emoji)}
                 </button>
               {/each}
             </div>
@@ -323,3 +334,11 @@
     </div>
   {/if}
 </div>
+
+{#snippet emojiCell(emoji: string)}
+  {#if emoji === LIFIC_LOGO}
+    <img src="/logo.webp" alt="Lific" width="20" height="20" class="object-contain" />
+  {:else}
+    {emoji}
+  {/if}
+{/snippet}
