@@ -13,6 +13,7 @@ mod ratelimit;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::Body,
     extract::Request,
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
@@ -349,7 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mcp_config = StreamableHttpServerConfig::default()
                 .with_stateful_mode(false)
                 .with_json_response(true)
-                .with_allowed_hosts(mcp_allowed_hosts);
+                .with_allowed_hosts(mcp_allowed_hosts.clone());
 
             let mcp_service = StreamableHttpService::new(
                 move || Ok(mcp::LificMcp::new(db_for_mcp.clone())),
@@ -405,8 +406,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 register_limiter: oauth_register_limiter,
             };
 
-            let app = authed_routes
-                .merge(oauth::router(oauth_state))
+            // Optional authless MCP escape hatch at /mcp/<token> (see the
+            // mcp_path_token config docs). Resolved identity for attribution:
+            // the configured username, else the first admin, else anonymous.
+            let authless_mcp_router: Option<Router> = cfg
+                .server
+                .mcp_path_token
+                .clone()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .map(|token| {
+                    let authless_user: Option<db::models::AuthUser> = {
+                        match pool.read() {
+                            Ok(conn) => match cfg.server.mcp_path_user.as_deref() {
+                                Some(uname) => db::queries::users::get_user_by_username(&conn, uname)
+                                    .ok()
+                                    .map(|u| db::models::AuthUser {
+                                        id: u.id,
+                                        username: u.username,
+                                        display_name: u.display_name,
+                                        is_admin: u.is_admin,
+                                    }),
+                                None => db::queries::users::first_admin(&conn)
+                                    .ok()
+                                    .flatten(),
+                            },
+                            Err(_) => None,
+                        }
+                    };
+                    info!(
+                        acting_as = authless_user
+                            .as_ref()
+                            .map(|u| u.username.as_str())
+                            .unwrap_or("<anonymous>"),
+                        "authless MCP endpoint enabled at /mcp/<token>"
+                    );
+                    build_authless_mcp_router(
+                        pool.clone(),
+                        &token,
+                        authless_user,
+                        mcp_allowed_hosts.clone(),
+                    )
+                });
+
+            let app = authed_routes.merge(oauth::router(oauth_state));
+            let app = match authless_mcp_router {
+                Some(r) => app.merge(r),
+                None => app,
+            };
+            let app = app
                 .fallback(get(serve_frontend))
                 // Top-level CORS layer.
                 //
@@ -514,6 +562,43 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     }
 }
 
+/// Build the authless MCP router mounted at `/mcp/<token>`.
+///
+/// This endpoint deliberately bypasses the OAuth/API-key auth middleware: the
+/// secret path segment IS the credential. It exists because claude.ai web's
+/// OAuth connector flow is currently broken (it finishes the OAuth dance, gets
+/// a token, then never sends the authenticated MCP request). An authless server
+/// sidesteps that path entirely. Every request is run as a fixed identity
+/// (`user`) so MCP tools that attribute actions to a user still work.
+///
+/// Security: anyone who learns the URL has full MCP access. The token must be
+/// long and random, and only served over HTTPS.
+fn build_authless_mcp_router(
+    pool: db::DbPool,
+    token: &str,
+    user: Option<db::models::AuthUser>,
+    allowed_hosts: Vec<String>,
+) -> Router {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_allowed_hosts(allowed_hosts);
+    let service = StreamableHttpService::new(
+        move || Ok(mcp::LificMcp::new(pool.clone())),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    Router::new().route(
+        &format!("/mcp/{token}"),
+        any(move |request: Request<Body>| async move {
+            mcp::with_request_user(user, || async {
+                service.handle(request).await.into_response()
+            })
+            .await
+        }),
+    )
+}
+
 /// Wrapper that skips auth for /api/health
 async fn auth_middleware_wrapper(
     state: axum::extract::State<auth::AuthState>,
@@ -568,7 +653,6 @@ async fn shutdown_signal(pool: db::DbPool) {
 #[cfg(test)]
 mod cors_tests {
     use super::*;
-    use axum::Router;
     use axum::routing::post;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -735,5 +819,80 @@ mod cors_tests {
             expose.contains("www-authenticate"),
             "www-authenticate must be exposed, got: {expose}"
         );
+    }
+}
+
+#[cfg(test)]
+mod authless_mcp_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn initialize_body() -> Body {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"}
+            }
+        });
+        Body::from(serde_json::to_vec(&body).unwrap())
+    }
+
+    /// The whole point: a request to /mcp/<token> with NO Authorization header
+    /// drives a full MCP `initialize` and returns 200. This is the path that
+    /// works around claude.ai web's broken OAuth connector flow.
+    #[tokio::test]
+    async fn authless_path_serves_mcp_without_auth() {
+        let pool = db::open_memory().unwrap();
+        let token = "s3cret-authless-token-abcdef";
+        let router =
+            build_authless_mcp_router(pool, token, None, vec!["localhost".into()]);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/mcp/{token}"))
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(initialize_body())
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "authless MCP initialize must succeed without any auth header"
+        );
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            val["result"]["serverInfo"].is_object(),
+            "expected an initialize result, got: {val}"
+        );
+    }
+
+    /// A wrong path token does not match the route at all (no secret leak,
+    /// no MCP access) — it falls through to 404 in this isolated router.
+    #[tokio::test]
+    async fn wrong_path_token_does_not_match() {
+        let pool = db::open_memory().unwrap();
+        let router =
+            build_authless_mcp_router(pool, "the-right-token", None, vec!["localhost".into()]);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/the-wrong-token")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(initialize_body())
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
