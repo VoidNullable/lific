@@ -12,7 +12,7 @@
   import ModuleList from "./routes/ModuleList.svelte";
   import ModuleDetail from "./routes/ModuleDetail.svelte";
   import Layout from "./lib/Layout.svelte";
-  import { hasSession, listProjects } from "./lib/api";
+  import { hasSession } from "./lib/api";
 
   let route = $state(window.location.hash.slice(1) || "/");
 
@@ -42,16 +42,9 @@
     }
   });
 
-  async function redirectToDefault() {
-    const res = await listProjects();
-    if (res.ok && res.data.length > 0) {
-      navigate(`/${res.data[0].identifier}/issues`);
-      return;
-    }
-    if (res.ok) {
-      navigate("/settings");
-      return;
-    }
+  // The bare root URL lands on Settings. (Issue lists are still reached
+  // by navigating into a project.)
+  function redirectToDefault() {
     navigate("/settings");
   }
 
