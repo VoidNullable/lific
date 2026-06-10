@@ -2084,6 +2084,13 @@
       }
       navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
     }}
+    onmousedown={(e) => {
+      // Shift-click means "extend selection" — suppress the native
+      // text-selection sweep it would otherwise trigger. preventDefault
+      // here (not on click) is what actually stops it, and only for
+      // shift so normal title text selection keeps working.
+      if (e.shiftKey) e.preventDefault();
+    }}
     onmouseenter={(e) => { if (shouldAcceptMouse(e)) focusedIndex = idx; }}
   >
     <!-- Selection checkbox (LIF-149). Space is always reserved so rows
