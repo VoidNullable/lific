@@ -23,9 +23,10 @@
   import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
   import DeleteMenu from "./DeleteMenu.svelte";
+  import ActivityTimeline from "./ActivityTimeline.svelte";
   import { ArrowLeft, Download } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
-  import type { Comment } from "./api";
+  import type { Activity, Comment } from "./api";
 
   let {
     navigate,
@@ -62,6 +63,9 @@
     // Comments (optional)
     comments,
     onNewComment,
+    // Activity timeline (optional — LIF-157). The route owns fetching;
+    // this shell just renders it between the body and the comments.
+    activity,
     // Layout
     layout = "two-column",
     sidebar,
@@ -104,6 +108,7 @@
     onDelete?: () => Promise<boolean>;
     comments?: Comment[];
     onNewComment?: (content: string) => Promise<Comment | null>;
+    activity?: Activity[];
     layout?: "two-column" | "wide";
     sidebar?: Snippet;
     belowTitle?: Snippet;
@@ -255,6 +260,10 @@
     proseMinHeight={bodyProseMinHeight}
     onSave={onSaveBody}
   />
+
+  {#if activity && activity.length > 0}
+    <ActivityTimeline items={activity} />
+  {/if}
 
   {#if onNewComment && comments}
     <Comments bind:this={commentsRef} {comments} {editable} onSubmit={onNewComment} />

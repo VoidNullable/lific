@@ -451,6 +451,49 @@ export interface Comment {
   updated_at: string;
 }
 
+// ── Activity / audit log (LIF-156/157) ─────────────────
+
+export interface Activity {
+  id: number;
+  ts: string;
+  actor_user_id: number | null;
+  actor_username: string | null;
+  actor_display_name: string | null;
+  actor_is_bot: boolean;
+  /** web | mcp | api | cli | system */
+  transport: string;
+  entity_type: string;
+  entity_id: number;
+  entity_label: string | null;
+  project_id: number | null;
+  issue_id: number | null;
+  page_id: number | null;
+  /** create | update | delete | attach | detach | link | unlink */
+  action: string;
+  field: string | null;
+  old_value: string | null;
+  new_value: string | null;
+}
+
+export interface ActivityFeed {
+  items: Activity[];
+  has_more: boolean;
+}
+
+export async function listIssueActivity(issueId: number, limit = 100) {
+  return request<ActivityFeed>(`/issues/${issueId}/activity?limit=${limit}`);
+}
+
+export async function listPageActivity(pageId: number, limit = 100) {
+  return request<ActivityFeed>(`/pages/${pageId}/activity?limit=${limit}`);
+}
+
+export async function listProjectActivity(projectId: number, limit = 50, offset = 0) {
+  return request<ActivityFeed>(
+    `/projects/${projectId}/activity?limit=${limit}&offset=${offset}`,
+  );
+}
+
 export async function listComments(issueId: number) {
   return request<Comment[]>(`/issues/${issueId}/comments`);
 }

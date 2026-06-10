@@ -8,10 +8,12 @@
     listLabels,
     listComments,
     createComment,
+    listIssueActivity,
     type Issue,
     type Module,
     type Label,
     type Comment,
+    type Activity,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
@@ -58,6 +60,7 @@
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
   let comments = $state<Comment[]>([]);
+  let activity = $state<Activity[]>([]);
   let loading = $state(true);
   let error = $state("");
 
@@ -113,16 +116,26 @@
     }
     issue = res.data;
 
-    const [modRes, lblRes, cmtRes] = await Promise.all([
+    const [modRes, lblRes, cmtRes, actRes] = await Promise.all([
       listModules(issue.project_id),
       listLabels(issue.project_id),
       listComments(issue.id),
+      listIssueActivity(issue.id),
     ]);
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
     if (cmtRes.ok) comments = cmtRes.data;
+    if (actRes.ok) activity = actRes.data.items;
 
     loading = false;
+  }
+
+  // Re-pull the timeline after any mutation so the user's own edit shows
+  // up in Activity immediately (it was just audited server-side).
+  async function refreshActivity() {
+    if (!issue) return;
+    const res = await listIssueActivity(issue.id);
+    if (res.ok) activity = res.data.items;
   }
 
   // Close sidebar dropdowns on outside click. (LabelEditor + the topbar
@@ -152,6 +165,7 @@
         hour: "2-digit",
         minute: "2-digit",
       });
+      refreshActivity();
     }
     saving = false;
   }
@@ -201,6 +215,7 @@
     const res = await createComment(issue.id, content);
     if (!res.ok) return null;
     comments = [...comments, res.data];
+    refreshActivity();
     return res.data;
   }
 
@@ -264,6 +279,7 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  {activity}
   layout="two-column"
 >
   {#snippet breadcrumbExtra()}

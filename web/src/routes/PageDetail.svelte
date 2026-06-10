@@ -7,9 +7,11 @@
     listPageComments,
     createPageComment,
     listLabels,
+    listPageActivity,
     type Page,
     type Comment,
     type Label,
+    type Activity,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
@@ -55,6 +57,7 @@
 
   let page = $state<Page | null>(null);
   let comments = $state<Comment[]>([]);
+  let activity = $state<Activity[]>([]);
   // LIF-105: project labels available for attachment. Stays empty for
   // workspace pages (project_id === null) — labels are project-scoped.
   let labels = $state<Label[]>([]);
@@ -95,9 +98,13 @@
   // the request was in flight.
   async function refreshPage() {
     const gen = loadGen;
-    const res = await getPage(pageId);
+    const [res, actRes] = await Promise.all([
+      getPage(pageId),
+      listPageActivity(pageId),
+    ]);
     if (gen !== loadGen) return; // navigated away mid-flight — discard
     if (res.ok) page = res.data;
+    if (actRes.ok) activity = actRes.data.items;
   }
 
   $effect(() =>
@@ -126,6 +133,7 @@
     // pages skip the labels fetch — they can't carry any (LIF-105).
     const tasks: Promise<unknown>[] = [
       listPageComments(page.id).then((r) => { if (gen === loadGen && r.ok) comments = r.data; }),
+      listPageActivity(page.id).then((r) => { if (gen === loadGen && r.ok) activity = r.data.items; }),
     ];
     if (page.project_id !== null) {
       tasks.push(
@@ -149,6 +157,10 @@
       lastSaved = new Date().toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
+      });
+      // Surface the edit in the Activity timeline immediately.
+      listPageActivity(page.id).then((r) => {
+        if (r.ok) activity = r.data.items;
       });
     }
     saving = false;
@@ -263,6 +275,7 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  {activity}
   layout="wide"
   bind:bodyMode
 >
