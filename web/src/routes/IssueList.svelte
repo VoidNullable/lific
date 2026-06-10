@@ -1404,7 +1404,8 @@
                   class="size-5 flex items-center justify-center rounded
                          text-[var(--text-faint)] hover:text-[var(--accent)]
                          hover:bg-[var(--bg-subtle)] transition-colors"
-                  onclick={() => navigate(`/${projectIdentifier}/issues/new`)}
+                  onclick={() =>
+                    navigate(`/${projectIdentifier}/issues/new?status=${status}`)}
                 >
                   <Plus size={12} />
                 </button>

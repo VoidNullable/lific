@@ -55,7 +55,13 @@
     | { type: "app"; page: "project-settings"; project: string }
     | { type: "app"; page: "issues"; project: string }
     | { type: "app"; page: "board"; project: string }
-    | { type: "app"; page: "issue-new"; project: string; defaultModuleId: number | null }
+    | {
+        type: "app";
+        page: "issue-new";
+        project: string;
+        defaultModuleId: number | null;
+        defaultStatus: string | null;
+      }
     | { type: "app"; page: "issue-detail"; project: string; identifier: string }
     | { type: "app"; page: "pages"; project: string }
     | { type: "app"; page: "page-detail"; project: string; pageId: number }
@@ -99,18 +105,27 @@
       return { type: "app", page: "board", project: boardMatch[1] };
     }
 
-    // Project-scoped: /{IDENTIFIER}/issues/new (optional ?module={id} prefill)
+    // Project-scoped: /{IDENTIFIER}/issues/new
+    // Optional prefills: ?module={id} (LIF-121) and ?status={status}
+    // (board column "+" creates an issue in that column's status).
     const issueNewMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/issues\/new$/i);
     if (issueNewMatch) {
       const moduleParam = query.get("module");
       const defaultModuleId = moduleParam && /^\d+$/.test(moduleParam)
         ? parseInt(moduleParam)
         : null;
+      const statusParam = query.get("status");
+      const defaultStatus =
+        statusParam &&
+        ["backlog", "todo", "active", "done", "cancelled"].includes(statusParam)
+          ? statusParam
+          : null;
       return {
         type: "app",
         page: "issue-new",
         project: issueNewMatch[1],
         defaultModuleId,
+        defaultStatus,
       };
     }
 
@@ -202,6 +217,7 @@
         {navigate}
         projectIdentifier={parsed.project}
         defaultModuleId={parsed.defaultModuleId}
+        defaultStatus={parsed.defaultStatus}
       />
     {:else if parsed.page === "issue-detail"}
       <IssueDetail

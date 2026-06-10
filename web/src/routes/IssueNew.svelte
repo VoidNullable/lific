@@ -27,6 +27,7 @@
     navigate,
     projectIdentifier,
     defaultModuleId = null,
+    defaultStatus = null,
   }: {
     navigate: (path: string) => void;
     projectIdentifier: string;
@@ -34,6 +35,10 @@
      *  "+ Issue" on a module page lands here with that module already
      *  selected. */
     defaultModuleId?: number | null;
+    /** Pre-fill status from ?status= so the board column "+" creates
+     *  an issue in that column instead of silently defaulting to
+     *  backlog. Validated by App's route parser. */
+    defaultStatus?: string | null;
   } = $props();
 
   let project = $state<Project | null>(null);
@@ -46,7 +51,7 @@
   // Draft fields
   let title = $state("");
   let description = $state("");
-  let status = $state("backlog");
+  let status = $state(defaultStatus ?? "backlog");
   let priority = $state("none");
   let moduleId = $state<number | null>(defaultModuleId);
   let selectedLabels = $state<string[]>([]);
