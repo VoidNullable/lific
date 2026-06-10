@@ -66,6 +66,41 @@ pub fn list_activity(
     Ok(ActivityFeed { items, has_more })
 }
 
+/// Per-actor rollup for a project: action counts, last-seen, and their
+/// dominant transport. Ordered most-active-first. `actor_user_id` NULL
+/// groups all system/unattributed writes into one row.
+pub fn actor_stats(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<Vec<crate::db::models::ActorStat>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.actor_user_id, u.username, u.display_name, COALESCE(u.is_bot, 0),
+                COUNT(*) AS actions, MAX(a.ts) AS last_ts,
+                (SELECT t.transport FROM audit_log t
+                 WHERE t.project_id = a.project_id
+                   AND t.actor_user_id IS a.actor_user_id
+                 GROUP BY t.transport ORDER BY COUNT(*) DESC LIMIT 1) AS top_transport
+         FROM audit_log a
+         LEFT JOIN users u ON u.id = a.actor_user_id
+         WHERE a.project_id = ?1
+         GROUP BY a.actor_user_id
+         ORDER BY actions DESC",
+    )?;
+    let rows = stmt.query_map([project_id], |row| {
+        Ok(crate::db::models::ActorStat {
+            actor_user_id: row.get(0)?,
+            username: row.get(1)?,
+            display_name: row.get(2)?,
+            is_bot: row.get::<_, i64>(3)? != 0,
+            actions: row.get(4)?,
+            last_ts: row.get(5)?,
+            top_transport: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(LificError::Database)
+}
+
 fn row_to_activity(row: &rusqlite::Row<'_>) -> Result<Activity, rusqlite::Error> {
     Ok(Activity {
         id: row.get(0)?,
@@ -564,5 +599,43 @@ mod tests {
         assert_eq!(rest.items.len(), 4);
         assert!(!rest.has_more);
         assert!(first.items.last().unwrap().id > rest.items.first().unwrap().id);
+    }
+
+    #[test]
+    fn actor_stats_rollup_counts_ranks_and_transports() {
+        let (pool, pid) = seeded();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice", false);
+        let bot = seed_user(&conn, "opencode-alice", true);
+
+        crate::actor::stamp(
+            &conn,
+            &ActorCtx { user_id: Some(alice), transport: Transport::Web },
+        );
+        queries::create_issue(&conn, &new_issue(pid, "a1")).unwrap();
+        queries::create_issue(&conn, &new_issue(pid, "a2")).unwrap();
+
+        crate::actor::stamp(
+            &conn,
+            &ActorCtx { user_id: Some(bot), transport: Transport::Mcp },
+        );
+        queries::create_issue(&conn, &new_issue(pid, "b1")).unwrap();
+        queries::create_issue(&conn, &new_issue(pid, "b2")).unwrap();
+        queries::create_issue(&conn, &new_issue(pid, "b3")).unwrap();
+        drop(conn);
+
+        let conn = pool.read().unwrap();
+        let stats = actor_stats(&conn, pid).unwrap();
+        // bot (3) > alice (2) > system (1: the project create itself)
+        assert_eq!(stats.len(), 3, "{stats:#?}");
+        assert_eq!(stats[0].username.as_deref(), Some("opencode-alice"));
+        assert_eq!(stats[0].actions, 3);
+        assert!(stats[0].is_bot);
+        assert_eq!(stats[0].top_transport, "mcp");
+        assert_eq!(stats[1].username.as_deref(), Some("alice"));
+        assert_eq!(stats[1].actions, 2);
+        assert_eq!(stats[1].top_transport, "web");
+        assert_eq!(stats[2].actor_user_id, None, "system bucket last");
+        assert_eq!(stats[2].top_transport, "system");
     }
 }

@@ -96,6 +96,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/activity",
             get(activity::project_activity),
         )
+        .route(
+            "/api/projects/{id}/activity/actors",
+            get(activity::project_activity_actors),
+        )
         .route("/api/export/issues/{identifier}", get(export::export_issue))
         .route("/api/export/pages/{identifier}", get(export::export_page))
         .route("/api/export/projects/{identifier}", get(export::export_project))

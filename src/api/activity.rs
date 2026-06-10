@@ -3,8 +3,11 @@
 
 use axum::extract::{Json, Path, Query, State};
 
-use crate::db::queries::activity::{ActivityScope, list_activity};
-use crate::db::{DbPool, models::ActivityFeed};
+use crate::db::queries::activity::{ActivityScope, actor_stats, list_activity};
+use crate::db::{
+    DbPool,
+    models::{ActivityFeed, ActorStat},
+};
 use crate::error::LificError;
 
 use super::with_read;
@@ -51,6 +54,15 @@ pub(super) async fn project_activity(
         list_activity(conn, ActivityScope::Project(id), q.limit, q.offset)
     })
     .map(Json)
+}
+
+/// GET /api/projects/{id}/activity/actors — per-actor rollup, most
+/// active first (LIF-158: actor rail + expanded-entry stats).
+pub(super) async fn project_activity_actors(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<ActorStat>>, LificError> {
+    with_read(&db, |conn| actor_stats(conn, id)).map(Json)
 }
 
 #[cfg(test)]
@@ -199,5 +211,26 @@ mod tests {
             .expect("content edit audited");
         assert_eq!(edit["new_value"], "# hello");
         assert_eq!(edit["entity_label"], "TST-DOC-1");
+    }
+
+    #[tokio::test]
+    async fn actors_endpoint_returns_rollup() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for i in 0..3 {
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": format!("i{i}") }),
+            )
+            .await;
+        }
+
+        let actors = get_json(&app, &format!("/api/projects/{project_id}/activity/actors")).await;
+        let arr = actors.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "test app writes are unscoped → one bucket");
+        assert!(arr[0]["actions"].as_i64().unwrap() >= 4); // project + 3 issues
+        assert!(arr[0]["last_ts"].is_string());
+        assert_eq!(arr[0]["top_transport"], "system");
     }
 }

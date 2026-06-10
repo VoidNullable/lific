@@ -439,6 +439,23 @@ pub struct ActivityFeed {
     pub has_more: bool,
 }
 
+/// Per-actor rollup for a project's audit history (LIF-158): powers the
+/// actor rail on the Activity page and the "N actions in this project"
+/// detail when an entry is expanded.
+#[derive(Debug, serde::Serialize)]
+pub struct ActorStat {
+    pub actor_user_id: Option<i64>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub is_bot: bool,
+    /// Total audit entries by this actor in the project.
+    pub actions: i64,
+    /// Timestamp of their most recent action.
+    pub last_ts: String,
+    /// Most-used transport for this actor in this project.
+    pub top_transport: String,
+}
+
 /// Deserializes a JSON field as Option<Option<T>>:
 /// - absent key → None (don't change)
 /// - "field": null → Some(None) (set to null)

@@ -494,6 +494,21 @@ export async function listProjectActivity(projectId: number, limit = 50, offset 
   );
 }
 
+/** Per-actor rollup for a project's audit history (most active first). */
+export interface ActorStat {
+  actor_user_id: number | null;
+  username: string | null;
+  display_name: string | null;
+  is_bot: boolean;
+  actions: number;
+  last_ts: string;
+  top_transport: string;
+}
+
+export async function listProjectActivityActors(projectId: number) {
+  return request<ActorStat[]>(`/projects/${projectId}/activity/actors`);
+}
+
 export async function listComments(issueId: number) {
   return request<Comment[]>(`/issues/${issueId}/comments`);
 }
