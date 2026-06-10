@@ -227,17 +227,22 @@
     return all.filter((c) => (fuzzyMatch(q, c.title)?.score ?? 0) >= 0.3);
   });
 
+  // Groups order by their strongest hit, not a fixed sequence — typing
+  // a project name must surface Projects above a pile of FTS issue
+  // matches (especially on detail pages, where Actions already sit on
+  // top). GROUP_ORDER only breaks ties.
   let grouped = $derived.by(() => {
-    const out: { label: string; entries: { r: PaletteResult; flatIdx: number }[] }[] = [];
     // Nav results sit after the action list in the flat selection order.
     let flatIdx = mode.type === "root" ? actionHits.length : 0;
-    for (const kind of GROUP_ORDER) {
-      const entries = results
-        .filter((r) => r.kind === kind)
-        .map((r) => ({ r, flatIdx: flatIdx++ }));
-      if (entries.length > 0) out.push({ label: GROUP_LABEL[kind], entries });
-    }
-    return out;
+    const groups = GROUP_ORDER.map((kind, gi) => {
+      const rs = results.filter((r) => r.kind === kind);
+      return { kind, gi, rs, best: rs.reduce((m, r) => Math.max(m, r.score), 0) };
+    }).filter((g) => g.rs.length > 0);
+    groups.sort((a, b) => b.best - a.best || a.gi - b.gi);
+    return groups.map((g) => ({
+      label: GROUP_LABEL[g.kind],
+      entries: g.rs.map((r) => ({ r, flatIdx: flatIdx++ })),
+    }));
   });
 
   function projectByIdent(ident: string): Project | undefined {
@@ -323,18 +328,31 @@
   /** Client fuzzy over the cached catalog (projects/modules/folders). */
   function catalogHits(q: string): PaletteResult[] {
     const hits: PaletteResult[] = [];
+    const ql = q.toLowerCase();
     for (const p of catalog.projects) {
       const m =
         fuzzyMatch(q, p.name) ??
         fuzzyMatch(q, p.identifier);
       if (m && m.score >= 0.3) {
+        // Exact or prefix project matches outrank FTS text hits: typing
+        // a project's name means "take me there", and Enter should land
+        // on its issue list (the project's default view).
+        let score = m.score;
+        if (p.identifier.toLowerCase() === ql || p.name.toLowerCase() === ql) {
+          score = 2.6;
+        } else if (
+          p.name.toLowerCase().startsWith(ql) ||
+          p.identifier.toLowerCase().startsWith(ql)
+        ) {
+          score = Math.max(score, 2.2);
+        }
         hits.push({
           kind: "project",
           title: p.name,
           identifier: p.identifier,
           emoji: p.emoji,
           route: `/${p.identifier}/issues`,
-          score: m.score,
+          score,
         });
       }
     }
