@@ -22,17 +22,29 @@ type HmacSha256 = Hmac<Sha256>;
 static CSRF_SECRET: std::sync::LazyLock<[u8; 32]> =
     std::sync::LazyLock::new(rand::random);
 
-/// Generate a CSRF token: timestamp.hmac(timestamp)
-fn generate_csrf_token() -> String {
+/// Generate a CSRF token bound to the approving session: `timestamp.hmac(ts || binding)`.
+///
+/// SECURITY: the token MUST be bound to the credential (`binding`) the request
+/// carries. The authorize page is served unauthenticated (`GET /oauth/authorize`),
+/// so an attacker can freely mint a token there; without binding, that harvested
+/// token would validate against a *victim's* cross-site POST, defeating the whole
+/// defense. Binding to the session means a token minted with no/attacker session
+/// (`binding=""` or the attacker's own) won't validate against the victim's
+/// session presented on the forged POST. `binding` is HMAC *input*, never echoed,
+/// so passing the raw session token here does not leak it.
+fn generate_csrf_token(binding: &str) -> String {
     let ts = chrono::Utc::now().timestamp();
     let mut mac = HmacSha256::new_from_slice(&*CSRF_SECRET).unwrap();
     mac.update(ts.to_le_bytes().as_ref());
+    mac.update(b".");
+    mac.update(binding.as_bytes());
     let sig = hex_encode(&mac.finalize().into_bytes());
     format!("{ts}.{sig}")
 }
 
-/// Validate a CSRF token. Returns true if valid and not older than 10 minutes.
-fn validate_csrf_token(token: &str) -> bool {
+/// Validate a CSRF token against the binding it must have been issued for.
+/// Returns true only if the HMAC matches AND the token is not older than 10 minutes.
+fn validate_csrf_token(token: &str, binding: &str) -> bool {
     let Some((ts_str, sig)) = token.split_once('.') else {
         return false;
     };
@@ -44,11 +56,39 @@ fn validate_csrf_token(token: &str) -> bool {
     if now - ts > 600 || ts > now + 60 {
         return false;
     }
-    // Verify HMAC
+    // Verify HMAC over (timestamp || binding)
     let mut mac = HmacSha256::new_from_slice(&*CSRF_SECRET).unwrap();
     mac.update(ts.to_le_bytes().as_ref());
+    mac.update(b".");
+    mac.update(binding.as_bytes());
     let expected = hex_encode(&mac.finalize().into_bytes());
     expected == sig
+}
+
+/// Extract the session credential a browser would present: the `Authorization:
+/// Bearer` header first, then the `lific_token` cookie. Returns an empty string
+/// when neither is present, so the CSRF binding is still well-defined for the
+/// unauthenticated case. Used to bind a CSRF token to its session both when the
+/// authorize page is rendered and when the approval is submitted.
+fn session_credential(headers: &HeaderMap) -> String {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookies| {
+                    cookies.split(';').find_map(|c| {
+                        c.trim()
+                            .strip_prefix("lific_token=")
+                            .map(|v| v.trim().to_string())
+                    })
+                })
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -280,8 +320,11 @@ struct AuthorizeParams {
     scope: Option<String>,
 }
 
-async fn authorize_page(Query(params): Query<AuthorizeParams>) -> Html<String> {
-    let csrf_token = generate_csrf_token();
+async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams>) -> Html<String> {
+    // Bind the CSRF token to the session the browser presents when loading this
+    // page (sent on the top-level GET navigation under SameSite=Lax). The POST
+    // approval must carry the same session for the token to validate.
+    let csrf_token = generate_csrf_token(&session_credential(&headers));
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -345,9 +388,16 @@ async fn authorize_approve(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<ApproveForm>,
 ) -> Response {
-    // Validate CSRF token to prevent cross-site form submission attacks
+    // The credential presented on this POST (Bearer header or lific_token
+    // cookie). The CSRF token must have been minted for this same credential.
+    let credential = session_credential(&headers);
+
+    // Validate CSRF token, BOUND to the presenting session, to prevent
+    // cross-site form submission attacks. A token harvested from the
+    // unauthenticated authorize page (bound to no/attacker session) will not
+    // match a victim's session presented here.
     match &form.csrf_token {
-        Some(token) if validate_csrf_token(token) => {}
+        Some(token) if validate_csrf_token(token, &credential) => {}
         _ => {
             return (
                 StatusCode::FORBIDDEN,
@@ -358,27 +408,9 @@ async fn authorize_approve(
     }
 
     // Require authentication -- the person approving must be identified.
-    // Extract a session token from either the Authorization header or a cookie,
-    // then validate it against the database to ensure it's a real, non-expired session.
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            // For the browser form flow, extract the token from the lific_token cookie
-            headers
-                .get("cookie")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|cookies| {
-                    cookies.split(';').find_map(|c| {
-                        let c = c.trim();
-                        c.strip_prefix("lific_token=").map(|v| v.trim().to_string())
-                    })
-                })
-        });
-
-    let Some(token) = token else {
+    // `credential` is the session token from the Authorization header or cookie;
+    // it is validated against the database below to ensure it's real and unexpired.
+    let Some(token) = (!credential.is_empty()).then_some(credential) else {
         return (
             StatusCode::UNAUTHORIZED,
             Html("<h1>Authentication required</h1><p>You must be signed in to approve OAuth access. <a href=\"/#/login\">Sign in</a></p>".to_string()),
@@ -893,9 +925,11 @@ mod tests {
         session.token
     }
 
-    /// Build the form body for an authorize POST, including a valid CSRF token.
-    fn authorize_body(client_id: &str, redirect_uri: &str) -> String {
-        let csrf = generate_csrf_token();
+    /// Build the form body for an authorize POST, including a CSRF token bound
+    /// to `binding` (the session credential the POST will carry: a Bearer token,
+    /// a cookie value, or "" for the unauthenticated case).
+    fn authorize_body(client_id: &str, redirect_uri: &str, binding: &str) -> String {
+        let csrf = generate_csrf_token(binding);
         format!(
             "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}",
             client_id,
@@ -910,7 +944,7 @@ mod tests {
     async fn authorize_rejects_missing_auth() {
         let (app, _db) = test_oauth_app();
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let body = authorize_body(&client_id, "http://localhost/callback");
+        let body = authorize_body(&client_id, "http://localhost/callback", "");
         let resp = app
             .clone()
             .oneshot(
@@ -930,7 +964,13 @@ mod tests {
     async fn authorize_rejects_garbage_bearer_token() {
         let (app, _db) = test_oauth_app();
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let body = authorize_body(&client_id, "http://localhost/callback");
+        // CSRF bound to the (garbage) token actually presented, so we exercise
+        // the session-validation path rather than tripping the CSRF check.
+        let body = authorize_body(
+            &client_id,
+            "http://localhost/callback",
+            "lific_sess_fake_garbage_token",
+        );
         let resp = app
             .clone()
             .oneshot(
@@ -951,7 +991,11 @@ mod tests {
     async fn authorize_rejects_fake_cookie_token() {
         let (app, _db) = test_oauth_app();
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let body = authorize_body(&client_id, "http://localhost/callback");
+        let body = authorize_body(
+            &client_id,
+            "http://localhost/callback",
+            "lific_sess_fake_garbage_token",
+        );
         let resp = app
             .clone()
             .oneshot(
@@ -973,7 +1017,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let body = authorize_body(&client_id, "http://localhost/callback");
+        let body = authorize_body(&client_id, "http://localhost/callback", &session_token);
         let resp = app
             .clone()
             .oneshot(
@@ -1000,7 +1044,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let body = authorize_body(&client_id, "http://localhost/callback");
+        let body = authorize_body(&client_id, "http://localhost/callback", &session_token);
         let resp = app
             .clone()
             .oneshot(
@@ -1019,6 +1063,78 @@ mod tests {
             "expected redirect, got {}",
             resp.status()
         );
+    }
+
+    /// CSRF regression: a token harvested from the unauthenticated authorize
+    /// page (bound to no session, `binding=""`) must NOT validate when replayed
+    /// against a victim's authenticated session. This is the exact cross-site
+    /// attack the binding closes — without it, the harvested token would pass
+    /// CSRF and the victim's cookie would drive an approval. Expect 403, not a
+    /// redirect.
+    #[tokio::test]
+    async fn authorize_rejects_unbound_csrf_replayed_with_victim_session() {
+        let (app, db) = test_oauth_app();
+        let victim_session = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        // Attacker mints a CSRF from the public GET page → bound to "".
+        let body = authorize_body(&client_id, "http://localhost/callback", "");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    // Victim's session rides along (e.g. via cookie).
+                    .header("cookie", format!("lific_token={victim_session}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "harvested unbound CSRF must be rejected against a victim session"
+        );
+    }
+
+    /// The authorize page binds the CSRF token to the session that loaded it, so
+    /// a CSRF minted for one session must not authorize a different one.
+    #[tokio::test]
+    async fn authorize_rejects_csrf_bound_to_a_different_session() {
+        let (app, db) = test_oauth_app();
+        let victim_session = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        // CSRF bound to some OTHER session value than the one presented.
+        let body = authorize_body(
+            &client_id,
+            "http://localhost/callback",
+            "lific_sess_some_other_session",
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("authorization", format!("Bearer {victim_session}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Unit-level proof the binding is enforced in the token primitives.
+    #[test]
+    fn csrf_token_is_bound_to_its_session() {
+        let t = generate_csrf_token("session-A");
+        assert!(validate_csrf_token(&t, "session-A"));
+        assert!(!validate_csrf_token(&t, "session-B"));
+        assert!(!validate_csrf_token(&t, ""));
     }
 
     // ── LIF-49: metadata does not advertise refresh_token ────
@@ -1469,7 +1585,8 @@ mod tests {
         // A real PKCE pair so the later token exchange passes verification.
         let verifier = "test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789";
         let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
-        let csrf = generate_csrf_token();
+        // CSRF bound to the session presented on the approval (cookie below).
+        let csrf = generate_csrf_token(&session_token);
         let body = format!(
             "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}",
             client_id,
