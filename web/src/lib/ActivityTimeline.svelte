@@ -55,6 +55,45 @@
 
   /** Human verb for the entry, excluding the value rendering. */
   function verb(a: Activity): string {
+    // ── Plans: phrase step/plan mutations as readable diffs, not raw
+    //    "created this plan_step" noise (LIF-177 follow-up). ──
+    if (a.entity_type === "plan_step") {
+      switch (a.action) {
+        case "create":
+          return "added step";
+        case "delete":
+          return "removed step";
+        case "auto-complete":
+          return "auto-completed a step (issue closed)";
+        case "auto-reopen":
+          return "reopened a step (issue reopened)";
+        case "update":
+          if (a.field === "done")
+            return a.new_value === "1" ? "completed a step" : "reopened a step";
+          if (a.field === "title") return "renamed a step";
+          if (a.field === "description") return "edited a step’s description";
+          if (a.field === "issue")
+            return a.new_value ? "linked a step to" : "unlinked a step from";
+          return `changed a step’s ${a.field}`;
+      }
+    }
+    if (a.entity_type === "plan") {
+      switch (a.action) {
+        case "create":
+          return "created this plan";
+        case "delete":
+          return "deleted the plan";
+        case "auto-archive":
+          return "archived the plan (anchor issue closed)";
+        case "update":
+          if (a.field === "status") return "set status to";
+          if (a.field === "title") return "renamed the plan";
+          if (a.field === "anchor_issue")
+            return a.new_value ? "set anchor to" : "cleared the anchor";
+          return `changed ${a.field}`;
+      }
+    }
+
     switch (a.action) {
       case "create":
         return a.entity_type === "comment" ? "commented" : `created this ${a.entity_type}`;
@@ -73,6 +112,15 @@
       default:
         return a.action;
     }
+  }
+
+  /** Steps/plans carry a title in new_value (create) / old_value (delete);
+   *  show it in quotes so "added step" reads as "added step “schema”". */
+  function titleValue(a: Activity): string | null {
+    if (a.entity_type !== "plan_step" && a.entity_type !== "plan") return null;
+    if (a.action === "create") return a.new_value;
+    if (a.action === "delete") return a.old_value;
+    return null;
   }
 </script>
 
@@ -125,7 +173,15 @@
 
             <!-- Verb + values -->
             {verb(a)}
-            {#if a.action === "update" && a.field === "status"}
+            {#if titleValue(a)}
+              <span class="text-[var(--text-faint)] italic">“{shortValue(titleValue(a), 60)}”</span>
+            {:else if a.action === "update" && a.field === "done"}
+              <!-- verb already reads "completed/reopened a step" -->
+            {:else if a.action === "update" && (a.field === "issue" || a.field === "anchor_issue")}
+              <span class="font-mono text-[0.75rem] text-[var(--accent)]">{a.new_value ?? a.old_value}</span>
+            {:else if a.action === "update" && a.field === "status" && a.entity_type === "plan"}
+              <span class="capitalize text-[var(--text)] mx-0.5">{a.new_value}</span>
+            {:else if a.action === "update" && a.field === "status"}
               <span class="inline-flex items-center gap-1 align-middle mx-0.5">
                 <StatusIcon status={a.old_value ?? ""} size={12} />
                 <span class="capitalize">{a.old_value}</span>
