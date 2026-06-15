@@ -5,3 +5,5 @@
 .env
 AGENTS.md
 deploy.sh
+dev-backend.sh
+/.dev/
