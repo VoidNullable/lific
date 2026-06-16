@@ -15,6 +15,7 @@
   import PlanDetail from "./routes/PlanDetail.svelte";
   import ProjectActivity from "./routes/ProjectActivity.svelte";
   import Layout from "./lib/Layout.svelte";
+  import ErrorState from "./lib/ErrorState.svelte";
   import { hasSession } from "./lib/api";
 
   let route = $state(window.location.hash.slice(1) || "/");
@@ -73,7 +74,8 @@
     | { type: "app"; page: "plans"; project: string }
     | { type: "app"; page: "plan-detail"; project: string; planId: number }
     | { type: "app"; page: "activity"; project: string }
-    | { type: "loading" };
+    | { type: "loading" }
+    | { type: "not-found" };
 
   function parseRoute(input: string): ParsedRoute {
     // Strip a "?key=value" query string from the route before pattern-
@@ -206,7 +208,11 @@
       };
     }
 
-    return { type: "loading" };
+    // "/" is the redirect-pending root (the effect below sends it to the
+    // default surface), so keep it on the spinner. Any OTHER unmatched path
+    // is a genuine 404 — don't spin forever.
+    if (r === "/") return { type: "loading" };
+    return { type: "not-found" };
   }
 
   let parsed = $derived(parseRoute(route));
@@ -226,8 +232,24 @@
              border-t-[var(--accent)] animate-spin"
     ></div>
   </div>
+{:else if parsed.type === "not-found"}
+  <Layout {navigate} {route} bind:onProjectChange>
+    <ErrorState
+      title="Page not found"
+      message="We couldn't find that page. The link may be wrong, or it has moved."
+    >
+      <button
+        class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+               px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+        onclick={() => navigate("/settings")}
+      >
+        Back to home
+      </button>
+    </ErrorState>
+  </Layout>
 {:else}
   <Layout {navigate} {route} bind:onProjectChange>
+    <svelte:boundary>
     {#if parsed.page === "settings"}
       <Settings {navigate} />
     {:else if parsed.page === "project-new"}
@@ -277,5 +299,31 @@
     {:else if parsed.page === "activity"}
       <ProjectActivity {navigate} projectIdentifier={parsed.project} />
     {/if}
+
+      <!-- LIF-193: catch any unexpected render error from a route. Shows a
+           GENERIC message only — never the raw error/stack — so an exception
+           can't leak internal state to the user. -->
+      {#snippet failed(_error: unknown, reset: () => void)}
+        <ErrorState
+          title="Something went wrong"
+          message="An unexpected error interrupted this page. Trying again usually clears it."
+        >
+          <button
+            class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                   px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+            onclick={reset}
+          >
+            Try again
+          </button>
+          <button
+            class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)]
+                   px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+            onclick={() => location.reload()}
+          >
+            Reload
+          </button>
+        </ErrorState>
+      {/snippet}
+    </svelte:boundary>
   </Layout>
 {/if}

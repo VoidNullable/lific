@@ -27,6 +27,7 @@
   import StatusIcon from "../lib/StatusIcon.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import Mascot from "../lib/Mascot.svelte";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getContext } from "svelte";
@@ -1912,9 +1913,14 @@
         ></div>
       </div>
     {:else if error}
-      <div class="flex-1 flex items-center justify-center">
-        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-      </div>
+      <ErrorState title="Couldn't load this board" message={error}>
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        >
+          Project overview
+        </button>
+      </ErrorState>
     {:else}
       {#each STATUSES as status (status)}
         {@const colIssues = columnItems[status] ?? []}
@@ -2178,9 +2184,14 @@
         ></div>
       </div>
     {:else if error}
-      <div class="flex items-center justify-center py-20">
-        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-      </div>
+      <ErrorState title="Couldn't load issues" message={error}>
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        >
+          Project overview
+        </button>
+      </ErrorState>
     {:else if filteredIssues.length === 0}
       {#if hasActiveFilters() || searchQuery}
         <!-- Filtered-empty: work exists, it's just hidden behind a
