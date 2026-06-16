@@ -35,7 +35,9 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/auth/signup", post(auth::auth_signup))
         .route("/api/auth/login", post(auth::auth_login))
         .route("/api/auth/logout", post(auth::auth_logout))
-        .route("/api/auth/me", get(auth::auth_me))
+        .route("/api/auth/me", get(auth::auth_me).patch(auth::update_me))
+        .route("/api/auth/me/password", post(auth::change_password))
+        .route("/api/auth/me/sessions", delete(auth::revoke_all_sessions))
         .route(
             "/api/auth/keys",
             get(auth::list_keys).post(auth::create_key),

@@ -213,6 +213,85 @@ pub(super) async fn auth_me(
     })))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct UpdateMeRequest {
+    display_name: Option<String>,
+    email: Option<String>,
+}
+
+/// PATCH /api/auth/me — update the signed-in user's profile (display name,
+/// email). LIF-190.
+pub(super) async fn update_me(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<UpdateMeRequest>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let full = with_write(&db, |conn| {
+        crate::db::queries::users::update_profile(
+            conn,
+            user.id,
+            input.display_name.as_deref(),
+            input.email.as_deref(),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "id": full.id,
+        "username": full.username,
+        "email": full.email,
+        "display_name": full.display_name,
+        "is_admin": full.is_admin,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// POST /api/auth/me/password — change password after verifying the current
+/// one. LIF-190.
+pub(super) async fn change_password(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    with_write(&db, |conn| {
+        let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
+        let ok = crate::db::queries::users::verify_password(
+            &input.current_password,
+            &full.password_hash,
+        )?;
+        if !ok {
+            return Err(LificError::BadRequest("current password is incorrect".into()));
+        }
+        crate::db::queries::users::update_password(conn, user.id, &input.new_password)
+    })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// DELETE /api/auth/me/sessions — sign out of every session (this one too).
+/// Clears the cookie so the current browser drops to logged-out. LIF-190.
+pub(super) async fn revoke_all_sessions(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+) -> Result<impl IntoResponse, LificError> {
+    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    with_write(&db, |conn| {
+        crate::db::queries::users::delete_all_sessions(conn, user.id)
+    })?;
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        "set-cookie",
+        "lific_token=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+            .parse()
+            .unwrap(),
+    );
+    Ok((resp_headers, Json(serde_json::json!({ "revoked": true }))))
+}
+
 // ── Key management endpoints ─────────────────────────────────
 
 pub(super) async fn list_keys(
@@ -527,6 +606,81 @@ mod tests {
 
         assert_eq!(data["user"]["username"], "metest");
         assert!(token.starts_with("lific_sess_"));
+    }
+
+    // ── LIF-190: profile / password / session settings ──────
+
+    #[tokio::test]
+    async fn update_me_changes_display_name() {
+        use tower::ServiceExt;
+        let app = test_app();
+        let body = serde_json::json!({ "display_name": "Renamed Admin" });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/auth/me")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["display_name"], "Renamed Admin");
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_correct_current() {
+        let db = crate::db::open_memory().expect("test db");
+        let user = {
+            let conn = db.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "pwuser".into(),
+                    email: "pwuser@test.com".into(),
+                    password: "originalpass123".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+        };
+        let app = crate::api::test_helpers::app_as_user(db, &user);
+
+        let wrong =
+            serde_json::json!({ "current_password": "totally-wrong", "new_password": "newpassword123" });
+        let resp = json_post(&app, "/api/auth/me/password", wrong).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let right =
+            serde_json::json!({ "current_password": "originalpass123", "new_password": "newpassword123" });
+        let resp = json_post(&app, "/api/auth/me/password", right).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn revoke_all_sessions_ok() {
+        use tower::ServiceExt;
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/api/auth/me/sessions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["revoked"], true);
     }
 
     // ── LIF-75: login rate limiting (per-identity + per-IP, no double-count) ──

@@ -165,6 +165,72 @@ pub fn authenticate(conn: &Connection, identity: &str, password: &str) -> Result
     }
 }
 
+/// LIF-190: update the authenticated user's profile fields. Each field is
+/// optional so the caller can PATCH just one. Returns the refreshed user.
+pub fn update_profile(
+    conn: &Connection,
+    user_id: i64,
+    display_name: Option<&str>,
+    email: Option<&str>,
+) -> Result<User, LificError> {
+    if let Some(dn) = display_name {
+        let dn = dn.trim();
+        if dn.is_empty() {
+            return Err(LificError::BadRequest("display name cannot be empty".into()));
+        }
+        if dn.chars().count() > 100 {
+            return Err(LificError::BadRequest(
+                "display name must be 100 characters or fewer".into(),
+            ));
+        }
+        conn.execute(
+            "UPDATE users SET display_name = ?1 WHERE id = ?2",
+            params![dn, user_id],
+        )?;
+    }
+    if let Some(em) = email {
+        let em = em.trim().to_lowercase();
+        if em.is_empty() || !em.contains('@') {
+            return Err(LificError::BadRequest("invalid email address".into()));
+        }
+        conn.execute("UPDATE users SET email = ?1 WHERE id = ?2", params![em, user_id])
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(err, _)
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    LificError::BadRequest("that email is already in use".into())
+                }
+                other => other.into(),
+            })?;
+    }
+    get_user_by_id(conn, user_id)
+}
+
+/// LIF-190: replace the user's password. Caller is responsible for verifying
+/// the current password first. Enforces the same length bounds as signup.
+pub fn update_password(
+    conn: &Connection,
+    user_id: i64,
+    new_password: &str,
+) -> Result<(), LificError> {
+    if new_password.len() < 8 {
+        return Err(LificError::BadRequest(
+            "password must be at least 8 characters".into(),
+        ));
+    }
+    if new_password.len() > 1024 {
+        return Err(LificError::BadRequest(
+            "password must be 1024 characters or fewer".into(),
+        ));
+    }
+    let hash = hash_password(new_password)?;
+    conn.execute(
+        "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+        params![hash, user_id],
+    )?;
+    Ok(())
+}
+
 pub fn list_users(conn: &Connection) -> Result<Vec<User>, LificError> {
     let mut stmt = conn.prepare(
         "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
@@ -599,6 +665,83 @@ mod tests {
             },
         )
         .expect("create user")
+    }
+
+    // ── LIF-190: profile + password updates ─────────────────
+
+    #[test]
+    fn update_profile_changes_display_name_and_email() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+
+        let updated =
+            update_profile(&conn, user.id, Some("Blake W"), Some("NEW@Example.com")).unwrap();
+        assert_eq!(updated.display_name, "Blake W");
+        assert_eq!(updated.email, "new@example.com"); // normalized lowercase
+    }
+
+    #[test]
+    fn update_profile_partial_leaves_other_field() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+
+        let updated = update_profile(&conn, user.id, Some("Renamed"), None).unwrap();
+        assert_eq!(updated.display_name, "Renamed");
+        assert_eq!(updated.email, "blake@example.com"); // untouched
+    }
+
+    #[test]
+    fn update_profile_rejects_blank_name_and_bad_email() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+
+        assert!(update_profile(&conn, user.id, Some("   "), None).is_err());
+        assert!(update_profile(&conn, user.id, None, Some("not-an-email")).is_err());
+    }
+
+    #[test]
+    fn update_profile_rejects_duplicate_email() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let _a = test_create_user(&conn);
+        let b = create_user(
+            &conn,
+            &CreateUser {
+                username: "other".into(),
+                email: "other@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        // Taking the first user's email must fail on the unique constraint.
+        assert!(update_profile(&conn, b.id, None, Some("blake@example.com")).is_err());
+    }
+
+    #[test]
+    fn update_password_rehashes_and_authenticates() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+
+        update_password(&conn, user.id, "brand-new-password").unwrap();
+        // Old password no longer works; new one does.
+        assert!(authenticate(&conn, "blake", "securepassword123").is_err());
+        assert!(authenticate(&conn, "blake", "brand-new-password").is_ok());
+    }
+
+    #[test]
+    fn update_password_enforces_min_length() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        assert!(update_password(&conn, user.id, "short").is_err());
     }
 
     #[test]
