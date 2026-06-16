@@ -35,11 +35,16 @@
 
 <AuthShell
   {navigate}
-  title="Create your account"
-  subtitle="Set up your identity. No email verification needed."
+  title="New around here."
+  tagline="Lizzy's got a fresh notebook ready. Let's get you set up."
   altText="Already have an account?"
   altLabel="Sign in"
   altHref="/login"
+  mascotSrc="/LizzyWriting.png"
+  mascotW={567}
+  mascotH={562}
+  mascotScale={0.46}
+  mascotCaption="First issue's on her."
 >
   <form onsubmit={handleSubmit} class="flex flex-col gap-4">
     {#if error}
@@ -104,7 +109,7 @@
              text-[0.9375rem] font-medium py-2.5 px-5
              transition-all duration-200
              hover:bg-[var(--btn-success-hover)] motion-safe:active:scale-[0.98]
-             focus-visible:ring-2 focus-visible:ring-[var(--btn-success)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]
+             focus-visible:ring-2 focus-visible:ring-[var(--btn-success)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)]
              disabled:opacity-60 disabled:cursor-not-allowed"
     >
       {loading ? "Creating account…" : "Create account"}

@@ -29,11 +29,16 @@
 
 <AuthShell
   {navigate}
-  title="Welcome back"
-  subtitle="Sign in with your username or email."
+  title="Welcome back."
+  tagline="Lizzy's been keeping your seat warm. Pick up where you left off."
   altText="No account?"
   altLabel="Create one"
   altHref="/signup"
+  mascotSrc="/LizzyReading.png"
+  mascotW={487}
+  mascotH={714}
+  mascotScale={0.42}
+  mascotCaption="She's caught up on everything while you were gone."
 >
   <form onsubmit={handleSubmit} class="flex flex-col gap-4">
     {#if error}
@@ -82,7 +87,7 @@
              text-[0.9375rem] font-medium py-2.5 px-5
              transition-all duration-200
              hover:bg-[var(--btn-success-hover)] motion-safe:active:scale-[0.98]
-             focus-visible:ring-2 focus-visible:ring-[var(--btn-success)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]
+             focus-visible:ring-2 focus-visible:ring-[var(--btn-success)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)]
              disabled:opacity-60 disabled:cursor-not-allowed"
     >
       {loading ? "Signing in…" : "Sign in"}
