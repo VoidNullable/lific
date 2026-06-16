@@ -91,13 +91,13 @@
   --error-text: #fff;
   --success: var(--color-green-600);
   --success-bg: var(--color-green-bg);
-  /* Vibrant emerald + dark text, mirroring dark mode's #3bb266 pill so
-     the primary button reads as the same "lizard green" in both themes.
-     The old #116631 was a dark, desaturated forest green that went muddy
-     brown on the warm cream bg — and worse, it carried near-black text
-     (2.65:1, failed WCAG AA). This green holds stone-950 text at 5.4:1. */
-  --btn-success: #1a9d50;
-  --btn-success-hover: #1fb55c;
+  /* Bright lizard green + dark text. With dark (stone-950) text a
+     BRIGHTER green raises contrast, so there's lots of headroom: this
+     reads as a lively, fresh green on the warm cream bg rather than the
+     old muddy forest #116631. Dark text sits at 8.2:1 (AAA); hover
+     brightens further to ~10:1. */
+  --btn-success: #22c55e;
+  --btn-success-hover: #2ed673;
   --btn-success-text: var(--color-stone-950);
   --warn: var(--color-orange-600);
 
