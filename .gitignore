@@ -7,3 +7,8 @@ AGENTS.md
 deploy.sh
 dev-backend.sh
 /.dev/
+
+# Krita working/autosave files + editor backups (keep exported PNGs, not these)
+*.kra
+*~
+.*-autosave.kra
