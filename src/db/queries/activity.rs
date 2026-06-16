@@ -461,6 +461,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: None,
             },
         )

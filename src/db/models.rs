@@ -225,6 +225,9 @@ pub struct Page {
     pub sort_order: f64,
     /// LIF-112: lifecycle status — one of draft/active/complete/archived.
     pub status: String,
+    /// LIF-183: user-pinned to the top of the page list.
+    #[serde(default)]
+    pub pinned: bool,
     pub created_at: String,
     pub updated_at: String,
     /// Labels attached to this page (populated on read). Empty for
@@ -259,6 +262,8 @@ pub struct UpdatePage {
     pub sort_order: Option<f64>,
     /// LIF-112: lifecycle status. None = don't change.
     pub status: Option<String>,
+    /// LIF-183: pin/unpin. None = don't change.
+    pub pinned: Option<bool>,
     /// Replace the full label set. None = don't touch, Some(vec) = replace
     /// (delete-all + insert-by-name, mirroring `UpdateIssue`). Silently
     /// no-ops for workspace pages.

@@ -701,7 +701,8 @@ impl LificMcp {
         }) {
             Ok((page, folder_name)) => {
                 let mut out = format!(
-                    "{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}\n",
+                    "{}{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}\n",
+                    if page.pinned { "📌 " } else { "" },
                     page.identifier,
                     page.title,
                     page.status,
@@ -808,6 +809,7 @@ impl LificMcp {
                     folder_id: folder_id.map(Some),
                     sort_order: None,
                     status: input.status.clone(),
+                    pinned: input.pinned,
                     labels: input.labels.clone(),
                 },
             )
@@ -859,6 +861,7 @@ impl LificMcp {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: None,
             };
             match field {
@@ -1097,9 +1100,10 @@ impl LificMcp {
                             // part keeps list lines scannable. Full stamps
                             // live on get_page.
                             let updated = p.updated_at.split(' ').next().unwrap_or(&p.updated_at);
+                            let pin = if p.pinned { "📌 " } else { "" };
                             out.push_str(&format!(
-                                "- {} | {} | {}{}{} — updated {}\n",
-                                p.identifier, p.status, p.title, labels, folder, updated
+                                "- {}{} | {} | {}{}{} — updated {}\n",
+                                pin, p.identifier, p.status, p.title, labels, folder, updated
                             ));
                         }
                         out
@@ -2275,6 +2279,7 @@ mod tests {
             content: None,
             folder: None,
             status: None,
+            pinned: None,
             labels: None,
         }));
         assert!(updated.contains("Updated Doc"), "got: {updated}");
@@ -3256,6 +3261,7 @@ mod tests {
             content: None,
             folder: None,
             status: None,
+            pinned: None,
             labels: Some(vec!["draft".into()]),
         }));
 

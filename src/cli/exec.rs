@@ -557,6 +557,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     folder_id,
                     sort_order: None,
                     status: None,
+                    pinned: None,
                     labels: label_list,
                 },
             )?;

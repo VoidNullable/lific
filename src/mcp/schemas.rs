@@ -180,6 +180,8 @@ pub struct UpdatePageInput {
     pub folder: Option<String>,
     #[schemars(description = "Status: draft, active, complete, archived")]
     pub status: Option<String>,
+    #[schemars(description = "Pin (true) or unpin (false) the page to the top of the page list.")]
+    pub pinned: Option<bool>,
     #[schemars(
         description = "Replace labels. Pass [] to clear all. Labels are project-scoped (LIF-105)."
     )]

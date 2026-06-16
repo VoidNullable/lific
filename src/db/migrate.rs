@@ -100,6 +100,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "plans audit",
         include_str!("../../migrations/021_plans_audit.sql"),
     ),
+    (
+        22,
+        "page pinned",
+        include_str!("../../migrations/022_page_pinned.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

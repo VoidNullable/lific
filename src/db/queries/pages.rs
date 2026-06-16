@@ -26,13 +26,14 @@ fn page_from_row(row: &rusqlite::Row) -> rusqlite::Result<Page> {
         status: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        pinned: row.get(11)?,
         labels: Vec::new(),
     })
 }
 
 const PAGE_SELECT: &str = "SELECT pg.id, pg.project_id, pg.sequence, p.identifier,
             pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
-            pg.created_at, pg.updated_at
+            pg.created_at, pg.updated_at, pg.pinned
      FROM pages pg
      LEFT JOIN projects p ON p.id = pg.project_id";
 
@@ -101,7 +102,7 @@ pub fn list_pages(
     let mut sql = String::from(
         "SELECT DISTINCT pg.id, pg.project_id, pg.sequence, p.identifier,
                 pg.folder_id, pg.title, pg.content, pg.sort_order, pg.status,
-                pg.created_at, pg.updated_at
+                pg.created_at, pg.updated_at, pg.pinned
          FROM pages pg
          LEFT JOIN projects p ON p.id = pg.project_id",
     );
@@ -304,6 +305,12 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
                 params![status, id],
             )?;
         }
+        if let Some(pinned) = input.pinned {
+            conn.execute(
+                "UPDATE pages SET pinned = ?1 WHERE id = ?2",
+                params![pinned, id],
+            )?;
+        }
         if let Some(ref labels) = input.labels {
             // Mirror `update_issue`: delete-all + insert-by-name. Labels
             // are project-scoped, so for workspace pages we silently
@@ -479,6 +486,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: None,
             },
         )
@@ -597,6 +605,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: Some(vec!["new".into()]),
             },
         )
@@ -634,6 +643,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: Some(vec![]),
             },
         )
@@ -672,6 +682,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: None,
             },
         )
@@ -886,6 +897,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: Some("complete".into()),
+                pinned: None,
                 labels: None,
             },
         )
@@ -921,6 +933,7 @@ mod tests {
                 folder_id: None,
                 sort_order: None,
                 status: None,
+                pinned: None,
                 labels: None,
             },
         )
@@ -1020,6 +1033,122 @@ mod tests {
             "unknown order_by must error, not be interpolated"
         );
         assert!(list_pages(&conn, Some(pid), None, None, None, None, Some("up")).is_err());
+    }
+
+    // ── LIF-183: page pinning ────────────────────────────────
+
+    #[test]
+    fn create_page_defaults_to_unpinned() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let page = create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
+        assert!(!page.pinned);
+    }
+
+    #[test]
+    fn update_page_pins_and_unpins() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let page = create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
+
+        let pinned = update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: None,
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                pinned: Some(true),
+                labels: None,
+            },
+        )
+        .unwrap();
+        assert!(pinned.pinned);
+
+        let unpinned = update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: None,
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                pinned: Some(false),
+                labels: None,
+            },
+        )
+        .unwrap();
+        assert!(!unpinned.pinned);
+    }
+
+    #[test]
+    fn update_page_without_pinned_leaves_it_alone() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let page = create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
+        update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: None,
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                pinned: Some(true),
+                labels: None,
+            },
+        )
+        .unwrap();
+
+        // A title-only patch must not disturb the pin.
+        let renamed = update_page(
+            &conn,
+            page.id,
+            &UpdatePage {
+                title: Some("Renamed".into()),
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                pinned: None,
+                labels: None,
+            },
+        )
+        .unwrap();
+        assert!(renamed.pinned);
+    }
+
+    #[test]
+    fn list_pages_reflects_pinned() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let p = create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
+        update_page(
+            &conn,
+            p.id,
+            &UpdatePage {
+                title: None,
+                content: None,
+                folder_id: None,
+                sort_order: None,
+                status: None,
+                pinned: Some(true),
+                labels: None,
+            },
+        )
+        .unwrap();
+
+        let pages = list_pages(&conn, Some(pid), None, None, None, None, None).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].pinned);
     }
 
     #[test]
