@@ -249,12 +249,18 @@
   input::placeholder {
     color: var(--text-faint);
   }
-  input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-subtle);
-  }
   input[aria-invalid="true"] {
     border-color: var(--error);
+  }
+
+  /* Opt-in focus chrome (LIF-202 follow-up). Focus styling is no longer a
+     blanket default — chromeless inputs (command palette, pickers) used to
+     fight the global rule. Boxed form fields that want a visible focus ring
+     add `.input-field`. */
+  .input-field:focus,
+  .input-field:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-subtle);
   }
 
   button {
