@@ -608,9 +608,6 @@
               <h4 class="flex items-center gap-1.5 text-[0.875rem] font-semibold text-[var(--text)]">
                 <KeyRound size={14} class="text-[var(--text-muted)]" /> Copy your API key
               </h4>
-              <span class="ml-auto inline-flex items-center gap-1 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_16%,transparent)] px-1.5 py-0.5 rounded-full">
-                <AlertTriangle size={10} /> shown once
-              </span>
             </div>
 
             <div class="rounded-lg border border-[var(--btn-success)] bg-[color-mix(in_oklab,var(--btn-success)_8%,var(--bg))] overflow-hidden">
