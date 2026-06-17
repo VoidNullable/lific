@@ -25,6 +25,7 @@
     ChevronRight, ChevronDown, History, ArrowUpRight,
     CircleDot, FileText, MessageSquare, Layers, Tag, FolderClosed, Box,
   } from "lucide-svelte";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { getContext } from "svelte";
 
   const PAGE_SIZE = 50;
@@ -329,9 +330,20 @@
         ></div>
       </div>
     {:else if error}
-      <div class="flex items-center justify-center py-20">
-        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-      </div>
+      <ErrorState title="Couldn't load activity" message={error}>
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => loadProject(projectIdentifier)}
+        >
+          Try again
+        </button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        >
+          Project overview
+        </button>
+      </ErrorState>
     {:else if items.length === 0}
       <div class="flex flex-col items-center py-20 gap-3 px-6 max-w-[480px] mx-auto text-center">
         <History size={32} class="text-[var(--text-faint)]" />

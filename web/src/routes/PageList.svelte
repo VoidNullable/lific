@@ -37,6 +37,7 @@
   import Tooltip from "../lib/Tooltip.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { getContext } from "svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
 
@@ -870,9 +871,20 @@
         ></div>
       </div>
     {:else if error}
-      <div class="flex items-center justify-center py-20">
-        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-      </div>
+      <ErrorState title="Couldn't load pages" message={error}>
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => loadData(projectIdentifier)}
+        >
+          Try again
+        </button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        >
+          Project overview
+        </button>
+      </ErrorState>
     {:else if pages.length === 0 && folders.length === 0 && !createTarget}
       <div class="flex flex-col items-center py-16 gap-4 px-6 max-w-[460px] mx-auto text-center">
         <Mascot src="/LizzyReading.png" nativeW={487} nativeH={714} />

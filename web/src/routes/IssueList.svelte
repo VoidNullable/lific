@@ -1916,6 +1916,12 @@
       <ErrorState title="Couldn't load this board" message={error}>
         <button
           class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => loadProject(projectIdentifier)}
+        >
+          Try again
+        </button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
           onclick={() => navigate(`/${projectIdentifier}/overview`)}
         >
           Project overview
@@ -2187,6 +2193,12 @@
       <ErrorState title="Couldn't load issues" message={error}>
         <button
           class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => loadProject(projectIdentifier)}
+        >
+          Try again
+        </button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
           onclick={() => navigate(`/${projectIdentifier}/overview`)}
         >
           Project overview

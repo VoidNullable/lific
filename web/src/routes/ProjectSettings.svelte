@@ -28,6 +28,7 @@
     ChevronRight, Download, Pencil, Copy, Check, ArrowRight, History,
     AlertTriangle, ChevronDown,
   } from "lucide-svelte";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -259,10 +260,20 @@
     <div class="size-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
   </div>
 {:else if !project}
-  <div class="h-full flex flex-col items-center justify-center gap-3">
-    <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-    <button class="text-[0.8125rem] text-[var(--accent)] hover:underline" onclick={() => navigate("/settings")}>Back</button>
-  </div>
+  <ErrorState title="Couldn't load this project" message={error}>
+    <button
+      class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+      onclick={() => loadAll(projectIdentifier)}
+    >
+      Try again
+    </button>
+    <button
+      class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+      onclick={() => navigate("/settings")}
+    >
+      Back to home
+    </button>
+  </ErrorState>
 {:else}
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">

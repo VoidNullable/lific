@@ -326,6 +326,8 @@
   {navigate}
   {loading}
   {error}
+  deleteNounLabel="issue"
+  onRetry={() => loadIssue(issueIdentifier)}
   identifier={issue?.identifier ?? issueIdentifier}
   backRoute={backHref()}
   backLabel={backText()}

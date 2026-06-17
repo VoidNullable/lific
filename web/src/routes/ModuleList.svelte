@@ -24,6 +24,7 @@
   import IconPicker from "../lib/IconPicker.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
   import Mascot from "../lib/Mascot.svelte";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -266,9 +267,20 @@
         ></div>
       </div>
     {:else if error}
-      <div class="flex items-center justify-center py-20">
-        <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
-      </div>
+      <ErrorState title="Couldn't load modules" message={error}>
+        <button
+          class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+          onclick={() => loadData(projectIdentifier)}
+        >
+          Try again
+        </button>
+        <button
+          class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+          onclick={() => navigate(`/${projectIdentifier}/overview`)}
+        >
+          Project overview
+        </button>
+      </ErrorState>
     {:else if modules.length === 0 && !creating}
       <!-- Empty state — mascot + charming copy + green CTA, matching the
            issue-list empty state vocabulary. -->

@@ -26,7 +26,10 @@
   } = $props();
 </script>
 
-<div class="h-full min-h-[55vh] relative overflow-hidden flex items-center">
+<!-- w-full + flex-1 so the surface fills its parent even inside a flex *row*
+     (e.g. the board's column track), where a default flex child would shrink
+     to content width and pin left, leaving dead space on the right. -->
+<div class="w-full flex-1 h-full min-h-[55vh] relative overflow-hidden flex items-center">
   <!-- Copy, anchored left -->
   <div class="relative z-10 max-w-[440px] pl-8 sm:pl-14 pr-6 py-12">
     <p class="font-display text-[1.375rem] tracking-tight text-[var(--text)] leading-tight">

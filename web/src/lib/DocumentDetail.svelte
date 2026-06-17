@@ -24,6 +24,7 @@
   import InlineTitle from "./InlineTitle.svelte";
   import DeleteMenu from "./DeleteMenu.svelte";
   import ActivityTimeline from "./ActivityTimeline.svelte";
+  import ErrorState from "./ErrorState.svelte";
   import { ArrowLeft, Download } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
   import type { Activity, Comment } from "./api";
@@ -33,6 +34,8 @@
     navigate,
     loading = false,
     error = "",
+    onRetry,
+    deleteNounLabel = "page",
     identifier,
     backRoute,
     backLabel,
@@ -93,6 +96,10 @@
     navigate: (path: string) => void;
     loading?: boolean;
     error?: string;
+    /** Re-run the route's load. If omitted, the error state hard-reloads. */
+    onRetry?: () => void;
+    /** Singular noun for the error title, e.g. "issue" / "page" / "plan". */
+    deleteNounLabel?: string;
     identifier: string;
     backRoute: string;
     backLabel: string;
@@ -259,15 +266,20 @@
     ></div>
   </div>
 {:else if error}
-  <div class="h-full flex flex-col items-center justify-center gap-3">
-    <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
+  <ErrorState title={`Couldn't load this ${deleteNounLabel}`} message={error}>
     <button
-      class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+      class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+      onclick={() => (onRetry ? onRetry() : location.reload())}
+    >
+      Try again
+    </button>
+    <button
+      class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
       onclick={() => navigate(backRoute)}
     >
       Back to {backLabel.toLowerCase()}
     </button>
-  </div>
+  </ErrorState>
 {:else}
   <div class="h-full flex flex-col">
     <div class="flex-1 overflow-y-auto">

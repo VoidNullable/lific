@@ -289,6 +289,8 @@
   {navigate}
   {loading}
   {error}
+  deleteNounLabel="page"
+  onRetry={() => loadPage(pageId)}
   identifier={page?.identifier ?? ""}
   backRoute={`/${projectIdentifier}/pages`}
   backLabel="Pages"

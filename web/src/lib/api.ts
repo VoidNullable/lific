@@ -42,7 +42,10 @@ async function request<T>(
 
     return { ok: true, data: body as T };
   } catch (e) {
-    return { ok: false, error: "Network error — is the server running?" };
+    return {
+      ok: false,
+      error: "Couldn't reach the server. Check your connection and try again.",
+    };
   }
 }
 

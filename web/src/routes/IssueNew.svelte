@@ -12,6 +12,7 @@
   import LabelEditor from "../lib/LabelEditor.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
+  import ErrorState from "../lib/ErrorState.svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -179,15 +180,20 @@
     ></div>
   </div>
 {:else if !project}
-  <div class="h-full flex flex-col items-center justify-center gap-3">
-    <p class="text-[var(--error)] text-[0.875rem]">{error}</p>
+  <ErrorState title="Couldn't load this project" message={error}>
     <button
-      class="text-[0.8125rem] text-[var(--accent)] hover:underline"
+      class="text-[0.8125rem] font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
+      onclick={() => loadProject(projectIdentifier)}
+    >
+      Try again
+    </button>
+    <button
+      class="text-[0.8125rem] text-[var(--text-muted)] border border-[var(--border)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
       onclick={() => navigate(`/${projectIdentifier}/issues`)}
     >
       Back to issues
     </button>
-  </div>
+  </ErrorState>
 {:else}
   <div class="h-full flex flex-col">
     <!-- Content -->
