@@ -48,6 +48,15 @@
     type GroupBy,
     type Density,
   } from "../lib/issues/grouping";
+  import {
+    loadListState,
+    saveListState,
+    saveLayout,
+    loadCollapsedGroups,
+    saveCollapsedGroups,
+    loadHiddenStatuses,
+    saveHiddenStatuses,
+  } from "../lib/issues/persistence";
 
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
@@ -157,42 +166,18 @@
   // Filters, search, and sort are remembered per-project so navigating
   // away (e.g. into an issue detail) and back doesn't reset the view.
   // Layout (list vs board) is remembered too so IssueDetail's back arrow
-  // knows where to send the user.
-  function storageKeyForState(id: string) {
-    return `lific:list:state:${id}`;
-  }
-  function storageKeyForLayout(id: string) {
-    return `lific:list:layout:${id}`;
-  }
-
-  type PersistedListState = {
-    filterStatus?: string;
-    filterPriority?: string;
-    filterLabel?: string;
-    filterModule?: string;
-    searchQuery?: string;
-    sortField?: SortField;
-    sortDir?: SortDir;
-    groupBy?: GroupBy;
-    density?: Density;
-  };
-
+  // knows where to send the user. All localStorage glue lives in
+  // lib/issues/persistence.ts; the effects below just drive it reactively.
   let stateHydrated = $state(false);
 
   // Re-run when the project prop changes (read it synchronously so Svelte tracks it)
   $effect(() => {
     const id = projectIdentifier;
     stateHydrated = false;
-    // Hydrate filters/sort/search from localStorage (per-project) so going
-    // back from an issue detail preserves the view. Fall back to empty
-    // defaults if nothing is stored or storage is unavailable.
-    let s: PersistedListState = {};
-    try {
-      const raw = localStorage.getItem(storageKeyForState(id));
-      if (raw) s = JSON.parse(raw) as PersistedListState;
-    } catch {
-      // ignore
-    }
+    // Hydrate filters/sort/search per-project so going back from an issue
+    // detail preserves the view. loadListState falls back to {} when nothing
+    // is stored or storage is unavailable.
+    const s = loadListState(id);
     filterStatus = s.filterStatus ?? "";
     filterPriority = s.filterPriority ?? "";
     filterLabel = s.filterLabel ?? "";
@@ -202,12 +187,7 @@
     if (s.sortDir) sortDir = s.sortDir;
     if (s.groupBy) groupBy = s.groupBy;
     if (s.density) density = s.density;
-    try {
-      const rawC = localStorage.getItem(`lific:list:collapsed:${id}`);
-      collapsedGroups = rawC ? new Set(JSON.parse(rawC) as string[]) : new Set();
-    } catch {
-      collapsedGroups = new Set();
-    }
+    collapsedGroups = loadCollapsedGroups(id);
     stateHydrated = true;
     loadProject(id);
   });
@@ -215,20 +195,14 @@
   // Remember which layout the user is on so IssueDetail's back arrow
   // returns to the right route (/board vs /issues).
   $effect(() => {
-    const id = projectIdentifier;
-    const l = layout;
-    try {
-      localStorage.setItem(storageKeyForLayout(id), l);
-    } catch {
-      // ignore
-    }
+    saveLayout(projectIdentifier, layout);
   });
 
   // Persist filter/sort/search state on change. Gated on stateHydrated
   // to avoid clobbering storage with defaults during the hydrate pass.
   $effect(() => {
     const id = projectIdentifier;
-    const snapshot: PersistedListState = {
+    const snapshot = {
       filterStatus,
       filterPriority,
       filterLabel,
@@ -240,11 +214,7 @@
       density,
     };
     if (!stateHydrated) return;
-    try {
-      localStorage.setItem(storageKeyForState(id), JSON.stringify(snapshot));
-    } catch {
-      // ignore
-    }
+    saveListState(id, snapshot);
   });
 
   // Reload issues when filters change
@@ -439,12 +409,7 @@
     if (next.has(k)) next.delete(k);
     else next.add(k);
     collapsedGroups = next;
-    try {
-      localStorage.setItem(
-        `lific:list:collapsed:${projectIdentifier}`,
-        JSON.stringify([...next]),
-      );
-    } catch { /* ignore */ }
+    saveCollapsedGroups(projectIdentifier, next);
   }
 
   function moduleById(id: number | null): Module | undefined {
@@ -541,36 +506,18 @@
   // in localStorage so the choice persists across reloads.
   let hiddenStatuses = $state<Set<string>>(new Set());
 
-  function storageKeyForHidden(id: string) {
-    return `lific:board:hidden-statuses:${id}`;
-  }
-
   function toggleStatusVisibility(status: string) {
     const next = new Set(hiddenStatuses);
     if (next.has(status)) next.delete(status);
     else next.add(status);
     hiddenStatuses = next;
-    try {
-      localStorage.setItem(
-        storageKeyForHidden(projectIdentifier),
-        JSON.stringify([...next]),
-      );
-    } catch {
-      // localStorage can fail in private mode / quota — silently degrade
-      // to in-memory state, which is fine for the rest of the session.
-    }
+    saveHiddenStatuses(projectIdentifier, next);
   }
 
   // Re-hydrate hidden-statuses when the active project changes. Each
   // project owns its own visibility state.
   $effect(() => {
-    const id = projectIdentifier;
-    try {
-      const raw = localStorage.getItem(storageKeyForHidden(id));
-      hiddenStatuses = raw ? new Set(JSON.parse(raw) as string[]) : new Set();
-    } catch {
-      hiddenStatuses = new Set();
-    }
+    hiddenStatuses = loadHiddenStatuses(projectIdentifier);
   });
 
   // ── Board view: drag-and-drop state ──────────────────
