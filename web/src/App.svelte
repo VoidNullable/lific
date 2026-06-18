@@ -2,6 +2,7 @@
   import Login from "./routes/Login.svelte";
   import Signup from "./routes/Signup.svelte";
   import Settings from "./routes/Settings.svelte";
+  import InstanceSettings from "./routes/InstanceSettings.svelte";
   import IssueList from "./routes/IssueList.svelte";
   import IssueDetail from "./routes/IssueDetail.svelte";
   import IssueNew from "./routes/IssueNew.svelte";
@@ -55,6 +56,7 @@
   type ParsedRoute =
     | { type: "auth"; page: "login" | "signup" }
     | { type: "app"; page: "settings" }
+    | { type: "app"; page: "instance-settings" }
     | { type: "app"; page: "project-new" }
     | { type: "app"; page: "project-settings"; project: string }
     | { type: "app"; page: "issues"; project: string }
@@ -90,6 +92,9 @@
     }
     if (r === "/settings") {
       return { type: "app", page: "settings" };
+    }
+    if (r === "/settings/instance") {
+      return { type: "app", page: "instance-settings" };
     }
     if (r === "/projects/new") {
       return { type: "app", page: "project-new" };
@@ -252,6 +257,8 @@
     <svelte:boundary>
     {#if parsed.page === "settings"}
       <Settings {navigate} />
+    {:else if parsed.page === "instance-settings"}
+      <InstanceSettings {navigate} />
     {:else if parsed.page === "project-new"}
       <ProjectNew {navigate} />
     {:else if parsed.page === "project-settings"}

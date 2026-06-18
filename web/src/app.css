@@ -117,6 +117,11 @@
   --panel-bg: var(--color-stone-900);
   --panel-text: var(--color-stone-50);
   --panel-muted: var(--color-stone-400);
+
+  /* Password-strength ramp (signup checklist + meter segments). */
+  --strength-weak: #c2492f;
+  --strength-fair: #c97a17;
+  --strength-strong: var(--success);
 }
 
 /* ── Dark mode ───────────────────────────────────────── */
@@ -158,6 +163,10 @@
   --panel-bg: var(--color-stone-800);
   --panel-text: var(--color-stone-200);
   --panel-muted: var(--color-stone-500);
+
+  --strength-weak: #e06a50;
+  --strength-fair: #e0a54a;
+  --strength-strong: var(--success);
 }
 
 /* ── Base layer ──────────────────────────────────────── */

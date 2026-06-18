@@ -6,6 +6,7 @@ pub(crate) mod plans;
 mod projects;
 mod resources;
 mod search;
+pub(crate) mod settings;
 pub(crate) mod users;
 
 /// Unescape literal \n and \t sequences that come through JSON transport.

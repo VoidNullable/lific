@@ -13,6 +13,8 @@
     nativeH,
     scale = 0.25,
     class: className = "",
+    fill = "var(--text-faint)",
+    opacity = 0.5,
   }: {
     src: string;
     /** Intrinsic pixel dimensions of the source PNG. */
@@ -21,6 +23,11 @@
     /** Screen pixels per source pixel. Same value ⇒ same rendered scale. */
     scale?: number;
     class?: string;
+    /** Mask fill color. Override on dark brand surfaces where the default
+     *  muted text color would vanish. */
+    fill?: string;
+    /** Mask opacity. */
+    opacity?: number;
   } = $props();
 
   const w = $derived(Math.round(nativeW * scale));
@@ -30,8 +37,8 @@
 <div
   aria-hidden="true"
   class="shrink-0 {className}"
-  style="width: {w}px; height: {h}px; opacity: 0.5;
-         background-color: var(--text-faint);
+  style="width: {w}px; height: {h}px; opacity: {opacity};
+         background-color: {fill};
          -webkit-mask: url({src}) center / contain no-repeat;
          mask: url({src}) center / contain no-repeat;"
 ></div>

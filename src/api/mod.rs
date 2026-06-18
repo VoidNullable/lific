@@ -31,6 +31,13 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
     };
 
     Router::new()
+        // Public instance metadata for the auth screen (unauthenticated).
+        .route("/api/instance", get(auth::instance_info))
+        // Admin-only instance settings (authenticated; admin enforced in handler).
+        .route(
+            "/api/instance/settings",
+            get(auth::instance_settings_get).patch(auth::instance_settings_patch),
+        )
         // Auth
         .route("/api/auth/signup", post(auth::auth_signup))
         .route("/api/auth/login", post(auth::auth_login))
@@ -339,6 +346,37 @@ pub(crate) mod test_helpers {
             .oneshot(
                 Request::builder()
                     .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    pub async fn json_get(app: &Router, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    pub async fn json_patch(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
                     .uri(uri)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))

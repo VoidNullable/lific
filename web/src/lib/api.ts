@@ -83,6 +83,53 @@ export async function download(path: string, filename?: string) {
   return { ok: true as const };
 }
 
+/** Public, unauthenticated instance metadata the auth screen reads before
+ *  anyone has a session. Drives whether signup is open and whether this is a
+ *  brand-new instance vs one you are joining. Never includes user data, and
+ *  `has_users` never implies the new account is an admin (admin is CLI-only). */
+export interface InstanceInfo {
+  allow_signup: boolean;
+  has_users: boolean;
+  /** Human name for the instance, or null (fall back to host). */
+  instance_name: string | null;
+  /** Short admin message to show on the auth screen, or null. */
+  login_message: string | null;
+}
+
+export async function getInstance() {
+  return request<InstanceInfo>("/instance");
+}
+
+/** Full, admin-only instance settings (LIF-210). */
+export interface InstanceSettings {
+  allow_signup: boolean;
+  instance_name: string | null;
+  signup_email_domains: string[];
+  session_lifetime_days: number;
+  login_message: string | null;
+}
+
+export interface InstanceSettingsPatch {
+  allow_signup?: boolean;
+  /** "" clears (falls back to host). */
+  instance_name?: string;
+  signup_email_domains?: string[];
+  session_lifetime_days?: number;
+  /** "" clears. */
+  login_message?: string;
+}
+
+export async function getInstanceSettings() {
+  return request<InstanceSettings>("/instance/settings");
+}
+
+export async function updateInstanceSettings(patch: InstanceSettingsPatch) {
+  return request<InstanceSettings>("/instance/settings", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function signup(
   username: string,
   email: string,

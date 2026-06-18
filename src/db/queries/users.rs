@@ -240,6 +240,21 @@ pub fn list_users(conn: &Connection) -> Result<Vec<User>, LificError> {
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// True if at least one human (non-bot) account exists.
+///
+/// Backs the public `GET /api/instance` endpoint so the auth screen can tell a
+/// brand-new instance ("be the first account") from an established one ("join
+/// this instance") without leaking any user data. Bot identities are excluded
+/// because a connected tool is not a person who has signed up.
+pub fn has_human_users(conn: &Connection) -> Result<bool, LificError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE is_bot = 0)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
     Ok(User {
         id: row.get(0)?,
@@ -665,6 +680,39 @@ mod tests {
             },
         )
         .expect("create user")
+    }
+
+    #[test]
+    fn has_human_users_false_when_empty_then_true_after_signup() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        assert!(!has_human_users(&conn).unwrap(), "fresh db has no humans");
+
+        test_create_user(&conn);
+        assert!(has_human_users(&conn).unwrap(), "human signup flips it true");
+    }
+
+    #[test]
+    fn has_human_users_ignores_bot_only_instances() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        // A connected tool (bot) is not a person who signed up.
+        create_user(
+            &conn,
+            &CreateUser {
+                username: "agent".into(),
+                email: "agent@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            !has_human_users(&conn).unwrap(),
+            "a bot-only instance still reads as having no human accounts"
+        );
     }
 
     // ── LIF-190: profile + password updates ─────────────────

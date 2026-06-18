@@ -105,6 +105,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "page pinned",
         include_str!("../../migrations/022_page_pinned.sql"),
     ),
+    (
+        23,
+        "instance settings",
+        include_str!("../../migrations/023_instance_settings.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

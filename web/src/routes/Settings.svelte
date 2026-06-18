@@ -16,6 +16,7 @@
     type ToolTemplate,
   } from "../lib/api";
   import ToolIcon from "../lib/ToolIcon.svelte";
+  import SettingsTabs from "../lib/SettingsTabs.svelte";
   import {
     getPreference, setPreference, type ThemePreference,
   } from "../lib/theme";
@@ -338,6 +339,8 @@
         <div class="size-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
       </div>
     {:else if user}
+      <SettingsTabs active="account" isAdmin={user.is_admin} {navigate} />
+
       <!-- ── IDENTITY HERO (read-only) ────────────────── -->
       <section class="flex items-center gap-4 mb-8 animate-reveal delay-100">
         <div class="size-14 shrink-0 rounded-full bg-[var(--accent)] text-[var(--accent-text)] grid place-items-center font-display text-[1.25rem] tracking-tight">

@@ -45,6 +45,12 @@ pub enum Command {
     /// Generate a default lific.toml config file
     Init,
 
+    /// Inspect instance-wide settings and state (admin/operator scope)
+    Instance {
+        #[command(subcommand)]
+        action: InstanceAction,
+    },
+
     /// Manage API keys
     Key {
         #[command(subcommand)]
@@ -568,6 +574,43 @@ pub enum FolderAction {
     },
 }
 
+// ── Instance ─────────────────────────────────────────────────
+//
+// Instance-scoped settings and state, kept distinct from per-user `user`
+// management and from the project/content commands. Today it is read-only
+// (`info`); runtime-editable settings (signup toggle, instance name) land
+// with the DB-backed instance-settings store.
+
+#[derive(Subcommand)]
+pub enum InstanceAction {
+    /// Show instance settings and state
+    Info,
+
+    /// Change instance settings (only the flags you pass are updated)
+    Set {
+        /// Instance name (pass "" to clear and fall back to the host)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Open or close self-service signup
+        #[arg(long)]
+        signups: Option<bool>,
+
+        /// Comma-separated email domains allowed to self-register
+        /// (e.g. "acme.com,sub.acme.com"; pass "" to allow any)
+        #[arg(long = "signup-domains")]
+        signup_domains: Option<String>,
+
+        /// How long a login session stays valid, in days (1-365)
+        #[arg(long = "session-days")]
+        session_days: Option<i64>,
+
+        /// Short message shown on the auth screen (pass "" to clear)
+        #[arg(long = "login-message")]
+        login_message: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum KeyAction {
     /// Create a new API key
@@ -706,6 +749,49 @@ mod tests {
     fn parse_init() {
         let cli = Cli::try_parse_from(["lific", "init"]).unwrap();
         assert!(matches!(cli.command, Command::Init));
+    }
+
+    #[test]
+    fn parse_instance_info() {
+        let cli = Cli::try_parse_from(["lific", "instance", "info"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Instance {
+                action: InstanceAction::Info,
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_instance_set() {
+        let cli = Cli::try_parse_from([
+            "lific", "instance", "set",
+            "--name", "Acme Eng",
+            "--signups", "false",
+            "--signup-domains", "acme.com,sub.acme.com",
+            "--session-days", "14",
+            "--login-message", "Ask #it for access",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Instance {
+                action:
+                    InstanceAction::Set {
+                        name,
+                        signups,
+                        signup_domains,
+                        session_days,
+                        login_message,
+                    },
+            } => {
+                assert_eq!(name, Some("Acme Eng".into()));
+                assert_eq!(signups, Some(false));
+                assert_eq!(signup_domains, Some("acme.com,sub.acme.com".into()));
+                assert_eq!(session_days, Some(14));
+                assert_eq!(login_message, Some("Ask #it for access".into()));
+            }
+            _ => panic!("expected Instance Set"),
+        }
     }
 
     #[test]

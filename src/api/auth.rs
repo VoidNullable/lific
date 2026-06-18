@@ -8,7 +8,7 @@ use axum::{
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 
-use super::{with_read, with_write};
+use super::{require_admin, with_read, with_write};
 
 /// Build a Set-Cookie header for the session token with security flags.
 ///
@@ -55,12 +55,6 @@ pub(super) async fn auth_signup(
     limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     Json(input): Json<SignupRequest>,
 ) -> Result<impl IntoResponse, LificError> {
-    if !auth_cfg.allow_signup {
-        return Err(LificError::BadRequest(
-            "signup is disabled — contact an admin to create your account".into(),
-        ));
-    }
-
     // Rate limit signups to prevent Argon2 CPU exhaustion
     let key = format!("signup:{}", input.email.to_lowercase());
     if let Some(Extension(ref rl)) = limiter
@@ -73,6 +67,31 @@ pub(super) async fn auth_signup(
     }
 
     let conn = db.write()?;
+    let settings = crate::db::queries::settings::get(&conn)?;
+
+    // Signup policy is now DB-backed (admin-editable), not TOML.
+    if !settings.allow_signup {
+        return Err(LificError::BadRequest(
+            "signups are closed on this instance. Ask an admin to create your account.".into(),
+        ));
+    }
+    // Optional email-domain allowlist for self-service signup.
+    if !settings.signup_email_domains.is_empty() {
+        let domain = input
+            .email
+            .rsplit('@')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if !settings.signup_email_domains.contains(&domain) {
+            return Err(LificError::BadRequest(format!(
+                "signups on this instance are limited to: {}",
+                settings.signup_email_domains.join(", ")
+            )));
+        }
+    }
+
     let user = crate::db::queries::users::create_user(
         &conn,
         &CreateUser {
@@ -84,7 +103,11 @@ pub(super) async fn auth_signup(
             is_bot: false,
         },
     )?;
-    let session = crate::db::queries::users::create_session(&conn, user.id, None)?;
+    let session = crate::db::queries::users::create_session(
+        &conn,
+        user.id,
+        Some(settings.session_lifetime_days * 24),
+    )?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -150,7 +173,11 @@ pub(super) async fn auth_login(
                 return Err(e);
             }
         };
-    let session = crate::db::queries::users::create_session(&conn, user.id, None)?;
+    let lifetime_days = crate::db::queries::settings::get(&conn)
+        .map(|s| s.session_lifetime_days)
+        .unwrap_or(30);
+    let session =
+        crate::db::queries::users::create_session(&conn, user.id, Some(lifetime_days * 24))?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -201,6 +228,83 @@ pub(super) async fn auth_logout(
     );
 
     Ok((resp_headers, Json(serde_json::json!({"logged_out": true}))))
+}
+
+/// GET /api/instance — public instance metadata for the auth screen.
+///
+/// Unauthenticated by design: it gates what the login/signup page can show
+/// BEFORE anyone has a session. It returns only non-sensitive booleans, never
+/// any user data:
+///   - `allow_signup`: whether self-service signup is open (so the signup page
+///     can show a real "ask an admin" state instead of submitting then erroring)
+///   - `has_users`: whether any human account exists yet (so signup can say
+///     "be the first account" vs "join this instance" without ever claiming the
+///     new account owns or administers the instance — admin is granted out of
+///     band via the CLI, never by web signup).
+pub(super) async fn instance_info(
+    State(db): State<DbPool>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let (settings, has_users) = with_read(&db, |conn| {
+        let settings = crate::db::queries::settings::get(conn)?;
+        let has_users = crate::db::queries::users::has_human_users(conn)?;
+        Ok((settings, has_users))
+    })?;
+    // Public surface: only non-sensitive fields the auth screen needs. The
+    // domain allowlist and session lifetime stay behind the admin endpoint.
+    Ok(Json(serde_json::json!({
+        "allow_signup": settings.allow_signup,
+        "has_users": has_users,
+        "instance_name": settings.instance_name,
+        "login_message": settings.login_message,
+    })))
+}
+
+/// Full instance settings JSON (admin surface).
+fn settings_json(s: &crate::db::queries::settings::InstanceSettings) -> serde_json::Value {
+    serde_json::json!({
+        "allow_signup": s.allow_signup,
+        "instance_name": s.instance_name,
+        "signup_email_domains": s.signup_email_domains,
+        "session_lifetime_days": s.session_lifetime_days,
+        "login_message": s.login_message,
+    })
+}
+
+/// GET /api/instance/settings — full settings, admin only.
+pub(super) async fn instance_settings_get(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    require_admin(&auth_user)?;
+    let s = with_read(&db, crate::db::queries::settings::get)?;
+    Ok(Json(settings_json(&s)))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct InstanceSettingsPatchReq {
+    allow_signup: Option<bool>,
+    instance_name: Option<String>,
+    signup_email_domains: Option<Vec<String>>,
+    session_lifetime_days: Option<i64>,
+    login_message: Option<String>,
+}
+
+/// PATCH /api/instance/settings — partial update, admin only.
+pub(super) async fn instance_settings_patch(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<InstanceSettingsPatchReq>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    require_admin(&auth_user)?;
+    let patch = crate::db::queries::settings::InstanceSettingsPatch {
+        allow_signup: input.allow_signup,
+        instance_name: input.instance_name,
+        signup_email_domains: input.signup_email_domains,
+        session_lifetime_days: input.session_lifetime_days,
+        login_message: input.login_message,
+    };
+    let s = with_write(&db, move |conn| crate::db::queries::settings::update(conn, patch))?;
+    Ok(Json(settings_json(&s)))
 }
 
 pub(super) async fn auth_me(
@@ -592,9 +696,21 @@ mod tests {
 
     #[tokio::test]
     async fn auth_signup_disabled_rejects() {
+        // Signup policy is DB-backed now: disable it in the settings store.
         let db = crate::db::open_memory().expect("test db");
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::settings::update(
+                &conn,
+                crate::db::queries::settings::InstanceSettingsPatch {
+                    allow_signup: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
         let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
-            allow_signup: false,
+            allow_signup: true,
             secure_cookies: false,
         }));
 
@@ -606,7 +722,174 @@ mod tests {
         let resp = json_post(&app, "/api/auth/signup", body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let data = parse_json(resp).await;
-        assert!(data["error"].as_str().unwrap().contains("disabled"));
+        assert!(data["error"].as_str().unwrap().contains("closed"));
+    }
+
+    // ── GET /api/instance: public state the auth screen reads ──
+
+    #[tokio::test]
+    async fn instance_reports_open_signup_and_existing_users() {
+        // test_app() seeds a human admin and defaults allow_signup = true.
+        let app = test_app();
+        let resp = json_get(&app, "/api/instance").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["allow_signup"], true);
+        assert_eq!(data["has_users"], true, "seeded admin counts as a human");
+    }
+
+    #[tokio::test]
+    async fn instance_reports_closed_signup_and_empty_when_fresh() {
+        // Fresh db, no users, signup disabled via the settings store.
+        let db = crate::db::open_memory().expect("test db");
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::settings::update(
+                &conn,
+                crate::db::queries::settings::InstanceSettingsPatch {
+                    allow_signup: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            secure_cookies: false,
+        }));
+
+        let resp = json_get(&app, "/api/instance").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["allow_signup"], false);
+        assert_eq!(data["has_users"], false);
+    }
+
+    #[tokio::test]
+    async fn instance_flips_has_users_after_first_signup() {
+        // Open signup, fresh db: has_users is false until the first human signs
+        // up, then true. This is the brand-new-instance transition the signup
+        // page keys its copy off (without ever claiming the account is admin).
+        let db = crate::db::open_memory().expect("test db");
+        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            secure_cookies: false,
+        }));
+
+        let before = parse_json(json_get(&app, "/api/instance").await).await;
+        assert_eq!(before["has_users"], false);
+
+        let body = serde_json::json!({
+            "username": "firsthuman",
+            "email": "first@test.com",
+            "password": "securepass123"
+        });
+        assert_eq!(
+            json_post(&app, "/api/auth/signup", body).await.status(),
+            StatusCode::OK
+        );
+
+        let after = parse_json(json_get(&app, "/api/instance").await).await;
+        assert_eq!(after["has_users"], true);
+    }
+
+    // ── Instance settings (admin-gated GET/PATCH) ──
+
+    #[tokio::test]
+    async fn instance_settings_admin_can_read_and_patch() {
+        let app = test_app(); // authed as admin
+
+        let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
+        assert_eq!(data["allow_signup"], true);
+        assert_eq!(data["session_lifetime_days"], 30);
+
+        let patch = serde_json::json!({
+            "instance_name": "Acme Eng",
+            "allow_signup": false,
+            "session_lifetime_days": 14,
+            "signup_email_domains": ["acme.com"],
+        });
+        let resp = json_patch(&app, "/api/instance/settings", patch).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["instance_name"], "Acme Eng");
+        assert_eq!(data["allow_signup"], false);
+        assert_eq!(data["session_lifetime_days"], 14);
+        assert_eq!(data["signup_email_domains"][0], "acme.com");
+
+        // The public endpoint reflects the live change.
+        let pub_data = parse_json(json_get(&app, "/api/instance").await).await;
+        assert_eq!(pub_data["allow_signup"], false);
+        assert_eq!(pub_data["instance_name"], "Acme Eng");
+    }
+
+    #[tokio::test]
+    async fn instance_settings_forbidden_for_non_admin() {
+        let db = crate::db::open_memory().expect("test db");
+        let user = {
+            let conn = db.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "reg".into(),
+                    email: "reg@test.com".into(),
+                    password: "securepass123".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+        };
+        let app = crate::api::test_helpers::app_as_user(db, &user);
+        assert_eq!(
+            json_get(&app, "/api/instance/settings").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_patch(&app, "/api/instance/settings", serde_json::json!({ "allow_signup": true }))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_enforces_email_domain_allowlist() {
+        let db = crate::db::open_memory().expect("test db");
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::settings::update(
+                &conn,
+                crate::db::queries::settings::InstanceSettingsPatch {
+                    signup_email_domains: Some(vec!["acme.com".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            secure_cookies: false,
+        }));
+
+        // Disallowed domain is rejected.
+        let resp = json_post(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({ "username": "x", "email": "x@other.com", "password": "securepass123" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Allowed domain succeeds.
+        let resp = json_post(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({ "username": "y", "email": "y@acme.com", "password": "securepass123" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
