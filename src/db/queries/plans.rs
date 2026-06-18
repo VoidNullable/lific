@@ -1062,4 +1062,111 @@ mod tests {
             "issue-driven cascade must be audited as auto-complete: {step_audit:?}"
         );
     }
+
+    // ── Coverage backfill: previously-untested step mutators & guards ──
+
+    /// assert_step_in_plan is an integrity guard: it must accept a step that
+    /// belongs to the plan and reject one that doesn't, so a caller can't
+    /// mutate a step via the wrong plan's identifier.
+    #[test]
+    fn assert_step_in_plan_accepts_own_rejects_foreign() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let plan_a = create_plan(&conn, &CreatePlan { project_id: pid, title: "A".into(), issue_id: None, steps: vec![simple_step("a-step", None)] }).unwrap();
+        let plan_b = create_plan(&conn, &CreatePlan { project_id: pid, title: "B".into(), issue_id: None, steps: vec![simple_step("b-step", None)] }).unwrap();
+        let a_step = plan_a.steps[0].id;
+        let b_step = plan_b.steps[0].id;
+
+        assert!(assert_step_in_plan(&conn, plan_a.id, a_step).is_ok());
+        // a_step belongs to plan_a, not plan_b → BadRequest.
+        let err = assert_step_in_plan(&conn, plan_b.id, a_step).unwrap_err();
+        assert!(matches!(err, LificError::BadRequest(_)), "foreign step must be rejected, got {err:?}");
+        assert!(assert_step_in_plan(&conn, plan_b.id, b_step).is_ok());
+    }
+
+    #[test]
+    fn set_step_title_renames_and_404s_on_missing() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("old title", None)] }).unwrap();
+        let step_id = plan.steps[0].id;
+
+        set_step_title(&conn, step_id, "new title").unwrap();
+        let reread = get_plan(&conn, plan.id).unwrap();
+        assert_eq!(reread.steps[0].title, "new title");
+
+        let err = set_step_title(&conn, 999_999, "ghost").unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)), "missing step must 404, got {err:?}");
+    }
+
+    // set_step_description runs unescape_text (LIF-177): literal \n from JSON
+    // transport must land as a real newline in the stored body.
+    #[test]
+    fn set_step_description_sets_body_and_unescapes() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let step_id = plan.steps[0].id;
+
+        set_step_description(&conn, step_id, "line one\\nline two").unwrap();
+        let reread = get_plan(&conn, plan.id).unwrap();
+        assert_eq!(reread.steps[0].description, "line one\nline two", "\\n must be unescaped to a newline");
+
+        let err = set_step_description(&conn, 999_999, "x").unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)));
+    }
+
+    #[test]
+    fn set_step_issue_links_and_unlinks() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let issue = seed_issue(&conn, pid, "Linkable", "todo");
+        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let step_id = plan.steps[0].id;
+
+        set_step_issue(&conn, step_id, Some(issue.id)).unwrap();
+        assert_eq!(get_plan(&conn, plan.id).unwrap().steps[0].issue_id, Some(issue.id));
+
+        // Passing None must clear the link back to NULL.
+        set_step_issue(&conn, step_id, None).unwrap();
+        assert_eq!(get_plan(&conn, plan.id).unwrap().steps[0].issue_id, None);
+
+        let err = set_step_issue(&conn, 999_999, Some(issue.id)).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)));
+    }
+
+    #[test]
+    fn step_parent_reflects_nesting() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![CreatePlanStep {
+                    title: "parent".into(),
+                    description: String::new(),
+                    issue_id: None,
+                    done: false,
+                    steps: vec![simple_step("child", None)],
+                }],
+            },
+        )
+        .unwrap();
+        let parent_id = plan.steps[0].id;
+        let child_id = plan.steps[0].children[0].id;
+
+        assert_eq!(step_parent(&conn, parent_id).unwrap(), None, "root step has no parent");
+        assert_eq!(step_parent(&conn, child_id).unwrap(), Some(parent_id));
+
+        let err = step_parent(&conn, 999_999).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)));
+    }
 }

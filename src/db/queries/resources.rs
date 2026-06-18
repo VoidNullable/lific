@@ -776,4 +776,51 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.emoji, None);
     }
+
+    // ── Coverage backfill: previously-untested lookups & guards ──
+
+    // get_resource_project_id whitelists the table name (it's interpolated
+    // into SQL) — an unknown table must be rejected as BadRequest, never run.
+    #[test]
+    fn get_resource_project_id_resolves_and_rejects_bad_table() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let module = create_module(&conn, &CreateModule {
+            project_id: pid, name: "M".into(), description: String::new(),
+            status: "active".into(), emoji: None,
+        }).unwrap();
+        let label = create_label(&conn, &CreateLabel {
+            project_id: pid, name: "bug".into(), color: "#EF4444".into(),
+        }).unwrap();
+        let folder = create_folder(&conn, &CreateFolder {
+            project_id: pid, parent_id: None, name: "Docs".into(),
+        }).unwrap();
+
+        assert_eq!(get_resource_project_id(&conn, "modules", module.id).unwrap(), pid);
+        assert_eq!(get_resource_project_id(&conn, "labels", label.id).unwrap(), pid);
+        assert_eq!(get_resource_project_id(&conn, "folders", folder.id).unwrap(), pid);
+
+        // Unknown table is rejected before any SQL runs (anti-injection guard).
+        let err = get_resource_project_id(&conn, "issues; DROP TABLE projects", 1).unwrap_err();
+        assert!(matches!(err, LificError::BadRequest(_)), "bad table must be BadRequest, got {err:?}");
+
+        // Known table, missing row → NotFound.
+        let err = get_resource_project_id(&conn, "modules", 999_999).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)));
+    }
+
+    #[test]
+    fn get_folder_name_returns_name_and_404s() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let folder = create_folder(&conn, &CreateFolder {
+            project_id: pid, parent_id: None, name: "Design".into(),
+        }).unwrap();
+
+        assert_eq!(get_folder_name(&conn, folder.id).unwrap(), "Design");
+        let err = get_folder_name(&conn, 999_999).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)));
+    }
 }
