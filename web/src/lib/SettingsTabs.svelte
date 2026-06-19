@@ -16,7 +16,7 @@
 
 <div class="flex items-center gap-6 border-b border-[var(--border)] mb-8">
   <button
-    class="relative -mb-px px-0.5 pb-2.5 pt-1 text-[0.875rem] font-medium border-b-2 transition-colors
+    class="relative -mb-px px-0.5 pb-2.5 pt-1 text-body font-medium border-b-2 transition-colors
            {active === 'account'
       ? 'border-[var(--accent)] text-[var(--text)]'
       : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'}"
@@ -26,7 +26,7 @@
   </button>
   {#if isAdmin}
     <button
-      class="relative -mb-px px-0.5 pb-2.5 pt-1 text-[0.875rem] font-medium border-b-2 transition-colors
+      class="relative -mb-px px-0.5 pb-2.5 pt-1 text-body font-medium border-b-2 transition-colors
              {active === 'instance'
         ? 'border-[var(--accent)] text-[var(--text)]'
         : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'}"

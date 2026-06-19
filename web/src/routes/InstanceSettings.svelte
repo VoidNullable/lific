@@ -158,7 +158,7 @@
             <Lock size={20} class="text-[var(--text-faint)]" />
           </div>
           <h2 class="text-[1rem] font-semibold text-[var(--text)]">Admins only</h2>
-          <p class="text-[0.875rem] text-[var(--text-muted)] mt-1 max-w-[36ch]">
+          <p class="text-body text-[var(--text-muted)] mt-1 max-w-[36ch]">
             Instance settings are visible to administrators of this instance.
           </p>
           <button
@@ -172,7 +172,7 @@
       {:else}
         <section class="mb-8 animate-reveal delay-100">
           <h1 class="font-display text-[1.5rem] tracking-tight text-[var(--text)] leading-none">Instance</h1>
-          <p class="text-[0.875rem] text-[var(--text-muted)] mt-2">
+          <p class="text-body text-[var(--text-muted)] mt-2">
             Settings for the Lific instance at <span class="font-mono text-[var(--text)]">{host}</span>.
             Changes apply immediately.
           </p>
@@ -195,7 +195,7 @@
                 onblur={commitName}
                 placeholder={host}
                 maxlength="60"
-                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                        outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
               />
               <span class="block text-caption text-[var(--text)] mt-1.5">Shown on the sign-in screen. Leave blank to use the host.</span>
@@ -249,7 +249,7 @@
                 bind:value={fDomains}
                 onblur={commitDomains}
                 placeholder="snake.com, sub.snake.com"
-                class="w-full px-3 py-2 text-[0.875rem] font-mono rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                class="w-full px-3 py-2 text-body font-mono rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                        outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
               />
               <span class="block text-caption text-[var(--text)] mt-1.5">Comma-separated. Leave blank to allow any email domain.</span>
@@ -265,10 +265,10 @@
                   onblur={commitSession}
                   min="1"
                   max="365"
-                  class="w-24 px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                  class="w-24 px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                          outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                 />
-                <span class="text-[0.875rem] text-[var(--text)]">days</span>
+                <span class="text-body text-[var(--text)]">days</span>
               </div>
               <span class="block text-caption text-[var(--text)] mt-1.5">How long a sign-in stays valid before re-authenticating (1 to 365).</span>
             </label>
@@ -282,7 +282,7 @@
                 rows="2"
                 maxlength="280"
                 placeholder="Lific Issue tracker. Ask I.T. for access"
-                class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                        outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] resize-none"
               ></textarea>
               <span class="block text-caption text-[var(--text)] mt-1.5">A short note shown on the sign-in screen. Leave blank for none.</span>
@@ -366,7 +366,7 @@
             <ShieldCheck size={16} class="text-[var(--text-muted)]" />
             <h2 class="text-[1rem] font-semibold text-[var(--text)]">Members</h2>
           </div>
-          <p class="text-[0.875rem] text-[var(--text-muted)] mb-5 leading-relaxed">
+          <p class="text-body text-[var(--text-muted)] mb-5 leading-relaxed">
             {users.length} {users.length === 1 ? "person" : "people"} on this instance · {adminCount} admin.
           </p>
 
@@ -377,7 +377,7 @@
                   {initials(u.display_name || u.username)}
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="text-[0.875rem] text-[var(--text)] truncate leading-tight">{u.display_name || u.username}</div>
+                  <div class="text-body text-[var(--text)] truncate leading-tight">{u.display_name || u.username}</div>
                   <div class="text-caption font-mono text-[var(--text-faint)] truncate leading-tight mt-0.5">@{u.username}</div>
                 </div>
                 <span

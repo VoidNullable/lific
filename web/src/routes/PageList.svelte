@@ -1047,7 +1047,7 @@
                     </span>
                     <div class="flex-1 min-w-0">
                       <div class="flex items-center gap-2">
-                        <span class="text-[0.875rem] font-medium text-[var(--text)] truncate flex-1">
+                        <span class="text-body font-medium text-[var(--text)] truncate flex-1">
                           {page.title}
                         </span>
                         <span

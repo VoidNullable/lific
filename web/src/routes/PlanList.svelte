@@ -170,7 +170,7 @@
           <div class="mb-6 flex items-center gap-3 p-3 rounded-xl border-l-2 border-l-[var(--btn-success)] bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
             <ListChecks size={16} class="text-[var(--btn-success)]" />
             <input
-              class="flex-1 bg-transparent outline-none text-[0.875rem] text-[var(--text)]"
+              class="flex-1 bg-transparent outline-none text-body text-[var(--text)]"
               placeholder="Plan title…"
               bind:value={createTitle}
               autofocus
@@ -240,7 +240,7 @@
                       {/snippet}
                     </ProgressRing>
                     <div class="flex-1 min-w-0">
-                      <div class="text-[0.875rem] text-[var(--text)] truncate">{plan.title}</div>
+                      <div class="text-body text-[var(--text)] truncate">{plan.title}</div>
                       <div class="text-caption text-[var(--text-faint)] font-mono">
                         {plan.identifier}{plan.anchor_identifier ? ` · anchor ${plan.anchor_identifier}` : ""}
                       </div>

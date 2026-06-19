@@ -208,7 +208,7 @@
 
 {#snippet userOption(opt: { value: string | number | null; label: string; [key: string]: unknown }, isSelected: boolean)}
   {#if opt.value === null}
-    <span class="text-[0.875rem] text-[var(--text-faint)]">{opt.label}</span>
+    <span class="text-body text-[var(--text-faint)]">{opt.label}</span>
   {:else}
     <div class="flex items-center gap-2.5">
       <div
@@ -223,7 +223,7 @@
       <div class="min-w-0">
         <div class="flex items-center gap-1.5">
           <span
-            class="text-[0.875rem] truncate
+            class="text-body truncate
                    {isSelected ? 'text-[var(--accent)] font-medium' : 'text-[var(--text)]'}"
           >
             {opt.label}

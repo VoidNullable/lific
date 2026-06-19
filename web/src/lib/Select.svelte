@@ -131,7 +131,7 @@
               {@render renderOption(opt, isSelected)}
             {:else}
               <span
-                class="{sm ? 'text-body-sm' : 'text-[0.875rem]'}
+                class="{sm ? 'text-body-sm' : 'text-body'}
                        {isSelected ? 'text-[var(--accent)] font-medium' : 'text-[var(--text)]'}"
               >
                 {opt.label}

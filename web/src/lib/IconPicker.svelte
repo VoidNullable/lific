@@ -172,7 +172,7 @@
     {:else if value && !isLucide}
       {value}
     {:else}
-      <span class="text-[var(--text-faint)] text-[0.875rem]">+</span>
+      <span class="text-[var(--text-faint)] text-body">+</span>
     {/if}
   </button>
 

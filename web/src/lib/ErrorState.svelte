@@ -36,7 +36,7 @@
       {title}
     </p>
     {#if message}
-      <p class="text-[0.875rem] text-[var(--text-muted)] leading-relaxed mt-2 max-w-[42ch]">
+      <p class="text-body text-[var(--text-muted)] leading-relaxed mt-2 max-w-[42ch]">
         {message}
       </p>
     {/if}

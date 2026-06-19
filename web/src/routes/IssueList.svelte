@@ -1219,7 +1219,7 @@
           type="text"
           bind:this={inlineCreateTitleEl}
           bind:value={inlineCreateTitle}
-          class="flex-1 text-[0.875rem] bg-transparent text-[var(--text)]
+          class="flex-1 text-body bg-transparent text-[var(--text)]
                  placeholder:text-[var(--text-faint)] outline-none border-none"
           placeholder="Issue title..."
           autofocus={!inlineCreateStatusOpen}
@@ -1303,7 +1303,7 @@
             <p class="text-[var(--text)] text-[1.0625rem] font-medium">
               All quiet here
             </p>
-            <p class="text-[var(--text-muted)] text-[0.875rem]">
+            <p class="text-[var(--text-muted)] text-body">
               No work on the board. Time for a nap… or a fresh idea.
             </p>
           </div>

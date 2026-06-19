@@ -331,7 +331,7 @@
               <textarea
                 bind:value={draftDesc}
                 rows="2"
-                class="mt-2 w-full text-[0.875rem] bg-transparent border border-[var(--border)] rounded-md px-2.5 py-1.5
+                class="mt-2 w-full text-body bg-transparent border border-[var(--border)] rounded-md px-2.5 py-1.5
                        text-[var(--text)] outline-none resize-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                 placeholder="Describe this project…"
                 autofocus
@@ -341,7 +341,7 @@
             {:else}
               <button class="group block text-left mt-1.5 max-w-[60ch] rounded px-0.5 cursor-text hover:bg-[var(--bg-subtle)] transition-colors" onclick={startEditDesc}>
                 {#if project.description}
-                  <span class="text-[0.875rem] text-[var(--text-muted)] leading-relaxed">{project.description}</span>
+                  <span class="text-body text-[var(--text-muted)] leading-relaxed">{project.description}</span>
                 {:else}
                   <span class="text-body-sm text-[var(--text-faint)] italic">Add a description…</span>
                 {/if}
@@ -379,7 +379,7 @@
             <div class="flex items-center gap-3 py-6 px-1 text-[var(--text-muted)]">
               <span class="grid place-items-center size-8 rounded-full bg-[var(--success-bg)] text-[var(--success)]"><Check size={16} /></span>
               <div>
-                <p class="text-[0.875rem] text-[var(--text)]">Nothing needs attention</p>
+                <p class="text-body text-[var(--text)]">Nothing needs attention</p>
                 <p class="text-body-sm text-[var(--text-faint)]">Everything open is fresh and on track.</p>
               </div>
             </div>
@@ -403,7 +403,7 @@
                   <span class="absolute left-0 top-0 bottom-0 w-[3px]" style="background: {heat}"></span>
                   <PriorityIcon priority={issue.priority} size={15} />
                   <span class="text-micro font-mono text-[var(--text-faint)] shrink-0 tabular-nums w-[58px]">{issue.identifier}</span>
-                  <span class="text-[0.875rem] text-[var(--text)] truncate flex-1">{issue.title}</span>
+                  <span class="text-body text-[var(--text)] truncate flex-1">{issue.title}</span>
                   <div class="shrink-0 flex items-center gap-2 text-micro tabular-nums">
                     <span class="text-[var(--text-faint)]">open {ageLabel(age)}</span>
                     {#if idle >= 14}
@@ -449,7 +449,7 @@
             onclick={() => { dangerOpen = !dangerOpen; }}
           >
             <AlertTriangle size={15} class="text-[var(--error)]" />
-            <span class="text-[0.875rem] font-semibold text-[var(--error)] flex-1">Danger zone</span>
+            <span class="text-body font-semibold text-[var(--error)] flex-1">Danger zone</span>
             <ChevronDown size={15} class="text-[var(--error)] transition-transform {dangerOpen ? 'rotate-180' : ''}" />
           </button>
 

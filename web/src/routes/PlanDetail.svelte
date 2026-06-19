@@ -371,7 +371,7 @@
     {#if addingChildOf === -1}
       <div class="flex items-center gap-2 py-1 mt-2 pl-1">
         <input
-          class="flex-1 bg-transparent outline-none text-[0.875rem] text-[var(--text)] border-b border-[var(--accent)]"
+          class="flex-1 bg-transparent outline-none text-body text-[var(--text)] border-b border-[var(--accent)]"
           placeholder="Step title…"
           bind:value={childTitle}
           autofocus
@@ -422,7 +422,7 @@
         <div class="flex items-center gap-2">
           {#if editingTitleOf === step.id}
             <input
-              class="flex-1 bg-transparent outline-none text-[0.875rem] text-[var(--text)] border-b border-[var(--accent)]"
+              class="flex-1 bg-transparent outline-none text-body text-[var(--text)] border-b border-[var(--accent)]"
               bind:value={titleDraft}
               autofocus
               onkeydown={(e) => { if (e.key === "Enter") commitEditTitle(); if (e.key === "Escape") editingTitleOf = null; }}
@@ -430,7 +430,7 @@
             />
           {:else}
             <button
-              class="text-left text-[0.875rem] truncate {step.done ? 'text-[var(--text-faint)] line-through' : 'text-[var(--text)]'}"
+              class="text-left text-body truncate {step.done ? 'text-[var(--text-faint)] line-through' : 'text-[var(--text)]'}"
               ondblclick={() => startEditTitle(step)}
               title="Double-click to rename"
             >
@@ -496,7 +496,7 @@
         {#if addingChildOf === step.id}
           <div class="flex items-center gap-2 py-1">
             <input
-              class="flex-1 bg-transparent outline-none text-[0.875rem] text-[var(--text)] border-b border-[var(--accent)]"
+              class="flex-1 bg-transparent outline-none text-body text-[var(--text)] border-b border-[var(--accent)]"
               placeholder="Sub-step title…"
               bind:value={childTitle}
               autofocus

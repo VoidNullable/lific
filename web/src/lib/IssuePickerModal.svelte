@@ -276,7 +276,7 @@
                   <StatusIcon status={hit.status} size={14} />
                 {/if}
               </span>
-              <span class="flex-1 min-w-0 text-[0.875rem] text-[var(--text)] truncate">
+              <span class="flex-1 min-w-0 text-body text-[var(--text)] truncate">
                 {hit.title}
               </span>
               <span class="font-mono text-micro text-[var(--text-faint)] shrink-0">

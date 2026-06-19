@@ -218,7 +218,7 @@
             <textarea
               bind:value={description}
               bind:this={descriptionEl}
-              class="w-full text-[0.875rem] leading-[1.7] text-[var(--text)]
+              class="w-full text-body leading-[1.7] text-[var(--text)]
                      bg-transparent border-none outline-none resize-none
                      p-0 m-0 font-[var(--font-body)] min-h-[120px]"
               placeholder="Add a description... (markdown supported)"

@@ -392,7 +392,7 @@
           <Plug size={16} class="text-[var(--text-muted)]" />
           <h2 class="text-[1rem] font-semibold text-[var(--text)]">Connected tools</h2>
         </div>
-        <p class="text-[0.875rem] text-[var(--text-muted)] mb-5 leading-relaxed">
+        <p class="text-body text-[var(--text-muted)] mb-5 leading-relaxed">
           Link an AI coding tool to Lific over MCP. Each connection mints a bot identity that acts on your behalf; disconnect any time.
         </p>
 
@@ -406,7 +406,7 @@
               </div>
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
-                  <span class="text-[0.875rem] font-medium text-[var(--text)]">{template.name}</span>
+                  <span class="text-body font-medium text-[var(--text)]">{template.name}</span>
                   {#if st === "connected"}
                     <span class="inline-flex items-center gap-1 text-micro font-semibold uppercase tracking-wide
                                  text-[var(--success)] bg-[var(--success-bg)] px-1.5 py-0.5 rounded-full">
@@ -463,7 +463,7 @@
       <!-- ── ACCOUNT (profile + security, bottom of page) ─── -->
       <section class="mt-10 pt-8 border-t border-[var(--border)] animate-reveal delay-250">
         <h2 class="text-[1rem] font-semibold text-[var(--text)] mb-1">Account</h2>
-        <p class="text-[0.875rem] text-[var(--text-muted)] mb-6 leading-relaxed">
+        <p class="text-body text-[var(--text-muted)] mb-6 leading-relaxed">
           Manage your profile, password, and sessions.
         </p>
 
@@ -473,7 +473,7 @@
             <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Display name</span>
             <input
               bind:value={profileName}
-              class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+              class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                      outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
             />
           </label>
@@ -482,13 +482,13 @@
             <input
               bind:value={profileEmail}
               type="email"
-              class="w-full px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+              class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                      outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
             />
           </label>
           <div>
             <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">Username</span>
-            <p class="text-[0.875rem] font-mono text-[var(--text-muted)]">@{user.username}</p>
+            <p class="text-body font-mono text-[var(--text-muted)]">@{user.username}</p>
           </div>
         </div>
         {#if profileError}
@@ -517,12 +517,12 @@
           <div class="max-w-[480px] flex flex-col gap-2.5">
             <input
               type="password" bind:value={curPw} placeholder="Current password" autocomplete="current-password"
-              class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+              class="px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                      outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
             />
             <input
               type="password" bind:value={newPw} placeholder="New password (min 8 chars)" autocomplete="new-password"
-              class="px-3 py-2 text-[0.875rem] rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+              class="px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
                      outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
               onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
             />
@@ -604,10 +604,10 @@
         {#if connecting}
           <div class="flex items-center gap-3 py-8 justify-center text-[var(--text-muted)]">
             <div class="size-5 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
-            <span class="text-[0.875rem]">Minting credentials…</span>
+            <span class="text-body">Minting credentials…</span>
           </div>
         {:else if connectError}
-          <div class="flex items-start gap-2.5 text-[0.875rem] text-[var(--error)] bg-[var(--error-bg)] px-3.5 py-3 rounded-md" role="alert">
+          <div class="flex items-start gap-2.5 text-body text-[var(--error)] bg-[var(--error-bg)] px-3.5 py-3 rounded-md" role="alert">
             <AlertTriangle size={16} class="shrink-0 mt-0.5" />
             <span>{connectError}</span>
           </div>
@@ -621,7 +621,7 @@
           <section class="mb-5">
             <div class="flex items-center gap-2.5 mb-2">
               <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">1</span>
-              <h4 class="flex items-center gap-1.5 text-[0.875rem] font-semibold text-[var(--text)]">
+              <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
                 <KeyRound size={14} class="text-[var(--text-muted)]" /> Copy your API key
               </h4>
             </div>
@@ -657,7 +657,7 @@
           <section class="mb-5">
             <div class="flex items-center gap-2.5 mb-2">
               <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">2</span>
-              <h4 class="flex items-center gap-1.5 text-[0.875rem] font-semibold text-[var(--text)]">
+              <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
                 <FileCode2 size={14} class="text-[var(--text-muted)]" /> Add to your config
               </h4>
             </div>
@@ -741,7 +741,7 @@
             <section class="mb-5">
               <div class="flex items-center gap-2.5 mb-2">
                 <span class="size-5 shrink-0 grid place-items-center rounded-full bg-[var(--btn-success)] text-[var(--btn-success-text)] text-micro font-bold tabular-nums">3</span>
-                <h4 class="flex items-center gap-1.5 text-[0.875rem] font-semibold text-[var(--text)]">
+                <h4 class="flex items-center gap-1.5 text-body font-semibold text-[var(--text)]">
                   <Terminal size={14} class="text-[var(--text-muted)]" /> Set the env var
                   <span class="font-normal text-[var(--text-muted)]">· {OS_LABELS[selectedOs]}</span>
                 </h4>

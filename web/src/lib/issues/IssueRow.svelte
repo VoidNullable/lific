@@ -193,7 +193,7 @@
        items-center, so icons remain aligned to the title column as a whole. -->
   <div class="flex-1 min-w-0 flex flex-col gap-0.5">
     <span
-      class="text-[0.875rem] text-[var(--text)] truncate
+      class="text-body text-[var(--text)] truncate
              {issue.status === 'done' || issue.status === 'cancelled'
         ? 'line-through text-[var(--text-muted)]'
         : ''}"

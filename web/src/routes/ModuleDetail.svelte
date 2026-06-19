@@ -447,7 +447,7 @@
             {#if issues.length === 0}
               <div class="py-10 flex flex-col items-center gap-3">
                 <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.18} />
-                <p class="text-[0.875rem] text-[var(--text-muted)]">
+                <p class="text-body text-[var(--text-muted)]">
                   Nothing assigned here yet
                 </p>
                 {#if editable}
@@ -484,7 +484,7 @@
                     <span class="text-caption font-mono text-[var(--text-faint)] shrink-0 tabular-nums w-[60px]">
                       {issue.identifier}
                     </span>
-                    <span class="text-[0.875rem] text-[var(--text)] truncate flex-1">
+                    <span class="text-body text-[var(--text)] truncate flex-1">
                       {issue.title}
                     </span>
                     {#if issue.priority && issue.priority !== "none"}

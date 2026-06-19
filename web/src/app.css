@@ -31,6 +31,7 @@
   --text-micro: 0.6875rem;    /* 11px — section labels, kbd, tally, badges */
   --text-caption: 0.75rem;    /* 12px — compact button text, sort/display pills */
   --text-body-sm: 0.8125rem;  /* 13px — dense UI workhorse (sidebar, menus, filters) */
+  --text-body: 0.875rem;      /* 14px — prose / paragraphs, ErrorState body */
 
   /* named colors for palette reference */
   --color-stone-50: #faf8f5;

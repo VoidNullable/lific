@@ -644,7 +644,7 @@
                   ></span>
                 {/if}
               </span>
-              <span class="flex-1 text-[0.875rem] text-[var(--text)] capitalize truncate">
+              <span class="flex-1 text-body text-[var(--text)] capitalize truncate">
                 {c.title}
               </span>
               {#if c.hint}
@@ -681,7 +681,7 @@
                 <span class="size-5 flex items-center justify-center shrink-0 text-[var(--accent)]">
                   <Zap size={14} />
                 </span>
-                <span class="flex-1 text-[0.875rem] text-[var(--text)] truncate">
+                <span class="flex-1 text-body text-[var(--text)] truncate">
                   {a.title}
                 </span>
                 {#if a.hint}
@@ -733,7 +733,7 @@
                 </span>
 
                 <span class="flex-1 min-w-0 flex items-baseline gap-2">
-                  <span class="text-[0.875rem] text-[var(--text)] truncate">
+                  <span class="text-body text-[var(--text)] truncate">
                     {r.title}
                   </span>
                   {#if r.sub}
