@@ -183,7 +183,7 @@
         <div class="min-h-full flex flex-col">
           <div class="flex-1 px-6 sm:px-10 lg:px-14 py-10 lg:py-14">
             <div class="w-full max-w-[28rem]">
-              <h1 class="font-display text-[1.875rem] sm:text-[2.125rem] font-semibold tracking-[-0.02em] text-[var(--text)] leading-[1.08] animate-reveal">
+              <h1 class="font-display text-display font-semibold tracking-[-0.02em] text-[var(--text)] leading-[1.08] animate-reveal">
                 {title}
               </h1>
               <p class="text-body-lg text-[var(--text-muted)] leading-relaxed mt-2.5 max-w-[40ch] animate-reveal delay-100">

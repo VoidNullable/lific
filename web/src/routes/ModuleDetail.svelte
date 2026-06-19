@@ -356,7 +356,7 @@
                 <input
                   type="text"
                   bind:value={draftName}
-                  class="w-full text-[1.75rem] font-display tracking-tight
+                  class="w-full text-display font-display tracking-tight
                          bg-transparent border-none outline-none
                          text-[var(--text)] py-1"
                   onblur={commitName}
@@ -369,7 +369,7 @@
               {:else if editable}
                 <button
                   type="button"
-                  class="text-[1.75rem] font-display tracking-tight text-[var(--text)]
+                  class="text-display font-display tracking-tight text-[var(--text)]
                          py-1 rounded transition-colors w-full text-left
                          bg-transparent border-0 p-0 cursor-text hover:bg-[var(--bg-subtle)]"
                   onclick={startEditName}
@@ -383,7 +383,7 @@
                   {mod.name}
                 </button>
               {:else}
-                <h1 class="text-[1.75rem] font-display tracking-tight text-[var(--text)] py-1">
+                <h1 class="text-display font-display tracking-tight text-[var(--text)] py-1">
                   {mod.name}
                 </h1>
               {/if}

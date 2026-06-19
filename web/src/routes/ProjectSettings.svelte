@@ -291,7 +291,7 @@
                 <!-- svelte-ignore a11y_autofocus -->
                 <input
                   bind:value={draftName}
-                  class="text-[1.75rem] font-display tracking-tight bg-transparent border-none outline-none
+                  class="text-display font-display tracking-tight bg-transparent border-none outline-none
                          text-[var(--text)] w-full max-w-[28ch] -my-0.5 focus-visible:ring-2
                          focus-visible:ring-[var(--accent)] rounded px-0.5"
                   autofocus
@@ -300,7 +300,7 @@
                 />
               {:else}
                 <button
-                  class="group flex items-center gap-2 text-[1.75rem] font-display tracking-tight
+                  class="group flex items-center gap-2 text-display font-display tracking-tight
                          text-[var(--text)] -my-0.5 rounded px-0.5 cursor-text hover:bg-[var(--bg-subtle)] transition-colors"
                   onclick={startEditName}
                 >

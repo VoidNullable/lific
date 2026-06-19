@@ -22,7 +22,7 @@
 
   // Full class strings so Tailwind's scanner keeps them.
   const sizeClass = $derived(
-    size === "lg" ? "text-[1.75rem] mb-3" : "text-title mb-4",
+    size === "lg" ? "text-display mb-3" : "text-title mb-4",
   );
 
   let editing = $state(false);

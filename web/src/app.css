@@ -35,6 +35,7 @@
   --text-body-lg: 0.9375rem;  /* 15px — form fields (Select md), auth buttons */
   --text-heading: 1.125rem;   /* 18px — small headings, brand wordmark, empty-state titles. Absorbs old 17px (1.0625rem) */
   --text-title: 1.375rem;     /* 22px — page h1s, ErrorState title, large stat numerals. Absorbs old 20px (1.25rem) and 24px (1.5rem) */
+  --text-display: 1.75rem;    /* 28px — hero copy, InlineTitle lg, in-place title editors. Absorbs old 30px (1.875rem) */
 
   /* named colors for palette reference */
   --color-stone-50: #faf8f5;
