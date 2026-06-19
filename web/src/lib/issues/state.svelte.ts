@@ -52,6 +52,9 @@ export class IssueListState {
   displayOpen = $state(false);
   sortOpen = $state(false);
   newMenuOpen = $state(false);
+  /** Unified filter popover (LIF-222). Replaces the previous row of four
+   *  inline `<Select>` filter triggers. */
+  filterOpen = $state(false);
 
   // ── Row interaction: keyboard focus, multi-select, inline dropdowns ──
   // Shared between the keyboard handler, the bulk handlers, and IssueRow.
@@ -107,6 +110,10 @@ export class IssueListState {
     this.filterStatus = this.filterStatus === status ? "" : status;
   }
 
+  toggleLabelFilter(name: string): void {
+    this.filterLabel = this.filterLabel === name ? "" : name;
+  }
+
   // ── Sort helper ──
   /** Select a sort field (default direction) or, if already active, flip
    *  direction. Mirrors the spreadsheet-column pattern. */
@@ -153,6 +160,17 @@ export class IssueListState {
     this.displayOpen = false;
     this.sortOpen = false;
     this.newMenuOpen = false;
+    this.filterOpen = false;
+  }
+
+  /** Count of active filters, for the topbar Filter button badge. */
+  activeFilterCount(): number {
+    let n = 0;
+    if (this.filterStatus) n++;
+    if (this.filterPriority) n++;
+    if (this.filterLabel) n++;
+    if (this.filterModule) n++;
+    return n;
   }
 
   // ── Persistence wiring ──

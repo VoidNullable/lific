@@ -288,6 +288,7 @@
       view.hintsOpen ||
       view.displayOpen ||
       view.newMenuOpen ||
+      view.filterOpen ||
       inlineCreateActive ||
       view.statusDropdownId !== null ||
       view.priorityDropdownId !== null ||
@@ -852,6 +853,8 @@
           view.displayOpen = false;
         } else if (view.sortOpen) {
           view.sortOpen = false;
+        } else if (view.filterOpen) {
+          view.filterOpen = false;
         } else if (bulkMenu !== null) {
           bulkMenu = null;
         } else if (view.priorityDropdownId !== null) {
@@ -954,6 +957,7 @@
     view.displayOpen = false;
     view.sortOpen = false;
     view.newMenuOpen = false;
+    view.filterOpen = false;
     bulkMenu = null;
   }}
 />

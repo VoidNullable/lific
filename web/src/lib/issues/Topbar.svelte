@@ -10,11 +10,11 @@
   // (navigate, searchInputEl, inline-create trigger) come in as props.
   import type { Label, Module } from "../api";
   import {
-    Plus, Search, ChevronRight, ChevronDown, X, Layers, Signal,
+    Plus, Search, ChevronRight, ChevronDown, Layers, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDown, ArrowUp, Hash, Clock, History, Check, Zap, PenLine,
+    SlidersVertical,
   } from "lucide-svelte";
-  import Select from "../Select.svelte";
   import Tooltip from "../Tooltip.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import StatusIcon from "../StatusIcon.svelte";
@@ -62,6 +62,11 @@
     onMaybeCollapseSearch: () => void;
     onQuickCreate: () => void;
   } = $props();
+
+  // Count of active filters — drives the badge on the Filter button and the
+  // visibility of the popover's "Clear all" link. Derived so the topbar
+  // re-renders correctly when filters change without manual subscription.
+  let filterCount = $derived(view.activeFilterCount());
 </script>
 
 <div class="flex items-center gap-3 px-6 py-2 w-full">
@@ -149,119 +154,179 @@
   <!-- Separator -->
   <div class="w-px h-4 bg-[var(--border)]"></div>
 
-  <!-- ── FILTERS ── -->
-  <div class="flex items-center gap-1.5">
-    <!-- Status -->
-    <Select options={statusOptions} bind:value={view.filterStatus} placeholder="Status" size="sm" class="w-auto">
-      {#snippet renderSelected(opt)}
-        <span class="flex items-center gap-1.5 text-body-sm">
-          {#if opt.value}
-            <StatusIcon status={String(opt.value)} size={13} />
-            <span class="text-[var(--text)] capitalize">{opt.label}</span>
-          {:else}
-            <span class="text-[var(--text-muted)]">{opt.label}</span>
-          {/if}
-        </span>
-      {/snippet}
-      {#snippet renderOption(opt, isSelected)}
-        <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-          {#if opt.value}
-            <StatusIcon status={String(opt.value)} size={14} />
-            <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'} capitalize">{opt.label}</span>
-          {:else}
-            <span class="text-[var(--text-muted)]">{opt.label}</span>
-          {/if}
-        </span>
-      {/snippet}
-    </Select>
-
-    <!-- Priority -->
-    <Select options={priorityOptions} bind:value={view.filterPriority} placeholder="Priority" size="sm" class="w-auto">
-      {#snippet renderSelected(opt)}
-        <span class="flex items-center gap-1.5 text-body-sm">
-          {#if opt.value}
-            <PriorityIcon priority={String(opt.value)} size={13} />
-            <span class="capitalize" style="color: {priorityCssColor(String(opt.value))}">{opt.label}</span>
-          {:else}
-            <span class="text-[var(--text-muted)]">{opt.label}</span>
-          {/if}
-        </span>
-      {/snippet}
-      {#snippet renderOption(opt, isSelected)}
-        <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-          {#if opt.value}
-            <PriorityIcon priority={String(opt.value)} size={14} />
-            <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'} capitalize">{opt.label}</span>
-          {:else}
-            <span class="text-[var(--text-muted)]">{opt.label}</span>
-          {/if}
-        </span>
-      {/snippet}
-    </Select>
-
-    <!-- Labels -->
-    {#if labels.length > 0}
-      <Select options={labelOptions} bind:value={view.filterLabel} placeholder="Label" size="sm" class="w-auto">
-        {#snippet renderSelected(opt)}
-          <span class="flex items-center gap-1.5 text-body-sm">
-            {#if opt.value && opt.color}
-              <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
-              <span class="text-[var(--text)]">{opt.label}</span>
-            {:else}
-              <span class="text-[var(--text-muted)]">{opt.label}</span>
-            {/if}
-          </span>
-        {/snippet}
-        {#snippet renderOption(opt, isSelected)}
-          <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-            {#if opt.value && opt.color}
-              <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
-              <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
-            {:else}
-              <span class="text-[var(--text-muted)]">{opt.label}</span>
-            {/if}
-          </span>
-        {/snippet}
-      </Select>
-    {/if}
-
-    <!-- Modules -->
-    {#if modules.length > 0}
-      <Select options={moduleOptions} bind:value={view.filterModule} placeholder="Module" size="sm" class="w-auto">
-        {#snippet renderSelected(opt)}
-          <span class="flex items-center gap-1.5 text-body-sm">
-            {#if opt.value}
-              <Layers size={13} class="shrink-0 text-[var(--text-muted)]" />
-              <span class="text-[var(--text)]">{opt.label}</span>
-            {:else}
-              <span class="text-[var(--text-muted)]">{opt.label}</span>
-            {/if}
-          </span>
-        {/snippet}
-        {#snippet renderOption(opt, isSelected)}
-          <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
-            {#if opt.value}
-              <Layers size={14} class="shrink-0 text-[var(--text-muted)]" />
-              <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
-            {:else}
-              <span class="text-[var(--text-muted)]">{opt.label}</span>
-            {/if}
-          </span>
-        {/snippet}
-      </Select>
-    {/if}
-
-    {#if view.hasActiveFilters()}
+  <!-- ── FILTER (unified popover; LIF-222) ────────────────────
+       Replaces the previous row of up to four inline <Select>
+       triggers (Status / Priority / Labels / Modules) plus a
+       standalone Clear button. The popover stacks all four
+       sections vertically with section labels matching the
+       LIF-DOC-14 §7 popover language, and the trigger carries
+       a small accent badge with the count of active filters. -->
+  <div class="relative">
+    <Tooltip content={view.filterOpen ? null : "Filter"} placement="bottom">
       <button
-        class="flex items-center gap-1 text-caption text-[var(--text-muted)]
-               hover:text-[var(--text)] px-1.5 py-1 rounded-md
-               hover:bg-[var(--bg-subtle)] transition-colors"
-        onclick={() => view.clearFilters()}
-        title="Clear all filters"
+        class="h-7 flex items-center gap-1.5 px-2 rounded-md
+               text-caption font-medium transition-colors
+               hover:bg-[var(--bg-subtle)]
+               {view.filterOpen || filterCount > 0
+                 ? 'text-[var(--text)] bg-[var(--bg-subtle)]'
+                 : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+        onclick={(e) => {
+          e.stopPropagation();
+          view.filterOpen = !view.filterOpen;
+          view.sortOpen = false;
+          view.displayOpen = false;
+          view.hintsOpen = false;
+          view.newMenuOpen = false;
+        }}
       >
-        <X size={12} />
-        Clear
+        <SlidersVertical size={12} class="shrink-0" />
+        <span>Filter</span>
+        {#if filterCount > 0}
+          <span
+            class="grid place-items-center min-w-[1.05rem] h-[1.05rem] px-1
+                   rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+                   font-mono text-micro leading-none tabular-nums"
+          >
+            {filterCount}
+          </span>
+        {/if}
       </button>
+    </Tooltip>
+
+    {#if view.filterOpen}
+      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+      <div
+        class="absolute left-0 top-full mt-1.5 z-30 w-[280px]
+               bg-[var(--surface)] border border-[var(--border)]
+               rounded-lg shadow-lg py-1.5
+               max-h-[min(540px,calc(100dvh-6rem))] overflow-y-auto"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <!-- Header: section title + clear-all link -->
+        <div class="flex items-center justify-between gap-2 px-3 pt-1 pb-1.5">
+          <span class="text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+            Filters
+          </span>
+          {#if filterCount > 0}
+            <button
+              class="text-caption text-[var(--text-muted)] hover:text-[var(--text)]
+                     transition-colors"
+              onclick={() => view.clearFilters()}
+            >
+              Clear all
+            </button>
+          {/if}
+        </div>
+
+        <!-- Section row snippet. `iconKind` selects the inline glyph (status
+             icon, priority bar, label color dot, module icon, or none). -->
+        {#snippet row(label, active, color, iconKind, value, onClick)}
+          <button
+            class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
+                   {active
+              ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
+              : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+            onclick={onClick}
+          >
+            <span class="flex items-center gap-2 min-w-0 flex-1">
+              {#if iconKind === "status" && value}
+                <StatusIcon status={value} size={14} />
+              {:else if iconKind === "priority" && value}
+                <PriorityIcon priority={value} size={14} />
+              {:else if iconKind === "label" && color}
+                <span class="size-2.5 rounded-full shrink-0" style="background: {color}"></span>
+              {:else if iconKind === "module" && value}
+                <Layers size={14} class="shrink-0 text-[var(--text-muted)]" />
+              {:else}
+                <!-- "Any" row + label/module without metadata: spacer keeps
+                     labels flush with iconified siblings. -->
+                <span class="size-3.5 shrink-0"></span>
+              {/if}
+              <span
+                class="truncate {iconKind === 'status' || iconKind === 'priority'
+                  ? 'capitalize'
+                  : ''}"
+                style={iconKind === "priority" && value
+                  ? `color: ${priorityCssColor(value)}`
+                  : ""}
+              >{label}</span>
+            </span>
+            {#if active}
+              <Check size={13} class="text-[var(--accent)] shrink-0" />
+            {/if}
+          </button>
+        {/snippet}
+
+        <!-- STATUS -->
+        <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+          Status
+        </div>
+        {@render row("Any", !view.filterStatus, undefined, "none", "", () => (view.filterStatus = ""))}
+        {#each statusOptions.filter((o) => o.value) as opt (opt.value)}
+          {@render row(
+            opt.label,
+            view.filterStatus === opt.value,
+            undefined,
+            "status",
+            String(opt.value),
+            () => view.toggleStatusFilter(String(opt.value)),
+          )}
+        {/each}
+
+        <div class="my-1 h-px bg-[var(--border)]"></div>
+
+        <!-- PRIORITY -->
+        <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+          Priority
+        </div>
+        {@render row("Any", !view.filterPriority, undefined, "none", "", () => (view.filterPriority = ""))}
+        {#each priorityOptions.filter((o) => o.value) as opt (opt.value)}
+          {@render row(
+            opt.label,
+            view.filterPriority === opt.value,
+            undefined,
+            "priority",
+            String(opt.value),
+            () => view.togglePriorityFilter(String(opt.value)),
+          )}
+        {/each}
+
+        {#if labels.length > 0}
+          <div class="my-1 h-px bg-[var(--border)]"></div>
+          <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+            Label
+          </div>
+          {@render row("Any", !view.filterLabel, undefined, "none", "", () => (view.filterLabel = ""))}
+          {#each labelOptions.filter((o) => o.value) as opt (opt.value)}
+            {@render row(
+              opt.label,
+              view.filterLabel === opt.value,
+              opt.color,
+              "label",
+              String(opt.value),
+              () => view.toggleLabelFilter(String(opt.value)),
+            )}
+          {/each}
+        {/if}
+
+        {#if modules.length > 0}
+          <div class="my-1 h-px bg-[var(--border)]"></div>
+          <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+            Module
+          </div>
+          {@render row("Any", !view.filterModule, undefined, "none", "", () => (view.filterModule = ""))}
+          {#each moduleOptions.filter((o) => o.value) as opt (opt.value)}
+            {@render row(
+              opt.label,
+              view.filterModule === opt.value,
+              undefined,
+              "module",
+              String(opt.value),
+              () => view.toggleModuleFilter(String(opt.value)),
+            )}
+          {/each}
+        {/if}
+      </div>
     {/if}
   </div>
 
