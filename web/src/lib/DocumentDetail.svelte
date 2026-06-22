@@ -25,7 +25,7 @@
   import DeleteMenu from "./DeleteMenu.svelte";
   import ActivityTimeline from "./ActivityTimeline.svelte";
   import ErrorState from "./ErrorState.svelte";
-  import { ArrowLeft, Download } from "lucide-svelte";
+  import { ArrowLeft, Download, PanelRight, X } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
   import type { Activity, Comment } from "./api";
   import type { PaletteAction, PaletteContext } from "./palette";
@@ -204,10 +204,17 @@
   let contentEl = $state<HTMLElement | null>(null);
   let commentsRef = $state<Comments | null>(null);
 
-  // Reset to read mode whenever we switch documents.
+  // LIF-226: on mobile the metadata sidebar is an off-canvas panel toggled
+  // from the topbar (it's statically docked at md+). This tracks its open
+  // state; meaningless at md+.
+  let propsOpen = $state(false);
+
+  // Reset to read mode + close the mobile props panel whenever we switch
+  // documents.
   $effect(() => {
     identifier; // track
     bodyMode = "read";
+    propsOpen = false;
   });
 
   // Auto-enter edit on an empty body, once per document. Keyed on the
@@ -250,6 +257,13 @@
     // (the title input / body textarea handle their own Esc to cancel).
     if (e.key === "Escape") {
       if (inField || bodyMode === "edit") return;
+      // The mobile props panel intercepts Esc first — close it instead of
+      // navigating away.
+      if (propsOpen) {
+        e.preventDefault();
+        propsOpen = false;
+        return;
+      }
       e.preventDefault();
       navigate(backRoute);
     }
@@ -285,19 +299,44 @@
     <div class="flex-1 overflow-y-auto">
       {#if layout === "two-column"}
         <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
-          <div bind:this={contentEl} class="flex-1 min-w-0 px-8 py-6">
+          <div bind:this={contentEl} class="flex-1 min-w-0 px-4 py-5 sm:px-8 sm:py-6">
             {@render mainColumn()}
           </div>
           {#if sidebar}
+            <!-- Mobile backdrop for the off-canvas props panel. -->
+            {#if propsOpen}
+              <button
+                class="md:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
+                aria-label="Close details"
+                onclick={() => (propsOpen = false)}
+              ></button>
+            {/if}
+            <!-- Metadata sidebar: off-canvas drawer below md, docked at md+
+                 (LIF-226). -->
             <aside
-              class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5"
+              class="w-[280px] sm:w-[300px] md:w-[220px] shrink-0 overflow-y-auto
+                     border-l border-[var(--border)] bg-[var(--bg)] py-6 px-5
+                     fixed inset-y-0 right-0 z-50 transition-transform duration-200 ease-out
+                     {propsOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'}
+                     md:static md:z-auto md:w-[220px] md:translate-x-0 md:shadow-none md:transition-none"
             >
+              <!-- In-drawer close affordance (mobile only). -->
+              <div class="md:hidden flex justify-end -mt-2 -mr-1 mb-1">
+                <button
+                  class="size-9 grid place-items-center rounded-md text-[var(--text-muted)]
+                         hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                  aria-label="Close details"
+                  onclick={() => (propsOpen = false)}
+                >
+                  <X size={18} />
+                </button>
+              </div>
               {@render sidebar()}
             </aside>
           {/if}
         </div>
       {:else}
-        <div bind:this={contentEl} class="px-10 py-8">
+        <div bind:this={contentEl} class="px-4 py-6 sm:px-10 sm:py-8">
           {@render mainColumn()}
         </div>
       {/if}
@@ -347,20 +386,20 @@
 
 {#snippet topbar()}
   {#if !loading && !error}
-    <div class="flex items-center gap-3 px-6 py-2 w-full">
+    <div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
       <!-- Left zone: scope -->
-      <div class="flex items-center gap-1.5 shrink-0">
+      <div class="flex items-center gap-1.5 shrink-0 min-w-0">
         <button
           class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]
                  hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
                  hover:bg-[var(--bg-subtle)]"
           onclick={() => navigate(backRoute)}
         >
-          <ArrowLeft size={14} />
-          {backLabel}
+          <ArrowLeft size={14} class="shrink-0" />
+          <span class="hidden sm:inline">{backLabel}</span>
         </button>
         <span class="text-[var(--text-faint)]">/</span>
-        <span class="text-body-sm font-mono text-[var(--text-muted)]">
+        <span class="text-body-sm font-mono text-[var(--text-muted)] truncate">
           {identifier}
         </span>
         {#if breadcrumbExtra}{@render breadcrumbExtra()}{/if}
@@ -369,7 +408,7 @@
       <!-- Right zone: mode toggle + save indicator + export + menu -->
       <div class="ml-auto flex items-center gap-2 shrink-0">
         {#if exportError}
-          <span class="text-caption text-[var(--error)]">{exportError}</span>
+          <span class="hidden sm:inline text-caption text-[var(--error)]">{exportError}</span>
         {/if}
 
         {#if editable && body.trim() && !bodyContent}
@@ -381,7 +420,7 @@
           />
         {/if}
 
-        <span class="text-caption text-[var(--text-faint)] min-w-[5rem] text-right">
+        <span class="hidden sm:inline text-caption text-[var(--text-faint)] sm:min-w-[5rem] text-right">
           {#if saving}
             <span class="animate-pulse">Saving...</span>
           {:else if lastSaved}
@@ -404,6 +443,21 @@
             {onDelete}
             align="right"
           />
+        {/if}
+
+        <!-- Props panel toggle (mobile only). Opens the off-canvas metadata
+             sidebar that's statically docked at md+ (LIF-226). -->
+        {#if sidebar}
+          <button
+            class="md:hidden size-9 grid place-items-center rounded-md
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors"
+            aria-label="Show details"
+            aria-expanded={propsOpen}
+            onclick={() => (propsOpen = true)}
+          >
+            <PanelRight size={16} />
+          </button>
         {/if}
       </div>
     </div>

@@ -81,7 +81,7 @@
 </script>
 
 <div
-  class="w-full flex items-center gap-3 px-6 text-left
+  class="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-6 text-left
          {density === 'comfortable' ? 'py-3' : 'py-2.5'}
          border-b border-[var(--border)] last:border-b-0
          border-l-2 transition-colors group cursor-pointer
@@ -182,8 +182,9 @@
     {/if}
   </div>
 
-  <!-- Identifier -->
-  <span class="text-body-sm text-[var(--text-faint)] font-mono shrink-0 w-[72px]">
+  <!-- Identifier. Narrower on mobile (the project prefix is implied by
+       context) so the title gets more room. -->
+  <span class="text-body-sm text-[var(--text-faint)] font-mono shrink-0 w-[52px] sm:w-[72px] truncate">
     {issue.identifier}
   </span>
 
@@ -212,9 +213,10 @@
     {/if}
   </div>
 
-  <!-- Labels -->
+  <!-- Labels. Hidden below sm — secondary metadata that would otherwise
+       crush the title on a phone (LIF-229). -->
   {#if issue.labels.length > 0}
-    <div class="flex items-center gap-1 shrink-0">
+    <div class="hidden sm:flex items-center gap-1 shrink-0">
       {#each issue.labels.slice(0, 2) as lbl}
         {@const labelObj = labels.find((l) => l.name === lbl)}
         <span
@@ -236,7 +238,7 @@
   <!-- LIF-191: module chip — which arc this issue belongs to. Hidden when
        already grouped by module (redundant). -->
   {#if issue.module_id != null && groupBy !== "module" && mod}
-    <span class="shrink-0 inline-flex items-center gap-1 max-w-[130px] text-micro text-[var(--text-muted)]">
+    <span class="hidden sm:inline-flex shrink-0 items-center gap-1 max-w-[130px] text-micro text-[var(--text-muted)]">
       {#if mod.emoji}
         <ProjectIcon value={mod.emoji} size={12} />
       {:else}
@@ -296,8 +298,8 @@
     {/if}
   </div>
 
-  <!-- Updated time -->
-  <span class="text-caption text-[var(--text-faint)] shrink-0 w-[60px] text-right">
+  <!-- Updated time. Hidden below sm to give the title room (LIF-229). -->
+  <span class="hidden sm:block text-caption text-[var(--text-faint)] shrink-0 w-[60px] text-right">
     {formatRelative(issue.updated_at)}
   </span>
 </div>

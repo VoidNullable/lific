@@ -32,10 +32,21 @@
   import ErrorState from "../lib/ErrorState.svelte";
   import { formatDate } from "../lib/format";
   import {
-    ArrowLeft, Plus, ChevronDown,
+    ArrowLeft, Plus, ChevronDown, PanelRight, X,
     CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle,
   } from "lucide-svelte";
   import { getContext } from "svelte";
+
+  // LIF-226: metadata sidebar is an off-canvas panel below md, toggled from
+  // the topbar; statically docked at md+.
+  let propsOpen = $state(false);
+  $effect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && propsOpen) propsOpen = false;
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
@@ -240,19 +251,19 @@
 
 {#snippet topbarContent()}
   {#if mod}
-    <div class="flex items-center gap-3 px-6 py-2 w-full">
-      <div class="flex items-center gap-1.5 shrink-0">
+    <div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+      <div class="flex items-center gap-1.5 shrink-0 min-w-0">
         <button
           class="flex items-center gap-1.5 text-body-sm text-[var(--text-muted)]
                  hover:text-[var(--text)] transition-colors rounded px-1.5 py-0.5
                  hover:bg-[var(--bg-subtle)]"
           onclick={() => navigate(`/${projectIdentifier}/modules`)}
         >
-          <ArrowLeft size={14} />
-          Modules
+          <ArrowLeft size={14} class="shrink-0" />
+          <span class="hidden sm:inline">Modules</span>
         </button>
         <span class="text-[var(--text-faint)]">/</span>
-        <span class="text-body-sm font-medium text-[var(--text)] truncate max-w-[280px]">
+        <span class="text-body-sm font-medium text-[var(--text)] truncate max-w-[140px] sm:max-w-[280px]">
           {mod.name}
         </span>
       </div>
@@ -267,7 +278,7 @@
           />
         {/if}
 
-        <span class="text-caption text-[var(--text-faint)] min-w-[5rem] text-right">
+        <span class="hidden sm:inline text-caption text-[var(--text-faint)] sm:min-w-[5rem] text-right">
           {#if saving}
             <span class="animate-pulse">Saving...</span>
           {:else if lastSaved}
@@ -279,13 +290,13 @@
           <button
             class="inline-flex items-center gap-1 text-body-sm font-medium
                    text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                   px-2.5 py-1 rounded-md hover:bg-[var(--btn-success-hover)]
+                   px-2 sm:px-2.5 py-1 rounded-md hover:bg-[var(--btn-success-hover)]
                    transition-colors focus:outline-none
                    motion-safe:active:scale-[0.97]"
             onclick={newIssueInModule}
           >
-            <Plus size={13} />
-            Issue
+            <Plus size={13} class="shrink-0" />
+            <span class="hidden sm:inline">Issue</span>
           </button>
 
           <DeleteMenu
@@ -298,6 +309,18 @@
             align="right"
           />
         {/if}
+
+        <!-- Props panel toggle (mobile only) — LIF-226. -->
+        <button
+          class="md:hidden size-9 grid place-items-center rounded-md
+                 text-[var(--text-muted)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Show details"
+          aria-expanded={propsOpen}
+          onclick={() => (propsOpen = true)}
+        >
+          <PanelRight size={16} />
+        </button>
       </div>
     </div>
   {/if}
@@ -330,7 +353,7 @@
     <div class="flex-1 overflow-y-auto">
       <div class="max-w-[1120px] mx-auto flex gap-0 min-h-full">
         <!-- Main column -->
-        <div class="flex-1 min-w-0 px-8 py-6">
+        <div class="flex-1 min-w-0 px-4 py-5 sm:px-8 sm:py-6">
           <!-- Name + icon. The icon mirrors projects (LIF-124): same
                IconPicker, same lucide/emoji vocabulary. -->
           <div class="flex items-center gap-3 mb-3">
@@ -497,9 +520,36 @@
           </section>
         </div>
 
+        <!-- Mobile backdrop for the off-canvas props panel. -->
+        {#if propsOpen}
+          <button
+            class="md:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
+            aria-label="Close details"
+            onclick={() => (propsOpen = false)}
+          ></button>
+        {/if}
         <!-- Sidebar. Softly set apart by a subtle panel tint instead of a
-             hard rule (shadow/elevation language used across the app). -->
-        <aside class="w-[236px] shrink-0 self-start rounded-xl bg-[var(--bg-subtle)] py-5 px-5 my-6 mr-2">
+             hard rule (shadow/elevation language used across the app).
+             Off-canvas drawer below md, docked card at md+ (LIF-226). -->
+        <aside
+          class="w-[280px] sm:w-[300px] md:w-[236px] shrink-0 self-start overflow-y-auto
+                 bg-[var(--bg-subtle)] py-5 px-5
+                 fixed inset-y-0 right-0 z-50 transition-transform duration-200 ease-out
+                 {propsOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'}
+                 md:static md:z-auto md:w-[236px] md:translate-x-0 md:shadow-none md:transition-none
+                 md:rounded-xl md:my-6 md:mr-2"
+        >
+          <!-- In-drawer close (mobile only). -->
+          <div class="md:hidden flex justify-end -mt-2 -mr-1 mb-1">
+            <button
+              class="size-9 grid place-items-center rounded-md text-[var(--text-muted)]
+                     hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+              aria-label="Close details"
+              onclick={() => (propsOpen = false)}
+            >
+              <X size={18} />
+            </button>
+          </div>
           <!-- Status -->
           <div class="mb-5">
             <p class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-2">

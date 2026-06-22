@@ -32,6 +32,7 @@
     FolderPlus,
     ClipboardPaste,
     NotebookPen,
+    PanelRight,
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
@@ -180,6 +181,10 @@
   // in a search context).
   let searchQuery = $state("");
   let searchExpanded = $state(false);
+
+  // LIF-231: the overview/folder-navigator sidebar is an off-canvas panel
+  // below lg, toggled from the topbar; statically docked at lg+.
+  let overviewOpen = $state(false);
   let searchInputEl = $state<HTMLInputElement | null>(null);
 
   // A search hit carries enough info to render the row: which page, the
@@ -402,6 +407,8 @@
     focusedFolderId = id;
     searchQuery = "";
     searchExpanded = false;
+    // On mobile, dismiss the off-canvas overview so the filtered list shows.
+    overviewOpen = false;
   }
 
   // Optimistic pin toggle. Flip locally so the row reacts instantly, then
@@ -588,21 +595,24 @@
 
 <svelte:window
   onclick={() => { newMenuOpen = false; }}
-  onkeydown={(e) => { if (e.key === "Escape" && newMenuOpen) newMenuOpen = false; }}
+  onkeydown={(e) => {
+    if (e.key === "Escape" && newMenuOpen) newMenuOpen = false;
+    else if (e.key === "Escape" && overviewOpen) overviewOpen = false;
+  }}
 />
 
 {#snippet topbarContent()}
-  <div class="flex items-center gap-3 px-6 py-2 w-full">
-    <!-- Breadcrumb: Project > Pages -->
+  <div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+    <!-- Breadcrumb: Project > Pages. Project segment collapses below sm. -->
     <div class="flex items-center gap-1.5 shrink-0">
       <button
-        class="text-body-sm font-mono font-medium text-[var(--text-muted)]
+        class="hidden sm:inline text-body-sm font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
         onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>
-      <ChevronRight size={12} class="text-[var(--text-faint)]" />
+      <ChevronRight size={12} class="hidden sm:block text-[var(--text-faint)]" />
       <span class="text-body-sm font-medium text-[var(--text)]">
         Pages
       </span>
@@ -695,6 +705,23 @@
 
     <!-- Right zone: search + create actions -->
     <div class="ml-auto flex items-center gap-1.5 shrink-0">
+      <!-- LIF-231: overview/folder-navigator toggle (below lg, where the
+           sidebar is off-canvas). -->
+      {#if !loading && !error && (pages.length > 0 || folders.length > 0)}
+        <Tooltip content="Overview & folders" placement="bottom">
+          <button
+            class="lg:hidden size-9 sm:size-7 flex items-center justify-center rounded-md
+                   text-[var(--text-muted)] hover:text-[var(--text)]
+                   hover:bg-[var(--bg-subtle)] transition-colors"
+            aria-label="Show overview and folders"
+            aria-expanded={overviewOpen}
+            onclick={(e) => { e.stopPropagation(); overviewOpen = true; }}
+          >
+            <PanelRight size={15} />
+          </button>
+        </Tooltip>
+      {/if}
+
       <!-- LIF-117: search. Collapsed-to-icon, expands inline on click. -->
       {#if searchExpanded}
         <div class="relative">
@@ -757,8 +784,8 @@
           aria-expanded={newMenuOpen}
           onclick={(e) => { e.stopPropagation(); newMenuOpen = !newMenuOpen; }}
         >
-          <Plus size={14} />
-          New
+          <Plus size={14} class="shrink-0" />
+          <span class="hidden sm:inline">New</span>
           <ChevronDown
             size={14}
             class="motion-safe:transition-transform {newMenuOpen ? 'rotate-180' : ''}"
@@ -1087,12 +1114,34 @@
   </div>
 
   <!-- LIF-185: right sidebar — project page overview + folder navigator.
-       Fills the empty right space and lets you focus a single folder. -->
+       Fills the empty right space and lets you focus a single folder.
+       LIF-231: off-canvas drawer below lg, docked at lg+. -->
   {#if !loading && !error && (pages.length > 0 || folders.length > 0)}
+    {#if overviewOpen}
+      <button
+        class="lg:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
+        aria-label="Close overview"
+        onclick={() => (overviewOpen = false)}
+      ></button>
+    {/if}
     <aside
-      class="w-[260px] shrink-0 overflow-y-auto border-l border-[var(--border)]
-             bg-[var(--bg-subtle)] px-4 py-5 hidden lg:block"
+      class="w-[280px] sm:w-[300px] lg:w-[260px] shrink-0 overflow-y-auto
+             border-l border-[var(--border)] bg-[var(--bg-subtle)] px-4 py-5
+             fixed inset-y-0 right-0 z-50 transition-transform duration-200 ease-out
+             {overviewOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'}
+             lg:static lg:z-auto lg:w-[260px] lg:translate-x-0 lg:shadow-none lg:transition-none"
     >
+      <!-- In-drawer close (below lg). -->
+      <div class="lg:hidden flex justify-end -mt-2 -mr-1 mb-1">
+        <button
+          class="size-9 grid place-items-center rounded-md text-[var(--text-muted)]
+                 hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Close overview"
+          onclick={() => (overviewOpen = false)}
+        >
+          <X size={18} />
+        </button>
+      </div>
       <!-- Summary -->
       <div class="grid grid-cols-2 gap-3 mb-5">
         <div>
