@@ -54,7 +54,7 @@ Add `--json` to any command for machine-readable output.
 
 Point your MCP client at the server. Replace `your-api-key` with the key from first run (or create one with `lific key create --name my-key`).
 
-**Remote (network):**
+**Access MCP commands:**
 
 ```json
 {
@@ -68,7 +68,7 @@ Point your MCP client at the server. Replace `your-api-key` with the key from fi
 }
 ```
 
-**Local (stdio, no network):**
+**Access CLI commands:**
 
 ```json
 {
@@ -90,24 +90,24 @@ Each connection creates a bot identity tied to your account. Changes show up att
 
 ## MCP tools
 
-| Tool | What it does |
-|------|-------------|
-| `list_issues` | Filter by status, priority, module, label, or workable |
-| `get_issue` | Full issue details with relations, labels, and comments |
-| `create_issue` / `update_issue` | Create or partially update by identifier |
-| `edit_issue` / `edit_page` | Targeted find-and-replace edits without resending the whole body |
-| `get_board` | Board view grouped by status, priority, or module |
-| `search` | Fuzzy full-text search across issues and pages |
-| `get_activity` | Audit history for an issue, page, or whole project — who changed what, when |
-| `link_issues` / `unlink_issues` | Dependency tracking (blocks, relates_to, duplicate) |
-| `get_page` / `create_page` / `update_page` | Markdown documents in folders, with labels and lifecycle status |
-| `add_comment` / `list_comments` | Threaded comments on issues and pages |
-| `create_plan` / `get_plan` | Persisted, nestable step plans that survive across sessions; steps can mirror issues |
-| `edit_plan_step` / `update_plan_step` | Edit a step, toggle done (closing a mirrored issue), add/move/delete steps |
-| `list_resources` | Discover projects, modules, labels, folders, plans |
-| `manage_resource` | Create/update projects, modules (with icons), labels, folders |
-| `delete` | Delete anything by identifier |
-| `export_issue` / `export_page` / `export_project` | Export to portable markdown |
+| Tool                                              | What it does                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `list_issues`                                     | Filter by status, priority, module, label, or workable                               |
+| `get_issue`                                       | Full issue details with relations, labels, and comments                              |
+| `create_issue` / `update_issue`                   | Create or partially update by identifier                                             |
+| `edit_issue` / `edit_page`                        | Targeted find-and-replace edits without resending the whole body                     |
+| `get_board`                                       | Board view grouped by status, priority, or module                                    |
+| `search`                                          | Fuzzy full-text search across issues and pages                                       |
+| `get_activity`                                    | Audit history for an issue, page, or whole project — who changed what, when          |
+| `link_issues` / `unlink_issues`                   | Dependency tracking (blocks, relates_to, duplicate)                                  |
+| `get_page` / `create_page` / `update_page`        | Markdown documents in folders, with labels and lifecycle status                      |
+| `add_comment` / `list_comments`                   | Threaded comments on issues and pages                                                |
+| `create_plan` / `get_plan`                        | Persisted, nestable step plans that survive across sessions; steps can mirror issues |
+| `edit_plan_step` / `update_plan_step`             | Edit a step, toggle done (closing a mirrored issue), add/move/delete steps           |
+| `list_resources`                                  | Discover projects, modules, labels, folders, plans                                   |
+| `manage_resource`                                 | Create/update projects, modules (with icons), labels, folders                        |
+| `delete`                                          | Delete anything by identifier                                                        |
+| `export_issue` / `export_page` / `export_project` | Export to portable markdown                                                          |
 
 Everything uses human-readable identifiers: `project="APP"` not `project_id=7`.
 
@@ -126,19 +126,19 @@ Issues stay flat and lateral; the hierarchy lives on the plan. It's the differen
 
 ## Features
 
-| Category | What you get |
-|----------|-------------|
-| **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
-| **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync; first-class tree view and activity history |
-| **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 26 tools, human-readable identifiers, compact schema |
-| **REST API** | Full CRUD for all resources, search, board view |
-| **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
-| **User accounts** | Individual auth, per-tool bot identities, project lead permissions |
-| **OAuth 2.1** | PKCE, dynamic client registration, token revocation, per-user token identity |
-| **Backups** | Automatic SQLite snapshots with configurable retention |
-| **CLI** | Full CRUD for issues, projects, pages, modules, labels, folders. No server needed |
-| **Single binary** | No runtime dependencies, embedded SQLite, ~16MB |
+| Category           | What you get                                                                                                                                        |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity                                |
+| **Plans**          | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync; first-class tree view and activity history |
+| **Documentation**  | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams                                |
+| **MCP interface**  | 26 tools, human-readable identifiers, compact schema                                                                                                |
+| **REST API**       | Full CRUD for all resources, search, board view                                                                                                     |
+| **Web UI**         | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme                                                    |
+| **User accounts**  | Individual auth, per-tool bot identities, project lead permissions                                                                                  |
+| **OAuth 2.1**      | PKCE, dynamic client registration, token revocation, per-user token identity                                                                        |
+| **Backups**        | Automatic SQLite snapshots with configurable retention                                                                                              |
+| **CLI**            | Full CRUD for issues, projects, pages, modules, labels, folders. No server needed                                                                   |
+| **Single binary**  | No runtime dependencies, embedded SQLite, ~16MB                                                                                                     |
 
 ## Configuration
 
@@ -168,6 +168,30 @@ level = "info"
 CLI flags (`--db`, `--port`, `--host`) override config values.
 
 </details>
+
+### Deployment-aware issuer derivation
+
+Lific automatically derives the OAuth issuer URL from incoming request headers, so it works correctly whether you're connecting locally or over the network:
+
+| Deployment       | How you connect                | Issuer derivation                                                     |
+| ---------------- | ------------------------------ | --------------------------------------------------------------------- |
+| Local dev        | `http://127.0.0.1:3456`        | From `Host` header → `http://127.0.0.1:3456`                          |
+| Tailscale funnel | `https://yourname.ts.net:3456` | From `X-Forwarded-Proto` + `Host` → `https://yourname.ts.net:3456`    |
+| Reverse proxy    | `https://example.com/lific`    | From `X-Forwarded-Proto` + `X-Forwarded-Host` → `https://example.com` |
+| Direct IP        | `http://203.0.113.7:3456`      | From `Host` header → `http://203.0.113.7:3456`                        |
+
+This ensures OAuth works without manual configuration — the protected-resource metadata always matches what your AI tool connects to.
+
+For advanced setups (e.g., behind a proxy that strips headers), set `public_url` explicitly:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+public_url = "https://example.com/lific"
+```
+
+The `public_url` takes precedence over header-based derivation.
 
 ## Building from source
 
