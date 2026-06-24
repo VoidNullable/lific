@@ -178,30 +178,66 @@ pub fn router(state: OAuthState) -> Router {
 
 // ── Discovery ────────────────────────────────────────────────────────────
 
-async fn protected_resource_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
-    // RFC 9728 / Claude connector requirement: the `resource` field MUST match
-    // the MCP server URL the user enters in Claude *including the path component*
-    // (`/mcp`). Claude derives the RFC 8707 audience from the URL it was given
-    // (`https://host/mcp`) and rejects the issued token if the protected-resource
-    // metadata advertises a different resource (e.g. the bare origin). Returning
-    // the bare issuer here is what surfaced as "Authorization with the MCP server
-    // failed" on claude.ai web even though the token exchange succeeded.
-    let resource = format!("{}/mcp", state.issuer.trim_end_matches('/'));
+/// Derive the issuer URL from request headers, accommodating both local and
+/// network deployments.
+///
+/// Fallback chain:
+/// 1. X-Forwarded-Proto + X-Forwarded-Host (for reverse proxies)
+/// 2. Host header (direct connections)
+/// 3. Fall back to the configured issuer (explicit public_url or default)
+fn derive_issuer_from_request(headers: &HeaderMap, fallback: &str) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_else(|| if fallback.starts_with("https") { String::from("https") } else { String::from("http") });
+
+    if let Some(host) = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim()) {
+        if !host.is_empty() {
+            return format!("{scheme}://{host}");
+        }
+    }
+
+    if let Some(host) = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim()) {
+        if !host.is_empty() {
+            return format!("{scheme}://{host}");
+        }
+    }
+
+    fallback.to_string()
+}
+
+async fn protected_resource_metadata(
+    State(state): State<OAuthState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let issuer = derive_issuer_from_request(&headers, &state.issuer);
+    let resource = format!("{}/mcp", issuer.trim_end_matches('/'));
     Json(serde_json::json!({
         "resource": resource,
-        "authorization_servers": [state.issuer],
+        "authorization_servers": [issuer],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"]
     }))
 }
 
-async fn authorization_server_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
+async fn authorization_server_metadata(
+    State(state): State<OAuthState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let issuer = derive_issuer_from_request(&headers, &state.issuer);
     Json(serde_json::json!({
-        "issuer": state.issuer,
-        "authorization_endpoint": format!("{}/oauth/authorize", state.issuer),
-        "token_endpoint": format!("{}/oauth/token", state.issuer),
-        "registration_endpoint": format!("{}/oauth/register", state.issuer),
-        "revocation_endpoint": format!("{}/oauth/revoke", state.issuer),
+        "issuer": issuer,
+        "authorization_endpoint": format!("{}/oauth/authorize", issuer),
+        "token_endpoint": format!("{}/oauth/token", issuer),
+        "registration_endpoint": format!("{}/oauth/register", issuer),
+        "revocation_endpoint": format!("{}/oauth/revoke", issuer),
         "scopes_supported": ["mcp"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
