@@ -45,9 +45,9 @@ api-keys-simplified = "0.5"
 argon2 = "0.5"
 rand = "0.8"
 
-# Static assets (embedded frontend)
-rust-embed = { version = "8", features = ["mime-guess"] }
-mime_guess = "2"
+# Static assets (embedded frontend) - optional via `frontend` feature
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+mime_guess = { version = "2", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Encoding
@@ -80,3 +80,7 @@ strip = true
 inherits = "release"
 lto = true
 codegen-units = 1
+
+[features]
+default = []
+frontend = ["rust-embed/mime-guess", "mime_guess"]

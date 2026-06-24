@@ -44,30 +44,28 @@ use rmcp::{
         tower::{StreamableHttpServerConfig, StreamableHttpService},
     },
 };
+
+#[cfg(feature = "frontend")]
 use rust_embed::Embed;
 use tracing::info;
-
+#[cfg(feature = "frontend")]
 /// Embedded frontend assets compiled from web/dist/.
-/// Falls back gracefully if dist/ doesn't exist (e.g. dev builds without frontend).
+#[cfg(feature = "frontend")]
 #[derive(Embed)]
+#[cfg(feature = "frontend")]
 #[folder = "web/dist/"]
 #[allow(dead_code)]
 struct WebAssets;
 
+#[cfg(feature = "frontend")]
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
 async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
 
-    // Try the exact path first (e.g. assets/index-abc.js)
     if let Some(file) = WebAssets::get(path) {
         let mime = mime_guess::from_path(path)
             .first_or_octet_stream()
             .to_string();
-        // Vite emits content-hashed filenames under assets/ (e.g.
-        // index-xkSiPCqs.js), so those are safe to cache forever — a new
-        // build changes the hash and thus the URL. Everything else
-        // (index.html, favicon) stays uncached so a redeploy is picked up
-        // immediately.
         let cache_control = if path.starts_with("assets/") {
             "public, max-age=31536000, immutable"
         } else {
@@ -81,23 +79,31 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
             ],
             file.data.to_vec(),
         )
-            .into_response();
+        .into_response();
     }
 
-    // SPA fallback: serve index.html for all unmatched routes
     match WebAssets::get("index.html") {
         Some(file) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/html".to_string())],
             file.data.to_vec(),
         )
-            .into_response(),
+        .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             "Frontend not built. Run: cd web && bun run build",
         )
-            .into_response(),
+        .into_response(),
     }
+}
+
+#[cfg(not(feature = "frontend"))]
+async fn serve_frontend(_uri: axum::http::Uri) -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        "Frontend not built. Build with: cargo build --features frontend",
+    )
+    .into_response()
 }
 
 #[tokio::main]
