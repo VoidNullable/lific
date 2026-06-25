@@ -8,8 +8,20 @@ pub struct Project {
     pub description: String,
     pub emoji: Option<String>,
     pub lead_user_id: Option<i64>,
+    /// LIF-233: sidebar ordering rank. Reindexed 0..N on every reorder; new
+    /// projects append at the end. list_projects orders by this then name.
+    pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// LIF-233: payload for `PUT /api/projects/reorder` — the full project id list
+/// in the desired top-to-bottom order. The server reindexes `sort_order` to the
+/// list position, sidestepping float-midpoint exhaustion and all-equal-rank
+/// collisions.
+#[derive(Debug, Deserialize)]
+pub struct ReorderProjects {
+    pub ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]

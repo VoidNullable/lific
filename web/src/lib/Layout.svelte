@@ -3,11 +3,14 @@
     me,
     clearSession,
     listProjects,
+    reorderProjects,
     type AuthUser,
     type Project,
   } from "./api";
   import ProjectIcon from "./ProjectIcon.svelte";
   import CommandPalette from "./CommandPalette.svelte";
+  import { dndzone, type DndEvent } from "svelte-dnd-action";
+  import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, type ThemePreference } from "./theme";
   import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X } from "lucide-svelte";
   import { setContext } from "svelte";
@@ -113,10 +116,41 @@
   }
 
   async function refreshProjects() {
+    // LIF-233: never swap the projects array out from under an in-flight drag —
+    // svelte-dnd-action owns it during the consider/finalize lifecycle, and a
+    // route-change refresh landing mid-drag would corrupt the zone. The
+    // finalize handler re-syncs from the server response once the drop settles.
+    if (dragActive) return;
     const res = await listProjects();
     if (res.ok) {
       projects = res.data;
     }
+  }
+
+  // ── LIF-233: drag-to-reorder projects in the sidebar ────────
+  // The dndzone owns `projects` during a drag. We veto auto-refresh while
+  // dragActive, then persist the new order on finalize (server reindexes
+  // sort_order and returns the canonical list).
+  let dragActive = $state(false);
+  const FLIP_MS = 150;
+
+  function handleProjectConsider(e: CustomEvent<DndEvent<Project>>) {
+    dragActive = true;
+    projects = e.detail.items;
+  }
+
+  async function handleProjectFinalize(e: CustomEvent<DndEvent<Project>>) {
+    projects = e.detail.items;
+    const ids = projects.map((p) => p.id);
+    const res = await reorderProjects(ids);
+    if (res.ok) {
+      projects = res.data;
+    } else {
+      // Persist failed — re-sync from server to undo the optimistic order.
+      const fresh = await listProjects();
+      if (fresh.ok) projects = fresh.data;
+    }
+    dragActive = false;
   }
 
   function initials(name: string): string {
@@ -239,8 +273,28 @@
             </button>
           </div>
 
+          <!-- LIF-233: drag-to-reorder zone. Each project is a SINGLE direct
+               child of the zone (pill + its sub-nav wrapped together), so
+               svelte-dnd-action's one-item-per-child model stays 1:1 — the
+               active project's expanded sub-nav must NOT become its own
+               draggable item. The header/+button above sit OUTSIDE the zone. -->
+          <div
+            use:dndzone={{
+              items: projects,
+              flipDurationMs: FLIP_MS,
+              type: "lific-projects",
+              dropTargetStyle: {},
+              dragDisabled: projects.length < 2,
+            }}
+            onconsider={handleProjectConsider}
+            onfinalize={handleProjectFinalize}
+          >
           {#each projects as project (project.id)}
             {@const isProjectActive = activeProject === project.identifier}
+            <!-- One draggable item per project. animate:flip gives the reorder
+                 its slide; the wrapper holds both the pill and (when active)
+                 the sub-nav so they move as a unit. -->
+            <div animate:flip={{ duration: FLIP_MS }}>
             <!-- Project pill. Active = elevated surface + chevron down; the
                  click navigates into the project, which makes it active and
                  expands its sub-nav (collapsed-until-focused UX preserved). -->
@@ -301,7 +355,9 @@
                 {@render subItem(`/${project.identifier}/activity`, "Activity", History)}
               </div>
             {/if}
+            </div>
           {/each}
+          </div>
         {:else}
           <div class="px-3 py-6">
             <p class="text-body-sm text-[var(--text-faint)] mb-2">No projects yet.</p>

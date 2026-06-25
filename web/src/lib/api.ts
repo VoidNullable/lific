@@ -298,12 +298,23 @@ export interface Project {
   description: string;
   emoji: string | null;
   lead_user_id: number | null;
+  // LIF-233: sidebar ordering rank (server-assigned, 0..N).
+  sort_order: number;
   created_at: string;
   updated_at: string;
 }
 
 export async function listProjects() {
   return request<Project[]>("/projects");
+}
+
+// LIF-233: persist sidebar order. Send the full id list top-to-bottom; the
+// server reindexes sort_order to match. Returns the reordered project list.
+export async function reorderProjects(ids: number[]) {
+  return request<Project[]>("/projects/reorder", {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  });
 }
 
 export async function getProject(id: number) {

@@ -7,8 +7,8 @@ use super::unescape_text;
 
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, name, identifier, description, emoji, lead_user_id, created_at, updated_at
-         FROM projects ORDER BY name",
+        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at
+         FROM projects ORDER BY sort_order, name",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Project {
@@ -18,8 +18,9 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
             description: row.get(3)?,
             emoji: row.get(4)?,
             lead_user_id: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            sort_order: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -38,7 +39,7 @@ pub fn resolve_project_identifier(conn: &Connection, identifier: &str) -> Result
 
 pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
     conn.query_row(
-        "SELECT id, name, identifier, description, emoji, lead_user_id, created_at, updated_at
+        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at
          FROM projects WHERE id = ?1",
         params![id],
         |row| {
@@ -49,8 +50,9 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
                 description: row.get(3)?,
                 emoji: row.get(4)?,
                 lead_user_id: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                sort_order: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         },
     )
@@ -101,9 +103,12 @@ fn validate_identifier(identifier: &str) -> Result<(), LificError> {
 
 pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Project, LificError> {
     validate_identifier(&input.identifier)?;
+    // LIF-233: append new projects below existing ones rather than letting them
+    // default to rank 0 (which would jump them to the top once the user has
+    // reordered). COALESCE handles the first-ever project (no rows yet).
     conn.execute(
-        "INSERT INTO projects (name, identifier, description, emoji, lead_user_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO projects (name, identifier, description, emoji, lead_user_id, sort_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))",
         params![
             input.name,
             input.identifier,
@@ -113,6 +118,40 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
         ],
     )?;
     get_project(conn, conn.last_insert_rowid())
+}
+
+/// LIF-233: reindex project `sort_order` to match the supplied id order
+/// (position 0 = top of the sidebar). Full reindex on every call keeps ranks
+/// dense and deterministic, avoiding the float-midpoint exhaustion and
+/// all-equal-rank collisions a per-item PATCH scheme would hit.
+///
+/// Rejects duplicate ids and any id that doesn't exist (BadRequest). Projects
+/// not present in `ids` keep their current rank — callers should send the full
+/// list to guarantee a total order.
+pub fn reorder_projects(conn: &Connection, ids: &[i64]) -> Result<Vec<Project>, LificError> {
+    // Reject duplicates: an id appearing twice would silently clobber its own
+    // rank and signals a malformed client request.
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Err(LificError::BadRequest(format!(
+                "duplicate project id {id} in reorder list"
+            )));
+        }
+    }
+    super::savepoint(conn, "reorder_projects", || {
+        for (position, id) in ids.iter().enumerate() {
+            let changed = conn.execute(
+                "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
+                params![position as i64, id],
+            )?;
+            if changed == 0 {
+                return Err(LificError::BadRequest(format!("project {id} not found")));
+            }
+        }
+        Ok(())
+    })?;
+    list_projects(conn)
 }
 
 pub fn update_project(
@@ -431,6 +470,105 @@ mod tests {
 
         let projects = list_projects(&conn).unwrap();
         assert_eq!(projects.len(), 3);
+    }
+
+    // ── LIF-233: sidebar ordering ────────────────────────────
+
+    fn seed_named(conn: &Connection, name: &str, ident: &str) -> i64 {
+        create_project(
+            conn,
+            &CreateProject {
+                name: name.into(),
+                identifier: ident.into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn list_projects_tie_breaks_by_name_at_equal_rank() {
+        // After the 025 migration every pre-existing project has sort_order 0,
+        // so the listing must stay deterministic — alphabetical, as before the
+        // feature. Force equal ranks to simulate that post-migration state
+        // (create_project otherwise appends distinct ranks).
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        seed_named(&conn, "Gamma", "G");
+        seed_named(&conn, "Alpha", "A");
+        seed_named(&conn, "Beta", "B");
+        conn.execute("UPDATE projects SET sort_order = 0", []).unwrap();
+
+        let names: Vec<String> = list_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn reorder_projects_sets_explicit_order() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let a = seed_named(&conn, "Alpha", "A");
+        let b = seed_named(&conn, "Beta", "B");
+        let g = seed_named(&conn, "Gamma", "G");
+
+        // Put Gamma first, then Alpha, then Beta — the opposite of alphabetical.
+        let reordered = reorder_projects(&conn, &[g, a, b]).unwrap();
+        let names: Vec<String> = reordered.into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Gamma", "Alpha", "Beta"]);
+
+        // Order persists across a fresh list (sort_order, not query happenstance).
+        let names: Vec<String> = list_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Gamma", "Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn reorder_rejects_unknown_id() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let a = seed_named(&conn, "Alpha", "A");
+        let err = reorder_projects(&conn, &[a, 99999]).unwrap_err();
+        assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
+        // The failed reorder is rolled back: Alpha keeps its original rank.
+        assert_eq!(list_projects(&conn).unwrap()[0].name, "Alpha");
+    }
+
+    #[test]
+    fn reorder_rejects_duplicate_id() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let a = seed_named(&conn, "Alpha", "A");
+        let b = seed_named(&conn, "Beta", "B");
+        let err = reorder_projects(&conn, &[a, b, a]).unwrap_err();
+        assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn new_project_appends_after_reorder() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let a = seed_named(&conn, "Alpha", "A");
+        let b = seed_named(&conn, "Beta", "B");
+        // Reorder so Beta(rank 0) precedes Alpha(rank 1).
+        reorder_projects(&conn, &[b, a]).unwrap();
+        // A brand-new project should land at the bottom, not jump to rank 0.
+        seed_named(&conn, "Zeta", "Z");
+        let names: Vec<String> = list_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Beta", "Alpha", "Zeta"]);
     }
 
     #[test]

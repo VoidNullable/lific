@@ -6,7 +6,7 @@ use axum::{
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 
-use super::{require_admin, require_project_lead, with_read, with_write};
+use super::{require_admin, require_authenticated, require_project_lead, with_read, with_write};
 
 pub(super) async fn list_projects(
     State(db): State<DbPool>,
@@ -46,6 +46,23 @@ pub(super) async fn update_project(
     require_project_lead(&db, &auth_user, id)?;
     with_write(&db, |conn| {
         crate::db::queries::update_project(conn, id, &input)
+    })
+    .map(Json)
+}
+
+/// PUT /api/projects/reorder — persist the sidebar order (LIF-233). Takes the
+/// full id list top-to-bottom; the server reindexes `sort_order`. Gated only on
+/// being authenticated (order is instance-wide, not a privileged project edit),
+/// so any logged-in user can rearrange — unlike `update_project`, which is
+/// lead/admin-only.
+pub(super) async fn reorder_projects(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<ReorderProjects>,
+) -> Result<Json<Vec<Project>>, LificError> {
+    require_authenticated(&auth_user)?;
+    with_write(&db, |conn| {
+        crate::db::queries::reorder_projects(conn, &input.ids)
     })
     .map(Json)
 }
@@ -718,6 +735,103 @@ mod tests {
             "expected 'not found' in error, got: {}",
             data["error"]
         );
+    }
+
+    // ── LIF-233: sidebar reordering ──────────────────────────
+
+    /// POST a project with an explicit identifier; return its id.
+    async fn seed_named_project(app: &axum::Router, name: &str, ident: &str) -> i64 {
+        let resp = json_post(
+            app,
+            "/api/projects",
+            serde_json::json!({ "name": name, "identifier": ident }),
+        )
+        .await;
+        parse_json(resp).await["id"].as_i64().unwrap()
+    }
+
+    async fn list_project_names(app: &axum::Router) -> Vec<String> {
+        let resp = json_get(app, "/api/projects").await;
+        parse_json(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reorder_persists_new_order() {
+        let app = test_app();
+        let a = seed_named_project(&app, "Alpha", "AAA").await;
+        let b = seed_named_project(&app, "Beta", "BBB").await;
+        let c = seed_named_project(&app, "Gamma", "GGG").await;
+
+        // Default order is alphabetical.
+        assert_eq!(list_project_names(&app).await, ["Alpha", "Beta", "Gamma"]);
+
+        // Reorder: Gamma, Alpha, Beta.
+        let resp = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({ "ids": [c, a, b] }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Response echoes the new order.
+        let returned: Vec<String> = parse_json(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(returned, ["Gamma", "Alpha", "Beta"]);
+        // And a fresh GET reflects it.
+        assert_eq!(list_project_names(&app).await, ["Gamma", "Alpha", "Beta"]);
+    }
+
+    #[tokio::test]
+    async fn reorder_allowed_for_non_lead_user() {
+        // Unlike update_project (lead/admin-only), reordering is open to any
+        // authenticated user since sidebar order is instance-wide chrome.
+        let (db, _, _, regular, _) = setup_lead_test();
+        let app = app_as_user(db, &regular);
+
+        // setup_lead_test already created project "LDT"; add a second.
+        let ldt = {
+            // resolve LDT's id from the list
+            let names = json_get(&app, "/api/projects").await;
+            parse_json(names).await[0]["id"].as_i64().unwrap()
+        };
+        let second = seed_named_project(&app, "Second", "SEC").await;
+
+        let resp = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({ "ids": [second, ldt] }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a regular (non-lead) user should be allowed to reorder"
+        );
+        assert_eq!(list_project_names(&app).await, ["Second", "Lead Test"]);
+    }
+
+    #[tokio::test]
+    async fn reorder_with_unknown_id_returns_400() {
+        let app = test_app();
+        let a = seed_named_project(&app, "Alpha", "AAA").await;
+        let resp = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({ "ids": [a, 99999] }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

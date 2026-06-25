@@ -115,6 +115,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "web auto-login",
         include_str!("../../migrations/024_web_auto_login.sql"),
     ),
+    (
+        25,
+        "project sort order",
+        include_str!("../../migrations/025_project_sort_order.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

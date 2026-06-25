@@ -79,6 +79,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects",
             get(projects::list_projects).post(projects::create_project),
         )
+        // Reorder must be registered before the `{id}` route so the static
+        // segment wins the match (axum/matchit prioritises static over param,
+        // but keeping it adjacent makes the intent obvious). LIF-233.
+        .route("/api/projects/reorder", put(projects::reorder_projects))
         .route(
             "/api/projects/{id}",
             get(projects::get_project)
@@ -257,6 +261,17 @@ fn require_project_lead(
     }
 }
 
+/// Require any authenticated user (LIF-233). Used for low-stakes, instance-wide
+/// actions like sidebar project ordering, which shouldn't be gated behind
+/// per-project lead/admin rights the way structural project edits are.
+/// Default-deny: returns Forbidden when auth_user is None.
+fn require_authenticated(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
+    match auth_user {
+        Some(_) => Ok(()),
+        None => Err(LificError::Forbidden("authentication required".into())),
+    }
+}
+
 /// Check if the authenticated user is an admin.
 /// Default-deny: returns Forbidden when auth_user is None (OAuth tokens, legacy keys).
 fn require_admin(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
@@ -366,6 +381,24 @@ pub(crate) mod test_helpers {
                     .method("GET")
                     .uri(uri)
                     .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    pub async fn json_put(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
