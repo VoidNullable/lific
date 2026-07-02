@@ -203,6 +203,21 @@ pub async fn build_report_with_config_path(
         connect_host(&cfg.server.host),
         cfg.server.port
     );
+
+    // LIF-252/LIF-258: if no --key/LIFIC_API_KEY was given, fall back to a
+    // token stored by `lific login` (env > keyring > file). We probe the
+    // credential store keyed by the server's public_url when set, else the
+    // loopback base, since that's how `lific login` would have keyed it.
+    let cred_base = cfg.server.public_url.as_deref().unwrap_or(&base);
+    let (effective_key, key_source): (Option<String>, Option<crate::cli::credentials::TokenSource>) =
+        match key {
+            Some(k) => (Some(k.to_string()), None),
+            None => match crate::cli::credentials::load_with_source(cred_base) {
+                Some((tok, src)) => (Some(tok), Some(src)),
+                None => (None, None),
+            },
+        };
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -218,7 +233,13 @@ pub async fn build_report_with_config_path(
             checks.push(server_check_result(reachable));
             if reachable.reachable {
                 checks.push(check_oauth_discovery(c, &base).await);
-                checks.push(check_mcp(c, &base, key).await);
+                let mut mcp_check = check_mcp(c, &base, effective_key.as_deref()).await;
+                // Note where the credential came from when it was a stored
+                // login token rather than an explicit --key/LIFIC_API_KEY.
+                if let Some(src) = key_source {
+                    mcp_check.detail = format!("{} (using {})", mcp_check.detail, src.label());
+                }
+                checks.push(mcp_check);
             } else {
                 checks.push(Check::new(
                     "oauth_discovery",

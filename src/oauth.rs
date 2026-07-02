@@ -166,11 +166,18 @@ pub fn router(state: OAuthState) -> Router {
             "/oauth/authorize",
             get(authorize_page).post(authorize_approve),
         )
+        .route(
+            "/oauth/device_authorization",
+            post(device_authorization),
+        )
+        .route("/oauth/device", get(device_page).post(device_approve))
         .route("/oauth/token", post(token_exchange))
         .route("/oauth/revoke", post(revoke_token))
         // Claude.ai strips /oauth/ prefix (known bug anthropics/claude-ai-mcp#82)
         .route("/register", post(register_client))
         .route("/authorize", get(authorize_page).post(authorize_approve))
+        .route("/device_authorization", post(device_authorization))
+        .route("/device", get(device_page).post(device_approve))
         .route("/token", post(token_exchange))
         .route("/revoke", post(revoke_token))
         .with_state(state)
@@ -202,10 +209,14 @@ async fn authorization_server_metadata(State(state): State<OAuthState>) -> Json<
         "token_endpoint": format!("{}/oauth/token", state.issuer),
         "registration_endpoint": format!("{}/oauth/register", state.issuer),
         "revocation_endpoint": format!("{}/oauth/revoke", state.issuer),
+        "device_authorization_endpoint": format!("{}/oauth/device_authorization", state.issuer),
         "scopes_supported": ["mcp"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": [
+            "authorization_code",
+            "urn:ietf:params:oauth:grant-type:device_code"
+        ],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
         "code_challenge_methods_supported": ["S256"]
     }))
@@ -526,6 +537,350 @@ async fn authorize_approve(
     Redirect::to(&redirect_url).into_response()
 }
 
+// ── Device Authorization (RFC 8628) ──────────────────────────────────────
+
+/// The RFC 8628 device-code grant type string.
+const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// Device code lifetime in seconds (RFC 8628 `expires_in`).
+const DEVICE_CODE_EXPIRES_IN: u64 = 900;
+
+/// Default minimum polling interval in seconds (RFC 8628 `interval`).
+const DEVICE_CODE_INTERVAL: i64 = 5;
+
+/// Unambiguous alphabet for the human-typed `user_code` — no vowels (avoids
+/// spelling words), no 0/O/1/I/L-style confusables. 20 characters.
+const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+/// Generate an 8-character user code formatted `XXXX-XXXX`.
+fn generate_user_code() -> String {
+    let pick = |buf: &mut String| {
+        for _ in 0..4 {
+            let idx = (rand::random::<u8>() as usize) % USER_CODE_ALPHABET.len();
+            buf.push(USER_CODE_ALPHABET[idx] as char);
+        }
+    };
+    let mut out = String::with_capacity(9);
+    pick(&mut out);
+    out.push('-');
+    pick(&mut out);
+    out
+}
+
+/// Normalize a user code the human may have typed with lowercase letters,
+/// spaces, or a missing dash: uppercase, strip everything but the alphabet,
+/// then re-insert the dash after 4 chars. `bcdf ghjk` and `bcdfghjk` both
+/// normalize to `BCDF-GHJK`.
+fn normalize_user_code(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if cleaned.len() == 8 {
+        format!("{}-{}", &cleaned[..4], &cleaned[4..])
+    } else {
+        cleaned
+    }
+}
+
+/// Best-effort cleanup of expired device codes. Called opportunistically on new
+/// device_authorization requests so no background task is needed.
+fn cleanup_expired_device_codes(db: &DbPool) {
+    if let Ok(conn) = db.write() {
+        let _ = conn.execute(
+            "DELETE FROM oauth_device_codes WHERE expires_at <= datetime('now')",
+            [],
+        );
+    }
+}
+
+#[derive(Deserialize)]
+struct DeviceAuthRequest {
+    #[serde(default)]
+    client_name: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    scope: Option<String>,
+}
+
+/// `POST /oauth/device_authorization` (RFC 8628 §3.1/§3.2). Accepts form OR
+/// JSON. Rate-limited per source IP like `/oauth/register`.
+async fn device_authorization(
+    State(state): State<OAuthState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // ── Rate limit per source IP (reuse the register limiter) ──
+    let ip = crate::ratelimit::client_ip(&headers);
+    let key = format!("oauth_device_authorization:{ip}");
+    if !state.register_limiter.check(&key) {
+        let retry = state.register_limiter.retry_after(&key);
+        warn!(ip = %ip, "oauth device authorization rate limited");
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "too_many_requests",
+                "error_description": format!("too many device authorization requests — try again in {retry} seconds")
+            })),
+        )
+            .into_response();
+        if let Ok(v) = retry.to_string().parse() {
+            resp.headers_mut().insert("retry-after", v);
+        }
+        return resp;
+    }
+
+    // Parse client_name from either form-encoded or JSON body (both optional).
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let req: DeviceAuthRequest = if content_type.contains("application/json") {
+        serde_json::from_slice(&body).unwrap_or(DeviceAuthRequest {
+            client_name: None,
+            scope: None,
+        })
+    } else {
+        // application/x-www-form-urlencoded (default)
+        serde_urlencoded::from_bytes(&body).unwrap_or(DeviceAuthRequest {
+            client_name: None,
+            scope: None,
+        })
+    };
+
+    // Opportunistic housekeeping.
+    cleanup_expired_device_codes(&state.db);
+
+    // High-entropy device code — return raw once, store only its hash.
+    let device_code = format!("{}{}", uuid_v4(), uuid_v4()).replace('-', "");
+    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+    // Generate a unique user code (retry a few times on the rare collision).
+    let mut user_code = generate_user_code();
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEVICE_CODE_EXPIRES_IN as i64);
+
+    let conn = match state.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let mut inserted = false;
+    for _ in 0..5 {
+        let res = conn.execute(
+            "INSERT INTO oauth_device_codes
+                (device_code_hash, user_code, client_name, expires_at, interval_seconds, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+            params![
+                device_code_hash,
+                user_code,
+                req.client_name,
+                expires_at.to_rfc3339(),
+                DEVICE_CODE_INTERVAL,
+            ],
+        );
+        match res {
+            Ok(_) => {
+                inserted = true;
+                break;
+            }
+            Err(_) => {
+                // user_code UNIQUE collision — regenerate and retry.
+                user_code = generate_user_code();
+            }
+        }
+    }
+    if !inserted {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
+
+    let verification_uri = format!("{}/oauth/device", state.issuer.trim_end_matches('/'));
+    let verification_uri_complete = format!(
+        "{verification_uri}?user_code={}",
+        urlencoding::encode(&user_code)
+    );
+
+    info!(user_code = %user_code, "OAuth device authorization issued");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "device_code": device_code,
+            "user_code": user_code,
+            "verification_uri": verification_uri,
+            "verification_uri_complete": verification_uri_complete,
+            "expires_in": DEVICE_CODE_EXPIRES_IN,
+            "interval": DEVICE_CODE_INTERVAL,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct DevicePageQuery {
+    #[serde(default)]
+    user_code: Option<String>,
+}
+
+/// `GET /oauth/device` — server-rendered verification page. Mirrors
+/// `authorize_page`'s style + CSRF pattern. The page is served regardless of
+/// auth state (matching `authorize_page`, which also renders unauthenticated);
+/// the POST handler is what enforces a valid session before approving.
+async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Html<String> {
+    let csrf_token = generate_csrf_token(&session_credential(&headers));
+    let prefill = q
+        .user_code
+        .as_deref()
+        .map(normalize_user_code)
+        .unwrap_or_default();
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Lific - Device Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: system-ui, sans-serif; max-width: 400px; margin: 80px auto; padding: 0 20px; background: #0a0a0a; color: #e0e0e0; }}
+        h1 {{ font-size: 1.4em; margin-bottom: 0.5em; }}
+        p {{ color: #888; line-height: 1.5; }}
+        label {{ display: block; margin-top: 1.5em; color: #aaa; font-size: 0.9em; }}
+        input[type=text] {{ width: 100%; box-sizing: border-box; margin-top: 0.4em; padding: 12px; border-radius: 6px; border: 1px solid #333; background: #111; color: #fff; font-size: 1.2em; letter-spacing: 0.15em; text-align: center; text-transform: uppercase; }}
+        .buttons {{ display: flex; gap: 12px; margin-top: 2em; }}
+        button {{ flex: 1; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 1em; cursor: pointer; }}
+        button.approve {{ background: #2563eb; }}
+        button.approve:hover {{ background: #1d4ed8; }}
+        button.deny {{ background: #444; }}
+        button.deny:hover {{ background: #555; }}
+    </style>
+</head>
+<body>
+    <h1>Connect a device to Lific</h1>
+    <p>Enter the code shown on the device or terminal that's signing in, then approve.</p>
+    <form method="POST" action="/oauth/device">
+        <label for="user_code">Device code</label>
+        <input type="text" id="user_code" name="user_code" value="{user_code}" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+        <input type="hidden" name="csrf_token" value="{csrf_token}">
+        <div class="buttons">
+            <button type="submit" name="decision" value="approve" class="approve">Approve</button>
+            <button type="submit" name="decision" value="deny" class="deny">Deny</button>
+        </div>
+    </form>
+</body>
+</html>"#,
+        user_code = html_escape(&prefill),
+        csrf_token = html_escape(&csrf_token),
+    ))
+}
+
+#[derive(Deserialize)]
+struct DeviceApproveForm {
+    user_code: String,
+    decision: Option<String>,
+    csrf_token: Option<String>,
+}
+
+/// `POST /oauth/device` — validate CSRF + session, then mark the device code
+/// approved (binding the approving user) or denied.
+async fn device_approve(
+    State(oauth): State<OAuthState>,
+    headers: HeaderMap,
+    axum::Form(form): axum::Form<DeviceApproveForm>,
+) -> Response {
+    let credential = session_credential(&headers);
+
+    // CSRF, bound to the presenting session (identical policy to authorize).
+    match &form.csrf_token {
+        Some(token) if validate_csrf_token(token, &credential) => {}
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Html("<h1>Invalid or expired form</h1><p>Please go back and try again. <a href=\"/#/\">Return to Lific</a></p>".to_string()),
+            )
+                .into_response();
+        }
+    }
+
+    // The approver must be signed in.
+    let Some(token) = (!credential.is_empty()).then_some(credential) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html("<h1>Authentication required</h1><p>You must be signed in to approve a device. <a href=\"/#/login\">Sign in</a></p>".to_string()),
+        )
+            .into_response();
+    };
+
+    let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
+        let conn = match oauth.db.write() {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        };
+        crate::db::queries::users::validate_session(&conn, &token)
+            .ok()
+            .map(|u| Some(u.id))
+    } else if token.starts_with("lific_at_") {
+        if validate_oauth_token(&oauth.db, &token) {
+            Some(oauth_token_user_id(&oauth.db, &token))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let Some(approving_user_id) = auth_outcome else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html("<h1>Invalid session</h1><p>Your session has expired or is invalid. <a href=\"/#/login\">Sign in again</a></p>".to_string()),
+        )
+            .into_response();
+    };
+
+    let normalized = normalize_user_code(&form.user_code);
+    let deny = form.decision.as_deref() == Some("deny");
+
+    let conn = match oauth.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+
+    // Only pending, unexpired codes can be acted on.
+    let new_status = if deny { "denied" } else { "approved" };
+    let updated = conn
+        .execute(
+            "UPDATE oauth_device_codes
+             SET status = ?1, user_id = ?2
+             WHERE user_code = ?3 AND status = 'pending' AND expires_at > datetime('now')",
+            params![new_status, approving_user_id, normalized],
+        )
+        .unwrap_or(0);
+
+    if updated == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html(format!(
+                "<h1>Unknown or expired code</h1><p>The code <code>{}</code> was not found, has expired, or was already used. <a href=\"/oauth/device\">Try again</a></p>",
+                html_escape(&normalized)
+            )),
+        )
+            .into_response();
+    }
+
+    info!(user_code = %normalized, decision = %new_status, "OAuth device verification");
+
+    if deny {
+        (
+            StatusCode::OK,
+            Html("<h1>Access denied</h1><p>The device will not be connected. You can close this page.</p>".to_string()),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Html("<h1>Device approved</h1><p>You're all set. Return to the device or terminal — it will finish signing in automatically.</p>".to_string()),
+        )
+            .into_response()
+    }
+}
+
 // ── Token Exchange ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -537,6 +892,9 @@ struct TokenRequest {
     code_verifier: Option<String>,
     #[allow(dead_code)]
     refresh_token: Option<String>,
+    /// RFC 8628 device grant: the opaque device_code returned by
+    /// /oauth/device_authorization.
+    device_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -551,6 +909,9 @@ async fn token_exchange(
     State(state): State<OAuthState>,
     axum::Form(req): axum::Form<TokenRequest>,
 ) -> Response {
+    if req.grant_type == DEVICE_CODE_GRANT {
+        return device_token_exchange(&state, &req);
+    }
     if req.grant_type != "authorization_code" {
         return (
             StatusCode::BAD_REQUEST,
@@ -713,6 +1074,142 @@ async fn token_exchange(
         scope,
     })
     .into_response()
+}
+
+/// RFC 8628 §3.4/§3.5 device-code token exchange. Looks up the device code by
+/// hash, enforces the polling interval (`slow_down`), and returns the
+/// per-status error (`authorization_pending` / `access_denied` /
+/// `expired_token`) or, on approval, mints and returns an access token.
+fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
+    let Some(device_code) = req.device_code.as_deref().filter(|c| !c.is_empty()) else {
+        return device_error(StatusCode::BAD_REQUEST, "invalid_request", Some("missing device_code"));
+    };
+    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+    let conn = match state.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+
+    struct DeviceRow {
+        status: String,
+        user_id: Option<i64>,
+        expires_at: String,
+        interval_seconds: i64,
+        last_polled_at: Option<String>,
+    }
+
+    let row: Result<DeviceRow, _> = conn.query_row(
+        "SELECT status, user_id, expires_at, interval_seconds, last_polled_at
+         FROM oauth_device_codes WHERE device_code_hash = ?1",
+        params![device_code_hash],
+        |r| {
+            Ok(DeviceRow {
+                status: r.get(0)?,
+                user_id: r.get(1)?,
+                expires_at: r.get(2)?,
+                interval_seconds: r.get(3)?,
+                last_polled_at: r.get(4)?,
+            })
+        },
+    );
+
+    let row = match row {
+        Ok(r) => r,
+        // Unknown device_code → invalid_grant per RFC 8628 §3.5.
+        Err(_) => return device_error(StatusCode::BAD_REQUEST, "invalid_grant", None),
+    };
+
+    let now = chrono::Utc::now();
+
+    // Expiry check first (RFC 8628: expired_token).
+    let expired = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
+        .map(|t| now >= t.with_timezone(&chrono::Utc))
+        .unwrap_or(true);
+    if expired {
+        let _ = conn.execute(
+            "DELETE FROM oauth_device_codes WHERE device_code_hash = ?1",
+            params![device_code_hash],
+        );
+        return device_error(StatusCode::BAD_REQUEST, "expired_token", None);
+    }
+
+    // slow_down: reject if polled faster than `interval` since the last poll.
+    if let Some(last) = &row.last_polled_at
+        && let Ok(last_t) = chrono::DateTime::parse_from_rfc3339(last)
+    {
+        let elapsed = now
+            .signed_duration_since(last_t.with_timezone(&chrono::Utc))
+            .num_seconds();
+        if elapsed < row.interval_seconds {
+            // Do NOT update last_polled_at here — an early poll shouldn't push
+            // the window out; the client is told to slow down.
+            return device_error(StatusCode::BAD_REQUEST, "slow_down", None);
+        }
+    }
+
+    // Record this poll time (used for the next slow_down check).
+    let _ = conn.execute(
+        "UPDATE oauth_device_codes SET last_polled_at = ?1 WHERE device_code_hash = ?2",
+        params![now.to_rfc3339(), device_code_hash],
+    );
+
+    match row.status.as_str() {
+        "pending" => device_error(StatusCode::BAD_REQUEST, "authorization_pending", None),
+        "denied" => device_error(StatusCode::BAD_REQUEST, "access_denied", None),
+        "consumed" => device_error(StatusCode::BAD_REQUEST, "invalid_grant", Some("device code already used")),
+        "approved" => {
+            // Mint the access token bound to the approving user, then mark the
+            // code consumed (single use).
+            let scope = "mcp";
+            let client_id = "device";
+            // Ensure a client row exists so the FK on oauth_tokens is satisfied.
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
+                 VALUES ('device', 'Device Authorization', '[]')",
+                [],
+            );
+
+            let access_token = format!("lific_at_{}", uuid_v4());
+            let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
+            let expires_in: u64 = 3600 * 24 * 30; // 30 days
+            let expires_at = now + chrono::Duration::seconds(expires_in as i64);
+
+            if let Err(e) = conn.execute(
+                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![token_hash, client_id, expires_at.to_rfc3339(), scope, row.user_id],
+            ) {
+                tracing::error!(error = %e, "failed to store device OAuth token");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+            }
+
+            // Single-use: mark consumed so a replay returns invalid_grant.
+            let _ = conn.execute(
+                "UPDATE oauth_device_codes SET status = 'consumed' WHERE device_code_hash = ?1",
+                params![device_code_hash],
+            );
+
+            info!(scope = %scope, "OAuth device token issued");
+            Json(TokenResponse {
+                access_token,
+                token_type: "Bearer".into(),
+                expires_in,
+                scope: scope.into(),
+            })
+            .into_response()
+        }
+        _ => device_error(StatusCode::BAD_REQUEST, "invalid_grant", None),
+    }
+}
+
+/// Build an RFC 8628 §3.5 JSON error response body.
+fn device_error(status: StatusCode, error: &str, description: Option<&str>) -> Response {
+    let body = match description {
+        Some(d) => serde_json::json!({"error": error, "error_description": d}),
+        None => serde_json::json!({"error": error}),
+    };
+    (status, Json(body)).into_response()
 }
 
 // ── Token Revocation (RFC 7009) ──────────────────────────────────────────
@@ -1765,5 +2262,431 @@ mod tests {
             None,
             "legacy token has no bound user"
         );
+    }
+
+    // ── LIF-252: device authorization flow (RFC 8628) ────────────────────
+
+    /// POST /oauth/device_authorization and return the parsed JSON.
+    async fn request_device_code(app: &Router, client_name: Option<&str>) -> serde_json::Value {
+        let body = match client_name {
+            Some(n) => format!("client_name={}", urlencoding::encode(n)),
+            None => String::new(),
+        };
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device_authorization")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// POST the device grant to /oauth/token and return (status, json).
+    async fn poll_device_token(
+        app: &Router,
+        device_code: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = format!(
+            "grant_type={}&device_code={}",
+            urlencoding::encode("urn:ietf:params:oauth:grant-type:device_code"),
+            urlencoding::encode(device_code),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+        (status, val)
+    }
+
+    #[tokio::test]
+    async fn device_authorization_returns_wellformed_response() {
+        let (app, _db) = test_oauth_app();
+        let v = request_device_code(&app, Some("My CLI")).await;
+        assert!(v["device_code"].as_str().is_some());
+        let user_code = v["user_code"].as_str().unwrap();
+        // Format XXXX-XXXX from the unambiguous alphabet.
+        assert_eq!(user_code.len(), 9);
+        assert_eq!(&user_code[4..5], "-");
+        for c in user_code.chars().filter(|c| *c != '-') {
+            assert!(
+                USER_CODE_ALPHABET.contains(&(c as u8)),
+                "user_code char {c} not in alphabet"
+            );
+        }
+        assert_eq!(v["expires_in"], 900);
+        assert_eq!(v["interval"], 5);
+        let vuri = v["verification_uri"].as_str().unwrap();
+        assert!(vuri.ends_with("/oauth/device"));
+        let vuc = v["verification_uri_complete"].as_str().unwrap();
+        assert!(vuc.contains("user_code="));
+    }
+
+    #[tokio::test]
+    async fn device_code_stored_only_as_hash() {
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap();
+        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let conn = db.read().unwrap();
+        // The raw code must NOT be in the table; only its hash.
+        let by_hash: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE device_code_hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(by_hash, 1);
+        let by_raw: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE device_code_hash = ?1",
+                params![device_code],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(by_raw, 0, "raw device_code must not be stored");
+    }
+
+    #[tokio::test]
+    async fn device_metadata_advertises_endpoint_and_grant() {
+        let (app, _) = test_oauth_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["device_authorization_endpoint"]
+                .as_str()
+                .unwrap()
+                .ends_with("/oauth/device_authorization")
+        );
+        let grants = v["grant_types_supported"].as_array().unwrap();
+        assert!(
+            grants
+                .iter()
+                .any(|g| g == "urn:ietf:params:oauth:grant-type:device_code"),
+            "metadata must advertise the device grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_polling_pending_then_approved_end_to_end() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db); // user "oauthtest"
+        let user_id: i64 = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE username = 'oauthtest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let v = request_device_code(&app, Some("laptop")).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let user_code = v["user_code"].as_str().unwrap().to_string();
+
+        let device_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+        // First poll: pending.
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "authorization_pending");
+
+        // Simulate the client having waited the interval before its next poll,
+        // so the slow_down guard doesn't fire (this test drives polls
+        // back-to-back with no real delay).
+        let reset_last_poll = |db: &DbPool| {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE oauth_device_codes SET last_polled_at = NULL WHERE device_code_hash = ?1",
+                params![device_hash],
+            )
+            .unwrap();
+        };
+
+        // Approve via the verification page (signed-in session, CSRF-bound).
+        let csrf = generate_csrf_token(&session_token);
+        let approve_body = format!(
+            "user_code={}&decision=approve&csrf_token={}",
+            urlencoding::encode(&user_code),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(approve_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "approval should succeed");
+
+        // The device row now binds the approver.
+        {
+            let conn = db.read().unwrap();
+            let (st, uid): (String, Option<i64>) = conn
+                .query_row(
+                    "SELECT status, user_id FROM oauth_device_codes WHERE user_code = ?1",
+                    params![user_code],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(st, "approved");
+            assert_eq!(uid, Some(user_id));
+        }
+
+        // Next poll: approved → returns a token bound to the approver.
+        reset_last_poll(&db);
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::OK, "expected token, got {body}");
+        let access_token = body["access_token"].as_str().unwrap();
+        assert!(access_token.starts_with("lific_at_"));
+        assert_eq!(oauth_token_user_id(&db, access_token), Some(user_id));
+
+        // Single-use: a replay poll now fails (consumed → invalid_grant).
+        reset_last_poll(&db);
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn device_polling_slow_down_when_too_fast() {
+        let (app, _db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+
+        // First poll registers last_polled_at (pending).
+        let (_, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(body["error"], "authorization_pending");
+
+        // Immediate second poll (< interval seconds) → slow_down.
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "slow_down");
+    }
+
+    #[tokio::test]
+    async fn device_expired_token_after_expiry() {
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+        // Force expiry by rewriting expires_at into the past.
+        {
+            let conn = db.write().unwrap();
+            let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+            conn.execute(
+                "UPDATE oauth_device_codes SET expires_at = ?1 WHERE device_code_hash = ?2",
+                params![past, hash],
+            )
+            .unwrap();
+        }
+
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "expired_token");
+    }
+
+    #[tokio::test]
+    async fn device_denied_path() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let user_code = v["user_code"].as_str().unwrap().to_string();
+
+        let csrf = generate_csrf_token(&session_token);
+        let deny_body = format!(
+            "user_code={}&decision=deny&csrf_token={}",
+            urlencoding::encode(&user_code),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(deny_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "access_denied");
+    }
+
+    #[tokio::test]
+    async fn device_verification_requires_login() {
+        let (app, _db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let user_code = v["user_code"].as_str().unwrap().to_string();
+
+        // CSRF bound to the empty (unauthenticated) session so we get past the
+        // CSRF gate and exercise the auth-required branch.
+        let csrf = generate_csrf_token("");
+        let body = format!(
+            "user_code={}&decision=approve&csrf_token={}",
+            urlencoding::encode(&user_code),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn device_approve_rejects_unbound_csrf() {
+        // A CSRF minted for no session must not approve with a victim cookie.
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let v = request_device_code(&app, None).await;
+        let user_code = v["user_code"].as_str().unwrap().to_string();
+
+        let csrf = generate_csrf_token(""); // unbound
+        let body = format!(
+            "user_code={}&decision=approve&csrf_token={}",
+            urlencoding::encode(&user_code),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn device_invalid_user_code_returns_error_page() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let csrf = generate_csrf_token(&session_token);
+        let body = format!(
+            "user_code={}&decision=approve&csrf_token={}",
+            "ZZZZ-ZZZZ",
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn device_unknown_device_code_is_invalid_grant() {
+        let (app, _db) = test_oauth_app();
+        let (status, body) = poll_device_token(&app, "totally-unknown-device-code").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn device_page_prefills_user_code_from_query() {
+        let (app, _db) = test_oauth_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/oauth/device?user_code=bcdfghjk")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        // Normalized + uppercased + dash-inserted into the input value.
+        assert!(html.contains("value=\"BCDF-GHJK\""), "prefill missing: {html}");
+    }
+
+    #[test]
+    fn normalize_user_code_handles_spacing_and_case() {
+        assert_eq!(normalize_user_code("bcdf-ghjk"), "BCDF-GHJK");
+        assert_eq!(normalize_user_code("bcdf ghjk"), "BCDF-GHJK");
+        assert_eq!(normalize_user_code("BCDFGHJK"), "BCDF-GHJK");
+        assert_eq!(normalize_user_code("  bcdfghjk  "), "BCDF-GHJK");
+    }
+
+    #[test]
+    fn generate_user_code_is_wellformed() {
+        for _ in 0..50 {
+            let c = generate_user_code();
+            assert_eq!(c.len(), 9);
+            assert_eq!(&c[4..5], "-");
+            for ch in c.chars().filter(|c| *c != '-') {
+                assert!(USER_CODE_ALPHABET.contains(&(ch as u8)));
+            }
+        }
     }
 }

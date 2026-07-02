@@ -540,12 +540,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!(active_keys = count, "API key auth enabled");
             }
 
-            // Auth state for middleware
-            let issuer = cfg
-                .server
-                .public_url
-                .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", cfg.server.host, cfg.server.port));
+            // Auth state for middleware. When no public_url is configured the
+            // issuer is derived from the bind address — but 0.0.0.0/:: are
+            // bind-any addresses, not dialable URLs. They leak into
+            // user-facing links (OAuth metadata, device verification_uri), so
+            // map them to loopback.
+            let issuer = cfg.server.public_url.clone().unwrap_or_else(|| {
+                let host = match cfg.server.host.as_str() {
+                    "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+                    h => h,
+                };
+                format!("http://{}:{}", host, cfg.server.port)
+            });
 
             let manager_ext = Arc::new(manager.clone());
 
@@ -730,6 +736,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server =
                 axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(shutdown_pool));
             server.await?;
+        }
+
+        Command::Login {
+            url,
+            non_interactive,
+            complete,
+            label,
+            no_store,
+        } => {
+            let json = cli::term::wants_json(cli.json);
+            let args = cli::login::LoginArgs {
+                url,
+                non_interactive,
+                complete,
+                label,
+                no_store,
+            };
+            // The login flow uses a blocking reqwest client and a polling loop
+            // with sleeps; run it off the async runtime so `reqwest::blocking`
+            // doesn't panic (dropping its runtime inside an async context) and
+            // the sleeps don't stall the reactor.
+            let cfg_clone = cfg.clone();
+            tokio::task::spawn_blocking(move || cli::login::run_login(&args, &cfg_clone, json))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            return Ok(());
+        }
+
+        Command::Logout { url } => {
+            let json = cli::term::wants_json(cli.json);
+            let cfg_clone = cfg.clone();
+            tokio::task::spawn_blocking(move || {
+                cli::login::run_logout(url.as_deref(), &cfg_clone, json)
+            })
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            return Ok(());
         }
 
         Command::Doctor { key } => {

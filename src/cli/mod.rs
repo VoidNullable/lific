@@ -1,7 +1,9 @@
 pub mod agents_md;
 pub mod connect;
+pub mod credentials;
 pub mod doctor;
 pub mod exec;
+pub mod login;
 pub mod term;
 
 use clap::{Parser, Subcommand};
@@ -45,6 +47,51 @@ pub enum Command {
 
     /// Run MCP server over stdio (for AI assistants)
     Mcp,
+
+    /// Sign in to a Lific server via the OAuth 2.0 device flow (RFC 8628).
+    ///
+    /// Prints a verification URL and short code; approve it on any device
+    /// (phone, browser) while this command polls until you do. The resulting
+    /// OAuth token is stored in your OS keyring (or a 0600 file fallback) so
+    /// later commands can reuse it.
+    ///
+    /// Agent/CI friendly: `--non-interactive` prints the code + device_code as
+    /// JSON and exits immediately; complete the login later (after a human
+    /// approves) with `lific login --complete <device_code>`.
+    Login {
+        /// Base URL of the server (default: server.public_url, else
+        /// http://127.0.0.1:<port>).
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Print the device code as JSON and exit without polling (Stripe-style
+        /// two-step flow). Also implied when stdin is not a TTY.
+        #[arg(long = "non-interactive")]
+        non_interactive: bool,
+
+        /// Resume a previously started login by polling for this device_code
+        /// until it is approved/denied/expired, then store the token.
+        #[arg(long)]
+        complete: Option<String>,
+
+        /// Human-friendly label for this login, shown on the approval page.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Don't persist the token (print it instead). Useful for one-off /
+        /// scripted use where storage isn't wanted.
+        #[arg(long = "no-store")]
+        no_store: bool,
+    },
+
+    /// Sign out: delete the stored credential for a server and best-effort
+    /// revoke it server-side.
+    Logout {
+        /// Base URL of the server (default: server.public_url, else
+        /// http://127.0.0.1:<port>).
+        #[arg(long)]
+        url: Option<String>,
+    },
 
     /// Diagnose the local setup (config, database, backups, running server).
     ///
@@ -866,6 +913,95 @@ mod tests {
                 assert_eq!(key, std::env::var("LIFIC_API_KEY").ok());
             }
             _ => panic!("expected Doctor"),
+        }
+    }
+
+    // ── login / logout parse tests ───────────────────────────
+
+    #[test]
+    fn parse_login_defaults() {
+        let cli = Cli::try_parse_from(["lific", "login"]).unwrap();
+        match cli.command {
+            Command::Login {
+                url,
+                non_interactive,
+                complete,
+                label,
+                no_store,
+            } => {
+                assert!(url.is_none());
+                assert!(!non_interactive);
+                assert!(complete.is_none());
+                assert!(label.is_none());
+                assert!(!no_store);
+            }
+            _ => panic!("expected Login"),
+        }
+    }
+
+    #[test]
+    fn parse_login_all_flags() {
+        let cli = Cli::try_parse_from([
+            "lific",
+            "login",
+            "--url",
+            "http://127.0.0.1:3998",
+            "--non-interactive",
+            "--label",
+            "my-laptop",
+            "--no-store",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Login {
+                url,
+                non_interactive,
+                complete,
+                label,
+                no_store,
+            } => {
+                assert_eq!(url, Some("http://127.0.0.1:3998".into()));
+                assert!(non_interactive);
+                assert!(complete.is_none());
+                assert_eq!(label, Some("my-laptop".into()));
+                assert!(no_store);
+            }
+            _ => panic!("expected Login"),
+        }
+    }
+
+    #[test]
+    fn parse_login_complete() {
+        let cli = Cli::try_parse_from([
+            "lific", "login", "--complete", "abc123def", "--url", "http://h:1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Login {
+                complete, url, ..
+            } => {
+                assert_eq!(complete, Some("abc123def".into()));
+                assert_eq!(url, Some("http://h:1".into()));
+            }
+            _ => panic!("expected Login"),
+        }
+    }
+
+    #[test]
+    fn parse_logout_defaults() {
+        let cli = Cli::try_parse_from(["lific", "logout"]).unwrap();
+        match cli.command {
+            Command::Logout { url } => assert!(url.is_none()),
+            _ => panic!("expected Logout"),
+        }
+    }
+
+    #[test]
+    fn parse_logout_with_url() {
+        let cli = Cli::try_parse_from(["lific", "logout", "--url", "https://lific.example"]).unwrap();
+        match cli.command {
+            Command::Logout { url } => assert_eq!(url, Some("https://lific.example".into())),
+            _ => panic!("expected Logout"),
         }
     }
 

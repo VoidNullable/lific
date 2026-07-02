@@ -25,7 +25,7 @@ tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compres
 # HTTP client — used by `lific doctor` to probe a running server (reachability,
 # OAuth discovery, MCP round-trip). rustls-tls (no OpenSSL linkage) so the
 # static single-binary build stays clean and `public_url` https checks work.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "vtab", "backup"] }
@@ -49,6 +49,21 @@ clap_complete = "4"
 api-keys-simplified = "0.5"
 argon2 = "0.5"
 rand = "0.8"
+# Credential storage for `lific login` (LIF-258). On Linux we use the
+# Secret Service backend (sync-secret-service) with the pure-Rust crypto
+# session (crypto-rust, no OpenSSL) and `vendored` so libdbus is compiled in
+# statically — CI and headless boxes don't need a system libdbus/pkg-config
+# package. apple-native / windows-native cover macOS Keychain and Windows
+# Credential Manager. When no Secret Service is present at runtime (e.g. a
+# headless server), src/cli/credentials.rs falls back to a 0600
+# ~/.config/lific/credentials.json file with a loud warning.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+    "vendored",
+] }
 
 # Static assets (embedded frontend)
 rust-embed = { version = "8", features = ["mime-guess"] }
@@ -57,6 +72,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Encoding
 urlencoding = "2"
+# serde_urlencoded: parse application/x-www-form-urlencoded device-authorization
+# bodies by hand (the endpoint accepts BOTH form and JSON, so we sniff the
+# content-type and deserialize the raw bytes rather than committing to one axum
+# extractor). Already in the tree transitively via axum.
+serde_urlencoded = "0.7"
 
 # Config
 toml = "0.8"

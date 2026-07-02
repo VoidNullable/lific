@@ -140,6 +140,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "saved views",
         include_str!("../../migrations/029_saved_views.sql"),
     ),
+    (
+        30,
+        "oauth device codes",
+        include_str!("../../migrations/030_oauth_device_codes.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.
