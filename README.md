@@ -16,13 +16,13 @@
 
 ---
 
-Your agent can write the code. What it can't do is remember: the plan dies with the context window, the TODO list rots in a markdown file, and the next session starts from zero. Lific is an issue tracker built to be that missing memory — self-hosted, single-binary, and designed so that its primary user is often an agent rather than a person.
+Your agent can write the code. What it can't do is remember: the plan dies with the context window, the TODO list rots in a markdown file, and the next session starts from zero. Lific is the missing memory: a self-hosted, single-binary issue tracker whose primary user is often an agent rather than a person.
 
 Three numbers instead of adjectives:
 
-- **26 MCP tools in 5,213 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer) — your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
+- **26 MCP tools in 5,213 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
 - **One ~21 MB binary.** Embedded SQLite, embedded web UI, backups built in. No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
-- **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more — no hand-edited JSON.
+- **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
 Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive being spoken, logged, grepped, and pasted into a prompt.
 
@@ -36,9 +36,9 @@ lific start             # serves on :3456, prints your API key once
 lific connect           # writes MCP config into your AI clients
 ```
 
-That's the whole thing. `lific connect` detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one — never overwriting existing config. Restart your client and the Lific tools are there.
+That's the whole thing. `lific connect` detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
-The web UI is at `http://localhost:3456` — the first account you create is the admin.
+The web UI is at `http://localhost:3456`. The first account you create is the admin.
 
 Verify any setup with:
 
@@ -54,17 +54,17 @@ lific doctor            # green/yellow/red checks: config, database, server,
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one died. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
-- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone" — who changed what, when, and through which tool. Every agent's work is attributed (more below).
+- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
-- **Take everything with you.** `export_issue`, `export_page`, `export_project` — portable markdown, no lock-in.
+- **Take everything with you.** `export_issue`, `export_page`, `export_project`: portable markdown, no lock-in.
 
-## Every tool gets its own identity — and that's the point
+## Every tool gets its own identity, and that's the point
 
 `lific connect` mints a **separate bot identity per tool**, owned by your account (`opencode-blake`, `cursor-blake`, ...). When several agents work the same project, provenance is the primitive that keeps you sane:
 
-- **The audit log shows which harness made every change** — "OpenCode closed APP-42", "Cursor edited the design page" — all attributed to you, never blurred together.
-- **Revoke one tool without touching the others.** Cursor misbehaving? Disconnect just its key — OpenCode keeps working.
+- **The audit log shows which harness made every change.** "OpenCode closed APP-42", "Cursor edited the design page". All attributed to you, never blurred together.
+- **Revoke one tool without touching the others.** Cursor misbehaving? Disconnect just its key and OpenCode keeps working.
 - **Scoped authority.** Each bot inherits its owner's project access and nothing more.
 
 This is the recommended way to connect agent harnesses.
@@ -83,12 +83,12 @@ lific connect --client zed --stdio               # no server: direct SQLite over
 lific connect --dry-run --client vscode          # preview without writing
 ```
 
-Each client gets its native schema (`mcpServers` vs `servers` vs `mcp`, Codex TOML with an env-var token, Goose YAML — the quirks are handled). JSON configs are merged non-destructively; a file `connect` can't parse safely is left untouched and you get the exact snippet to paste instead.
+Each client gets its native schema (`mcpServers` vs `servers` vs `mcp`, Codex TOML with an env-var token, Goose YAML; the quirks are handled). JSON configs are merged non-destructively; a file `connect` can't parse safely is left untouched and you get the exact snippet to paste instead.
 
 <details>
 <summary>OAuth, if you'd rather auth as yourself</summary>
 
-Lific implements the full MCP authorization spec — RFC 9728 protected-resource metadata, dynamic client registration, PKCE — so OAuth-capable clients can connect with **just the URL** and complete auth in the browser:
+Lific implements the full MCP authorization spec (RFC 9728 protected-resource metadata, dynamic client registration, PKCE), so OAuth-capable clients can connect with **just the URL** and complete auth in the browser:
 
 ```bash
 lific connect --oauth --client opencode   # writes a header-less config, mints nothing
@@ -98,7 +98,7 @@ opencode mcp auth lific                   # browser opens → sign in → approv
 claude mcp add --transport http lific http://localhost:3456/mcp
 ```
 
-The trade-off: an OAuth token **is you**. Changes made through it are indistinguishable from your own edits in the audit log — no per-harness attribution. Fine for personally browsing your tracker from an editor; for agents doing real work, prefer the per-tool bot identities above.
+The trade-off: an OAuth token **is you**. Changes made through it are indistinguishable from your own edits in the audit log, with no per-harness attribution. Fine for personally browsing your tracker from an editor; for agents doing real work, prefer the per-tool bot identities above.
 
 **Headless / SSH / agents.** No browser on the box? The device flow has you covered:
 
@@ -154,24 +154,24 @@ Each connection creates a bot identity tied to your account (the CLI's `connect`
 
 ## Plans: state that outlives the session
 
-An agent's plan shouldn't die when its context does. A **plan** is an ordered, arbitrarily-nestable tree of steps that persists across sessions and compaction — start a new session, call `get_plan`, and it's still there, ready to resume.
+An agent's plan shouldn't die when its context does. A **plan** is an ordered, arbitrarily-nestable tree of steps that persists across sessions and compaction. Start a new session, call `get_plan`, and it's still there, ready to resume.
 
 - **Steps can mirror issues.** Link a step to an issue and the two stay in sync: close the issue and the step checks itself; mark the step done and the issue closes. Reopen the issue and the step reopens, with a note of why.
 - **Authored in one call.** `create_plan` builds a full nested tree at once; `edit_plan_step` and `update_plan_step` keep it current.
-- **First-class in the UI.** A Plans tab sits alongside Issues, Board, Modules, and Pages — a real tree view with done toggles, per-step markdown notes, issue chips, and an activity timeline.
+- **First-class in the UI.** A Plans tab sits alongside Issues, Board, Modules, and Pages: a real tree view with done toggles, per-step markdown notes, issue chips, and an activity timeline.
 - **Fully tracked.** Every plan and step change lands in the audit log, including the issue-driven cascades.
 
 Issues stay flat and lateral; the hierarchy lives on the plan. It's the difference between an issue tracker and a project planner.
 
 ## Built for agents, not just reachable by them
 
-- **`lific agents-md`** writes an idempotent, marker-delimited block into your repo's `AGENTS.md` telling every agent that this project uses Lific — project identifier, CLI examples, and the workflow conventions. `lific connect` offers to do this automatically in project context.
+- **`lific agents-md`** writes an idempotent, marker-delimited block into your repo's `AGENTS.md` telling every agent that this project uses Lific: project identifier, CLI examples, and the workflow conventions. `lific connect` offers to do this automatically in project context.
 - **Session instructions.** The MCP server ships its conventions in the `initialize` response, so connected agents know how Lific wants to be used without you explaining it.
 - **Self-onboarding.** On a fresh database, the MCP tools tell the agent exactly how to bootstrap (`create a project first: manage_resource(...)`) instead of returning an empty list.
-- **Pipe-native CLI.** Output auto-upgrades to JSON when piped — `lific issue list --project APP | jq` just works, no `--json` needed (though it's there). Prompts never hang a non-interactive caller; they fail fast and name the bypass flag.
+- **Pipe-native CLI.** Output auto-upgrades to JSON when piped, so `lific issue list --project APP | jq` just works, no `--json` needed (though it's there). Prompts never hang a non-interactive caller; they fail fast and name the bypass flag.
 - **Shell completions:** `lific completion fish | source` (bash, zsh, fish, powershell, elvish).
 
-The CLI also works directly against the database — no server or auth required:
+The CLI also works directly against the database, no server or auth required:
 
 ```bash
 lific project list
@@ -183,28 +183,20 @@ lific search "authentication" --project APP
 
 ## MCP tools
 
-All 26, in 5,213 tokens total:
+All 26, in 5,213 tokens:
 
-| Tool | What it does |
-|------|-------------|
-| `list_issues` | Filter by status, priority, module, label, or workable |
-| `get_issue` | Full issue details with relations, labels, and comments |
-| `create_issue` / `update_issue` | Create or partially update by identifier |
-| `edit_issue` / `edit_page` | Targeted find-and-replace edits without resending the whole body |
-| `get_board` | Board view grouped by status, priority, or module |
-| `search` | Fuzzy full-text search across issues and pages |
-| `get_activity` | Audit history for an issue, page, or whole project — who changed what, when |
-| `link_issues` / `unlink_issues` | Dependency tracking (blocks, relates_to, duplicate) |
-| `get_page` / `create_page` / `update_page` | Markdown documents in folders, with labels and lifecycle status |
-| `add_comment` / `list_comments` | Threaded comments on issues and pages |
-| `create_plan` / `get_plan` | Persisted, nestable step plans that survive across sessions; steps can mirror issues |
-| `edit_plan_step` / `update_plan_step` | Edit a step, toggle done (closing a mirrored issue), add/move/delete steps |
-| `list_resources` | Discover projects, modules, labels, folders, plans |
-| `manage_resource` | Create/update projects, modules (with icons), labels, folders |
-| `delete` | Delete anything by identifier |
-| `export_issue` / `export_page` / `export_project` | Export to portable markdown |
+| Family | Tools |
+|--------|-------|
+| Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `edit_issue` · `get_board` |
+| Relations | `link_issues` · `unlink_issues` |
+| Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
+| Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
+| Comments | `add_comment` · `list_comments` |
+| Search & history | `search` · `get_activity` |
+| Structure | `list_resources` · `manage_resource` · `delete` |
+| Export | `export_issue` · `export_page` · `export_project` |
 
-Everything uses human-readable identifiers: `project="APP"`, not `project_id=7`.
+Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`). The behaviors worth knowing about are covered in "What your agent can now do" above; for exact schemas, connect a client and read `tools/list`.
 
 ## Features
 
@@ -229,9 +221,9 @@ Honesty is cheaper than churn:
 
 - **You need enterprise team features.** No SSO/SAML, no sprints, no estimates, no roadmap gantt charts. If you're coordinating forty humans, use Linear or Plane.
 - **You want issues as files in the repo.** Lific is a database with an API, not markdown-in-git. If you want `git diff` on your task list, a markdown-native tracker fits better.
-- **You need distributed multi-writer sync.** One Lific instance is one SQLite file — a single source of truth that's trivially backed up, not a CRDT. Multiple agents talk to one server; the server doesn't merge with other servers.
+- **You need distributed multi-writer sync.** One Lific instance is one SQLite file: a single source of truth that's trivially backed up, not a CRDT. Multiple agents talk to one server; the server doesn't merge with other servers.
 
-For one human directing several agents across personal projects — the thing it's built for — none of those trade-offs bite.
+For one human directing several agents across personal projects (the thing it's built for), none of those trade-offs bite.
 
 ## Configuration
 
@@ -258,7 +250,7 @@ retain = 24
 level = "info"
 ```
 
-CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost — it becomes the OAuth issuer and the URL `lific connect` writes into client configs.
+CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs.
 
 </details>
 
@@ -297,7 +289,7 @@ The frontend is a Svelte 5 SPA built with Vite. `bun run build` outputs static f
 
 Issues and PRs welcome. If you're planning something big, open an issue first so we can talk about it before you put in the work.
 
-Lific's own development is tracked in Lific — every feature in this README started life as a `LIF-` issue, filed and closed mostly by agents. The dogfood is the roadmap.
+Lific's own development is tracked in Lific. Every feature in this README started life as a `LIF-` issue, filed and closed mostly by agents. The dogfood is the roadmap.
 
 ## MCP Registry
 
