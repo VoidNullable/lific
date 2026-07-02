@@ -13,6 +13,42 @@ export const STATUSES = ["backlog", "todo", "active", "done", "cancelled"];
 /** Canonical priority order (urgent → none). */
 export const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
 
+/** Terminal statuses — work that's left the board (no longer actionable). */
+export const TERMINAL_STATUSES = ["done", "cancelled"];
+
+/** Sentinel `filterStatus` value for the "Unresolved" status-group filter:
+ *  everything that isn't in a terminal state (backlog + todo + active). Uses
+ *  an `@`-prefix so it can never collide with a real status string. */
+export const STATUS_UNRESOLVED = "@unresolved";
+
+/** True when an issue is unresolved (not done/cancelled). */
+export function isUnresolved(status: string): boolean {
+  return !TERMINAL_STATUSES.includes(status);
+}
+
+/** One-line descriptions of each status, surfaced in the filter modal so the
+ *  vocabulary is self-documenting. Single source of truth. */
+export const STATUS_DESCRIPTIONS: Record<string, string> = {
+  backlog: "Captured, not yet planned.",
+  todo: "Planned and ready to start.",
+  active: "In progress right now.",
+  done: "Completed and shipped.",
+  cancelled: "Abandoned — won't be done.",
+};
+
+/** Description of the "Unresolved" status-group filter. */
+export const UNRESOLVED_DESCRIPTION =
+  "All open work — backlog, todo, and active.";
+
+/** One-line descriptions of each priority level. */
+export const PRIORITY_DESCRIPTIONS: Record<string, string> = {
+  urgent: "Drop everything.",
+  high: "Important — do soon.",
+  medium: "Normal priority.",
+  low: "Nice to have, no rush.",
+  none: "No priority set.",
+};
+
 export type GroupBy = "status" | "priority" | "module" | "none";
 export type Density = "compact" | "comfortable";
 
@@ -50,7 +86,11 @@ export function buildGroups(opts: {
 
   if (searchQuery.trim()) return null;
   if (groupBy === "none") return null;
-  if (groupBy === "status" && filterStatus) return null;
+  // A single literal status filter makes status buckets pointless (one
+  // bucket). The "Unresolved" group filter still spans backlog/todo/active,
+  // so status grouping stays meaningful there — don't suppress it.
+  if (groupBy === "status" && filterStatus && filterStatus !== STATUS_UNRESOLVED)
+    return null;
 
   const out: IssueGroup[] = [];
   if (groupBy === "status") {

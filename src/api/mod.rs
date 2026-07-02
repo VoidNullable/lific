@@ -140,7 +140,14 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/labels",
             get(resources::list_labels).post(resources::create_label),
         )
-        .route("/api/labels/{id}", delete(resources::delete_label_handler))
+        .route(
+            "/api/labels/{id}",
+            put(resources::update_label_handler).delete(resources::delete_label_handler),
+        )
+        .route(
+            "/api/labels/{id}/merge",
+            post(resources::merge_label_handler),
+        )
         // Pages
         .route(
             "/api/pages",

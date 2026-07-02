@@ -10,9 +10,16 @@
   // close its other menus when this one opens. Standalone consumers
   // (the page) can ignore both and rely on the internal outside-click
   // close.
+  //
+  // Inline creation (label management): when an `onCreate` callback is
+  // provided, the picker grows a filter/create input. Typing a name that
+  // doesn't exist yet reveals a color row + Create button, so a user can
+  // mint a label from inside an issue without leaving for project settings.
 
   import { Plus, X, Check } from "lucide-svelte";
   import type { Label } from "./api";
+  import { colorForName } from "./labelColors";
+  import ColorPicker from "./ColorPicker.svelte";
 
   let {
     attached,
@@ -21,6 +28,7 @@
     onToggle,
     open = $bindable(false),
     onOpen,
+    onCreate,
     emptyText = "None",
     emptyItalic = false,
     hideEmptyWhenEditable = false,
@@ -35,12 +43,35 @@
     onToggle: (name: string) => void;
     open?: boolean;
     onOpen?: () => void;
+    /** When provided, the picker offers inline label creation. Returns true
+     *  on success (parent persists + attaches + refreshes `all`). */
+    onCreate?: (name: string, color: string) => Promise<boolean>;
     emptyText?: string;
     emptyItalic?: boolean;
     hideEmptyWhenEditable?: boolean;
     popoverWidth?: string;
     emptyPickerText?: string;
   } = $props();
+
+  let query = $state("");
+  let pickedColor = $state<string | null>(null);
+  let creating = $state(false);
+  let inputEl = $state<HTMLInputElement | null>(null);
+
+  // Effective create color: the user's explicit pick, else a stable color
+  // derived from the typed name.
+  let createColor = $derived(pickedColor ?? colorForName(query.trim() || "label"));
+
+  let trimmed = $derived(query.trim());
+  let filtered = $derived(
+    trimmed
+      ? all.filter((l) => l.name.toLowerCase().includes(trimmed.toLowerCase()))
+      : all,
+  );
+  let exactMatch = $derived(
+    all.some((l) => l.name.toLowerCase() === trimmed.toLowerCase()),
+  );
+  let canCreate = $derived(!!onCreate && trimmed.length > 0 && !exactMatch);
 
   function handleWindowClick() {
     open = false;
@@ -50,7 +81,40 @@
     e.stopPropagation();
     const next = !open;
     open = next;
-    if (next) onOpen?.();
+    if (next) {
+      query = "";
+      pickedColor = null;
+      onOpen?.();
+      // Focus the filter/create input on open (when creation is enabled).
+      if (onCreate) requestAnimationFrame(() => inputEl?.focus());
+    }
+  }
+
+  async function doCreate() {
+    if (!onCreate || !canCreate || creating) return;
+    creating = true;
+    const ok = await onCreate(trimmed, createColor);
+    creating = false;
+    if (ok) {
+      query = "";
+      pickedColor = null;
+      requestAnimationFrame(() => inputEl?.focus());
+    }
+  }
+
+  function onInputKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (canCreate) {
+        doCreate();
+      } else if (filtered.length === 1) {
+        onToggle(filtered[0].name);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      open = false;
+    }
   }
 </script>
 
@@ -105,36 +169,77 @@
   {#if open}
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
     <div
-      class="absolute left-0 top-full mt-1 z-20 {popoverWidth}
+      class="absolute left-0 top-full mt-1 z-20 {onCreate ? 'w-[240px]' : popoverWidth}
              bg-[var(--surface)] border border-[var(--border)]
              rounded-md shadow-lg py-1"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.stopPropagation()}
     >
-      {#if all.length === 0}
-        <div class="px-3 py-2 text-body-sm text-[var(--text-faint)]">
-          {emptyPickerText}
+      {#if onCreate}
+        <!-- Filter / create input -->
+        <div class="px-2 pt-1 pb-1.5">
+          <input
+            bind:this={inputEl}
+            bind:value={query}
+            type="text"
+            placeholder="Filter or create…"
+            class="w-full px-2 py-1 text-body-sm rounded
+                   border border-[var(--border)] bg-[var(--bg)]
+                   text-[var(--text)] placeholder:text-[var(--text-faint)]
+                   outline-none focus:border-[var(--accent)]"
+            onkeydown={onInputKeydown}
+          />
         </div>
-      {:else}
-        {#each all as label}
-          {@const isAttached = attached.includes(label.name)}
+      {/if}
+
+      <div class="max-h-[220px] overflow-y-auto">
+        {#if all.length === 0 && !canCreate}
+          <div class="px-3 py-2 text-body-sm text-[var(--text-faint)]">
+            {emptyPickerText}
+          </div>
+        {:else}
+          {#each filtered as label (label.id)}
+            {@const isAttached = attached.includes(label.name)}
+            <button
+              class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+                     text-body-sm transition-colors hover:bg-[var(--bg-subtle)]"
+              onclick={() => onToggle(label.name)}
+            >
+              <span
+                class="size-2.5 rounded-full shrink-0"
+                style="background: {label.color};"
+              ></span>
+              <span class="flex-1 min-w-0 truncate {isAttached ? 'font-medium' : ''}">
+                {label.name}
+              </span>
+              {#if isAttached}
+                <Check size={14} class="text-[var(--accent)] shrink-0" />
+              {/if}
+            </button>
+          {/each}
+          {#if onCreate && filtered.length === 0 && !canCreate}
+            <div class="px-3 py-2 text-body-sm text-[var(--text-faint)]">
+              {trimmed ? "No match" : emptyPickerText}
+            </div>
+          {/if}
+        {/if}
+      </div>
+
+      {#if canCreate}
+        <!-- Create section: compact color picker + Create button -->
+        <div class="border-t border-[var(--border)] mt-1 pt-2 px-2.5 pb-2 flex items-center gap-2">
+          <ColorPicker value={createColor} onChange={(c) => { pickedColor = c; }} />
           <button
-            class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                   text-body-sm transition-colors hover:bg-[var(--bg-subtle)]"
-            onclick={() => onToggle(label.name)}
+            class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded
+                   text-body-sm font-medium text-[var(--btn-success-text)]
+                   bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
+                   transition-colors disabled:opacity-50"
+            disabled={creating}
+            onclick={doCreate}
           >
-            <span
-              class="size-2.5 rounded-full shrink-0"
-              style="background: {label.color};"
-            ></span>
-            <span class="flex-1 {isAttached ? 'font-medium' : ''}">
-              {label.name}
-            </span>
-            {#if isAttached}
-              <Check size={14} class="text-[var(--accent)]" />
-            {/if}
+            {creating ? "Creating…" : `Create “${trimmed}”`}
           </button>
-        {/each}
+        </div>
       {/if}
     </div>
   {/if}

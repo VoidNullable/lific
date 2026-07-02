@@ -544,6 +544,47 @@ export async function listLabels(projectId: number) {
   return request<Label[]>(`/labels?project_id=${projectId}`);
 }
 
+export interface CreateLabelInput {
+  project_id: number;
+  name: string;
+  /** Hex color (e.g. "#EF4444"). Server defaults to a neutral gray if omitted. */
+  color?: string;
+}
+
+export async function createLabel(input: CreateLabelInput) {
+  return request<Label>(`/labels`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface UpdateLabelInput {
+  name?: string;
+  color?: string;
+}
+
+export async function updateLabel(id: number, input: UpdateLabelInput) {
+  return request<Label>(`/labels/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteLabel(id: number) {
+  return request<{ deleted: boolean }>(`/labels/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/** Merge label `id` into label `into`: re-points every issue/page attachment
+ *  onto the target (deduped) then deletes the source. Returns the survivor. */
+export async function mergeLabel(id: number, into: number) {
+  return request<Label>(`/labels/${id}/merge`, {
+    method: "POST",
+    body: JSON.stringify({ into }),
+  });
+}
+
 // ── Comments ────────────────────────────────────────────────
 
 export interface Comment {

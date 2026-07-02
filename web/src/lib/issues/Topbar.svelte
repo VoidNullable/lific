@@ -10,19 +10,17 @@
   // (navigate, searchInputEl, inline-create trigger) come in as props.
   import type { Label, Module } from "../api";
   import {
-    Plus, Search, ChevronRight, ChevronDown, Layers, Signal,
+    Plus, Search, ChevronRight, ChevronDown, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDown, ArrowUp, Hash, Clock, History, Check, Zap, PenLine,
     SlidersVertical,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
-  import PriorityIcon from "../PriorityIcon.svelte";
   import StatusIcon from "../StatusIcon.svelte";
+  import FilterModal from "./FilterModal.svelte";
   import type { SortField } from "./sort";
   import type { GroupBy, Density } from "./grouping";
   import type { IssueListState } from "./state.svelte";
-
-  type Opt = { value: string; label: string; color?: string };
 
   let {
     view,
@@ -31,10 +29,6 @@
     navigate,
     statusCounts,
     countLabel,
-    statusOptions,
-    priorityOptions,
-    labelOptions,
-    moduleOptions,
     labels,
     modules,
     priorityCssColor,
@@ -49,10 +43,7 @@
     navigate: (path: string) => void;
     statusCounts: { status: string; count: number }[];
     countLabel: string;
-    statusOptions: Opt[];
-    priorityOptions: Opt[];
-    labelOptions: Opt[];
-    moduleOptions: Opt[];
+    /** Label + module lists feed the filter modal's Label / Module sections. */
     labels: Label[];
     modules: Module[];
     priorityCssColor: (p: string) => string;
@@ -63,27 +54,27 @@
     onQuickCreate: () => void;
   } = $props();
 
-  // Count of active filters — drives the badge on the Filter button and the
-  // visibility of the popover's "Clear all" link. Derived so the topbar
-  // re-renders correctly when filters change without manual subscription.
+  // Count of active filters — drives the badge on the Filter button. Derived
+  // so the topbar re-renders when filters change without manual subscription.
   let filterCount = $derived(view.activeFilterCount());
 </script>
 
-<div class="flex items-center gap-3 px-6 py-2 w-full">
+<div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
 
   <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
-  <div class="flex items-center gap-3 shrink-0">
-    <!-- Breadcrumb -->
-    <div class="flex items-center gap-1.5">
+  <div class="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
+    <!-- Breadcrumb. The project segment + chevron collapse below sm (the
+         mobile header already shows the app name); the page label stays. -->
+    <div class="flex items-center gap-1.5 min-w-0">
       <button
-        class="text-body-sm font-mono font-medium text-[var(--text-muted)]
+        class="hidden sm:inline text-body-sm font-mono font-medium text-[var(--text-muted)]
                hover:text-[var(--text)] transition-colors"
         onclick={() => navigate(`/${projectIdentifier}/overview`)}
       >
         {projectIdentifier}
       </button>
-      <ChevronRight size={12} class="text-[var(--text-faint)]" />
-      <span class="text-body-sm font-medium text-[var(--text)]">
+      <ChevronRight size={12} class="hidden sm:block text-[var(--text-faint)]" />
+      <span class="text-body-sm font-medium text-[var(--text)] truncate">
         {layout === "board" ? "Board" : "Issues"}
       </span>
     </div>
@@ -125,7 +116,7 @@
          cap). Clicking one toggles the matching status filter. Gated on at
          least one non-zero tally. -->
     {#if statusCounts.some((s) => s.count > 0)}
-      <div class="flex items-center gap-0.5">
+      <div class="hidden md:flex items-center gap-0.5">
         {#each statusCounts as { status, count } (status)}
           {#if count > 0}
             <Tooltip
@@ -193,154 +184,24 @@
       </button>
     </Tooltip>
 
-    {#if view.filterOpen}
-      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-      <div
-        class="absolute left-0 top-full mt-1.5 z-30 w-[280px]
-               bg-[var(--surface)] border border-[var(--border)]
-               rounded-lg shadow-lg py-1.5
-               max-h-[min(540px,calc(100dvh-6rem))] overflow-y-auto"
-        onclick={(e) => e.stopPropagation()}
-      >
-        <!-- Header: section title + clear-all link -->
-        <div class="flex items-center justify-between gap-2 px-3 pt-1 pb-1.5">
-          <span class="text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-            Filters
-          </span>
-          {#if filterCount > 0}
-            <button
-              class="text-caption text-[var(--text-muted)] hover:text-[var(--text)]
-                     transition-colors"
-              onclick={() => view.clearFilters()}
-            >
-              Clear all
-            </button>
-          {/if}
-        </div>
-
-        <!-- Section row snippet. `iconKind` selects the inline glyph (status
-             icon, priority bar, label color dot, module icon, or none). -->
-        {#snippet row(label, active, color, iconKind, value, onClick)}
-          <button
-            class="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors
-                   {active
-              ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-              : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-            onclick={onClick}
-          >
-            <span class="flex items-center gap-2 min-w-0 flex-1">
-              {#if iconKind === "status" && value}
-                <StatusIcon status={value} size={14} />
-              {:else if iconKind === "priority" && value}
-                <PriorityIcon priority={value} size={14} />
-              {:else if iconKind === "label" && color}
-                <span class="size-2.5 rounded-full shrink-0" style="background: {color}"></span>
-              {:else if iconKind === "module" && value}
-                <Layers size={14} class="shrink-0 text-[var(--text-muted)]" />
-              {:else}
-                <!-- "Any" row + label/module without metadata: spacer keeps
-                     labels flush with iconified siblings. -->
-                <span class="size-3.5 shrink-0"></span>
-              {/if}
-              <span
-                class="truncate {iconKind === 'status' || iconKind === 'priority'
-                  ? 'capitalize'
-                  : ''}"
-                style={iconKind === "priority" && value
-                  ? `color: ${priorityCssColor(value)}`
-                  : ""}
-              >{label}</span>
-            </span>
-            {#if active}
-              <Check size={13} class="text-[var(--accent)] shrink-0" />
-            {/if}
-          </button>
-        {/snippet}
-
-        <!-- STATUS -->
-        <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-          Status
-        </div>
-        {@render row("Any", !view.filterStatus, undefined, "none", "", () => (view.filterStatus = ""))}
-        {#each statusOptions.filter((o) => o.value) as opt (opt.value)}
-          {@render row(
-            opt.label,
-            view.filterStatus === opt.value,
-            undefined,
-            "status",
-            String(opt.value),
-            () => view.toggleStatusFilter(String(opt.value)),
-          )}
-        {/each}
-
-        <div class="my-1 h-px bg-[var(--border)]"></div>
-
-        <!-- PRIORITY -->
-        <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-          Priority
-        </div>
-        {@render row("Any", !view.filterPriority, undefined, "none", "", () => (view.filterPriority = ""))}
-        {#each priorityOptions.filter((o) => o.value) as opt (opt.value)}
-          {@render row(
-            opt.label,
-            view.filterPriority === opt.value,
-            undefined,
-            "priority",
-            String(opt.value),
-            () => view.togglePriorityFilter(String(opt.value)),
-          )}
-        {/each}
-
-        {#if labels.length > 0}
-          <div class="my-1 h-px bg-[var(--border)]"></div>
-          <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-            Label
-          </div>
-          {@render row("Any", !view.filterLabel, undefined, "none", "", () => (view.filterLabel = ""))}
-          {#each labelOptions.filter((o) => o.value) as opt (opt.value)}
-            {@render row(
-              opt.label,
-              view.filterLabel === opt.value,
-              opt.color,
-              "label",
-              String(opt.value),
-              () => view.toggleLabelFilter(String(opt.value)),
-            )}
-          {/each}
-        {/if}
-
-        {#if modules.length > 0}
-          <div class="my-1 h-px bg-[var(--border)]"></div>
-          <div class="px-3 pt-1 pb-1 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
-            Module
-          </div>
-          {@render row("Any", !view.filterModule, undefined, "none", "", () => (view.filterModule = ""))}
-          {#each moduleOptions.filter((o) => o.value) as opt (opt.value)}
-            {@render row(
-              opt.label,
-              view.filterModule === opt.value,
-              undefined,
-              "module",
-              String(opt.value),
-              () => view.toggleModuleFilter(String(opt.value)),
-            )}
-          {/each}
-        {/if}
-      </div>
-    {/if}
   </div>
+
+  <!-- Full filter modal (LIF-222 follow-up). Lives outside the trigger
+       wrapper but is fixed-positioned, so DOM placement is irrelevant. -->
+  <FilterModal {view} {labels} {modules} {priorityCssColor} />
 
   <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
   <div class="ml-auto flex items-center gap-0.5 shrink-0">
 
-    <!-- Issue count. Reserved min-width so the brief load frame can't reflow. -->
+    <!-- Issue count. Reserved min-width so the brief load frame can't reflow.
+         Hidden below sm to save horizontal room on phones. -->
     <span
-      class="mr-1.5 min-w-[2ch] text-right text-micro tabular-nums
+      class="hidden sm:inline mr-1.5 min-w-[2ch] text-right text-micro tabular-nums
              font-medium text-[var(--text-faint)]"
     >
       {countLabel}
     </span>
-    <div class="w-px h-4 bg-[var(--border)] mr-1"></div>
+    <div class="hidden sm:block w-px h-4 bg-[var(--border)] mr-1"></div>
 
     <!-- Sort button + popover. -->
     <div class="relative">
@@ -368,7 +229,7 @@
           {:else}
             <ArrowDown size={12} class="shrink-0" />
           {/if}
-          <span>
+          <span class="hidden sm:inline">
             {view.sortField === "age"
               ? "Age"
               : view.sortField === "updated"
@@ -530,8 +391,8 @@
       </Tooltip>
     {/if}
 
-    <!-- Keyboard cheatsheet popover. -->
-    <div class="relative">
+    <!-- Keyboard cheatsheet popover. Hidden below md — no keyboard on touch. -->
+    <div class="relative hidden md:block">
       <Tooltip content={view.hintsOpen ? null : "Shortcuts  ·  ?"} placement="bottom">
         <button
           class="size-7 flex items-center justify-center rounded-md
@@ -599,7 +460,7 @@
       >
         <!-- Main segment: quick-create -->
         <button
-          class="group flex items-center gap-1.5 pl-2.5 pr-2
+          class="group flex items-center gap-1.5 px-2 sm:pl-2.5 sm:pr-2
                  text-body-sm font-medium text-[var(--btn-success-text)]
                  bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
                  transition-colors focus:outline-none
@@ -615,9 +476,9 @@
             class="motion-safe:transition-transform
                    motion-safe:group-hover:rotate-90"
           />
-          New
+          <span class="hidden sm:inline">New</span>
           <kbd
-            class="ml-0.5 grid place-items-center min-w-[1.05rem] h-[1.05rem]
+            class="hidden sm:grid ml-0.5 place-items-center min-w-[1.05rem] h-[1.05rem]
                    rounded bg-white/20 font-mono text-micro leading-none"
           >
             C

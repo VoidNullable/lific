@@ -96,6 +96,19 @@ pub(super) async fn create_label(
     with_write(&db, |conn| crate::db::queries::create_label(conn, &input)).map(Json)
 }
 
+pub(super) async fn update_label_handler(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<UpdateLabel>,
+) -> Result<Json<Label>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        crate::db::queries::get_resource_project_id(conn, "labels", id)
+    })?;
+    require_project_lead(&db, &auth_user, project_id)?;
+    with_write(&db, |conn| crate::db::queries::update_label(conn, id, &input)).map(Json)
+}
+
 pub(super) async fn delete_label_handler(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
@@ -107,6 +120,37 @@ pub(super) async fn delete_label_handler(
     require_project_lead(&db, &auth_user, project_id)?;
     with_write(&db, |conn| crate::db::queries::delete_label(conn, id))?;
     Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct MergeLabel {
+    /// Target label id the source is folded into.
+    into: i64,
+}
+
+pub(super) async fn merge_label_handler(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<MergeLabel>,
+) -> Result<Json<Label>, LificError> {
+    // Both labels must live in the same project, and the caller must lead it.
+    let source_project = with_read(&db, |conn| {
+        crate::db::queries::get_resource_project_id(conn, "labels", id)
+    })?;
+    let target_project = with_read(&db, |conn| {
+        crate::db::queries::get_resource_project_id(conn, "labels", input.into)
+    })?;
+    if source_project != target_project {
+        return Err(LificError::BadRequest(
+            "cannot merge labels across projects".into(),
+        ));
+    }
+    require_project_lead(&db, &auth_user, source_project)?;
+    with_write(&db, |conn| {
+        crate::db::queries::merge_label(conn, id, input.into)
+    })
+    .map(Json)
 }
 
 // ── Folder endpoints ─────────────────────────────────────────
@@ -201,5 +245,82 @@ mod tests {
         });
         let resp = json_post(&reg_app, "/api/labels", body).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn lead_can_update_label_and_regular_cannot() {
+        let (db, _, lead, regular, project_id) = setup_lead_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+
+        // Create a label to mutate.
+        let resp = json_post(
+            &lead_app,
+            "/api/labels",
+            serde_json::json!({ "project_id": project_id, "name": "bug", "color": "#FF0000" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let created = parse_json(resp).await;
+        let label_id = created["id"].as_i64().unwrap();
+
+        // Lead can rename + recolor it.
+        let resp = json_put(
+            &lead_app,
+            &format!("/api/labels/{label_id}"),
+            serde_json::json!({ "name": "defect", "color": "#00FF00" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = parse_json(resp).await;
+        assert_eq!(updated["name"], "defect");
+        assert_eq!(updated["color"], "#00FF00");
+
+        // Regular user cannot update it.
+        let reg_app = app_as_user(db, &regular);
+        let resp = json_put(
+            &reg_app,
+            &format!("/api/labels/{label_id}"),
+            serde_json::json!({ "name": "nope" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn lead_can_merge_labels_and_regular_cannot() {
+        let (db, _, lead, regular, project_id) = setup_lead_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+
+        let mk = |name: &str| {
+            serde_json::json!({ "project_id": project_id, "name": name, "color": "#FF0000" })
+        };
+        let a = parse_json(json_post(&lead_app, "/api/labels", mk("bug")).await).await;
+        let b = parse_json(json_post(&lead_app, "/api/labels", mk("defect")).await).await;
+        let a_id = a["id"].as_i64().unwrap();
+        let b_id = b["id"].as_i64().unwrap();
+
+        // Regular user cannot merge.
+        let reg_app = app_as_user(db, &regular);
+        let resp = json_post(
+            &reg_app,
+            &format!("/api/labels/{a_id}/merge"),
+            serde_json::json!({ "into": b_id }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Lead merges A into B: response is the survivor, and A is gone.
+        let resp = json_post(
+            &lead_app,
+            &format!("/api/labels/{a_id}/merge"),
+            serde_json::json!({ "into": b_id }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["id"].as_i64().unwrap(), b_id);
+
+        let list = parse_json(json_get(&lead_app, &format!("/api/labels?project_id={project_id}")).await).await;
+        let names: Vec<&str> = list.as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["defect"]);
     }
 }

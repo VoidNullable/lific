@@ -306,6 +306,63 @@ pub fn delete_label(conn: &Connection, id: i64) -> Result<(), LificError> {
     Ok(())
 }
 
+/// Merge `source_id` into `target_id`: every issue/page wearing the source
+/// label is re-pointed at the target (deduped via INSERT OR IGNORE so an
+/// object already carrying both doesn't violate the composite PK), then the
+/// source label is deleted. Atomic via savepoint. Returns the surviving
+/// target label. The attach/detach triggers fire naturally, so the audit log
+/// records the reassignment and issue `updated_at` bumps as usual.
+pub fn merge_label(conn: &Connection, source_id: i64, target_id: i64) -> Result<Label, LificError> {
+    if source_id == target_id {
+        return Err(LificError::BadRequest(
+            "cannot merge a label into itself".into(),
+        ));
+    }
+    super::savepoint(conn, "merge_label", || {
+        conn.execute(
+            "INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
+             SELECT issue_id, ?1 FROM issue_labels WHERE label_id = ?2",
+            params![target_id, source_id],
+        )?;
+        conn.execute(
+            "DELETE FROM issue_labels WHERE label_id = ?1",
+            params![source_id],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO page_labels (page_id, label_id)
+             SELECT page_id, ?1 FROM page_labels WHERE label_id = ?2",
+            params![target_id, source_id],
+        )?;
+        conn.execute(
+            "DELETE FROM page_labels WHERE label_id = ?1",
+            params![source_id],
+        )?;
+        let changed = conn.execute("DELETE FROM labels WHERE id = ?1", params![source_id])?;
+        if changed == 0 {
+            return Err(LificError::NotFound(format!("label {source_id} not found")));
+        }
+        Ok(())
+    })?;
+    conn.query_row(
+        "SELECT id, project_id, name, color FROM labels WHERE id = ?1",
+        params![target_id],
+        |row| {
+            Ok(Label {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                color: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("label {target_id} not found"))
+        }
+        _ => e.into(),
+    })
+}
+
 pub fn list_folders(conn: &Connection, project_id: i64) -> Result<Vec<Folder>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, project_id, parent_id, name, sort_order FROM folders WHERE project_id = ?1 ORDER BY sort_order, name",
@@ -592,6 +649,84 @@ mod tests {
         .unwrap();
         assert_eq!(updated.name, "defect"); // unchanged
         assert_eq!(updated.color, "#FF0000");
+    }
+
+    #[test]
+    fn merge_label_moves_attachments_and_dedups() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let bug = create_label(
+            &conn,
+            &CreateLabel { project_id: pid, name: "bug".into(), color: "#EF4444".into() },
+        )
+        .unwrap();
+        let defect = create_label(
+            &conn,
+            &CreateLabel { project_id: pid, name: "defect".into(), color: "#F97316".into() },
+        )
+        .unwrap();
+
+        // Issue A carries only the source label.
+        let a = crate::db::queries::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: pid,
+                title: "A".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec!["bug".into()],
+            },
+        )
+        .unwrap();
+        // Issue B carries BOTH — the merge must dedup, not double-insert.
+        let b = crate::db::queries::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: pid,
+                title: "B".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec!["bug".into(), "defect".into()],
+            },
+        )
+        .unwrap();
+
+        let survivor = merge_label(&conn, bug.id, defect.id).unwrap();
+        assert_eq!(survivor.id, defect.id);
+
+        // Source label is gone; only the target remains.
+        let labels = list_labels(&conn, pid).unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "defect");
+
+        // A was re-pointed; B kept exactly one copy of the target.
+        let a2 = crate::db::queries::get_issue(&conn, a.id).unwrap();
+        assert_eq!(a2.labels, vec!["defect".to_string()]);
+        let b2 = crate::db::queries::get_issue(&conn, b.id).unwrap();
+        assert_eq!(b2.labels, vec!["defect".to_string()]);
+    }
+
+    #[test]
+    fn merge_label_into_itself_errors() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn);
+        let l = create_label(
+            &conn,
+            &CreateLabel { project_id: pid, name: "bug".into(), color: "#EF4444".into() },
+        )
+        .unwrap();
+        let err = merge_label(&conn, l.id, l.id).unwrap_err();
+        assert!(matches!(err, LificError::BadRequest(_)));
     }
 
     #[test]

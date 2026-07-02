@@ -28,7 +28,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { compareIssues as compareIssuesPure } from "../lib/issues/sort";
   import { computeSearchResult, RESULT_CAP } from "../lib/issues/search";
-  import { STATUSES, PRIORITIES, buildGroups } from "../lib/issues/grouping";
+  import { STATUSES, PRIORITIES, buildGroups, STATUS_UNRESOLVED, isUnresolved } from "../lib/issues/grouping";
   import { saveListState, saveLayout } from "../lib/issues/persistence";
   import IssueCard from "../lib/issues/IssueCard.svelte";
   import BulkActionBar, {
@@ -63,13 +63,12 @@
   } = $props();
 
   let project = $state<Project | null>(null);
+  // `issues` is the FULL, unfiltered project set (capped at 1000). Status /
+  // priority / label / module filters are applied client-side downstream
+  // (LIF-222 perf), so this array always reflects the whole project — which
+  // is exactly what the right sidebar's project-wide breakdowns (LIF-186)
+  // need, no separate unfiltered fetch required.
   let issues = $state<Issue[]>([]);
-  // LIF-186: an unfiltered copy of the project's issues, used purely for the
-  // right sidebar's project-wide breakdowns (priority distribution, per-module
-  // counts). `issues` is server-FILTERED, so it can't answer "how many issues
-  // does each module have across the whole project" once a filter is active.
-  // When no filter is active this just mirrors `issues` (no extra fetch).
-  let allIssues = $state<Issue[]>([]);
   // LIF-161: true per-status tallies from the server. The fetched `issues`
   // array is limit-capped, so its length is NOT a reliable count — this is.
   let issueCounts = $state<IssueStatusCounts | null>(null);
@@ -81,23 +80,6 @@
   // LIF-99 Phase 3: shared view/interaction state lives in a $state class.
   // The component still owns the data layer (issues, project, fetches).
   const view = new IssueListState();
-
-  let statusOptions = $derived([
-    { value: "", label: "Status" },
-    ...STATUSES.map((s) => ({ value: s, label: s })),
-  ]);
-  let priorityOptions = $derived([
-    { value: "", label: "Priority" },
-    ...PRIORITIES.map((p) => ({ value: p, label: p })),
-  ]);
-  let labelOptions = $derived([
-    { value: "", label: "Label" },
-    ...labels.map((l) => ({ value: l.name, label: l.name, color: l.color })),
-  ]);
-  let moduleOptions = $derived([
-    { value: "", label: "Module" },
-    ...modules.map((m) => ({ value: m.name, label: m.name })),
-  ]);
 
   function priorityCssColor(p: string): string {
     switch (p) {
@@ -111,13 +93,13 @@
   }
 
   // LIF-186: project-wide breakdowns for the right sidebar. Computed from the
-  // unfiltered `allIssues` so the distribution and per-module counts reflect
-  // the whole project, not the currently filtered view.
+  // unfiltered `issues` so the distribution and per-module counts reflect the
+  // whole project, not the currently filtered view.
   let sidebarStats = $derived.by(() => {
     const prio: Record<string, number> = { urgent: 0, high: 0, medium: 0, low: 0, none: 0 };
     const byModule = new Map<number, number>();
     let noModule = 0;
-    for (const i of allIssues) {
+    for (const i of issues) {
       prio[i.priority] = (prio[i.priority] ?? 0) + 1;
       if (i.module_id == null) noModule++;
       else byModule.set(i.module_id, (byModule.get(i.module_id) ?? 0) + 1);
@@ -126,7 +108,7 @@
       prio,
       byModule,
       noModule,
-      total: issueCounts?.total ?? allIssues.length,
+      total: issueCounts?.total ?? issues.length,
       active: issueCounts?.active ?? 0,
     };
   });
@@ -163,17 +145,10 @@
     saveListState(id, snapshot);
   });
 
-  // Reload issues when filters change
-  $effect(() => {
-    // Reference the filter values to create dependency
-    view.filterStatus;
-    view.filterPriority;
-    view.filterLabel;
-    view.filterModule;
-    if (project) {
-      loadIssues();
-    }
-  });
+  // NOTE: filters no longer trigger a fetch. They're applied client-side in
+  // `controlFilteredIssues` (LIF-222 perf), so changing a filter is a pure
+  // in-memory recompute — instant, no round-trip. The full set is (re)loaded
+  // on mount/navigation and by the 15s auto-refresh poll.
 
   async function loadProject(identifier: string) {
     loading = true;
@@ -213,45 +188,25 @@
   async function loadIssues() {
     if (!project) return;
 
-    const filters: Record<string, unknown> = {
-      project_id: project.id,
-      // LIF-161: was 200, which silently truncated both the list and the
-      // topbar count once a project outgrew it. Still bounded so a huge
-      // project can't pull megabytes of descriptions per poll; the topbar
-      // tallies come from the counts endpoint, not from this fetch.
-      limit: 1000,
-    };
-    if (view.filterStatus) filters.status = view.filterStatus;
-    if (view.filterPriority) filters.priority = view.filterPriority;
-    if (view.filterLabel) filters.label = view.filterLabel;
-    if (view.filterModule) {
-      const mod = modules.find((m) => m.name === view.filterModule);
-      if (mod) filters.module_id = mod.id;
-    }
-
-    // Counts ride along with every issue fetch (initial load, filter
-    // change, 15s poll) so the topbar tallies converge with the rows.
-    // LIF-186: when a filter is active we ALSO pull an unfiltered set for the
-    // sidebar's project-wide breakdowns; with no filter the filtered fetch is
-    // already the full set, so we skip the extra round-trip.
-    const anyFilter = !!(view.filterStatus || view.filterPriority || view.filterLabel || view.filterModule);
-    const reqs: Promise<unknown>[] = [listIssues(filters), getIssueCounts(project.id)];
-    if (anyFilter) reqs.push(listIssues({ project_id: project.id, limit: 1000 }));
-    const [res, countsRes, allRes] = (await Promise.all(reqs)) as [
-      Awaited<ReturnType<typeof listIssues>>,
-      Awaited<ReturnType<typeof getIssueCounts>>,
-      Awaited<ReturnType<typeof listIssues>> | undefined,
-    ];
+    // LIF-222 perf: always fetch the FULL, unfiltered issue set. Status /
+    // priority / label / module filtering is applied client-side in the
+    // derived pipeline (see `controlFilteredIssues`), exactly like search —
+    // so toggling a filter is instant with zero network. The server fetch
+    // only runs on mount and the 15s poll.
+    //
+    // LIF-161: bounded at 1000 so a huge project can't pull megabytes of
+    // descriptions per poll; the topbar tallies come from the counts
+    // endpoint, not from this fetch. Counts ride along so the topbar
+    // converges with the rows.
+    const [res, countsRes] = await Promise.all([
+      listIssues({ project_id: project.id, limit: 1000 }),
+      getIssueCounts(project.id),
+    ]);
     if (res.ok) {
       issues = res.data;
     }
     if (countsRes.ok) {
       issueCounts = countsRes.data;
-    }
-    if (anyFilter) {
-      if (allRes && allRes.ok) allIssues = allRes.data;
-    } else if (res.ok) {
-      allIssues = res.data;
     }
   }
 
@@ -318,11 +273,37 @@
     }),
   );
 
+  // LIF-222 perf: status / priority / label / module filtering applied
+  // client-side over the full in-memory set. This used to be a server fetch
+  // per filter change (2-3 round-trips of up to 1000 full records each);
+  // doing it in-memory makes filter toggles instant and lets optimistic row
+  // edits (status/priority cycle, bulk) re-derive without a refetch. Module
+  // is matched by name → id via the loaded `modules` so the stored filter
+  // value (a name) still works.
+  let controlFilteredIssues = $derived.by(() => {
+    let out = issues;
+    if (view.filterStatus === STATUS_UNRESOLVED) {
+      // "Unresolved" group: everything not in a terminal state.
+      out = out.filter((i) => isUnresolved(i.status));
+    } else if (view.filterStatus) {
+      out = out.filter((i) => i.status === view.filterStatus);
+    }
+    if (view.filterPriority) out = out.filter((i) => i.priority === view.filterPriority);
+    if (view.filterLabel) out = out.filter((i) => i.labels.includes(view.filterLabel));
+    if (view.filterModule) {
+      const mod = modules.find((m) => m.name === view.filterModule);
+      const mid = mod ? mod.id : null;
+      out = out.filter((i) => i.module_id === mid);
+    }
+    return out;
+  });
+
   // LIF-119: fuzzy full-text search. The scoring/ranking lives in
   // lib/issues/search.ts; we wrap it in one $derived so downstream code can
   // read `filteredIssues` and `issueSearchScores` as projections of the
-  // single result (avoids writing $state from inside a $derived).
-  let searchResult = $derived(computeSearchResult(view.searchQuery, issues));
+  // single result (avoids writing $state from inside a $derived). Fed the
+  // control-filtered set so search composes with the active filters.
+  let searchResult = $derived(computeSearchResult(view.searchQuery, controlFilteredIssues));
 
   let filteredIssues = $derived(searchResult.issues);
   let issueSearchScores = $derived(searchResult.scores);
@@ -973,10 +954,6 @@
     {navigate}
     {statusCounts}
     {countLabel}
-    {statusOptions}
-    {priorityOptions}
-    {labelOptions}
-    {moduleOptions}
     {labels}
     {modules}
     {priorityCssColor}
@@ -1408,7 +1385,7 @@
 
  <!-- LIF-186: persistent right sidebar — project-wide issue context.
       Always-on (no toggle) on lg+; mirrors the Pages sidebar. Breakdowns
-      come from the unfiltered `allIssues`, and every row is a one-click
+       come from the unfiltered `issues`, and every row is a one-click
       filter shortcut into the existing filter state. -->
  {#if layout !== "board" && !loading && !error}
    <RightSidebar

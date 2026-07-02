@@ -6,6 +6,7 @@
     downloadIssueExport,
     listModules,
     listLabels,
+    createLabel,
     listComments,
     createComment,
     listIssueActivity,
@@ -206,6 +207,18 @@
     if (idx >= 0) current.splice(idx, 1);
     else current.push(name);
     await saveField("labels", current);
+  }
+
+  // Inline label creation from the picker (label management). Creates the
+  // project label, folds it into the local `labels` list, and attaches it to
+  // this issue. Returns success so LabelEditor can reset its create form.
+  async function createLabelInline(name: string, color: string): Promise<boolean> {
+    if (!issue) return false;
+    const res = await createLabel({ project_id: issue.project_id, name, color });
+    if (!res.ok) return false;
+    labels = [...labels, res.data].sort((a, b) => a.name.localeCompare(b.name));
+    await toggleLabel(res.data.name);
+    return true;
   }
 
   // ── Comments / export / delete ───────────────────────
@@ -551,6 +564,7 @@
             all={labels}
             {editable}
             onToggle={toggleLabel}
+            onCreate={editable ? createLabelInline : undefined}
             bind:open={labelsOpen}
             onOpen={closeOtherDropdowns}
           />

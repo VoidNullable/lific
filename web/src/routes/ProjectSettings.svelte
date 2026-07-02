@@ -19,6 +19,8 @@
     type UserSummary,
   } from "../lib/api";
   import IconPicker from "../lib/IconPicker.svelte";
+  import LabelManager from "../lib/LabelManager.svelte";
+  import { loadListState, saveListState } from "../lib/issues/persistence";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
@@ -202,6 +204,15 @@
   const completion = $derived(total > 0 ? (counts?.done ?? 0) / total : 0);
 
   function gotoOpenIssues() {
+    navigate(`/${projectIdentifier}/issues`);
+  }
+
+  // #1: open the issue list pre-filtered to a label. The list hydrates its
+  // filters from persisted per-project state on mount, so we stamp the label
+  // filter there (merging with whatever else is stored) before navigating.
+  function openLabelInIssues(name: string) {
+    const s = loadListState(projectIdentifier);
+    saveListState(projectIdentifier, { ...s, filterLabel: name });
     navigate(`/${projectIdentifier}/issues`);
   }
 
@@ -416,6 +427,14 @@
             </div>
           {/if}
         </section>
+
+        <!-- ── LABELS (management) ──────────────────────── -->
+        <LabelManager
+          projectId={project.id}
+          {issues}
+          onChange={() => loadAll(projectIdentifier)}
+          onOpenLabel={openLabelInIssues}
+        />
 
         <!-- ── RECENT ACTIVITY ──────────────────────────── -->
         {#if activity.length > 0}

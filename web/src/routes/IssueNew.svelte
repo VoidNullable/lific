@@ -3,6 +3,7 @@
     listProjects,
     listModules,
     listLabels,
+    createLabel,
     createIssue,
     type Project,
     type Module,
@@ -167,6 +168,19 @@
     } else {
       selectedLabels = [...selectedLabels, name];
     }
+  }
+
+  // Inline label creation from the picker (label management). Creates the
+  // project label, folds it into local `labels`, and selects it for the draft.
+  async function createLabelInline(name: string, color: string): Promise<boolean> {
+    if (!project) return false;
+    const res = await createLabel({ project_id: project.id, name, color });
+    if (!res.ok) return false;
+    labels = [...labels, res.data].sort((a, b) => a.name.localeCompare(b.name));
+    if (!selectedLabels.includes(res.data.name)) {
+      selectedLabels = [...selectedLabels, res.data.name];
+    }
+    return true;
   }
 </script>
 
@@ -380,23 +394,24 @@
               </div>
             {/if}
 
-            <!-- Labels (shared with IssueDetail via LabelEditor) -->
-            {#if labels.length > 0}
-              <div class="issue-meta-field">
-                {@render sidebarField("Labels")}
-                <LabelEditor
-                  attached={selectedLabels}
-                  all={labels}
-                  onToggle={toggleLabel}
-                  bind:open={labelsOpen}
-                  onOpen={() => {
-                    statusOpen = false;
-                    priorityOpen = false;
-                    moduleOpen = false;
-                  }}
-                />
-              </div>
-            {/if}
+            <!-- Labels (shared with IssueDetail via LabelEditor). Always
+                 shown — inline create lets you mint the project's first
+                 label without leaving the new-issue form. -->
+            <div class="issue-meta-field">
+              {@render sidebarField("Labels")}
+              <LabelEditor
+                attached={selectedLabels}
+                all={labels}
+                onToggle={toggleLabel}
+                onCreate={createLabelInline}
+                bind:open={labelsOpen}
+                onOpen={() => {
+                  statusOpen = false;
+                  priorityOpen = false;
+                  moduleOpen = false;
+                }}
+              />
+            </div>
           </div>
         </aside>
       </div>
