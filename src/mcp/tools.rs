@@ -7,6 +7,13 @@ use crate::db::{DbPool, models, queries};
 use super::LificMcp;
 use super::schemas::*;
 
+/// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
+/// **zero** projects, so the first agent connecting to a fresh install learns
+/// the bootstrap sequence instead of staring at an empty list. Kept in one
+/// place so all call sites and tests share the exact text. Precedent:
+/// backlog.md's "init-required" signal.
+pub(crate) const NO_PROJECTS_NUDGE: &str = "No projects exist yet. Create one first: manage_resource(resource_type='project', action='create', name='My Project', identifier='PRO'). Then create issues with create_issue(project='PRO', ...).";
+
 impl LificMcp {
     pub(crate) fn create_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         Self::tool_router()
@@ -328,6 +335,19 @@ fn visible_project_ids_mcp(
 }
 
 impl LificMcp {
+    /// LIF-257: return the self-onboarding nudge iff the DB genuinely has
+    /// **zero** projects. Uses the unfiltered `list_projects` (not the
+    /// authz-filtered visible set) on purpose: "projects exist but none are
+    /// visible to this user" is an authz state that must keep its current
+    /// output — nudging there would both mislead a real user and leak that
+    /// projects exist. Only a truly empty DB gets the nudge.
+    fn no_projects_nudge(&self) -> Option<String> {
+        match self.read(queries::list_projects) {
+            Ok(ps) if ps.is_empty() => Some(NO_PROJECTS_NUDGE.to_string()),
+            _ => None,
+        }
+    }
+
     /// Gate for comment read/create: Viewer (or Maintainer, for edges that
     /// need it) on the comment parent's project, falling back to
     /// workspace-admin for a page with no project. Mirrors
@@ -412,6 +432,13 @@ impl LificMcp {
             Ok(results) => {
                 let mut results = filter_visible(results, &visible, |r| r.project_id);
                 if results.is_empty() {
+                    // LIF-257: nudge only when the search itself came up
+                    // empty AND the DB has no projects — checked after the
+                    // query so workspace-level pages (which can exist with
+                    // zero projects) are never hidden by the nudge.
+                    if let Some(nudge) = self.no_projects_nudge() {
+                        return nudge;
+                    }
                     return "No results found.".into();
                 }
                 let has_more = results.len() as i64 > limit;
@@ -511,6 +538,9 @@ impl LificMcp {
         description = "List issues for a project. Use workable=true for issues with no unresolved blockers."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
+        if let Some(nudge) = self.no_projects_nudge() {
+            return nudge;
+        }
         let pid = match resolve_project(&self.db, &input.project) {
             Ok(id) => id,
             Err(e) => return format!("Error: {e}"),
@@ -803,6 +833,9 @@ impl LificMcp {
 
     #[tool(description = "Get board view of issues grouped by status, priority, or module")]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
+        if let Some(nudge) = self.no_projects_nudge() {
+            return nudge;
+        }
         let pid = match resolve_project(&self.db, &input.project) {
             Ok(id) => id,
             Err(e) => return format!("Error: {e}"),
@@ -1342,6 +1375,12 @@ impl LificMcp {
             }
             // Cross-project list (LIF-198 scope item 2): filter, don't deny.
             "project" => {
+                // LIF-257: a genuinely empty DB gets the onboarding nudge.
+                // Checked before the visibility filter so "projects exist but
+                // none visible to this user" keeps its "0 projects" output.
+                if let Some(nudge) = self.no_projects_nudge() {
+                    return nudge;
+                }
                 let visible = match visible_project_ids_mcp(&self.db) {
                     Ok(v) => v,
                     Err(e) => return format!("Error: {e}"),
@@ -2516,6 +2555,9 @@ mod tests {
     #[test]
     fn list_issues_bad_project_errors() {
         let m = mcp();
+        // A project must exist, else the LIF-257 onboarding nudge fires
+        // before the (bad) project identifier is ever resolved.
+        seed_project(&m, "Alpha", "AAA");
         let result = m.list_issues(Parameters(ListIssuesInput {
             project: "NOPE".into(),
             status: None,
@@ -2832,6 +2874,9 @@ mod tests {
     #[test]
     fn search_no_results() {
         let m = mcp();
+        // A project must exist, else the LIF-257 onboarding nudge fires
+        // before the query is ever run.
+        seed_project(&m, "Alpha", "AAA");
         let result = m.search(Parameters(SearchInput {
             query: "nonexistent_gibberish_zzz".into(),
             project: None,
@@ -2861,6 +2906,81 @@ mod tests {
         assert!(result.contains("2 projects"), "got: {result}");
         assert!(result.contains("AAA"), "got: {result}");
         assert!(result.contains("BBB"), "got: {result}");
+    }
+
+    // ── LIF-257: zero-projects onboarding nudge ──
+
+    #[test]
+    fn nudge_list_resources_project_on_empty_db() {
+        let m = mcp();
+        let result = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            ..Default::default()
+        }));
+        assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
+    }
+
+    #[test]
+    fn nudge_list_issues_on_empty_db() {
+        let m = mcp();
+        // Even with a bogus project filter, an empty DB nudges rather than
+        // returning "project not found".
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "ANY".into(),
+            ..Default::default()
+        }));
+        assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
+    }
+
+    #[test]
+    fn nudge_search_on_empty_db() {
+        let m = mcp();
+        let result = m.search(Parameters(SearchInput {
+            query: "anything".into(),
+            ..Default::default()
+        }));
+        assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
+    }
+
+    #[test]
+    fn nudge_get_board_on_empty_db() {
+        let m = mcp();
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "ANY".into(),
+            ..Default::default()
+        }));
+        assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
+    }
+
+    #[test]
+    fn no_nudge_once_a_project_exists() {
+        let m = mcp();
+        seed_project(&m, "Alpha", "AAA");
+
+        let listed = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            ..Default::default()
+        }));
+        assert!(!listed.contains(NO_PROJECTS_NUDGE), "got: {listed}");
+        assert!(listed.contains("1 projects"), "got: {listed}");
+
+        let issues = m.list_issues(Parameters(ListIssuesInput {
+            project: "AAA".into(),
+            ..Default::default()
+        }));
+        assert!(!issues.contains(NO_PROJECTS_NUDGE), "got: {issues}");
+
+        let searched = m.search(Parameters(SearchInput {
+            query: "anything".into(),
+            ..Default::default()
+        }));
+        assert!(!searched.contains(NO_PROJECTS_NUDGE), "got: {searched}");
+
+        let board = m.get_board(Parameters(GetBoardInput {
+            project: "AAA".into(),
+            ..Default::default()
+        }));
+        assert!(!board.contains(NO_PROJECTS_NUDGE), "got: {board}");
     }
 
     #[test]
@@ -4712,6 +4832,33 @@ mod authz_gating_tests {
             }))
         });
         assert!(one_visible.starts_with("1 projects"), "got: {one_visible}");
+    }
+
+    /// LIF-257: the onboarding nudge fires only on a genuinely empty DB. A
+    /// user who can see no projects (but projects DO exist) must keep the
+    /// current "0 projects" / "No results" output — nudging would leak that
+    /// projects exist and mislead a real member.
+    #[test]
+    fn nudge_not_shown_when_projects_exist_but_none_visible() {
+        let (m, _admin, _lead, _maintainer, _viewer, non_member, _project_id) =
+            setup_membership_mcp();
+
+        let projects = as_user(&non_member, || {
+            m.list_resources(Parameters(ListResourcesInput {
+                resource_type: "project".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(!projects.contains(NO_PROJECTS_NUDGE), "leaked nudge: {projects}");
+        assert!(projects.starts_with("0 projects"), "got: {projects}");
+
+        let searched = as_user(&non_member, || {
+            m.search(Parameters(SearchInput {
+                query: "anything".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(!searched.contains(NO_PROJECTS_NUDGE), "leaked nudge: {searched}");
     }
 
     // ── Writes: content mutations gated at Maintainer ────────────
