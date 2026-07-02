@@ -25,6 +25,21 @@
   import { fade } from "svelte/transition";
   import { onMount } from "svelte";
 
+  // Path-style deep links (LIF-247): external tools (e.g. the Dashboard)
+  // link to plain paths like /LIF/overview or /LIF/issues/LIF-42. The server
+  // SPA-fallbacks those to index.html, but this app is hash-routed — so a
+  // path-only URL would silently land on Home. Translate the path into the
+  // hash route once at boot and clean the address bar. Runs before the
+  // initial `route` read below so the very first render targets the right
+  // page. Unknown paths fall through to the SPA's own 404, which is correct.
+  if (window.location.pathname !== "/" && !window.location.hash) {
+    history.replaceState(
+      null,
+      "",
+      "/#" + window.location.pathname + window.location.search,
+    );
+  }
+
   let route = $state(window.location.hash.slice(1) || "/");
 
   // LIF-215: single-user mode. On a cold load with no session, ask the
