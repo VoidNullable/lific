@@ -1,6 +1,7 @@
 pub(crate) mod activity;
 pub(crate) mod comments;
 mod issues;
+pub(crate) mod members;
 mod pages;
 pub(crate) mod plans;
 mod projects;

@@ -302,6 +302,79 @@ pub struct CreateFolder {
     pub name: String,
 }
 
+// ── Project Members (LIF-195) ────────────────────────────────
+//
+// Per-project (user_id, role) pairs — the source of truth for project-scoped
+// authorization (epic LIF-194). This is the data model only; no enforcement
+// lives here or anywhere yet. `projects.lead_user_id` (migration 008) stays
+// as the denormalized "primary lead" pointer; the query layer keeps both
+// consistent on write (see db::queries::projects::create_project /
+// update_project).
+
+/// A project role, ordered by privilege: `Viewer < Maintainer < Lead`.
+/// Variant declaration order drives the derived `Ord`, so don't reorder
+/// these without checking `role_ordering_is_viewer_lt_maintainer_lt_lead`.
+///
+/// String form matches the DB's CHECK-constrained `role` column values
+/// exactly ('viewer' / 'maintainer' / 'lead') via `FromSql`/`ToSql`, so
+/// `row.get::<_, Role>(..)` and `params![.., role]` work directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Viewer,
+    Maintainer,
+    Lead,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Maintainer => "maintainer",
+            Role::Lead => "lead",
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "viewer" => Ok(Role::Viewer),
+            "maintainer" => Ok(Role::Maintainer),
+            "lead" => Ok(Role::Lead),
+            other => Err(format!("invalid role: {other:?}")),
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for Role {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str()?.parse().map_err(|_| rusqlite::types::FromSqlError::InvalidType)
+    }
+}
+
+impl rusqlite::types::ToSql for Role {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMember {
+    pub project_id: i64,
+    pub user_id: i64,
+    pub role: Role,
+    pub created_at: String,
+}
+
 // ── Users & Sessions ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

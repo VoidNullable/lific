@@ -117,7 +117,13 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
             input.lead_user_id
         ],
     )?;
-    get_project(conn, conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    // LIF-195: keep project_members in sync with the denormalized lead
+    // pointer — a project created with a lead gets a 'lead' membership row.
+    if let Some(lead_id) = input.lead_user_id {
+        super::members::upsert_member(conn, id, lead_id, Role::Lead)?;
+    }
+    get_project(conn, id)
 }
 
 /// LIF-233: reindex project `sort_order` to match the supplied id order
@@ -213,6 +219,12 @@ pub fn update_project(
                 "UPDATE projects SET lead_user_id = ?1 WHERE id = ?2",
                 params![lead, id],
             )?;
+            // LIF-195: upsert a 'lead' membership for the new lead. The old
+            // lead (if any) keeps their existing membership row — this is
+            // additive, not a swap.
+            if let Some(uid) = lead {
+                super::members::upsert_member(conn, id, uid, Role::Lead)?;
+            }
         }
         Ok(())
     })?;

@@ -120,6 +120,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project sort order",
         include_str!("../../migrations/025_project_sort_order.sql"),
     ),
+    (
+        26,
+        "project members",
+        include_str!("../../migrations/026_project_members.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.
