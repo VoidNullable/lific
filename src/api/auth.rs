@@ -367,6 +367,10 @@ pub(super) async fn instance_settings_patch(
         session_lifetime_days: input.session_lifetime_days,
         login_message: input.login_message,
         web_auto_login: input.web_auto_login,
+        // authz_enforced is not exposed on this endpoint yet — LIF-196 only
+        // ships the enforcement primitive. Toggling it is wired up by a
+        // later issue (LIF-197/198/199) once handlers actually enforce it.
+        authz_enforced: None,
     };
     let s = with_write(&db, move |conn| crate::db::queries::settings::update(conn, patch))?;
     Ok(Json(settings_json(&s)))

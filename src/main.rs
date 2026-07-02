@@ -1,6 +1,7 @@
 mod actor;
 mod api;
 mod auth;
+mod authz;
 mod backup;
 mod cli;
 mod config;
@@ -163,6 +164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         session_lifetime_days: session_days,
                         login_message,
                         web_auto_login: auto_login,
+                        // Not yet exposed as a CLI flag — LIF-196 only ships
+                        // the enforcement primitive, not the operator UX for
+                        // toggling it (that lands with LIF-197/198/199).
+                        authz_enforced: None,
                     };
                     let conn = pool.write()?;
                     db::queries::settings::update(&conn, patch)?;

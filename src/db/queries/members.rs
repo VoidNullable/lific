@@ -34,9 +34,7 @@ pub fn list_members(conn: &Connection, project_id: i64) -> Result<Vec<ProjectMem
 
 /// Look up a single user's role on a project. `None` when they aren't a
 /// member (distinct from an error — "not a member" is a normal state).
-/// Not yet called outside tests — this is what LIF-194's enforcement
-/// middleware will call once it lands.
-#[allow(dead_code)]
+/// Called by `authz::require_role` (LIF-196).
 pub fn get_member_role(
     conn: &Connection,
     project_id: i64,
@@ -96,6 +94,17 @@ pub fn remove_member(conn: &Connection, project_id: i64, user_id: i64) -> Result
         )));
     }
     Ok(())
+}
+
+/// List every project id the given user has a membership row on (any role).
+/// Powers `authz::visible_project_ids` (LIF-196) — the cross-project read
+/// filter for search / project listing once enforcement is wired in.
+pub fn list_project_ids_for_user(conn: &Connection, user_id: i64) -> Result<Vec<i64>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT project_id FROM project_members WHERE user_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![user_id], |row| row.get(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Count how many `lead` members a project currently has. Not used for

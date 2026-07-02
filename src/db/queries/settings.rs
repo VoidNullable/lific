@@ -26,6 +26,12 @@ pub struct InstanceSettings {
     /// the first admin without a password (see `/api/auth/auto-login`). Browser
     /// scope only — REST/MCP are unaffected. Dangerous on a public instance.
     pub web_auto_login: bool,
+    /// LIF-196: runtime flip for project-scoped default-deny authorization
+    /// (epic LIF-194). Off by default — today's exact lead/admin-only checks
+    /// apply. When true, `authz::require_role` enforces the full
+    /// viewer/maintainer/lead membership matrix, including gated reads.
+    /// See `src/authz.rs` and LIF-DOC-7.
+    pub authz_enforced: bool,
 }
 
 /// Partial update. `None` = leave unchanged. For the nullable string fields
@@ -38,6 +44,7 @@ pub struct InstanceSettingsPatch {
     pub session_lifetime_days: Option<i64>,
     pub login_message: Option<String>,
     pub web_auto_login: Option<bool>,
+    pub authz_enforced: Option<bool>,
 }
 
 /// Seed the settings row if it does not exist yet, using `allow_signup` as the
@@ -60,6 +67,7 @@ fn defaults() -> InstanceSettings {
         session_lifetime_days: 30,
         login_message: None,
         web_auto_login: false,
+        authz_enforced: false,
     }
 }
 
@@ -70,7 +78,8 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
     let found = conn
         .query_row(
             "SELECT allow_signup, instance_name, signup_email_domains,
-                    session_lifetime_days, login_message, web_auto_login
+                    session_lifetime_days, login_message, web_auto_login,
+                    authz_enforced
              FROM instance_settings WHERE id = 1",
             [],
             |row| {
@@ -82,6 +91,7 @@ pub fn get(conn: &Connection) -> Result<InstanceSettings, LificError> {
                     session_lifetime_days: row.get(3)?,
                     login_message: row.get(4)?,
                     web_auto_login: row.get::<_, i64>(5)? != 0,
+                    authz_enforced: row.get::<_, i64>(6)? != 0,
                 })
             },
         )
@@ -129,11 +139,13 @@ pub fn update(
     };
 
     let web_auto_login = patch.web_auto_login.unwrap_or(cur.web_auto_login);
+    let authz_enforced = patch.authz_enforced.unwrap_or(cur.authz_enforced);
 
     conn.execute(
         "UPDATE instance_settings
          SET allow_signup = ?1, instance_name = ?2, signup_email_domains = ?3,
              session_lifetime_days = ?4, login_message = ?5, web_auto_login = ?6,
+             authz_enforced = ?7,
              updated_at = datetime('now')
          WHERE id = 1",
         params![
@@ -143,6 +155,7 @@ pub fn update(
             session_lifetime_days,
             login_message,
             web_auto_login,
+            authz_enforced,
         ],
     )?;
 
@@ -229,6 +242,7 @@ mod tests {
         assert_eq!(s.session_lifetime_days, 30);
         assert!(s.login_message.is_none());
         assert!(!s.web_auto_login, "single-user auto-login is off by default");
+        assert!(!s.authz_enforced, "authorization enforcement is off by default");
     }
 
     #[test]
@@ -345,5 +359,34 @@ mod tests {
         )
         .unwrap();
         assert!(!s.web_auto_login);
+    }
+
+    // LIF-196: the authz_enforced runtime flag round-trips and defaults off.
+    #[test]
+    fn update_toggles_authz_enforced() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        assert!(!get(&c).unwrap().authz_enforced);
+
+        let s = update(
+            &c,
+            InstanceSettingsPatch { authz_enforced: Some(true), ..Default::default() },
+        )
+        .unwrap();
+        assert!(s.authz_enforced);
+        // Persisted, and an unrelated patch leaves it intact.
+        let s = update(
+            &c,
+            InstanceSettingsPatch { instance_name: Some("Solo".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert!(s.authz_enforced, "unrelated patch must not clear the flag");
+
+        let s = update(
+            &c,
+            InstanceSettingsPatch { authz_enforced: Some(false), ..Default::default() },
+        )
+        .unwrap();
+        assert!(!s.authz_enforced);
     }
 }

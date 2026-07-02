@@ -125,6 +125,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project members",
         include_str!("../../migrations/026_project_members.sql"),
     ),
+    (
+        27,
+        "authz enforced flag",
+        include_str!("../../migrations/027_authz_enforced.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

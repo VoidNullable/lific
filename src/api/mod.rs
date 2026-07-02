@@ -243,29 +243,19 @@ where
 /// false and thus locked out every non-admin user. New projects default the
 /// lead to the creator (see `create_project`), and the 011 migration backfills
 /// existing unowned projects, so this branch should be rare in practice.
+///
+/// LIF-196: thin wrapper over `authz::require_role(.., Role::Lead)`, the
+/// single enforcement primitive shared with MCP. Kept as its own function so
+/// existing call sites (`api/resources.rs`, `api/projects.rs`) don't churn.
+/// The behavior above is unchanged while the `authz_enforced` instance
+/// setting is off (today's default); see `src/authz.rs` for the full mode
+/// split.
 fn require_project_lead(
     db: &DbPool,
     auth_user: &Option<AuthUser>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    let Some(user) = auth_user else {
-        return Err(LificError::Forbidden(
-            "only the project lead or an admin can do this".into(),
-        ));
-    };
-    if user.is_admin {
-        return Ok(());
-    }
-    let project = with_read(db, |conn| queries::get_project(conn, project_id))?;
-    match project.lead_user_id {
-        Some(lead) if lead == user.id => Ok(()),
-        Some(_) => Err(LificError::Forbidden(
-            "only the project lead or an admin can do this".into(),
-        )),
-        None => Err(LificError::Forbidden(
-            "this project has no lead — only an admin can edit it".into(),
-        )),
-    }
+    crate::authz::require_role(db, auth_user, project_id, Role::Lead)
 }
 
 /// Require any authenticated user (LIF-233). Used for low-stakes, instance-wide
