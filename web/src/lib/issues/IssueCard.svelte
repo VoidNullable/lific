@@ -6,7 +6,9 @@
   import PriorityIcon from "../PriorityIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
   import { formatRelative } from "../format";
-  import { PanelRight } from "lucide-svelte";
+  import { PanelRight, ExternalLink } from "lucide-svelte";
+  import { openContextMenu } from "../contextMenu.svelte"; // LIF-248
+  import { projectCodeOf } from "../references"; // LIF-248
 
   let {
     issue,
@@ -19,12 +21,35 @@
     labels: Label[];
     /** Invoked when the card is clicked (parent navigates to the issue). */
     onOpen: (issue: Issue) => void;
-    /** LIF-244: opens the peek panel on this issue — mod-click (cmd/ctrl)
-     *  or the hover affordance button. Unlike IssueRow, the board has no
-     *  existing ctrl/cmd-click behavior to collide with, so mod-click is
-     *  safe to wire directly on the card body here. */
+    /** LIF-244: opens the peek panel on this issue — mod-click (cmd/ctrl),
+     *  shift-click (LIF-248), or the hover affordance button. Unlike
+     *  IssueRow, the board has no existing ctrl/cmd-click OR shift-click
+     *  behavior to collide with (no range-select on the board), so both
+     *  modifiers are safe to wire directly on the card body here. */
     onPeek: (issue: Issue) => void;
   } = $props();
+
+  // LIF-248: right-click → preview / open-in-new-tab. Doesn't touch
+  // selection or navigation — a separate event from `onclick` below, so
+  // this can't interfere with drag-and-drop (which starts on mousedown,
+  // not contextmenu) or the mod/shift-click peek handling.
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e.clientX, e.clientY, [
+      { label: "Open preview", icon: PanelRight, action: () => onPeek(issue) },
+      {
+        label: "Open in new tab",
+        icon: ExternalLink,
+        action: () =>
+          window.open(
+            `${location.origin}/#/${projectCodeOf(issue.identifier)}/issues/${issue.identifier}`,
+            "_blank",
+            "noopener",
+          ),
+      },
+    ]);
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
@@ -35,13 +60,14 @@
          transition-colors group"
   tabindex="0"
   onclick={(e) => {
-    if (e.ctrlKey || e.metaKey) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
       e.preventDefault();
       onPeek(issue);
       return;
     }
     onOpen(issue);
   }}
+  oncontextmenu={handleContextMenu}
 >
   <!-- Top row: identifier + peek affordance + priority -->
   <div class="flex items-center gap-2 mb-1.5">

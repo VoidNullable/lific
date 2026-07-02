@@ -18,6 +18,7 @@
 import { peekState } from "./issues/peek.svelte";
 import { commandPaletteState } from "./commandPaletteState.svelte";
 import { shortcutHelpState } from "./shortcutHelp.svelte";
+import { contextMenuState } from "./contextMenu.svelte"; // LIF-248
 
 export type ShortcutScope = "global" | "list" | "board" | "peek" | "palette";
 
@@ -97,16 +98,19 @@ export function isTypingContext(el: Element | null = document.activeElement): bo
 
 /** True when no list/board/global shortcut should fire: typing in a field,
  *  or a modal that owns its own keyboard handling is open (the peek panel,
- *  the command palette, or the shortcut help overlay itself). Deliberately
+ *  the command palette, the shortcut help overlay, or — LIF-248 — the
+ *  right-click context menu, whose own arrow/Enter/Esc handling would
+ *  otherwise double-fire alongside a list's j/k row navigation). Deliberately
  *  NOT used by the "?" toggle handler in Layout.svelte — that one needs to
  *  keep firing while the help overlay is already open (so a second "?"
- *  press can close it) and checks the typing/peek/palette conditions
- *  directly instead. */
+ *  press can close it) and checks the typing/peek/palette/context-menu
+ *  conditions directly instead. */
 export function shortcutsSuppressed(): boolean {
   return (
     isTypingContext() ||
     peekState.open ||
     commandPaletteState.open ||
-    shortcutHelpState.open
+    shortcutHelpState.open ||
+    contextMenuState.open
   );
 }

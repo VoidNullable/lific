@@ -16,6 +16,9 @@
   import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle } from "lucide-svelte";
   import { setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
+  import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
+  import { contextMenuState } from "./contextMenu.svelte";
+  import ContextMenu from "./ContextMenu.svelte"; // LIF-248
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { toggleShortcutHelp } from "./shortcutHelp.svelte";
   import { isTypingContext } from "./shortcuts";
@@ -48,7 +51,8 @@
         e.key === "?" &&
         !isTypingContext() &&
         !peekState.open &&
-        !commandPaletteState.open
+        !commandPaletteState.open &&
+        !contextMenuState.open
       ) {
         e.preventDefault();
         toggleShortcutHelp();
@@ -589,4 +593,13 @@
   <!-- LIF-245: shortcut help overlay, mounted once so "?" works from any
        route. -->
   <ShortcutHelp />
+  <!-- LIF-248: issue peek panel + right-click context menu, mounted once
+       here (not per-route) so shift-click-to-peek and right-click work on
+       every authenticated route — issue detail, plans, pages, activity,
+       home — not just the issue list/board. Both are `fixed`-positioned
+       singletons driven by module stores, so mounting them here vs. deep
+       inside a route makes no visual difference; it just makes them
+       reachable from everywhere. -->
+  <PeekPanel {navigate} />
+  <ContextMenu />
 {/if}

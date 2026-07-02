@@ -2,7 +2,10 @@
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import IssueHoverCard from "./IssueHoverCard.svelte";
-  import { IDENTIFIER_RE, refKind, routeFor } from "./references";
+  import { IDENTIFIER_RE, refKind, routeFor, projectCodeOf } from "./references";
+  import { openPeek } from "./issues/peek.svelte"; // LIF-248
+  import { openContextMenu } from "./contextMenu.svelte"; // LIF-248
+  import { PanelRight, ExternalLink } from "lucide-svelte";
 
   let { content, class: className = "" }: { content: string; class?: string } =
     $props();
@@ -154,10 +157,10 @@
     };
   });
 
-  // Wire hover/focus listeners onto every not-yet-decorated issue link.
-  // Mirrors the code-copy-button effect below: direct DOM listeners
-  // (not Svelte event bindings) because the anchors come from raw
-  // `{@html}` markup, not the component's own template.
+  // Wire hover/focus/click/context-menu listeners onto every not-yet-
+  // decorated issue link. Mirrors the code-copy-button effect below:
+  // direct DOM listeners (not Svelte event bindings) because the anchors
+  // come from raw `{@html}` markup, not the component's own template.
   $effect(() => {
     html; // re-run when the rendered markdown changes
     const root = containerEl;
@@ -172,6 +175,53 @@
       link.addEventListener("mouseleave", scheduleHoverHide);
       link.addEventListener("focus", () => scheduleHoverShow(link, ident));
       link.addEventListener("blur", scheduleHoverHide);
+
+      // LIF-248: shift-click opens the peek panel instead of navigating —
+      // same convention as IssueRow/IssueCard. A plain click keeps the
+      // link's normal `href="#/..."` navigation (nothing to intercept:
+      // this is a real <a>, not a synthetic click target). Peeking an
+      // identifier that's inside the peek panel's OWN rendered
+      // description (peek-in-peek) just swaps `peekState.identifier` —
+      // PeekPanel's effect re-fetches in place, same as any other
+      // re-target.
+      link.addEventListener("click", (e) => {
+        if (!e.shiftKey) return;
+        e.preventDefault();
+        openPeek(ident);
+      });
+
+      // Right-click: same two actions as IssueRow/IssueCard's context
+      // menu. stopPropagation so ContextMenu.svelte's window-level
+      // "close on any other contextmenu" listener doesn't immediately
+      // close the menu this just opened (see that component's handler
+      // for the full ordering argument).
+      link.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Right-clicking doesn't fire mouseleave, so a hover card already
+        // showing on this link would otherwise linger on top of the menu
+        // (IssueHoverCard renders at a higher z-index than ContextMenu —
+        // it needs to win against ordinary scroll/overflow contexts
+        // everywhere else it's used). Dismiss it immediately rather than
+        // waiting out the mouseleave grace period.
+        if (hoverShowTimer) { clearTimeout(hoverShowTimer); hoverShowTimer = null; }
+        if (hoverHideTimer) { clearTimeout(hoverHideTimer); hoverHideTimer = null; }
+        hoverAnchor = null;
+        hoverIdent = null;
+        openContextMenu(e.clientX, e.clientY, [
+          { label: "Open preview", icon: PanelRight, action: () => openPeek(ident) },
+          {
+            label: "Open in new tab",
+            icon: ExternalLink,
+            action: () =>
+              window.open(
+                `${location.origin}/#/${projectCodeOf(ident)}/issues/${ident}`,
+                "_blank",
+                "noopener",
+              ),
+          },
+        ]);
+      });
     }
   });
 

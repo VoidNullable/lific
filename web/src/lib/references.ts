@@ -46,6 +46,15 @@ export function refKind(kindMarker: string | undefined): RefKind {
   return "issue";
 }
 
+/** Issue identifiers carry their project code as the segment before the
+ *  first dash (PROJECT_CODE_RE never contains one) — cheaper than
+ *  threading a `projectIdentifier` prop through every call site that
+ *  already has the identifier string in hand (peek's "open full view",
+ *  the LIF-248 context menu's "open in new tab", shift-click handlers). */
+export function projectCodeOf(identifier: string): string {
+  return identifier.split("-")[0];
+}
+
 /** In-app hash route for a matched identifier. Issues deep-link
  *  directly since their route is keyed by the identifier string itself
  *  (`/PROJ/issues/PROJ-42`). Pages/plans are keyed by numeric id, which

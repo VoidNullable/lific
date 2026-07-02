@@ -10,13 +10,15 @@
   // state instance; keeping them explicit here first makes the seam
   // reviewable and build-verifiable.
   import type { Issue, Label, Module } from "../api";
-  import { Check, Signal, Layers, PanelRight } from "lucide-svelte";
+  import { Check, Signal, Layers, PanelRight, ExternalLink } from "lucide-svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
   import { formatRelative } from "../format";
   import { STATUSES, PRIORITIES, descriptionPreview } from "./grouping";
+  import { openContextMenu } from "../contextMenu.svelte"; // LIF-248
+  import { projectCodeOf } from "../references"; // LIF-248
 
   let {
     issue,
@@ -108,6 +110,28 @@
       ? undefined
       : modules.find((m) => m.id === issue.module_id),
   );
+
+  // LIF-248: right-click → preview / open-in-new-tab. A separate event
+  // from the row's own `onclick` below, so it can't touch selection
+  // (shift-click stays range-select, ctrl/cmd-click stays multi-select —
+  // both untouched here) or navigation.
+  function handleContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e.clientX, e.clientY, [
+      { label: "Open preview", icon: PanelRight, action: () => onPeek(issue) },
+      {
+        label: "Open in new tab",
+        icon: ExternalLink,
+        action: () =>
+          window.open(
+            `${location.origin}/#/${projectCodeOf(issue.identifier)}/issues/${issue.identifier}`,
+            "_blank",
+            "noopener",
+          ),
+      },
+    ]);
+  }
 </script>
 
 <div
@@ -143,6 +167,7 @@
     if (e.shiftKey) e.preventDefault();
   }}
   onmouseenter={(e) => onMouseEnterRow(e, idx)}
+  oncontextmenu={handleContextMenu}
 >
   <!-- Selection checkbox (LIF-149). Space is always reserved so rows never
        shift; the box is invisible until hover or until a selection exists

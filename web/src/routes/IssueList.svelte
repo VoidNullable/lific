@@ -43,8 +43,7 @@
   import RightSidebar from "../lib/issues/RightSidebar.svelte";
   import IssueRow from "../lib/issues/IssueRow.svelte";
   import Topbar from "../lib/issues/Topbar.svelte";
-  import PeekPanel from "../lib/issues/PeekPanel.svelte";
-  import { peekState, openPeek } from "../lib/issues/peek.svelte"; // LIF-244
+  import { peekState, openPeek, registerPeekSync } from "../lib/issues/peek.svelte"; // LIF-244 / LIF-248
   import {
     IssueListState,
     updateIssueWithUndo,
@@ -1177,6 +1176,11 @@
   function onPeekIssueChanged(id: number, patch: Record<string, unknown>) {
     issues = issues.map((i) => (i.id === id ? { ...i, ...(patch as Partial<Issue>) } : i));
   }
+  // LIF-248: PeekPanel is now mounted globally in Layout.svelte, not here —
+  // register our sync callback with the peek.svelte.ts singleton instead
+  // of passing it as a prop. Unregisters on unmount/navigation so a peek
+  // mutation made after this list is gone can't call into a stale closure.
+  $effect(() => registerPeekSync(onPeekIssueChanged));
   function onMouseEnterRow(e: MouseEvent, idx: number) {
     if (shouldAcceptMouse(e)) view.focusedIndex = idx;
   }
@@ -1955,12 +1959,6 @@
     onHoverModuleOption={(mi) => { view.modulePickerIdx = mi; }}
   />
 {/snippet}
-
-<!-- LIF-244: peek panel, mounted once and shared by both list and board
-     layouts (it's `fixed`-positioned, so it doesn't care which layout is
-     active — only the peek.svelte.ts store's open/identifier state does). -->
-<PeekPanel {navigate} onIssueChanged={onPeekIssueChanged} />
-
 
 
 

@@ -30,6 +30,8 @@
   import { getContext, type Snippet } from "svelte";
   import type { Activity, Comment } from "./api";
   import { isTypingContext } from "./shortcuts";
+  import { peekState } from "./issues/peek.svelte"; // LIF-248
+  import { contextMenuState } from "./contextMenu.svelte"; // LIF-248
   import type { PaletteAction, PaletteContext } from "./palette";
 
   let {
@@ -239,6 +241,17 @@
   });
 
   function handleKeydown(e: KeyboardEvent) {
+    // LIF-248: the peek panel and the right-click context menu are now
+    // mountable on top of ANY route (previously peek only existed inside
+    // IssueList, so this path was unreachable from here). Both own their
+    // own Escape handling — without this guard, opening peek from one of
+    // this route's relation/anchor chips and then pressing Escape would
+    // fire BOTH PeekPanel's closePeek() and this handler's navigate(away),
+    // and "E" would silently start editing the document behind the peek's
+    // scrim. Bail out entirely while either owns the keyboard, same
+    // shape as lib/shortcuts.ts's shortcutsSuppressed().
+    if (peekState.open || contextMenuState.open) return;
+
     // LIF-245: shared with every other keydown handler in the app (was a
     // locally duplicated computation) — see lib/shortcuts.ts.
     const inField = isTypingContext();

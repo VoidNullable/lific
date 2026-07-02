@@ -23,6 +23,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { formatDate } from "../lib/format";
   import { recordRecent } from "../lib/home/recents"; // LIF-237
+  import { openPeek } from "../lib/issues/peek.svelte"; // LIF-248
   import {
     Check,
     Plus,
@@ -315,6 +316,18 @@
     return { text: `${step.issue_identifier}: ${step.issue_status ?? "?"}`, tone: "link" };
   }
 
+  // LIF-248: shared by the provenance chip and the anchor-issue chip below —
+  // shift-click peeks instead of navigating, mirroring IssueDetail's
+  // relation chips and Markdown.svelte's identifier links.
+  function openIssueChip(e: MouseEvent, identifier: string) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      openPeek(identifier);
+      return;
+    }
+    navigate(`/${projectIdentifier}/issues/${identifier}`);
+  }
+
   let progress = $derived(plan && plan.step_count > 0 ? plan.done_count / plan.step_count : 0);
 </script>
 
@@ -448,7 +461,8 @@
                        : prov.tone === 'muted'
                          ? 'text-[var(--text-faint)] bg-[var(--bg-subtle)]'
                          : 'text-[var(--accent)] bg-[var(--accent-subtle)]'}"
-              onclick={() => step.issue_identifier && navigate(`/${projectIdentifier}/issues/${step.issue_identifier}`)}
+              title="Shift-click to preview"
+              onclick={(e) => step.issue_identifier && openIssueChip(e, step.issue_identifier)}
             >
               {prov.text}<ArrowUpRight size={10} />
             </button>
@@ -566,7 +580,8 @@
         <div class="flex items-center gap-1.5 -mx-2 px-2">
           {#if plan.anchor_identifier}
             <button class="text-body-sm font-mono text-[var(--accent)] hover:underline flex items-center gap-1"
-                    onclick={() => navigate(`/${projectIdentifier}/issues/${plan?.anchor_identifier}`)}>
+                    title="Shift-click to preview"
+                    onclick={(e) => plan?.anchor_identifier && openIssueChip(e, plan.anchor_identifier)}>
               {plan.anchor_identifier}<ArrowUpRight size={12} />
             </button>
             <button class="ml-auto text-[var(--text-faint)] hover:text-[var(--text)] text-caption" onclick={setAnchor}>change</button>

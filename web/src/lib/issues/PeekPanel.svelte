@@ -1,9 +1,10 @@
 <script lang="ts">
   // LIF-244 — issue peek panel: a slide-over preview of an issue from the
-  // list/board, without leaving the route. Mounted once inside
-  // IssueList.svelte (shared by both list and board layouts) and driven by
-  // the peek.svelte.ts module singleton, so any row/card can open it via
-  // `openPeek(identifier)` without a prop chain.
+  // list/board, without leaving the route. LIF-248: mounted once in
+  // Layout.svelte (available on every authenticated route, not just
+  // list/board) and driven by the peek.svelte.ts module singleton, so any
+  // row/card/chip can open it via `openPeek(identifier)` without a prop
+  // chain.
   //
   // Deliberately NOT a re-render of IssueDetail: no activity timeline, no
   // export/delete, no full comment thread — just enough to preview and
@@ -33,9 +34,10 @@
     type Module,
     type Label,
   } from "../api";
-  import { peekState, closePeek } from "./peek.svelte";
+  import { peekState, closePeek, notifyPeekSync } from "./peek.svelte";
   import { updateIssueWithUndo } from "./state.svelte";
   import { STATUSES, PRIORITIES } from "./grouping";
+  import { projectCodeOf } from "../references";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
@@ -49,14 +51,8 @@
 
   let {
     navigate,
-    onIssueChanged,
   }: {
     navigate: (path: string) => void;
-    /** Sync the caller's local issue list/board after a mutation applied
-     *  from the peek (forward mutation OR its Undo) — mirrors the
-     *  `onApplied` wiring IssueList's own row/keyboard/board handlers use
-     *  for `updateIssueWithUndo`. */
-    onIssueChanged?: (id: number, patch: Record<string, unknown>) => void;
   } = $props();
 
   let issue = $state<Issue | null>(null);
@@ -143,7 +139,7 @@
         if (issue && issue.id === id) {
           issue = { ...issue, ...(applied as Partial<Issue>) };
         }
-        onIssueChanged?.(id, applied);
+        notifyPeekSync(id, applied);
       },
     });
     resyncTick++;
@@ -167,7 +163,7 @@
     const res = await updateIssue(id, { title: next });
     if (res.ok) {
       if (issue && issue.id === id) issue = res.data;
-      onIssueChanged?.(id, { title: next });
+      notifyPeekSync(id, { title: next });
     }
   }
 
@@ -181,14 +177,6 @@
       // Clipboard blocked (permissions/insecure context) — silently no-op,
       // same tradeoff ProjectSettings' copy button makes.
     }
-  }
-
-  // Issue identifiers carry their project code as the segment before the
-  // dash (PROJECT_CODE_RE never contains one) — cheaper than plumbing a
-  // `projectIdentifier` prop through from both IssueList layouts for a
-  // value the identifier already encodes.
-  function projectCodeOf(identifier: string): string {
-    return identifier.split("-")[0];
   }
 
   function openFullView() {

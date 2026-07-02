@@ -24,6 +24,7 @@
   import { formatDate } from "../lib/format";
   import { recordRecent } from "../lib/home/recents"; // LIF-237
   import { updateIssueWithUndo } from "../lib/issues/state.svelte"; // LIF-243
+  import { openPeek } from "../lib/issues/peek.svelte"; // LIF-248
   import { ArrowUpRight } from "lucide-svelte";
 
   let {
@@ -267,6 +268,18 @@
     labels = [...labels, res.data].sort((a, b) => a.name.localeCompare(b.name));
     await toggleLabel(res.data.name);
     return true;
+  }
+
+  // LIF-248: shared by every relation chip (blocked-by / blocks / related)
+  // below — shift-click peeks instead of navigating, mirroring
+  // Markdown.svelte's identifier links and IssueCard's shift-click.
+  function openRelation(e: MouseEvent, rel: string) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      openPeek(rel);
+      return;
+    }
+    navigate(`/${projectIdentifier}/issues/${rel}`);
   }
 
   // ── Comments / export / delete ───────────────────────
@@ -631,7 +644,8 @@
                       class="text-caption font-mono text-[var(--error)]
                              bg-[var(--error-bg)] px-1.5 py-0.5 rounded
                              hover:underline transition-colors"
-                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
+                      title="{rel}  ·  Shift-click to preview"
+                      onclick={(e) => openRelation(e, rel)}
                     >
                       {rel}
                     </button>
@@ -648,7 +662,8 @@
                       class="text-caption font-mono text-[var(--accent)]
                              bg-[var(--accent-subtle)] px-1.5 py-0.5 rounded
                              hover:underline transition-colors"
-                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
+                      title="{rel}  ·  Shift-click to preview"
+                      onclick={(e) => openRelation(e, rel)}
                     >
                       {rel}
                     </button>
@@ -665,7 +680,8 @@
                       class="text-caption font-mono text-[var(--text-muted)]
                              bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
                              hover:underline transition-colors"
-                      onclick={() => navigate(`/${projectIdentifier}/issues/${rel}`)}
+                      title="{rel}  ·  Shift-click to preview"
+                      onclick={(e) => openRelation(e, rel)}
                     >
                       {rel}
                     </button>

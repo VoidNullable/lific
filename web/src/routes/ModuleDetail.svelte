@@ -31,6 +31,8 @@
   import Mascot from "../lib/Mascot.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import { formatDate } from "../lib/format";
+  import { peekState } from "../lib/issues/peek.svelte"; // LIF-248
+  import { contextMenuState } from "../lib/contextMenu.svelte"; // LIF-248
   import {
     ArrowLeft, Plus, ChevronDown, PanelRight, X,
     CircleDot, Pause, CircleCheck, CircleX, CircleDashed, Circle,
@@ -200,6 +202,12 @@
     if (e.key !== "e" && e.key !== "E") return;
     if (!editable || !mod) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // LIF-248: the module description renders via Markdown, whose
+    // identifier links can now shift-click-open the peek panel (globally
+    // mounted, not just inside IssueList) — without this guard, pressing
+    // "e" while that peek is open over this page would silently start
+    // editing the module's own description behind the scrim.
+    if (peekState.open || contextMenuState.open) return;
     const el = document.activeElement;
     if (el) {
       const tag = el.tagName;
