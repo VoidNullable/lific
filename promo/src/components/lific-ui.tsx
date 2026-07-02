@@ -854,11 +854,11 @@ const Sidebar: React.FC = () => {
               letterSpacing: "0.02em",
             }}
           >
-            BW
+            L
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: BODY_SM, color: C.text, lineHeight: 1.25 }}>
-              blake
+              Lizzy
             </div>
             <div
               style={{

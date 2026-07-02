@@ -22,12 +22,17 @@ export const Cta: React.FC = () => {
     fps,
     config: { damping: 16, stiffness: 110 },
   });
-  // Lizzy peeks in from the bottom-right corner.
+  // Lizzy peeks in from the bottom-right corner, then gently bobs
+  // through the long hold.
   const lizzy = spring({
     frame: frame - 28,
     fps,
     config: { damping: 15, stiffness: 90 },
   });
+  const bob = Math.sin((frame - 28) / 34) * 6;
+
+  // Slow breathing glow on the CTA box so the extended hold stays alive.
+  const breathe = (Math.sin(frame / 26) + 1) / 2; // 0..1
 
   return (
     <Background>
@@ -72,8 +77,8 @@ export const Cta: React.FC = () => {
             borderRadius: 18,
             padding: "26px 54px",
             opacity: urlIn,
-            transform: `scale(${0.92 + urlIn * 0.08})`,
-            boxShadow: `0 0 70px ${C.accentSubtle}`,
+            transform: `scale(${0.92 + urlIn * 0.08 + breathe * 0.008})`,
+            boxShadow: `0 0 ${60 + breathe * 40}px ${C.accentSubtle}`,
           }}
         >
           {CTA_URL}
@@ -91,7 +96,7 @@ export const Cta: React.FC = () => {
         style={{
           position: "absolute",
           right: 70,
-          bottom: -30 + (1 - lizzy) * -220,
+          bottom: 28 + bob + (1 - lizzy) * -220,
           width: 260,
           opacity: lizzy,
         }}

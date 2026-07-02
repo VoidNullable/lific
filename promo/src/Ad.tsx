@@ -11,6 +11,7 @@ import { TerminalScene } from "./scenes/TerminalScene";
 import { UIScene } from "./scenes/UIScene";
 import { AgentScene } from "./scenes/AgentScene";
 import { Proof } from "./scenes/Proof";
+import { TeamsScene } from "./scenes/TeamsScene";
 import { Cta } from "./scenes/Cta";
 
 /**
@@ -82,6 +83,11 @@ export const Ad: React.FC = () => {
 
         <TransitionSeries.Sequence durationInFrames={SCENES.proof}>
           <Proof />
+        </TransitionSeries.Sequence>
+        <TransitionSeries.Transition presentation={fade()} timing={cut} />
+
+        <TransitionSeries.Sequence durationInFrames={SCENES.teams}>
+          <TeamsScene />
         </TransitionSeries.Sequence>
         <TransitionSeries.Transition presentation={fade()} timing={cut} />
 
