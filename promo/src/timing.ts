@@ -18,7 +18,7 @@ export const SCENES = {
   ui: 240,
   agent: 215,
   proof: 115,
-  teams: 200,
+  teams: 270,
   cta: 265,
 } as const;
 
