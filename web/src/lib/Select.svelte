@@ -30,6 +30,33 @@
 
   let open = $state(false);
   let triggerEl = $state<HTMLButtonElement | null>(null);
+  let menuEl = $state<HTMLDivElement | null>(null);
+
+  // The menu is position:fixed with viewport coordinates (same technique as
+  // Tooltip.svelte) so it escapes `overflow: hidden` ancestors — e.g. the
+  // rounded settings cards (ProjectMembers, LabelManager) clip any
+  // absolute-positioned child to the card.
+  let menuPos = $state({ top: 0, left: 0, minWidth: 0 });
+
+  function seedMenuPos() {
+    if (!triggerEl) return;
+    const t = triggerEl.getBoundingClientRect();
+    menuPos = { top: t.bottom + 4, left: t.left, minWidth: t.width };
+  }
+
+  // Refine once the menu has a real size: flip above the trigger when it
+  // would run off the bottom of the viewport, clamp to the right edge.
+  $effect(() => {
+    if (!open || !menuEl || !triggerEl) return;
+    const t = triggerEl.getBoundingClientRect();
+    const m = menuEl.getBoundingClientRect();
+    let top = t.bottom + 4;
+    if (top + m.height > window.innerHeight - 8 && t.top - m.height - 4 >= 8) {
+      top = t.top - m.height - 4;
+    }
+    const left = Math.max(8, Math.min(t.left, window.innerWidth - m.width - 8));
+    menuPos = { top, left, minWidth: t.width };
+  });
 
   let selected = $derived(options.find((o) => o.value === value));
 
@@ -41,10 +68,22 @@
 
   function toggle(e: Event) {
     e.stopPropagation();
+    if (!open) seedMenuPos();
     open = !open;
   }
 
   function handleWindowClick() {
+    open = false;
+  }
+
+  // A fixed-position menu doesn't travel with its trigger, so close it when
+  // anything scrolls or the window resizes — except scrolls happening inside
+  // the menu itself (it has its own overflow-y).
+  function handleScrollOrResize(e: Event) {
+    if (!open) return;
+    if (e.type === "scroll" && menuEl && e.target instanceof Node && menuEl.contains(e.target)) {
+      return;
+    }
     open = false;
   }
 
@@ -80,7 +119,11 @@
   }
 </script>
 
-<svelte:window onclick={handleWindowClick} />
+<svelte:window
+  onclick={handleWindowClick}
+  onscrollcapture={handleScrollOrResize}
+  onresize={handleScrollOrResize}
+/>
 
 <div class="relative {className}">
   <button
@@ -117,9 +160,11 @@
   {#if open}
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
     <div
-      class="absolute left-0 top-full mt-1 z-30 min-w-full w-max
+      bind:this={menuEl}
+      class="fixed z-50 w-max
              bg-[var(--surface)] border border-[var(--border)]
              rounded-lg shadow-lg py-1.5 max-h-[min(360px,_50vh)] overflow-y-auto"
+      style="top: {menuPos.top}px; left: {menuPos.left}px; min-width: {menuPos.minWidth}px;"
       onclick={(e) => e.stopPropagation()}
     >
       {#each options as opt (opt.value)}
