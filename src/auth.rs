@@ -443,6 +443,9 @@ mod tests {
     use super::*;
     use crate::db;
     use api_keys_simplified::SecureString;
+    use axum::{Extension, Router, middleware, routing::get};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
 
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
@@ -689,5 +692,173 @@ mod tests {
 
         let status = manager.verify(&secure_key, &hash).unwrap();
         assert!(matches!(status, KeyStatus::Valid));
+    }
+
+    // ── LIF-204: OAuth-token user_id -> resolved AuthUser (REST middleware) ──
+    //
+    // `require_api_key` already resolves an OAuth token's bound user_id into a
+    // full `AuthUser` (LIF-79) and inserts it as `Extension<Option<AuthUser>>`.
+    // These tests exercise that resolution end-to-end through the actual
+    // middleware (rather than just the lower-level `oauth::oauth_token_user_id`
+    // helper, already covered in oauth.rs) to prove the request path shared by
+    // every REST handler and the /mcp route.
+
+    fn test_hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn test_auth_state(pool: &db::DbPool) -> AuthState {
+        AuthState {
+            db: pool.clone(),
+            manager: create_key_manager().unwrap(),
+            public_url: "https://example.com".into(),
+        }
+    }
+
+    /// Minimal router: `require_api_key` in front of a handler that echoes
+    /// back whatever `Extension<Option<AuthUser>>` the middleware resolved.
+    /// Lets tests assert on the resolved identity without a full REST route.
+    fn echo_app(auth_state: AuthState) -> Router {
+        async fn echo(
+            Extension(auth_user): Extension<Option<crate::db::models::AuthUser>>,
+        ) -> String {
+            match auth_user {
+                Some(u) => format!("user:{}:{}:{}", u.id, u.username, u.is_admin),
+                None => "none".to_string(),
+            }
+        }
+        Router::new()
+            .route("/echo", get(echo))
+            .layer(middleware::from_fn_with_state(auth_state, require_api_key))
+    }
+
+    /// Insert an `oauth_tokens` row directly, bound to `user_id` (or
+    /// unbound if `None`), bypassing the full authorize/token-exchange dance
+    /// (already covered end-to-end in oauth.rs). Returns the raw bearer token.
+    fn insert_oauth_token(pool: &db::DbPool, suffix: &str, user_id: Option<i64>) -> String {
+        use sha2::{Digest, Sha256};
+        let token = format!("lific_at_test-{suffix}");
+        let hash = test_hex_encode(&Sha256::digest(token.as_bytes()));
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let client_id = format!("client-{suffix}");
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, 'Test', '[\"http://localhost\"]')",
+            params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id) VALUES (?1, ?2, ?3, 'mcp', ?4)",
+            params![hash, client_id, expires, user_id],
+        )
+        .unwrap();
+        token
+    }
+
+    #[tokio::test]
+    async fn oauth_token_rest_request_resolves_to_correct_auth_user() {
+        let pool = test_db();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "tokenuser".into(),
+                    email: "tokenuser@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: Some("Token User".into()),
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let token = insert_oauth_token(&pool, "resolves", Some(user_id));
+
+        let resp = echo_app(test_auth_state(&pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            format!("user:{user_id}:tokenuser:false").as_bytes(),
+            "OAuth token must resolve to the bound user, not None"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_api_key_without_user_resolves_to_none_via_middleware() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "legacy-plain").unwrap();
+
+        let resp = echo_app(test_auth_state(&pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            b"none",
+            "a legacy key with no bound user must stay unresolved (default-deny)"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_token_for_deleted_user_resolves_to_none_not_panic() {
+        let pool = test_db();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            let id = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "ghost".into(),
+                    email: "ghost@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+            .id;
+            // Simulate the user having since been deleted; oauth_tokens.user_id
+            // has no FK constraint so this dangling reference is possible.
+            conn.execute("DELETE FROM users WHERE id = ?1", params![id])
+                .unwrap();
+            id
+        };
+        let token = insert_oauth_token(&pool, "ghost", Some(user_id));
+
+        let resp = echo_app(test_auth_state(&pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Must not panic, and must not resolve to a phantom user.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"none");
     }
 }
