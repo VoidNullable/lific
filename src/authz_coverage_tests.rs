@@ -173,6 +173,18 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/projects/{id}/members"), Gated(Lead)),
         (("PATCH", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
         (("DELETE", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
+        // ── Saved views (LIF-242, REST/web-only) ──
+        // Gated(Viewer) is the *project-role* floor only — every one of
+        // these additionally enforces strict per-user ownership in the
+        // query layer (db::queries::views::get_owned_view), which this
+        // manifest's Gate enum has no vocabulary for since it isn't a
+        // project-role check at all: a project's Viewer, Maintainer, and
+        // Lead can each only ever see/modify their *own* saved views, never
+        // a teammate's. See src/api/views.rs's module doc comment.
+        (("GET", "/api/projects/{id}/views"), Gated(Viewer)),
+        (("POST", "/api/projects/{id}/views"), Gated(Viewer)),
+        (("PATCH", "/api/projects/{id}/views/{view_id}"), Gated(Viewer)),
+        (("DELETE", "/api/projects/{id}/views/{view_id}"), Gated(Viewer)),
         // ── Issues ──
         (("GET", "/api/issues"), Filtered),
         (("POST", "/api/issues"), Gated(Maintainer)),

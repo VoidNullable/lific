@@ -9,6 +9,7 @@ mod pages;
 mod plans;
 mod projects;
 mod resources;
+mod views;
 
 use axum::{
     Router,
@@ -213,6 +214,16 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route(
             "/api/projects/{id}/issue-counts",
             get(projects::issue_counts),
+        )
+        // Saved views (LIF-242) — Viewer-gated + strict per-user ownership
+        // enforced in the query layer (see src/api/views.rs doc comment).
+        .route(
+            "/api/projects/{id}/views",
+            get(views::list_views).post(views::create_view),
+        )
+        .route(
+            "/api/projects/{id}/views/{view_id}",
+            patch(views::update_view).delete(views::delete_view),
         )
         // Health
         .route("/api/health", get(health))

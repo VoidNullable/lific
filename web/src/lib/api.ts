@@ -1319,3 +1319,63 @@ export interface InsightsPayload {
 export async function getInsights(projectId: number, weeks: number) {
   return request<InsightsPayload>(`/projects/${projectId}/insights?weeks=${weeks}`);
 }
+
+// ── Saved views (LIF-242) ─────────────────────────────────────
+//
+// Named filter/group/sort/display presets per project, personal to each
+// user — no team-shared views. `config` is an opaque JSON string as far as
+// this client and the backend are concerned; `web/src/lib/issues/views.ts`
+// owns the actual `ViewConfig` shape and (de)serializes it.
+
+export interface SavedView {
+  id: number;
+  project_id: number;
+  user_id: number;
+  name: string;
+  /** Opaque JSON string — see `views.ts`'s `parseConfig` / `buildConfig`. */
+  config: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSavedViewInput {
+  name: string;
+  config: string;
+  is_default?: boolean;
+}
+
+export interface UpdateSavedViewInput {
+  name?: string;
+  config?: string;
+  is_default?: boolean;
+}
+
+/** Lists only the caller's own views (server-enforced ownership). */
+export async function listSavedViews(projectId: number) {
+  return request<SavedView[]>(`/projects/${projectId}/views`);
+}
+
+export async function createSavedView(projectId: number, input: CreateSavedViewInput) {
+  return request<SavedView>(`/projects/${projectId}/views`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateSavedView(
+  projectId: number,
+  viewId: number,
+  input: UpdateSavedViewInput,
+) {
+  return request<SavedView>(`/projects/${projectId}/views/${viewId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteSavedView(projectId: number, viewId: number) {
+  return request<{ deleted: boolean }>(`/projects/${projectId}/views/${viewId}`, {
+    method: "DELETE",
+  });
+}

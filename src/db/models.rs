@@ -757,6 +757,45 @@ pub struct ListPlansQuery {
     pub offset: Option<i64>,
 }
 
+// ── Saved views (LIF-242) ────────────────────────────────────
+//
+// Named filter/group/sort presets per project, personal to each user (no
+// team-shared views — see api::views doc comment). `config` is an opaque
+// JSON string as far as the backend is concerned: validated for size and
+// well-formedness only (db::queries::views::validate_config), never
+// schema-validated. The frontend's `ViewConfig` (web/src/lib/issues/views.ts)
+// owns the actual shape.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedView {
+    pub id: i64,
+    pub project_id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub config: String,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSavedView {
+    pub name: String,
+    pub config: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// `PATCH /api/projects/{id}/views/{view_id}` body. All fields optional —
+/// only provided ones change. Renaming, updating the config, and (un)setting
+/// the default can all be done independently or together in one call.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateSavedView {
+    pub name: Option<String>,
+    pub config: Option<String>,
+    pub is_default: Option<bool>,
+}
+
 /// Deserializes a JSON field as Option<Option<T>>:
 /// - absent key → None (don't change)
 /// - "field": null → Some(None) (set to null)

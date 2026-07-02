@@ -10,6 +10,7 @@ mod resources;
 mod search;
 pub(crate) mod settings;
 pub(crate) mod users;
+pub(crate) mod views;
 
 /// Unescape literal \n and \t sequences that come through JSON transport.
 pub(crate) fn unescape_text(s: &str) -> String {

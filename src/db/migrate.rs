@@ -135,6 +135,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project members audit",
         include_str!("../../migrations/028_project_members_audit.sql"),
     ),
+    (
+        29,
+        "saved views",
+        include_str!("../../migrations/029_saved_views.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.

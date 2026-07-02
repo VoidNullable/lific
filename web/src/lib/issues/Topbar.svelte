@@ -18,6 +18,7 @@
   import Tooltip from "../Tooltip.svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import FilterModal from "./FilterModal.svelte";
+  import SavedViews from "./SavedViews.svelte";
   import type { SortField } from "./sort";
   import type { GroupBy, Density, LaneBy } from "./grouping";
   import type { IssueListState } from "./state.svelte";
@@ -203,6 +204,10 @@
       {countLabel}
     </span>
     <div class="hidden sm:block w-px h-4 bg-[var(--border)] mr-1"></div>
+
+    <!-- LIF-242: saved views. Self-contained — hides itself when /api/me
+         fails (logged out / OAuth-token-only / legacy key). -->
+    <SavedViews {view} {projectIdentifier} {layout} {navigate} />
 
     <!-- Sort button + popover. -->
     <div class="relative">
