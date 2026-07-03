@@ -889,7 +889,7 @@ impl LificMcp {
                         description: None,
                         status: input.set_status.clone(),
                         priority: input.set_priority.clone(),
-                        module_id: set_module_id,
+                        module_id: set_module_id.map(Some),
                         sort_order: None,
                         start_date: None,
                         target_date: None,
@@ -2830,6 +2830,7 @@ mod tests {
             description: None,
             status: None,
             color: None,
+            ..Default::default()
         }));
         // Two active issues in the Backend module (should be updated).
         for title in ["In-module A", "In-module B"] {
@@ -2841,6 +2842,7 @@ mod tests {
                 description: None,
                 module: Some("Backend".into()),
                 labels: None,
+                ..Default::default()
             }));
         }
         // One active issue with NO module (outside the filter).
@@ -2852,6 +2854,7 @@ mod tests {
             description: None,
             module: None,
             labels: None,
+            ..Default::default()
         }));
 
         let result = m.bulk_update(Parameters(BulkUpdateInput {
@@ -4439,6 +4442,7 @@ mod tests {
             priority: None,
             module: Some("Core".into()),
             labels: None,
+            ..Default::default()
         }));
         assert!(!set.starts_with("Error"), "set failed: {set}");
         let detail = m.get_issue(Parameters(GetIssueInput {
@@ -4455,6 +4459,7 @@ mod tests {
             priority: None,
             module: Some(String::new()),
             labels: None,
+            ..Default::default()
         }));
         assert!(!cleared.starts_with("Error"), "clear failed: {cleared}");
         let detail = m.get_issue(Parameters(GetIssueInput {
@@ -5724,6 +5729,7 @@ mod authz_gating_tests {
                 description: None,
                 module: None,
                 labels: None,
+                ..Default::default()
             }))
         });
         assert!(created.starts_with("Created"), "got: {created}");
