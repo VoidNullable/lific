@@ -160,8 +160,137 @@ pub(super) async fn get_board(
     Ok(Json(serde_json::json!(board)))
 }
 
+// ── GitHub import (LIF-264, web surface) ─────────────────────
+
+/// Request body for `POST /api/projects/{id}/import/github`.
+///
+/// The web Import panel posts repo + token + mapping here. `dry_run` drives the
+/// preview step (counts only, no writes). Only GitHub is exposed on the web;
+/// Linear/Jira are CLI-only per LIF-265.
+#[derive(serde::Deserialize)]
+pub(super) struct GithubImportRequest {
+    /// Source repo as `owner/name`.
+    repo: String,
+    /// Optional GitHub token. Public repos work without one (subject to the
+    /// anon rate limit).
+    #[serde(default)]
+    token: Option<String>,
+    /// open / closed / all. Defaults to all.
+    #[serde(default = "default_import_state")]
+    state: String,
+    /// Lific status for open issues.
+    #[serde(default = "default_map_open")]
+    map_open: String,
+    /// Lific status for closed issues.
+    #[serde(default = "default_map_closed")]
+    map_closed: String,
+    /// Preview only — count, write nothing.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+fn default_import_state() -> String {
+    "all".to_string()
+}
+fn default_map_open() -> String {
+    "backlog".to_string()
+}
+fn default_map_closed() -> String {
+    "done".to_string()
+}
+
+/// POST /api/projects/{id}/import/github — run (or preview) a GitHub import
+/// into this project.
+///
+/// Synchronous for v1: the request blocks until the import completes and
+/// returns the [`crate::import::ImportSummary`]. The fetch + DB work runs in a
+/// `spawn_blocking` task because the importer uses the blocking reqwest client.
+/// Progress is a spinner on the client; a real dry-run preview precedes the
+/// write so the operator sees counts first. Gated on project-lead (same bar as
+/// editing project structure).
+///
+/// The actual collect/apply is delegated to [`import_github_with`], which takes
+/// the fetcher as a parameter so tests can stub the network entirely.
+pub(super) async fn import_github(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Path(project_id): Path<i64>,
+    Json(req): Json<GithubImportRequest>,
+) -> Result<Json<crate::import::ImportSummary>, LificError> {
+    require_project_lead(&db, &auth_user, project_id)?;
+
+    // Resolve the import-bot owner from the authenticated user (the bot is
+    // owned by whoever ran the import), so audit provenance is correct. On a
+    // dry run we skip bot creation entirely.
+    let owner_id = auth_user.as_ref().map(|u| u.id);
+
+    let db2 = db.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        run_github_import_blocking(&db2, project_id, owner_id, &req)
+    })
+    .await
+    .map_err(|e| LificError::Internal(format!("import task failed: {e}")))??;
+
+    Ok(Json(summary))
+}
+
+/// The blocking body of [`import_github`], factored out so it runs off the
+/// async runtime (blocking reqwest) and so tests can call the injectable
+/// [`import_github_with`] variant directly.
+fn run_github_import_blocking(
+    db: &DbPool,
+    project_id: i64,
+    owner_id: Option<i64>,
+    req: &GithubImportRequest,
+) -> Result<crate::import::ImportSummary, LificError> {
+    let (owner, name) = crate::import::github::parse_repo(&req.repo)
+        .map_err(LificError::BadRequest)?;
+    let state = crate::import::github::StateFilter::parse(&req.state)
+        .map_err(LificError::BadRequest)?;
+    let fetcher = crate::import::github::LiveGithub::new(&owner, &name, req.token.clone())
+        .map_err(LificError::Internal)?;
+    let slug = format!("{owner}/{name}");
+    import_github_with(db, project_id, owner_id, &fetcher, &slug, state, req)
+}
+
+/// Core import logic with the fetcher injected. `owner_id` is the human who
+/// owns the import bot (comments are attributed to it); `None` (fresh install /
+/// dry run) skips comment attribution. Shared by the live handler and tests.
+pub(super) fn import_github_with(
+    db: &DbPool,
+    project_id: i64,
+    owner_id: Option<i64>,
+    fetcher: &dyn crate::import::github::GithubFetcher,
+    slug: &str,
+    state: crate::import::github::StateFilter,
+    req: &GithubImportRequest,
+) -> Result<crate::import::ImportSummary, LificError> {
+    let status_map = crate::import::StatusMap {
+        open: req.map_open.clone(),
+        closed: req.map_closed.clone(),
+    };
+    let fetched = crate::import::github::collect(fetcher, slug, state, &status_map)
+        .map_err(LificError::Internal)?;
+
+    // A dry run never mints a bot or writes; a real run resolves/creates the
+    // import bot owned by the requester.
+    let bot = if req.dry_run {
+        None
+    } else {
+        match owner_id {
+            Some(owner) => {
+                Some(crate::import::ensure_import_bot(db, owner, "github", "GitHub Import")?)
+            }
+            None => None,
+        }
+    };
+
+    crate::import::run_import(db, project_id, bot, &fetched, req.dry_run)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{GithubImportRequest, import_github_with};
     use crate::api::test_helpers::*;
     use crate::db::models::*;
     use axum::Extension;
@@ -898,5 +1027,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── GitHub import endpoint (LIF-264) ─────────────────────
+    //
+    // The HTTP handler wires a LiveGithub fetcher (real network), so we test
+    // the injectable core `import_github_with` with a fake fetcher — exercising
+    // the same collect → apply pipeline the endpoint uses, with zero network.
+
+    use crate::db::DbPool;
+    use crate::import::github::{GithubFetcher, GithubIssue, GithubComment, GithubUser, StateFilter};
+
+    fn import_pool() -> (DbPool, i64, i64) {
+        let db = crate::db::open_memory().unwrap();
+        let (pid, owner) = {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('boss', 'boss@test.local', 'x', 'Boss', 1, 0)",
+                [],
+            )
+            .unwrap();
+            let owner = conn.last_insert_rowid();
+            let pid = crate::db::queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "App".into(),
+                    identifier: "APP".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: Some(owner),
+                },
+            )
+            .unwrap()
+            .id;
+            (pid, owner)
+        };
+        (db, pid, owner)
+    }
+
+    struct FakeGithub;
+    impl GithubFetcher for FakeGithub {
+        fn fetch_issues_page(
+            &self,
+            page: u32,
+            _state: StateFilter,
+        ) -> Result<(Vec<GithubIssue>, bool), String> {
+            if page > 1 {
+                return Ok((vec![], false));
+            }
+            let issues: Vec<GithubIssue> = serde_json::from_str(
+                r#"[
+                    {"number":1,"title":"Open one","body":"b","state":"open","labels":[{"name":"bug","color":"d73a4a"}],"assignees":[]},
+                    {"number":2,"title":"Closed one","body":"","state":"closed","labels":[],"assignees":[]},
+                    {"number":3,"title":"A PR","body":"","state":"open","labels":[],"assignees":[],"pull_request":{"url":"x"}}
+                ]"#,
+            )
+            .unwrap();
+            Ok((issues, false))
+        }
+        fn fetch_comments(&self, _n: i64) -> Result<Vec<GithubComment>, String> {
+            Ok(vec![GithubComment {
+                user: Some(GithubUser { login: "octocat".into() }),
+                body: Some("nice".into()),
+                created_at: Some("2024-01-01T00:00:00Z".into()),
+            }])
+        }
+    }
+
+    fn req(dry_run: bool) -> GithubImportRequest {
+        GithubImportRequest {
+            repo: "octocat/hello".into(),
+            token: None,
+            state: "all".into(),
+            map_open: "backlog".into(),
+            map_closed: "done".into(),
+            dry_run,
+        }
+    }
+
+    #[test]
+    fn import_github_dry_run_counts_and_writes_nothing() {
+        let (db, pid, owner) = import_pool();
+        let summary = import_github_with(
+            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(true),
+        )
+        .unwrap();
+        assert!(summary.dry_run);
+        assert_eq!(summary.issues_created, 2, "PR filtered out");
+        assert_eq!(summary.skipped_non_issues, 1);
+        assert_eq!(summary.comments_planned, 2);
+        assert_eq!(summary.labels_planned, 1);
+        // Nothing written.
+        let conn = db.read().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn import_github_real_run_writes_and_is_idempotent() {
+        let (db, pid, owner) = import_pool();
+        let s1 = import_github_with(
+            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(false),
+        )
+        .unwrap();
+        assert_eq!(s1.issues_created, 2);
+        assert_eq!(s1.comments_created, 2);
+        assert_eq!(s1.labels_created, 1);
+
+        // Re-run: idempotent no-op.
+        let s2 = import_github_with(
+            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(false),
+        )
+        .unwrap();
+        assert_eq!(s2.issues_created, 0);
+        assert_eq!(s2.issues_skipped_existing, 2);
+
+        // Verify status mapping + source markers landed.
+        let conn = db.read().unwrap();
+        let (open_status, open_src): (String, String) = conn
+            .query_row(
+                "SELECT status, source FROM issues WHERE source = 'github:octocat/hello#1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(open_status, "backlog");
+        assert_eq!(open_src, "github:octocat/hello#1");
+        let closed_status: String = conn
+            .query_row(
+                "SELECT status FROM issues WHERE source = 'github:octocat/hello#2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(closed_status, "done");
     }
 }

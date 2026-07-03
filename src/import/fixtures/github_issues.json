@@ -1,0 +1,41 @@
+[
+  {
+    "number": 100,
+    "title": "Bug: crash on startup",
+    "body": "The app crashes on startup when the config file is missing.\n\nSteps to reproduce:\n1. Delete config\n2. Run `app`\n\n![screenshot](https://user-images.githubusercontent.com/1/2.png)",
+    "state": "open",
+    "labels": [
+      { "name": "bug", "color": "d73a4a" },
+      { "name": "needs-triage", "color": "" }
+    ],
+    "assignees": [{ "login": "alice" }],
+    "milestone": { "title": "v1.0" }
+  },
+  {
+    "number": 101,
+    "title": "Fixed: typo in README",
+    "body": "Corrected a typo.",
+    "state": "closed",
+    "labels": [{ "name": "docs", "color": "0075ca" }],
+    "assignees": []
+  },
+  {
+    "number": 102,
+    "title": "Add dark mode",
+    "body": "This PR adds dark mode support.",
+    "state": "open",
+    "labels": [],
+    "assignees": [{ "login": "bob" }],
+    "pull_request": {
+      "url": "https://api.github.com/repos/octocat/hello/pulls/102"
+    }
+  },
+  {
+    "number": 103,
+    "title": "Feature: export to CSV",
+    "body": "Would be nice to export data.",
+    "state": "open",
+    "labels": [{ "name": "enhancement", "color": "a2eeef" }],
+    "assignees": []
+  }
+]

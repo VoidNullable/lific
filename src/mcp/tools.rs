@@ -708,6 +708,7 @@ impl LificMcp {
                     start_date: None,
                     target_date: None,
                     labels: input.labels.clone().unwrap_or_default(),
+                    source: None,
                 },
             )
         }) {
@@ -3151,6 +3152,7 @@ mod tests {
             target_date: None,
             created_at: String::new(),
             updated_at: String::new(),
+            source: None,
             labels: vec!["bug".into()],
             blocks: vec!["T-2".into()],
             blocked_by: vec![],

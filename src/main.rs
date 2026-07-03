@@ -10,6 +10,7 @@ mod config;
 mod db;
 mod error;
 mod export;
+mod import;
 mod mcp;
 mod oauth;
 mod ratelimit;
@@ -863,6 +864,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("AGENTS.md {}: {}", action.as_str(), target.display());
             }
+            return Ok(());
+        }
+
+        Command::Import { action } => {
+            let json = cli::term::wants_json(cli.json);
+            // The importers use blocking reqwest + polling loops; run them off
+            // the async runtime so `reqwest::blocking` doesn't panic (same
+            // pattern as `login`).
+            let cfg_clone = cfg.clone();
+            tokio::task::spawn_blocking(move || {
+                cli::import::run(&cfg_clone, &action, json).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             return Ok(());
         }
 

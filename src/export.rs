@@ -338,6 +338,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["feature".into()],
+                source: None,
             },
         )
         .unwrap();
