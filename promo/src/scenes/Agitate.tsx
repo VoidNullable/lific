@@ -392,12 +392,15 @@ export const AgitateFoss: React.FC = () => {
                       />
                     ))}
                   </div>
+                  {/* The takeaway line pops: bold + bright so it reads
+                      even on a fast pass. */}
                   <div
                     style={{
                       marginTop: "auto",
                       fontFamily: BODY,
-                      fontSize: 19,
-                      color: C.textMuted,
+                      fontSize: 21,
+                      fontWeight: 700,
+                      color: C.text,
                       opacity: factIn,
                     }}
                   >

@@ -65,7 +65,7 @@ export const Reveal: React.FC = () => {
               fontWeight: 500,
               color: C.textMuted,
               display: "flex",
-              gap: 26,
+              gap: 24,
               alignItems: "center",
             }}
           >
@@ -73,7 +73,26 @@ export const Reveal: React.FC = () => {
             <Dot />
             <span style={{ color: C.text }}>One SQLite file.</span>
             <Dot />
+            {/* Provision-language, worst-cased from measurement: 22 MB
+                fresh on v2.0.0; 295 MB RSS on our production instance
+                after a full day of AI-agent traffic. Headroom on
+                purpose - the claim should over-deliver. */}
+            <span style={{ color: C.text }}>Under 512 MB of RAM.</span>
+            <Dot />
             <span style={{ color: C.success }}>Free &amp; open source.</span>
+          </div>
+        </FadeUp>
+        <FadeUp delay={32} duration={14}>
+          <div
+            style={{
+              fontFamily: BODY,
+              fontSize: 21,
+              color: C.textFaint,
+              marginTop: -14,
+            }}
+          >
+            measured on v2.0.0: 22 MB fresh, about 300 MB after a day of
+            production AI-agent traffic
           </div>
         </FadeUp>
       </AbsoluteFill>
