@@ -1,0 +1,37 @@
+[
+  {
+    "key": "PROJ-1",
+    "fields": {
+      "summary": "Implement search",
+      "description": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              { "type": "text", "text": "We need full-text search across issues." }
+            ]
+          }
+        ]
+      },
+      "status": { "statusCategory": { "key": "indeterminate" } },
+      "priority": { "name": "High" },
+      "labels": ["backend", "search"],
+      "assignee": { "displayName": "Alice" },
+      "issuetype": { "name": "Story" }
+    }
+  },
+  {
+    "key": "PROJ-2",
+    "fields": {
+      "summary": "Old ticket closed",
+      "description": null,
+      "status": { "statusCategory": { "key": "done" } },
+      "priority": { "name": "Low" },
+      "labels": [],
+      "assignee": null,
+      "issuetype": { "name": "Task" }
+    }
+  }
+]

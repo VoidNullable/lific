@@ -433,6 +433,37 @@ export async function downloadProjectExport(identifier: string) {
   return download(`/export/projects/${identifier}`);
 }
 
+// ── Import (LIF-264) ────────────────────────────────────────
+
+export interface GithubImportRequest {
+  repo: string;
+  token?: string;
+  state?: "open" | "closed" | "all";
+  map_open?: string;
+  map_closed?: string;
+  dry_run: boolean;
+}
+
+export interface ImportSummary {
+  dry_run: boolean;
+  issues_created: number;
+  issues_skipped_existing: number;
+  comments_created: number;
+  labels_created: number;
+  comments_planned: number;
+  labels_planned: number;
+  skipped_non_issues: number;
+  skipped_assignees: number;
+  skipped_other: number;
+}
+
+export async function importGithub(projectId: number, input: GithubImportRequest) {
+  return request<ImportSummary>(`/projects/${projectId}/import/github`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 // ── Issues ──────────────────────────────────────────────────
 
 export interface Issue {

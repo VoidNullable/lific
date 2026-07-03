@@ -680,6 +680,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["bug".into()],
+                source: None,
             },
         )
         .unwrap();
@@ -696,6 +697,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["bug".into(), "defect".into()],
+                source: None,
             },
         )
         .unwrap();

@@ -233,6 +233,12 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/issue-counts",
             get(projects::issue_counts),
         )
+        // GitHub import (LIF-264) — lead-gated. dry_run in the body drives the
+        // preview step.
+        .route(
+            "/api/projects/{id}/import/github",
+            post(projects::import_github),
+        )
         // Saved views (LIF-242) — Viewer-gated + strict per-user ownership
         // enforced in the query layer (see src/api/views.rs doc comment).
         .route(
@@ -1333,6 +1339,7 @@ mod authz_gating_tests {
                     start_date: None,
                     target_date: None,
                     labels: vec![],
+                    source: None,
                 },
             )
             .unwrap()

@@ -180,6 +180,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("DELETE", "/api/projects/{id}"), Gated(ProjectDelete)),
         (("GET", "/api/projects/{id}/board"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/issue-counts"), Gated(Viewer)),
+        (("POST", "/api/projects/{id}/import/github"), Gated(Lead)),
         // ── Membership management (LIF-199, REST/web-only) ──
         (("GET", "/api/projects/{id}/members"), Gated(Viewer)),
         (("POST", "/api/projects/{id}/members"), Gated(Lead)),

@@ -11,7 +11,7 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
         .prepare_cached(
             "SELECT i.id, i.project_id, i.sequence, p.identifier, i.title, i.description,
                     i.status, i.priority, i.module_id, i.sort_order,
-                    i.start_date, i.target_date, i.created_at, i.updated_at
+                    i.start_date, i.target_date, i.created_at, i.updated_at, i.source
              FROM issues i
              JOIN projects p ON p.id = i.project_id
              WHERE i.id = ?1",
@@ -34,6 +34,7 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 target_date: row.get(11)?,
                 created_at: row.get(12)?,
                 updated_at: row.get(13)?,
+                source: row.get(14)?,
                 labels: Vec::new(),
                 blocks: Vec::new(),
                 blocked_by: Vec::new(),
@@ -258,6 +259,10 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
             target_date: row.get(11)?,
             created_at: row.get(12)?,
             updated_at: row.get(13)?,
+            // `source` is import provenance, not needed for list rendering;
+            // fetch it only on the single-issue read path (get_issue) to keep
+            // this hot list query's column set stable.
+            source: None,
             labels: Vec::new(),
             blocks: Vec::new(),
             blocked_by: Vec::new(),
@@ -354,11 +359,12 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
     // label loop would reflect the last issue_labels row, not the issue.
     let id = super::savepoint(conn, "create_issue", || {
         conn.execute(
-            "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 input.project_id, next_seq, input.title, unescape_text(&input.description),
                 input.status, input.priority, input.module_id, input.start_date, input.target_date,
+                input.source,
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -566,6 +572,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec![],
+                source: None,
             },
         )
         .unwrap()
@@ -616,6 +623,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["bug".into(), "feature".into()],
+                source: None,
             },
         )
         .unwrap();
@@ -655,6 +663,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["bug".into()],
+                source: None,
             },
         );
         assert!(result.is_err(), "label attach failure must surface");
@@ -821,6 +830,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec![],
+                source: None,
             },
         )
         .unwrap();
@@ -863,6 +873,7 @@ mod tests {
                 start_date: None,
                 target_date: None,
                 labels: vec!["bug".into()],
+                source: None,
             },
         )
         .unwrap();

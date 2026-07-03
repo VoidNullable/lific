@@ -66,6 +66,10 @@ pub struct Issue {
     pub target_date: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Import provenance marker (LIF-264/265): stable per-external-issue string
+    /// like `github:owner/name#12`. `None` for hand-created issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Labels attached to this issue (populated on read)
     #[serde(default)]
     pub labels: Vec<String>,
@@ -93,6 +97,9 @@ pub struct CreateIssue {
     pub target_date: Option<String>,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Import provenance marker (LIF-264/265). `None` for hand-created issues.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

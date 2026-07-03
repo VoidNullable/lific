@@ -1,0 +1,110 @@
+{
+  "type": "doc",
+  "version": 1,
+  "content": [
+    {
+      "type": "heading",
+      "attrs": { "level": 1 },
+      "content": [{ "type": "text", "text": "Title" }]
+    },
+    {
+      "type": "paragraph",
+      "content": [
+        { "type": "text", "text": "This is " },
+        { "type": "text", "text": "bold", "marks": [{ "type": "strong" }] },
+        { "type": "text", "text": " and " },
+        { "type": "text", "text": "italic", "marks": [{ "type": "em" }] },
+        { "type": "text", "text": " and " },
+        { "type": "text", "text": "code", "marks": [{ "type": "code" }] },
+        { "type": "text", "text": " and " },
+        {
+          "type": "text",
+          "text": "a link",
+          "marks": [
+            { "type": "link", "attrs": { "href": "https://example.com" } }
+          ]
+        },
+        { "type": "text", "text": "." }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "content": [
+        { "type": "text", "text": "line1" },
+        { "type": "hardBreak" },
+        { "type": "text", "text": "line2" }
+      ]
+    },
+    {
+      "type": "bulletList",
+      "content": [
+        {
+          "type": "listItem",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "first" }]
+            }
+          ]
+        },
+        {
+          "type": "listItem",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "second" }]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "orderedList",
+      "content": [
+        {
+          "type": "listItem",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "one" }]
+            }
+          ]
+        },
+        {
+          "type": "listItem",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "two" }]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "codeBlock",
+      "attrs": { "language": "rust" },
+      "content": [{ "type": "text", "text": "let x = 1;" }]
+    },
+    {
+      "type": "blockquote",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [{ "type": "text", "text": "quoted" }]
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "content": [
+        { "type": "text", "text": "cc " },
+        {
+          "type": "mention",
+          "attrs": { "id": "123", "text": "@alice" }
+        }
+      ]
+    },
+    { "type": "rule" }
+  ]
+}

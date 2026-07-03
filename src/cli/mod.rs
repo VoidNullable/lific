@@ -3,6 +3,7 @@ pub mod connect;
 pub mod credentials;
 pub mod doctor;
 pub mod exec;
+pub mod import;
 pub mod login;
 pub mod term;
 
@@ -270,6 +271,114 @@ pub enum Command {
     Folder {
         #[command(subcommand)]
         action: FolderAction,
+    },
+
+    /// Import issues from an external tracker (GitHub, Linear, Jira).
+    ///
+    /// Each importer records a stable `source` marker per issue so re-running
+    /// is idempotent: already-imported issues are skipped, never duplicated.
+    /// Imported comments are attributed to a dedicated import bot (owned by a
+    /// human, like `lific connect` bots) so the audit log shows provenance.
+    /// `--dry-run` reports counts and writes nothing.
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
+}
+
+// ── Import ───────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ImportAction {
+    /// Import GitHub repo issues (filters out pull requests).
+    Github {
+        /// Source repo as owner/name (e.g. octocat/hello).
+        #[arg(long)]
+        repo: String,
+
+        /// Destination Lific project identifier (e.g. APP).
+        #[arg(long)]
+        project: String,
+
+        /// Which issues to import: open, closed, or all.
+        #[arg(long, default_value = "all")]
+        state: String,
+
+        /// GitHub token (falls back to GITHUB_TOKEN). Optional for public
+        /// repos, but strongly recommended to avoid the 60 req/hr anon limit.
+        #[arg(long, env = "GITHUB_TOKEN")]
+        token: Option<String>,
+
+        /// Lific status for open issues.
+        #[arg(long = "map-open", default_value = "backlog")]
+        map_open: String,
+
+        /// Lific status for closed issues.
+        #[arg(long = "map-closed", default_value = "done")]
+        map_closed: String,
+
+        /// Username who should own the import bot (defaults to the sole human
+        /// / sole admin; required when several users exist).
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Report what would be imported without writing anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
+    /// Import Linear team issues.
+    Linear {
+        /// Linear team key (e.g. ENG).
+        #[arg(long)]
+        team: String,
+
+        /// Destination Lific project identifier.
+        #[arg(long)]
+        project: String,
+
+        /// Linear personal API key (falls back to LINEAR_API_KEY).
+        #[arg(long, env = "LINEAR_API_KEY")]
+        token: Option<String>,
+
+        /// Username who should own the import bot.
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Report what would be imported without writing anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
+    /// Import Jira Cloud project issues.
+    Jira {
+        /// Jira site slug (the `<site>` in <site>.atlassian.net).
+        #[arg(long)]
+        site: String,
+
+        /// Jira project key (e.g. PROJ).
+        #[arg(long = "jira-project")]
+        jira_project: String,
+
+        /// Destination Lific project identifier.
+        #[arg(long)]
+        project: String,
+
+        /// Jira account email (falls back to JIRA_EMAIL).
+        #[arg(long, env = "JIRA_EMAIL")]
+        email: Option<String>,
+
+        /// Jira API token (falls back to JIRA_API_TOKEN).
+        #[arg(long, env = "JIRA_API_TOKEN")]
+        token: Option<String>,
+
+        /// Username who should own the import bot.
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Report what would be imported without writing anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 }
 

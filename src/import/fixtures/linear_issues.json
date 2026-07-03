@@ -1,0 +1,45 @@
+[
+  {
+    "identifier": "ENG-1",
+    "title": "Login button unresponsive",
+    "description": "The login button does nothing on mobile.\n\n## Steps\n- reproduce on iOS\n- tap login",
+    "priority": 1,
+    "state": { "type": "started" },
+    "assignee": { "name": "alice", "displayName": "Alice" },
+    "estimate": 3,
+    "labels": {
+      "nodes": [{ "name": "Bug", "color": "#e11d48" }]
+    },
+    "comments": {
+      "nodes": [
+        {
+          "body": "Confirmed on iPhone 14.",
+          "createdAt": "2024-02-01T10:00:00.000Z",
+          "user": { "name": "alice", "displayName": "Alice" }
+        }
+      ]
+    }
+  },
+  {
+    "identifier": "ENG-2",
+    "title": "Add onboarding tour",
+    "description": "Guide new users through the app.",
+    "priority": 3,
+    "state": { "type": "backlog" },
+    "assignee": null,
+    "labels": {
+      "nodes": [{ "name": "Feature", "color": "#2563eb" }]
+    },
+    "comments": { "nodes": [] }
+  },
+  {
+    "identifier": "ENG-3",
+    "title": "Old spec removed",
+    "description": "",
+    "priority": 0,
+    "state": { "type": "canceled" },
+    "assignee": null,
+    "labels": { "nodes": [] },
+    "comments": { "nodes": [] }
+  }
+]

@@ -21,6 +21,7 @@
   import IconPicker from "../lib/IconPicker.svelte";
   import LabelManager from "../lib/LabelManager.svelte";
   import ProjectMembers from "../lib/ProjectMembers.svelte";
+  import ImportPanel from "../lib/ImportPanel.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
@@ -439,6 +440,9 @@
 
         <!-- ── MEMBERS (LIF-200) ────────────────────────── -->
         <ProjectMembers projectId={project.id} />
+
+        <!-- ── IMPORT (LIF-264) ─────────────────────────── -->
+        <ImportPanel projectId={project.id} onImported={() => loadAll(projectIdentifier)} />
 
         <!-- ── RECENT ACTIVITY ──────────────────────────── -->
         {#if activity.length > 0}

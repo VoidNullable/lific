@@ -155,6 +155,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "comment mentions",
         include_str!("../../migrations/032_comment_mentions.sql"),
     ),
+    (
+        33,
+        "import source markers",
+        include_str!("../../migrations/033_import_source.sql"),
+    ),
 ];
 
 /// Ensure the migrations table exists and apply any pending migrations.
