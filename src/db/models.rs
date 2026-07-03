@@ -123,6 +123,7 @@ pub struct ListIssuesQuery {
     pub module_id: Option<i64>,
     pub label: Option<String>,
     pub workable: Option<bool>,
+    pub blocked: Option<bool>,
     /// Inclusive lower bound on `created_at` (ISO date or datetime).
     pub created_since: Option<String>,
     /// Exclusive upper bound on `created_at`.

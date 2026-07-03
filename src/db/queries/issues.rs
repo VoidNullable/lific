@@ -195,6 +195,18 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
         );
         conditions.push("i.status NOT IN ('done', 'cancelled')".to_string());
     }
+    if q.blocked == Some(true) {
+        conditions.push(
+            "EXISTS (
+                SELECT 1 FROM issue_relations ir
+                JOIN issues b ON b.id = ir.source_id
+                WHERE ir.target_id = i.id
+                  AND ir.relation_type = 'blocks'
+                  AND b.status != 'done'
+            )"
+            .to_string(),
+        );
+    }
 
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
@@ -305,6 +317,34 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
             let (issue_id, label_name) = row?;
             if let Some(&idx) = pos_by_id.get(&issue_id) {
                 issues[idx].labels.push(label_name);
+            }
+        }
+
+        // For the blocked=true filter, attach each issue's unresolved blockers
+        // so the MCP output can render `blocked_by:LIF-3,LIF-7`. Only the
+        // unresolved (non-done) blockers are surfaced, mirroring the filter.
+        if q.blocked == Some(true) {
+            let sql = format!(
+                "SELECT ir.target_id, p.identifier, b.sequence
+                 FROM issue_relations ir
+                 JOIN issues b ON b.id = ir.source_id
+                 JOIN projects p ON p.id = b.project_id
+                 WHERE ir.target_id IN ({placeholders})
+                   AND ir.relation_type = 'blocks'
+                   AND b.status != 'done'"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let blocker_rows = stmt.query_map(params_refs.as_slice(), |row| {
+                let target_id: i64 = row.get(0)?;
+                let proj: String = row.get(1)?;
+                let seq: i64 = row.get(2)?;
+                Ok((target_id, format!("{proj}-{seq}")))
+            })?;
+            for row in blocker_rows {
+                let (issue_id, blocker_ident) = row?;
+                if let Some(&idx) = pos_by_id.get(&issue_id) {
+                    issues[idx].blocked_by.push(blocker_ident);
+                }
             }
         }
     }
@@ -952,6 +992,85 @@ mod tests {
         .unwrap();
         assert_eq!(workable.len(), 1);
         assert_eq!(workable[0].title, "Was blocked");
+    }
+
+    #[test]
+    fn blocked_includes_only_blocked_issues() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let blocker = quick_issue(&conn, pid, "Blocker", "todo", "none");
+        let blocked = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        link_issues(&conn, blocker.id, blocked.id, "blocks").unwrap();
+
+        let result = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                blocked: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Only the blocked issue matches; the blocker itself has no blocker.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].title, "Blocked");
+        // Its unresolved blocker is surfaced as blocked_by.
+        assert_eq!(result[0].blocked_by, vec![blocker.identifier.clone()]);
+    }
+
+    #[test]
+    fn blocked_excludes_when_blocker_done() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let blocker = quick_issue(&conn, pid, "Blocker", "done", "none");
+        let was_blocked = quick_issue(&conn, pid, "Was blocked", "todo", "none");
+        link_issues(&conn, blocker.id, was_blocked.id, "blocks").unwrap();
+
+        let result = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                blocked: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The only blocker is done, so nothing is blocked.
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn blocked_is_inverse_of_workable() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let blocker = quick_issue(&conn, pid, "Blocker", "todo", "none");
+        let blocked = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        link_issues(&conn, blocker.id, blocked.id, "blocks").unwrap();
+
+        let workable = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                workable: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let blocked_list = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                blocked: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The blocked issue matches blocked=true and NOT workable=true.
+        assert!(blocked_list.iter().any(|i| i.id == blocked.id));
+        assert!(!workable.iter().any(|i| i.id == blocked.id));
     }
 
     #[test]

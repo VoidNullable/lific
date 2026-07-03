@@ -535,7 +535,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List issues for a project. Use workable=true for issues with no unresolved blockers."
+        description = "List issues for a project. Use workable=true for issues with no unresolved blockers, or blocked=true for issues with at least one unresolved blocker."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
         if let Some(nudge) = self.no_projects_nudge() {
@@ -568,6 +568,7 @@ impl LificMcp {
                     module_id,
                     label: input.label.clone(),
                     workable: input.workable,
+                    blocked: input.blocked,
                     created_since: input.created_since.clone(),
                     created_until: input.created_until.clone(),
                     updated_since: input.updated_since.clone(),
@@ -2712,6 +2713,30 @@ mod tests {
             target: "LNK-2".into(),
         }));
         assert!(result.contains("Unlinked"), "got: {result}");
+    }
+
+    #[test]
+    fn list_issues_blocked_filter_surfaces_blocked_by() {
+        let m = mcp();
+        seed_project(&m, "Test", "BLK");
+        seed_issue(&m, "BLK", "Blocker"); // BLK-1
+        seed_issue(&m, "BLK", "Blocked"); // BLK-2
+        m.link_issues(Parameters(LinkIssuesInput {
+            source: "BLK-1".into(),
+            target: "BLK-2".into(),
+            relation_type: "blocks".into(),
+        }));
+
+        let result = m.list_issues(Parameters(ListIssuesInput {
+            project: "BLK".into(),
+            blocked: Some(true),
+            ..Default::default()
+        }));
+        // Only the blocked issue is returned, and its blocker identifier is
+        // rendered inline as blocked_by:BLK-1.
+        assert!(result.contains("1 issues"), "got: {result}");
+        assert!(result.contains("Blocked"), "got: {result}");
+        assert!(result.contains("blocked_by:BLK-1"), "got: {result}");
     }
 
     // ── board ──

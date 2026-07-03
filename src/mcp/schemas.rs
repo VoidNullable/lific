@@ -37,6 +37,10 @@ pub struct ListIssuesInput {
     #[schemars(description = "Only return issues with no unresolved blockers")]
     pub workable: Option<bool>,
     #[schemars(
+        description = "Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7."
+    )]
+    pub blocked: Option<bool>,
+    #[schemars(
         description = "Only issues created at/after this ISO date or datetime (e.g. 2026-06-01)"
     )]
     pub created_since: Option<String>,
