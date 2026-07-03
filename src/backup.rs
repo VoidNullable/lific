@@ -118,8 +118,51 @@ fn run_backup(pool: &DbPool, db_path: &Path, backup_dir: &Path, retain: usize) {
     // Drop the dest connection to flush
     drop(dest);
 
+    // LIF-262: the attachments sidecar dir is part of the data set (Option B
+    // content-addressed storage — bytes live on disk, not in the DB), so a DB
+    // snapshot alone would restore metadata rows pointing at missing blobs.
+    // Mirror the attachments dir into the backup dir so a backup is
+    // self-contained: one binary, one database, one attachments dir. Files are
+    // content-addressed (immutable), so this is an additive sync — existing
+    // backup blobs are never rewritten and pruned source files are left in
+    // place (a restore only needs a superset of the referenced hashes).
+    if let Some(parent) = db_path.parent() {
+        let attachments_src = parent.join("attachments");
+        if attachments_src.is_dir() {
+            let attachments_dst = backup_dir.join("attachments");
+            if let Err(e) = sync_attachments_dir(&attachments_src, &attachments_dst) {
+                warn!(error = %e, "failed to sync attachments into backup dir");
+            }
+        }
+    }
+
     // Rotate old backups
     rotate_backups(backup_dir, db_stem, retain);
+}
+
+/// Copy any attachment blobs not already present in the backup dir. Blobs are
+/// content-addressed (the filename IS the sha256), so a file that already
+/// exists is byte-identical and safe to skip — this stays cheap even as the
+/// attachment set grows.
+fn sync_attachments_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else { continue };
+        // Skip in-progress temp writes (see storage::AttachmentStore::write).
+        if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+            continue;
+        }
+        let target = dst.join(name);
+        if !target.exists() {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Keep only the N most recent backups, delete the rest.
@@ -242,6 +285,37 @@ mod tests {
         assert!(dir.join("lific_20260101_120000.txt").exists());
         assert!(!dir.join("lific_20260101_120000.db").exists()); // oldest removed
         assert!(dir.join("lific_20260102_120000.db").exists()); // kept
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_backup_syncs_attachments_dir() {
+        // A backup must carry the content-addressed attachment blobs (Option B
+        // storage) alongside the DB snapshot, so a restore has the bytes its
+        // metadata rows point at.
+        let dir = make_temp_dir();
+        let db_path = dir.join("source.db");
+        let backup_dir = dir.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        // Seed an attachments sidecar dir next to the db.
+        let att_dir = dir.join("attachments");
+        fs::create_dir_all(&att_dir).unwrap();
+        fs::write(att_dir.join("deadbeefsha"), b"blob contents").unwrap();
+        // A stray temp write must be skipped.
+        fs::write(att_dir.join("deadbeefsha.tmp"), b"partial").unwrap();
+
+        let pool = crate::db::open(&db_path).expect("open test db");
+        run_backup(&pool, &db_path, &backup_dir, 5);
+
+        let mirrored = backup_dir.join("attachments").join("deadbeefsha");
+        assert!(mirrored.exists(), "attachment blob must be mirrored into the backup dir");
+        assert_eq!(fs::read(&mirrored).unwrap(), b"blob contents");
+        assert!(
+            !backup_dir.join("attachments").join("deadbeefsha.tmp").exists(),
+            "in-progress .tmp writes must not be backed up"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

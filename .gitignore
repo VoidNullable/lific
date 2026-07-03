@@ -2,6 +2,9 @@
 *.db
 *.db-wal
 *.db-shm
+# LIF-262: runtime attachment blobs (content-addressed sidecar dir) live next
+# to the database; never commit a dev instance's uploads.
+/attachments/
 .env
 AGENTS.md
 deploy.sh

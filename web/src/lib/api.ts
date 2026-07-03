@@ -755,6 +755,104 @@ export async function createPageComment(pageId: number, content: string) {
   });
 }
 
+// ── Attachments (LIF-262) ────────────────────────────────────
+//
+// Image + file uploads on issues, comments, and pages. Bytes are stored
+// content-addressed server-side; the client only ever holds the numeric id
+// and the `/api/attachments/{id}` URL. Uploads go through a raw `fetch` (not
+// the JSON `request` helper) because they're multipart, not JSON.
+
+export interface Attachment {
+  id: number;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  uploader_id: number | null;
+  created_at: string;
+}
+
+export interface UploadResponse {
+  id: number;
+  url: string;
+  filename: string;
+  mime: string;
+  size: number;
+}
+
+export type AttachmentEntity = "issue" | "page" | "comment";
+
+/** Upload one file. Optionally link it to an entity immediately (used by the
+ *  detail-view "Attach" affordance); otherwise it stays unlinked until the
+ *  entity's markdown is saved and re-scanned server-side. Returns a discrete
+ *  result so callers can surface the exact server reason via a toast. */
+export async function uploadAttachment(
+  file: File,
+  link?: { entity_type: AttachmentEntity; entity_id: number },
+): Promise<{ ok: true; data: UploadResponse } | { ok: false; error: string }> {
+  const token = localStorage.getItem("lific_token");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  if (link) {
+    form.append("entity_type", link.entity_type);
+    form.append("entity_id", String(link.entity_id));
+  }
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  try {
+    const res = await fetch(`${BASE}/attachments`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: body.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, data: body as UploadResponse };
+  } catch {
+    return {
+      ok: false,
+      error: "Couldn't reach the server. Check your connection and try again.",
+    };
+  }
+}
+
+/** List the attachments linked to one entity (detail-view section). */
+export async function listEntityAttachments(
+  entityType: AttachmentEntity,
+  entityId: number,
+) {
+  return request<Attachment[]>(
+    `/attachments?entity_type=${entityType}&entity_id=${entityId}`,
+  );
+}
+
+/** Download an attachment via the shared `download` helper (auth header +
+ *  Content-Disposition filename handling). */
+export async function downloadAttachment(id: number, filename?: string) {
+  return download(`/attachments/${id}`, filename);
+}
+
+export async function deleteAttachment(id: number) {
+  return request<{ deleted: boolean }>(`/attachments/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/** Human-readable byte size (e.g. "1.4 MB"). Small standalone helper so the
+ *  chip renderer and the detail-section share one formatting. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let val = bytes / 1024;
+  let i = 0;
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+  return `${val.toFixed(val < 10 ? 1 : 0)} ${units[i]}`;
+}
+
 // ── Pages ───────────────────────────────────────────────────
 
 export interface Page {

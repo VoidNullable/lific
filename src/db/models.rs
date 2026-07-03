@@ -808,6 +808,62 @@ pub struct UpdateSavedView {
     pub is_default: Option<bool>,
 }
 
+// ── Attachments (LIF-262) ────────────────────────────────────
+//
+// Image + file uploads on issues, comments, and pages. Bytes live on disk at
+// `<data_dir>/attachments/<sha256>` (content-addressed sidecar — see
+// migration 031 and src/storage.rs); this row is metadata only. The
+// `attachment_links` join (many-to-many) records which entities reference an
+// attachment so the orphan GC knows when a sidecar file is collectable.
+
+/// One uploaded file's metadata. Serialized straight to the upload/list
+/// responses; `sha256` is intentionally NOT serialized (it's an internal
+/// storage key, and the public handle is the numeric `id` + `/api/attachments`
+/// URL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: i64,
+    #[serde(skip_serializing)]
+    pub sha256: String,
+    pub filename: String,
+    pub mime: String,
+    pub size_bytes: i64,
+    pub uploader_id: Option<i64>,
+    pub created_at: String,
+}
+
+/// The kind of entity an attachment is linked to. Mirrors the
+/// `attachment_links.entity_type` CHECK values exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentEntity {
+    Issue,
+    Page,
+    Comment,
+}
+
+impl AttachmentEntity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttachmentEntity::Issue => "issue",
+            AttachmentEntity::Page => "page",
+            AttachmentEntity::Comment => "comment",
+        }
+    }
+}
+
+impl std::str::FromStr for AttachmentEntity {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "issue" => Ok(AttachmentEntity::Issue),
+            "page" => Ok(AttachmentEntity::Page),
+            "comment" => Ok(AttachmentEntity::Comment),
+            other => Err(format!("invalid attachment entity: {other:?}")),
+        }
+    }
+}
+
 /// Deserializes a JSON field as Option<Option<T>>:
 /// - absent key → None (don't change)
 /// - "field": null → Some(None) (set to null)

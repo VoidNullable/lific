@@ -159,6 +159,18 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/pages/{page_id}/comments"), Gated(Viewer)),
         (("PUT", "/api/comments/{id}"), Exempt(OWNERSHIP)),
         (("DELETE", "/api/comments/{id}"), Exempt(OWNERSHIP)),
+        // ── Attachments (LIF-262) ──
+        // The list endpoint gates on the owning entity's project at Viewer.
+        (("GET", "/api/attachments"), Gated(Viewer)),
+        // Upload is open to any authenticated user (per-user rate-limited); the
+        // blob only becomes project-visible once linked into an entity, so
+        // there's no project to gate at upload time.
+        (("POST", "/api/attachments"), Exempt("any authenticated user may upload; per-user rate-limited; linked-to-project visibility happens on entity save — LIF-262")),
+        // Download/delete authorize dynamically against EVERY project the
+        // attachment is linked into (Viewer to read, Maintainer/uploader/admin
+        // to delete), which no single fixed gate level captures.
+        (("GET", "/api/attachments/{id}"), Exempt("read gated at Viewer on any linked project, or uploader/admin when still unlinked — dynamic, see api::attachments::authorize_read (LIF-262)")),
+        (("DELETE", "/api/attachments/{id}"), Exempt("delete gated at uploader, Maintainer on any linked project, or admin — dynamic, see api::attachments::authorize_delete (LIF-262)")),
         // ── Projects ──
         (("GET", "/api/projects"), Filtered),
         (("POST", "/api/projects"), Exempt("open to any authenticated user; creator auto-becomes lead — LIF-DOC-7 decision #13")),

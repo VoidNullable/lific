@@ -11,7 +11,7 @@
 
 <p align="center">
   <strong>Issue tracking for the agentic coding era.</strong><br>
-  One binary. One SQLite file. MCP built in.
+  One binary. One SQLite database (plus an attachments dir). MCP built in.
 </p>
 
 ---
@@ -21,7 +21,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 Three numbers instead of adjectives:
 
 - **26 MCP tools in 5,231 tokens.** That's the measured size of the full `tools/list` response at v2.0.0 (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
-- **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
+- **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
 Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive being spoken, logged, grepped, and pasted into a prompt.

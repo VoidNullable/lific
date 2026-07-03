@@ -27,6 +27,8 @@ fn create_comment_with_mentions(
         let candidates = comments::mention_candidates(conn, project_id, member_scoped)?;
         let comment = comments::create_comment(conn, parent, user_id, content)?;
         comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+        // LIF-262: link attachments referenced in the comment body.
+        super::attachments::sync_links(conn, AttachmentEntity::Comment, comment.id, &comment.content)?;
         Ok(comment)
     })
 }
@@ -167,6 +169,8 @@ pub(super) async fn update_comment_handler(
         let candidates = comments::mention_candidates(conn, project_id, member_scoped)?;
         let comment = comments::update_comment(conn, id, &input.content)?;
         comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+        // LIF-262: re-scan the edited comment and reconcile links.
+        super::attachments::sync_links(conn, AttachmentEntity::Comment, comment.id, &comment.content)?;
         Ok(comment)
     })
     .map(Json)

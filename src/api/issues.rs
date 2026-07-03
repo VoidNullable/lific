@@ -53,7 +53,18 @@ pub(super) async fn create_issue(
     Json(input): Json<CreateIssue>,
 ) -> Result<Json<Issue>, LificError> {
     authz::require_role(&db, &auth_user, input.project_id, Role::Maintainer)?;
-    with_write(&db, |conn| crate::db::queries::create_issue(conn, &input)).map(Json)
+    let issue = with_write(&db, |conn| {
+        let issue = crate::db::queries::create_issue(conn, &input)?;
+        // LIF-262: link any attachments the description references.
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Issue,
+            issue.id,
+            &issue.description,
+        )?;
+        Ok(issue)
+    })?;
+    Ok(Json(issue))
 }
 
 pub(super) async fn update_issue(
@@ -64,10 +75,18 @@ pub(super) async fn update_issue(
 ) -> Result<Json<Issue>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    with_write(&db, |conn| {
-        crate::db::queries::update_issue(conn, id, &input)
-    })
-    .map(Json)
+    let issue = with_write(&db, |conn| {
+        let issue = crate::db::queries::update_issue(conn, id, &input)?;
+        // LIF-262: re-scan the (possibly edited) description and reconcile links.
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Issue,
+            issue.id,
+            &issue.description,
+        )?;
+        Ok(issue)
+    })?;
+    Ok(Json(issue))
 }
 
 pub(super) async fn delete_issue_handler(

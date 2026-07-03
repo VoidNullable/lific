@@ -146,6 +146,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../../migrations/030_oauth_device_codes.sql"),
     ),
     (
+        31,
+        "attachments",
+        include_str!("../../migrations/031_attachments.sql"),
+    ),
+    (
         32,
         "comment mentions",
         include_str!("../../migrations/032_comment_mentions.sql"),

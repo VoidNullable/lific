@@ -17,12 +17,19 @@
     listMentionCandidates,
     type Comment,
     type MentionCandidate,
+    type AttachmentEntity,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { MENTION_RE } from "./mentions";
-  import { MessageSquare, CornerDownLeft } from "lucide-svelte";
+  import { MessageSquare, CornerDownLeft, Paperclip } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import { tick } from "svelte";
+  import {
+    uploadFiles,
+    filesFromClipboard,
+    filesFromDrop,
+    insertAtCaret,
+  } from "./attachments/compose";
 
   let {
     comments,
@@ -33,17 +40,27 @@
     // fetches @mention candidates and offers autocomplete. Null (workspace
     // pages) disables mentions entirely.
     projectId = null,
+    // LIF-262: when set, pasted/dropped/attached files link straight to this
+    // entity (comment threads always know their parent). New comments haven't
+    // been created yet, so uploads stay unlinked until the comment is posted
+    // and its body is re-scanned server-side — we pass no id here and let that
+    // re-scan record the link.
+    attachTo = null,
   }: {
     comments: Comment[];
     editable?: boolean;
     onSubmit: (content: string) => Promise<Comment | null>;
     placeholder?: string;
     projectId?: number | null;
+    attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
   } = $props();
 
   let draft = $state("");
   let submitting = $state(false);
+  let uploading = $state(false);
+  let dragOver = $state(false);
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
+  let fileInputEl = $state<HTMLInputElement | null>(null);
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
 
@@ -213,6 +230,63 @@
     el.style.height = `${el.scrollHeight}px`;
   }
 
+  // ── LIF-262: attachment uploads ──────────────────────────
+
+  function insertSnippet(snippet: string) {
+    const el = textareaEl;
+    if (!el) {
+      draft = draft + (draft.endsWith("\n") || draft === "" ? "" : "\n") + snippet + "\n";
+      return;
+    }
+    const { text, caret } = insertAtCaret(el, draft, snippet);
+    draft = text;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(caret, caret);
+      resize();
+    });
+  }
+
+  async function runUploads(files: File[]) {
+    await uploadFiles(files, {
+      link: attachTo ?? undefined,
+      onInsert: insertSnippet,
+      onBusy: (b) => (uploading = b),
+    });
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const files = filesFromClipboard(e);
+    if (files.length > 0) {
+      e.preventDefault();
+      void runUploads(files);
+    }
+  }
+
+  function onDrop(e: DragEvent) {
+    const files = filesFromDrop(e);
+    dragOver = false;
+    if (files.length > 0) {
+      e.preventDefault();
+      void runUploads(files);
+    }
+  }
+
+  function onDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault();
+      dragOver = true;
+    }
+  }
+
+  function onFilePicked(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      void runUploads(Array.from(input.files));
+      input.value = "";
+    }
+  }
+
   function initials(name: string): string {
     return name
       .split(/[\s_-]+/)
@@ -290,7 +364,14 @@
   {/if}
 
   {#if editable}
-    <div class="cmt__composer">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="cmt__composer"
+      class:cmt__composer--drag={dragOver}
+      ondrop={onDrop}
+      ondragover={onDragOver}
+      ondragleave={() => (dragOver = false)}
+    >
       <div class="cmt__input-wrap">
         <textarea
           bind:this={textareaEl}
@@ -300,6 +381,7 @@
           oninput={onInput}
           onkeydown={onKeydown}
           onclick={updateMentionContext}
+          onpaste={onPaste}
           onblur={() => setTimeout(() => (mentionOpen = false), 120)}
         ></textarea>
 
@@ -335,7 +417,19 @@
         {/if}
       </div>
       <div class="cmt__toolbar">
-        <span class="cmt__hint">Markdown supported</span>
+        <div class="cmt__toolbar-left">
+          <button
+            type="button"
+            class="cmt__attach"
+            title="Attach a file"
+            onclick={() => fileInputEl?.click()}
+            disabled={uploading}
+          >
+            <Paperclip size={13} />
+            <span>{uploading ? "Uploading\u2026" : "Attach"}</span>
+          </button>
+          <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
+        </div>
         <div class="cmt__actions">
           <span class="cmt__kbd" aria-hidden="true">
             <kbd>{isMac ? "\u2318" : "Ctrl"}</kbd>
@@ -346,6 +440,14 @@
           </button>
         </div>
       </div>
+      <input
+        bind:this={fileInputEl}
+        type="file"
+        class="cmt__file-input"
+        multiple
+        accept="image/*,application/pdf,text/plain,.log,application/zip"
+        onchange={onFilePicked}
+      />
     </div>
   {/if}
 </section>
@@ -513,6 +615,62 @@
   .cmt__composer:focus-within {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-subtle);
+  }
+  /* LIF-262: drag-over affordance while a file is hovered over the composer. */
+  .cmt__composer--drag {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-subtle);
+  }
+  .cmt__composer--drag::after {
+    content: "Drop to upload";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--accent-subtle) 80%, transparent);
+    color: var(--accent);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    pointer-events: none;
+    border-radius: 0.75rem;
+  }
+  .cmt__composer {
+    position: relative;
+  }
+
+  .cmt__file-input {
+    display: none;
+  }
+
+  .cmt__toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    min-width: 0;
+  }
+  .cmt__attach {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3125rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    transition:
+      border-color 0.15s var(--ease-out-expo),
+      color 0.15s var(--ease-out-expo);
+  }
+  .cmt__attach:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .cmt__attach:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .cmt__input {

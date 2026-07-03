@@ -1,4 +1,5 @@
 mod activity;
+mod attachments;
 mod auth;
 mod comments;
 mod export;
@@ -13,13 +14,24 @@ mod views;
 
 use axum::{
     Router,
-    extract::{Json, Query, State},
+    extract::{DefaultBodyLimit, Json, Query, State},
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{self, CorsLayer};
 
+/// Transport-level body-size ceiling for the multipart upload route only. The
+/// per-instance `AttachmentConfig.max_bytes` (default 10 MB) is the real limit
+/// the handler enforces with an exact byte count and a friendly error; this
+/// ceiling just has to be comfortably above it so the raised limit isn't the
+/// thing that rejects a legitimate upload before the handler can. It overrides
+/// the global 2 MB `DefaultBodyLimit` (main.rs) for this route alone —
+/// everything else stays capped at 2 MB.
+const UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
 use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
+
+pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
 
 /// Build the full API router.
 pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
@@ -231,6 +243,21 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/views/{view_id}",
             patch(views::update_view).delete(views::delete_view),
         )
+        // Attachments (LIF-262) — image + file uploads on issues, comments,
+        // and pages. The upload route carries its own larger DefaultBodyLimit
+        // (overriding the global 2 MB) so multipart uploads up to the
+        // configured max aren't rejected at the transport layer.
+        .route(
+            "/api/attachments",
+            get(attachments::list_entity_attachments)
+                .post(attachments::upload_attachment)
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
+        .route(
+            "/api/attachments/{id}",
+            get(attachments::download_attachment)
+                .delete(attachments::delete_attachment),
+        )
         // Health
         .route("/api/health", get(health))
         .layer(
@@ -383,10 +410,44 @@ pub(crate) mod test_helpers {
     use axum::http::Request;
     use axum::{Extension, Router};
     use http_body_util::BodyExt;
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     use crate::db::DbPool;
     use crate::db::models::*;
+
+    /// A unique tempdir-backed attachment store for a test app, plus the
+    /// config + rate-limiter extensions the attachment routes need. Layered
+    /// onto every test app so the attachment endpoints work in tests without a
+    /// real data dir.
+    pub fn test_attachment_store() -> crate::storage::AttachmentStore {
+        let dir = std::env::temp_dir().join(format!(
+            "lific_att_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::storage::AttachmentStore::new(dir)
+    }
+
+    /// Layer the three attachment extensions onto a router under test.
+    pub fn with_attachment_layers(router: Router) -> Router {
+        with_attachment_layers_store(router, test_attachment_store())
+    }
+
+    pub fn with_attachment_layers_store(
+        router: Router,
+        store: crate::storage::AttachmentStore,
+    ) -> Router {
+        router
+            .layer(Extension(store))
+            .layer(Extension(super::AttachmentConfig::default()))
+            .layer(Extension(Arc::new(super::AttachmentUploadLimiter(
+                crate::ratelimit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
+            ))))
+    }
 
     pub fn test_app() -> Router {
         let db = crate::db::open_memory().expect("test db");
@@ -403,7 +464,7 @@ pub(crate) mod test_helpers {
             .expect("seed test admin");
             conn.last_insert_rowid()
         };
-        super::router(db, &[])
+        with_attachment_layers(super::router(db, &[]))
             .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
@@ -525,7 +586,7 @@ pub(crate) mod test_helpers {
 
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
-        super::router(db, &[])
+        with_attachment_layers(super::router(db, &[]))
             .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,

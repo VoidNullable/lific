@@ -13,6 +13,7 @@ mod export;
 mod mcp;
 mod oauth;
 mod ratelimit;
+mod storage;
 
 use std::sync::Arc;
 
@@ -620,6 +621,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::time::Duration::from_secs(15 * 60),
             ));
 
+            // LIF-262: attachment storage + upload guards. Bytes live in a
+            // sidecar dir next to the database (content-addressed); the upload
+            // route is rate-limited per user (30 uploads / 10 min).
+            let attachment_store =
+                storage::AttachmentStore::from_db_path(&cfg.database.path);
+            let attachment_config = api::AttachmentConfig::default();
+            let attachment_upload_limiter = Arc::new(api::AttachmentUploadLimiter(
+                ratelimit::RateLimiter::new(30, std::time::Duration::from_secs(10 * 60)),
+            ));
+            // Sweep abandoned (unlinked) attachments hourly.
+            storage::start_gc_task(pool.clone(), attachment_store.clone());
+
             // Routes behind auth: REST API + MCP
             let authed_routes = api::router(pool.clone(), &cfg.server.cors_origins)
                 .route(
@@ -641,6 +654,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                 )
                 .layer(axum::Extension(login_limiter))
+                .layer(axum::Extension(attachment_store))
+                .layer(axum::Extension(attachment_config))
+                .layer(axum::Extension(attachment_upload_limiter))
                 .layer(axum::Extension(crate::config::AuthConfig::from_server(
                     cfg.auth.allow_signup,
                     cfg.server.public_url.as_deref(),
