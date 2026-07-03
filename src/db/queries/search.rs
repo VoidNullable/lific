@@ -4,7 +4,9 @@ use crate::db::models::*;
 use crate::error::LificError;
 
 pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, LificError> {
-    let limit = q.limit.unwrap_or(20);
+    // Clamp limit to a sane range (LIF-141 class): SQLite treats LIMIT -1 as
+    // "no limit", so an unclamped `?limit=-1` would return the whole FTS set.
+    let limit = q.limit.unwrap_or(20).clamp(1, 500);
     let offset = q.offset.unwrap_or(0).max(0);
 
     // Validate enum-ish params up front so a typo'd filter errors instead
@@ -169,6 +171,42 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].result_type, "issue");
         assert_eq!(results[0].identifier, Some("TST-1".into()));
+    }
+
+    // LIF-141 class: `?limit=-1` must not become SQLite's "no limit" and
+    // return the entire FTS result set. The floor clamps to 1.
+    #[test]
+    fn search_clamps_negative_limit() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for i in 0..3 {
+            issues::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id: pid,
+                    title: format!("authentication case {i}"),
+                    description: String::new(),
+                    status: "backlog".into(),
+                    priority: "none".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "authentication".into(),
+                limit: Some(-1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1, "limit=-1 must clamp to 1, not return every match");
     }
 
     // LIF-133: empty and whitespace-only queries previously built `MATCH ''`,
