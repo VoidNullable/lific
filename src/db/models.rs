@@ -116,7 +116,10 @@ pub struct UpdateIssue {
     pub description: Option<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
-    pub module_id: Option<i64>,
+    /// LIF-145: tristate so clients can clear an issue's module back to NULL.
+    /// None = absent (don't change), Some(None) = unassign (NULL), Some(Some(id)) = set.
+    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    pub module_id: Option<Option<i64>>,
     pub sort_order: Option<f64>,
     pub start_date: Option<String>,
     pub target_date: Option<String>,

@@ -494,7 +494,7 @@ mod tests {
         queries::update_issue(
             &conn,
             a.id,
-            &UpdateIssue { module_id: Some(module.id), ..no_update() },
+            &UpdateIssue { module_id: Some(Some(module.id)), ..no_update() },
         )
         .unwrap();
         quick_issue(&conn, pid, "B", "none");

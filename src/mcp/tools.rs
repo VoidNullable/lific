@@ -139,6 +139,23 @@ fn resolve_folder(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, 
     queries::resolve_folder_name(&conn, project_id, name).map_err(|e| e.to_string())
 }
 
+/// LIF-145 sentinel for a create's simple `Option<String>` icon field: field
+/// omitted or empty string both mean "no icon"; a non-empty string sets it.
+fn emoji_for_create(emoji: &Option<String>) -> Option<String> {
+    emoji.as_ref().filter(|s| !s.is_empty()).cloned()
+}
+
+/// LIF-145 sentinel for an update's tristate `Option<Option<String>>` icon
+/// field: omitted (None) = leave unchanged, empty string = clear to NULL,
+/// non-empty = set.
+fn emoji_for_update(emoji: &Option<String>) -> Option<Option<String>> {
+    match emoji {
+        None => None,
+        Some(s) if s.is_empty() => Some(None),
+        Some(s) => Some(Some(s.clone())),
+    }
+}
+
 /// Heuristic to tell page identifiers (`PRO-DOC-1`, `DOC-1`) apart from issue
 /// identifiers (`PRO-42`). Both shapes use uppercase project prefixes and
 /// numeric sequences, but the literal `DOC` segment is unique to pages.
@@ -755,10 +772,13 @@ impl LificMcp {
             return format!("Error: {e}");
         }
         match self.write(|conn| {
+            // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
+            // (unassign module), non-empty = resolve + set.
             let module_id = match &input.module {
+                Some(name) if name.is_empty() => Some(None),
                 Some(name) => {
                     let issue = queries::get_issue(conn, id)?;
-                    Some(queries::resolve_module_name(conn, issue.project_id, name)?)
+                    Some(Some(queries::resolve_module_name(conn, issue.project_id, name)?))
                 }
                 None => None,
             };
@@ -1138,7 +1158,10 @@ impl LificMcp {
             return format!("Error: {e}");
         }
         match self.write(|conn| {
+            // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
+            // (move page to root), non-empty = resolve folder + set.
             let folder_id = match &input.folder {
+                Some(name) if name.is_empty() => Some(None),
                 Some(name) => {
                     let page = queries::get_page(conn, id)?;
                     let pid = page.project_id.ok_or_else(|| {
@@ -1146,7 +1169,7 @@ impl LificMcp {
                             "page has no project for folder resolution".into(),
                         )
                     })?;
-                    Some(queries::resolve_folder_name(conn, pid, name)?)
+                    Some(Some(queries::resolve_folder_name(conn, pid, name)?))
                 }
                 None => None,
             };
@@ -1156,7 +1179,7 @@ impl LificMcp {
                 &models::UpdatePage {
                     title: input.title.clone(),
                     content: input.content.clone(),
-                    folder_id: folder_id.map(Some),
+                    folder_id,
                     sort_order: None,
                     status: input.status.clone(),
                     pinned: input.pinned,
@@ -1663,7 +1686,7 @@ impl LificMcp {
                             name: name.clone(),
                             identifier: ident.clone(),
                             description: input.description.clone().unwrap_or_default(),
-                            emoji: None,
+                            emoji: emoji_for_create(&input.emoji),
                             lead_user_id,
                         },
                     )
@@ -1691,7 +1714,7 @@ impl LificMcp {
                             name: input.name.clone(),
                             identifier: input.identifier.clone(),
                             description: input.description.clone(),
-                            emoji: None,
+                            emoji: emoji_for_update(&input.emoji),
                             lead_user_id: None,
                         },
                     )
@@ -1722,7 +1745,7 @@ impl LificMcp {
                             name: name.clone(),
                             description: input.description.clone().unwrap_or_default(),
                             status: input.status.clone().unwrap_or("active".into()),
-                            emoji: None,
+                            emoji: emoji_for_create(&input.emoji),
                         },
                     )
                 }) {
@@ -1756,7 +1779,7 @@ impl LificMcp {
                             name: input.name.clone(),
                             description: input.description.clone(),
                             status: input.status.clone(),
-                            emoji: None,
+                            emoji: emoji_for_update(&input.emoji),
                         },
                     )
                 }) {
@@ -2280,6 +2303,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.starts_with("Created project"), "got: {result}");
         ident.to_string()
@@ -2349,6 +2373,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("New Name"), "got: {result}");
     }
@@ -2367,6 +2392,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("Backend"), "got: {result}");
     }
@@ -2385,6 +2411,7 @@ mod tests {
             description: None,
             current_name: None,
             status: None,
+            emoji: None,
         }));
         assert!(result.contains("bug"), "got: {result}");
         assert!(result.contains("#EF4444"), "got: {result}");
@@ -2404,6 +2431,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("Docs"), "got: {result}");
     }
@@ -2421,6 +2449,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("name required"), "got: {result}");
     }
@@ -2438,6 +2467,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("Unsupported"), "got: {result}");
     }
@@ -2472,6 +2502,7 @@ mod tests {
             description: None,
             current_name: None,
             status: None,
+            emoji: None,
         }));
         let result = m.create_issue(Parameters(CreateIssueInput {
             project: "OPT".into(),
@@ -3137,6 +3168,7 @@ mod tests {
             description: None,
             current_name: None,
             status: None,
+            emoji: None,
         }));
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "label".into(),
@@ -3148,6 +3180,7 @@ mod tests {
             identifier: None,
             description: None,
             status: None,
+            emoji: None,
         }));
         assert!(result.contains("defect"), "got: {result}");
         assert!(result.contains("#FF0000"), "got: {result}");
@@ -3167,6 +3200,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -3178,6 +3212,7 @@ mod tests {
             description: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         assert!(result.contains("Documentation"), "got: {result}");
     }
@@ -3848,6 +3883,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("EPP".into()),
@@ -3950,6 +3986,7 @@ mod tests {
                 description: None,
                 current_name: None,
                 status: None,
+                emoji: None,
             }));
         }
     }
@@ -4004,6 +4041,217 @@ mod tests {
         }));
         assert!(detail.contains("Labels: draft"), "got: {detail}");
         assert!(!detail.contains("design"), "got: {detail}");
+    }
+
+    // ── LIF-145: sentinel clearing (module / folder / emoji) ──
+
+    /// Assign an issue to a module, then clear it via the empty-string
+    /// sentinel and confirm it is unassigned (module_id = NULL).
+    #[test]
+    fn mcp_update_issue_clears_module_with_empty_string() {
+        let m = mcp();
+        seed_project(&m, "Clear Module", "CLM");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("CLM".into()),
+            name: Some("Core".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+        seed_issue(&m, "CLM", "Task");
+
+        // Assign to module.
+        let set = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "CLM-1".into(),
+            title: None,
+            description: None,
+            status: None,
+            priority: None,
+            module: Some("Core".into()),
+            labels: None,
+        }));
+        assert!(!set.starts_with("Error"), "set failed: {set}");
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "CLM-1".into(),
+        }));
+        assert!(detail.contains("Module: Core"), "got: {detail}");
+
+        // Clear via empty-string sentinel.
+        let cleared = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "CLM-1".into(),
+            title: None,
+            description: None,
+            status: None,
+            priority: None,
+            module: Some(String::new()),
+            labels: None,
+        }));
+        assert!(!cleared.starts_with("Error"), "clear failed: {cleared}");
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "CLM-1".into(),
+        }));
+        assert!(detail.contains("Module: none"), "got: {detail}");
+
+        // DB truth: module_id is NULL.
+        let conn = m.db.read().unwrap();
+        let id = queries::resolve_identifier(&conn, "CLM-1").unwrap();
+        assert_eq!(queries::get_issue(&conn, id).unwrap().module_id, None);
+    }
+
+    /// Move a page into a folder, then move it back to root via the
+    /// empty-string sentinel (folder_id = NULL).
+    #[test]
+    fn mcp_update_page_clears_folder_with_empty_string() {
+        let m = mcp();
+        seed_project(&m, "Clear Folder", "CLF");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "folder".into(),
+            action: "create".into(),
+            project: Some("CLF".into()),
+            name: Some("Docs".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("CLF".into()),
+            title: "Spec".into(),
+            content: None,
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+
+        // Move into folder.
+        let moved = m.update_page(Parameters(UpdatePageInput {
+            identifier: "CLF-DOC-1".into(),
+            title: None,
+            content: None,
+            folder: Some("Docs".into()),
+            status: None,
+            pinned: None,
+            labels: None,
+        }));
+        assert!(!moved.starts_with("Error"), "move failed: {moved}");
+        {
+            let conn = m.db.read().unwrap();
+            let id = queries::resolve_page_identifier(&conn, "CLF-DOC-1").unwrap();
+            assert!(queries::get_page(&conn, id).unwrap().folder_id.is_some());
+        }
+
+        // Move back to root via empty-string sentinel.
+        let rooted = m.update_page(Parameters(UpdatePageInput {
+            identifier: "CLF-DOC-1".into(),
+            title: None,
+            content: None,
+            folder: Some(String::new()),
+            status: None,
+            pinned: None,
+            labels: None,
+        }));
+        assert!(!rooted.starts_with("Error"), "root failed: {rooted}");
+        let conn = m.db.read().unwrap();
+        let id = queries::resolve_page_identifier(&conn, "CLF-DOC-1").unwrap();
+        assert_eq!(queries::get_page(&conn, id).unwrap().folder_id, None);
+    }
+
+    /// Set a project emoji on update, then clear it via the empty-string
+    /// sentinel (emoji = NULL).
+    #[test]
+    fn mcp_manage_resource_sets_then_clears_project_emoji() {
+        let m = mcp();
+        seed_project(&m, "Emoji Project", "EMP");
+
+        // Set emoji.
+        let set = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("EMP".into()),
+            name: None,
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: Some("lucide:Rocket".into()),
+        }));
+        assert!(!set.starts_with("Error"), "set failed: {set}");
+        {
+            let conn = m.db.read().unwrap();
+            let pid = queries::resolve_project_identifier(&conn, "EMP").unwrap();
+            assert_eq!(
+                queries::get_project(&conn, pid).unwrap().emoji.as_deref(),
+                Some("lucide:Rocket")
+            );
+        }
+
+        // Clear via empty-string sentinel.
+        let cleared = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("EMP".into()),
+            name: None,
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: Some(String::new()),
+        }));
+        assert!(!cleared.starts_with("Error"), "clear failed: {cleared}");
+        let conn = m.db.read().unwrap();
+        let pid = queries::resolve_project_identifier(&conn, "EMP").unwrap();
+        assert_eq!(queries::get_project(&conn, pid).unwrap().emoji, None);
+    }
+
+    /// Set a module emoji on update via manage_resource (LIF-145 threads
+    /// emoji through the module arms too).
+    #[test]
+    fn mcp_manage_resource_sets_module_emoji() {
+        let m = mcp();
+        seed_project(&m, "Module Emoji", "MEM");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("MEM".into()),
+            name: Some("Core".into()),
+            identifier: None,
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+
+        let set = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "update".into(),
+            project: Some("MEM".into()),
+            name: None,
+            identifier: None,
+            description: None,
+            current_name: Some("Core".into()),
+            status: None,
+            color: None,
+            emoji: Some("lucide:Boxes".into()),
+        }));
+        assert!(!set.starts_with("Error"), "set failed: {set}");
+
+        let conn = m.db.read().unwrap();
+        let pid = queries::resolve_project_identifier(&conn, "MEM").unwrap();
+        let mid = queries::resolve_module_name(&conn, pid, "Core").unwrap();
+        assert_eq!(
+            queries::get_module(&conn, mid).unwrap().emoji.as_deref(),
+            Some("lucide:Boxes")
+        );
     }
 
     #[test]
@@ -4120,6 +4368,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("MET".into()),
@@ -4236,6 +4485,7 @@ mod tests {
             current_name: None,
             status: None,
             color: None,
+            emoji: None,
         }));
         m.create_page(Parameters(CreatePageInput {
             project: Some("FOL".into()),
@@ -5113,6 +5363,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
@@ -5127,6 +5378,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(is_forbidden(&denied2), "got: {denied2}");
@@ -5142,6 +5394,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(
@@ -5159,6 +5412,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(!is_forbidden(&allowed2), "got: {allowed2}");
@@ -5175,6 +5429,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(is_forbidden(&denied_settings), "got: {denied_settings}");
@@ -5206,6 +5461,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
@@ -5221,6 +5477,7 @@ mod authz_gating_tests {
                 current_name: None,
                 status: None,
                 color: None,
+                emoji: None,
             }))
         });
         assert!(!is_forbidden(&allowed), "got: {allowed}");

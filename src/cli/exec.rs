@@ -284,7 +284,9 @@ fn issue(
                     description: description.clone(),
                     status: status.clone(),
                     priority: priority.clone(),
-                    module_id,
+                    // LIF-145: module_id is now tristate; the CLI only sets or
+                    // skips (no clear), so map Some(id) -> Some(Some(id)).
+                    module_id: module_id.map(Some),
                     sort_order: None,
                     start_date: None,
                     target_date: None,

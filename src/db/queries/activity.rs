@@ -334,7 +334,7 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                module_id: Some(module.id),
+                module_id: Some(Some(module.id)),
                 ..no_update()
             },
         )

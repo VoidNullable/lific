@@ -447,6 +447,8 @@ pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<I
                 params![priority, id],
             )?;
         }
+        // LIF-145: tristate. Outer Some means the client set the key; inner
+        // None unassigns (NULL). rusqlite binds Option<i64> to NULL when None.
         if let Some(module_id) = input.module_id {
             conn.execute(
                 "UPDATE issues SET module_id = ?1 WHERE id = ?2",

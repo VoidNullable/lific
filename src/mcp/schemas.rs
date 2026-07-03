@@ -112,7 +112,9 @@ pub struct UpdateIssueInput {
     pub status: Option<String>,
     #[schemars(description = "New priority: urgent, high, medium, low, none")]
     pub priority: Option<String>,
-    #[schemars(description = "New module name")]
+    #[schemars(
+        description = "New module name. Omit to leave unchanged; pass an empty string \"\" to unassign the issue from its module. (LIF-145)"
+    )]
     pub module: Option<String>,
     #[schemars(description = "Replace labels")]
     pub labels: Option<Vec<String>>,
@@ -176,7 +178,9 @@ pub struct UpdatePageInput {
     pub title: Option<String>,
     #[schemars(description = "New markdown content")]
     pub content: Option<String>,
-    #[schemars(description = "Move to folder name")]
+    #[schemars(
+        description = "Move to folder name. Omit to leave unchanged; pass an empty string \"\" to move the page back to the project root. (LIF-145)"
+    )]
     pub folder: Option<String>,
     #[schemars(description = "Status: draft, active, complete, archived")]
     pub status: Option<String>,
@@ -282,6 +286,10 @@ pub struct ManageResourceInput {
     pub status: Option<String>,
     #[schemars(description = "Color hex (for label, e.g. #EF4444)")]
     pub color: Option<String>,
+    #[schemars(
+        description = "Icon for project or module: 'lucide:<Name>' or a literal emoji. Omit to leave unchanged; pass an empty string \"\" to clear it back to none. (LIF-145)"
+    )]
+    pub emoji: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
