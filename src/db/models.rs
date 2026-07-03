@@ -80,6 +80,14 @@ pub struct Issue {
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relates_to: Vec<String>,
+    /// Issues this one is a duplicate of (source→target 'duplicate' links where
+    /// this issue is the source).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicates: Vec<String>,
+    /// Issues that are duplicates of this one (reverse direction: this issue is
+    /// the target of a 'duplicate' link).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicated_by: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

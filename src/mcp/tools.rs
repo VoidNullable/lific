@@ -34,6 +34,12 @@ pub(crate) fn fmt_issue(i: &models::Issue) -> String {
     if !i.blocked_by.is_empty() {
         s.push_str(&format!(" blocked_by:{}", i.blocked_by.join(",")));
     }
+    if !i.duplicates.is_empty() {
+        s.push_str(&format!(" duplicates:{}", i.duplicates.join(",")));
+    }
+    if !i.duplicated_by.is_empty() {
+        s.push_str(&format!(" duplicated_by:{}", i.duplicated_by.join(",")));
+    }
     s
 }
 
@@ -628,6 +634,12 @@ impl LificMcp {
                 }
                 if !issue.relates_to.is_empty() {
                     out.push_str(&format!("Relates to: {}\n", issue.relates_to.join(", ")));
+                }
+                if !issue.duplicates.is_empty() {
+                    out.push_str(&format!("Duplicates: {}\n", issue.duplicates.join(", ")));
+                }
+                if !issue.duplicated_by.is_empty() {
+                    out.push_str(&format!("Duplicated by: {}\n", issue.duplicated_by.join(", ")));
                 }
                 if !issue.description.is_empty() {
                     out.push_str(&format!("\n{}\n", issue.description));
@@ -3184,10 +3196,14 @@ mod tests {
             blocks: vec!["T-2".into()],
             blocked_by: vec![],
             relates_to: vec![],
+            duplicates: vec!["T-3".into()],
+            duplicated_by: vec!["T-4".into()],
         };
         let s = fmt_issue(&issue);
         assert!(s.contains("[bug]"), "got: {s}");
         assert!(s.contains("blocks:T-2"), "got: {s}");
+        assert!(s.contains("duplicates:T-3"), "got: {s}");
+        assert!(s.contains("duplicated_by:T-4"), "got: {s}");
     }
 
     // ── comments ──

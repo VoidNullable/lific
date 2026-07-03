@@ -39,6 +39,8 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 blocks: Vec::new(),
                 blocked_by: Vec::new(),
                 relates_to: Vec::new(),
+                duplicates: Vec::new(),
+                duplicated_by: Vec::new(),
             })
         })
         .map_err(|e| match e {
@@ -96,6 +98,38 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
            AND ir.relation_type = 'relates_to'",
     )?;
     issue.relates_to = relates_stmt
+        .query_map(params![id], |row| {
+            let proj: String = row.get(0)?;
+            let seq: i64 = row.get(1)?;
+            Ok(format!("{proj}-{seq}"))
+        })?
+        .collect::<Result<Vec<String>, _>>()?;
+
+    // Duplicate is directional like `blocks`: a source→target 'duplicate' link
+    // means source duplicates target. From the source's perspective the target
+    // is what it `duplicates`; from the target's perspective the source is
+    // captured in `duplicated_by`.
+    let mut duplicates_stmt = conn.prepare_cached(
+        "SELECT p.identifier, i.sequence FROM issue_relations ir
+         JOIN issues i ON i.id = ir.target_id
+         JOIN projects p ON p.id = i.project_id
+         WHERE ir.source_id = ?1 AND ir.relation_type = 'duplicate'",
+    )?;
+    issue.duplicates = duplicates_stmt
+        .query_map(params![id], |row| {
+            let proj: String = row.get(0)?;
+            let seq: i64 = row.get(1)?;
+            Ok(format!("{proj}-{seq}"))
+        })?
+        .collect::<Result<Vec<String>, _>>()?;
+
+    let mut duplicated_by_stmt = conn.prepare_cached(
+        "SELECT p.identifier, i.sequence FROM issue_relations ir
+         JOIN issues i ON i.id = ir.source_id
+         JOIN projects p ON p.id = i.project_id
+         WHERE ir.target_id = ?1 AND ir.relation_type = 'duplicate'",
+    )?;
+    issue.duplicated_by = duplicated_by_stmt
         .query_map(params![id], |row| {
             let proj: String = row.get(0)?;
             let seq: i64 = row.get(1)?;
@@ -267,6 +301,8 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
             blocks: Vec::new(),
             blocked_by: Vec::new(),
             relates_to: Vec::new(),
+            duplicates: Vec::new(),
+            duplicated_by: Vec::new(),
         })
     })?;
 
@@ -995,6 +1031,27 @@ mod tests {
         let blocked = get_issue(&conn, i2.id).unwrap();
         assert!(blocker.blocks.contains(&"TST-2".to_string()));
         assert!(blocked.blocked_by.contains(&"TST-1".to_string()));
+    }
+
+    // LIF-136: a source→target 'duplicate' link must surface on both issues —
+    // the source `duplicates` the target, the target is `duplicated_by` the
+    // source. Previously this went write-only into issue_relations.
+    #[test]
+    fn get_issue_includes_duplicate_relation_both_directions() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let dup = quick_issue(&conn, pid, "Dup", "todo", "none");
+        let canonical = quick_issue(&conn, pid, "Canonical", "todo", "none");
+        link_issues(&conn, dup.id, canonical.id, "duplicate").unwrap();
+
+        let got_dup = get_issue(&conn, dup.id).unwrap();
+        assert_eq!(got_dup.duplicates, vec!["TST-2".to_string()]);
+        assert!(got_dup.duplicated_by.is_empty());
+
+        let got_canonical = get_issue(&conn, canonical.id).unwrap();
+        assert_eq!(got_canonical.duplicated_by, vec!["TST-1".to_string()]);
+        assert!(got_canonical.duplicates.is_empty());
     }
 
     #[test]

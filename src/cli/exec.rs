@@ -185,6 +185,12 @@ fn issue(
                 if !issue.relates_to.is_empty() {
                     println!("  Relates:  {}", issue.relates_to.join(", "));
                 }
+                if !issue.duplicates.is_empty() {
+                    println!("  Dupes:    {}", issue.duplicates.join(", "));
+                }
+                if !issue.duplicated_by.is_empty() {
+                    println!("  DupedBy:  {}", issue.duplicated_by.join(", "));
+                }
                 if !issue.description.is_empty() {
                     println!();
                     println!("{}", issue.description);

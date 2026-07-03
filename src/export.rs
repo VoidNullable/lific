@@ -167,6 +167,10 @@ fn render_issue_markdown(
         blocks: &'a [String],
         blocked_by: &'a [String],
         relates_to: &'a [String],
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        duplicates: &'a [String],
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        duplicated_by: &'a [String],
         start_date: &'a Option<String>,
         target_date: &'a Option<String>,
         created_at: &'a str,
@@ -187,6 +191,8 @@ fn render_issue_markdown(
             blocks: &issue.blocks,
             blocked_by: &issue.blocked_by,
             relates_to: &issue.relates_to,
+            duplicates: &issue.duplicates,
+            duplicated_by: &issue.duplicated_by,
             start_date: &issue.start_date,
             target_date: &issue.target_date,
             created_at: &issue.created_at,
@@ -409,5 +415,68 @@ mod tests {
             .unwrap();
         assert!(issue_file.content.contains("identifier: EXP-1"));
         assert!(issue_file.content.contains("## Comments"));
+    }
+
+    // LIF-136: duplicate relations must appear in exported frontmatter, both
+    // the `duplicates` (source) and `duplicated_by` (target) directions.
+    #[test]
+    fn issue_export_includes_duplicate_relations() {
+        let db = open_memory().unwrap();
+        let conn = db.write().unwrap();
+        let project = queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Dup Test".into(),
+                identifier: "DUP".into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: None,
+            },
+        )
+        .unwrap();
+        let mk = |title: &str| {
+            queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id: project.id,
+                    title: title.into(),
+                    description: String::new(),
+                    status: "todo".into(),
+                    priority: "none".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                    source: None,
+                },
+            )
+            .unwrap()
+        };
+        let dup = mk("Duplicate");
+        let canonical = mk("Canonical");
+        queries::link_issues(&conn, dup.id, canonical.id, "duplicate").unwrap();
+
+        // The single-issue export path populates relations via get_issue.
+        let dup_bundle = export_issue(&conn, "DUP-1").unwrap();
+        let dup_file = &dup_bundle.files[0];
+        assert!(
+            dup_file.content.contains("duplicates:") && dup_file.content.contains("DUP-2"),
+            "source frontmatter should list duplicates: {}",
+            dup_file.content
+        );
+        assert!(
+            !dup_file.content.contains("duplicated_by:"),
+            "source frontmatter should omit empty duplicated_by: {}",
+            dup_file.content
+        );
+
+        let canonical_bundle = export_issue(&conn, "DUP-2").unwrap();
+        let canonical_file = &canonical_bundle.files[0];
+        assert!(
+            canonical_file.content.contains("duplicated_by:")
+                && canonical_file.content.contains("DUP-1"),
+            "target frontmatter should list duplicated_by: {}",
+            canonical_file.content
+        );
     }
 }
