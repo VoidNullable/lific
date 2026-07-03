@@ -343,6 +343,28 @@ export async function removeProjectMember(projectId: number, userId: number) {
   });
 }
 
+// ── My effective role (LIF-234) ─────────────────────────────
+//
+// The caller's own role on one project, plus whether enforcement is on and
+// whether they're a workspace admin. Drives role-aware UI affordances
+// (`lib/projectRole.svelte.ts`) — one Viewer-gated call per project switch,
+// so a plain viewer can learn what to hide/disable without reading the full
+// roster or the admin-only instance settings. `role` is null for a
+// non-member admin (who is gated by `is_admin` instead).
+
+export interface MyProjectRole {
+  role: ProjectRole | null;
+  /** Whether the instance's project-scoped authorization is enforced. When
+   *  false (legacy/local-first default), the UI stays fully interactive. */
+  enforced: boolean;
+  /** Workspace admin — bypasses all gating, UI stays fully interactive. */
+  is_admin: boolean;
+}
+
+export async function getMyProjectRole(projectId: number) {
+  return request<MyProjectRole>(`/projects/${projectId}/my-role`);
+}
+
 // ── @mention candidates (LIF-263) ───────────────────────────
 //
 // The users a comment composer may `@`-mention in this project. Scoped to

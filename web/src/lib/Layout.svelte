@@ -22,6 +22,7 @@
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { toggleShortcutHelp } from "./shortcutHelp.svelte";
   import { isTypingContext } from "./shortcuts";
+  import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
 
   // Ref to the command palette so the sidebar's "Jump to…" affordance can
   // summon it (LIF-192).
@@ -202,6 +203,22 @@
   }
 
   let activeProject = $derived(projectFromRoute());
+
+  // LIF-234: the single point that primes the shared project-role store on
+  // each project switch. Resolves the route identifier to a numeric id from
+  // the already-loaded projects list, then loads (once, cached) the caller's
+  // effective role so every route/component can gate mutate affordances
+  // without its own fetch. Runs off `activeProject` + `projects` so it fires
+  // as soon as both are known (projects arrive async after the first route
+  // render). Case-insensitive match mirrors the route matcher.
+  $effect(() => {
+    const ident = activeProject;
+    if (!ident) return;
+    const proj = projects.find(
+      (p) => p.identifier.toLowerCase() === ident.toLowerCase(),
+    );
+    if (proj) loadProjectRole(proj.id);
+  });
 
   // ── Project sub-nav expand/collapse ─────────────────────────
   // The active project's sub-nav is shown by default. `manuallyCollapsed`
