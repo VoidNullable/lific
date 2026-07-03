@@ -294,6 +294,7 @@
   deleteNounLabel="page"
   onRetry={() => loadPage(pageId)}
   identifier={page?.identifier ?? ""}
+  attachEntity={page ? { entity_type: "page", entity_id: page.id } : null}
   backRoute={`/${projectIdentifier}/pages`}
   backLabel="Pages"
   {editable}

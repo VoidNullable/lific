@@ -32,7 +32,7 @@
   import Markdown from "./Markdown.svelte";
   import ModeToggle from "./ModeToggle.svelte";
   import StatusIcon from "./StatusIcon.svelte";
-  import { Search, CornerDownLeft } from "lucide-svelte";
+  import { Search, CornerDownLeft, Paperclip } from "lucide-svelte";
   import {
     findTrigger,
     searchSuggestions,
@@ -40,6 +40,13 @@
     type TriggerMatch,
     type SuggestionHit,
   } from "./references";
+  import type { AttachmentEntity } from "./api";
+  import {
+    uploadFiles,
+    filesFromClipboard,
+    filesFromDrop,
+    insertAtCaret,
+  } from "./attachments/compose";
 
   let {
     value,
@@ -52,6 +59,10 @@
     onSave,
     mode = $bindable<"read" | "edit">("read"),
     saving = false,
+    // LIF-262: when set, files dropped/pasted/attached into the editor link
+    // straight to this entity. When omitted (e.g. a not-yet-created issue),
+    // uploads stay unlinked until the body is saved and re-scanned server-side.
+    attachTo = null,
   }: {
     value: string;
     editable?: boolean;
@@ -63,7 +74,12 @@
     onSave: (next: string) => Promise<void> | void;
     mode?: "read" | "edit";
     saving?: boolean;
+    attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
   } = $props();
+
+  let uploading = $state(false);
+  let dragOver = $state(false);
+  let fileInputEl = $state<HTMLInputElement | null>(null);
 
   // Draft only matters while editing. enterEdit() copies the current
   // `value` into it at swap time, so initializing it empty here avoids
@@ -308,6 +324,60 @@
     }
   }
 
+  // ── LIF-262: attachment uploads ──────────────────────────
+
+  function insertSnippet(snippet: string) {
+    const el = textareaEl;
+    if (!el) return;
+    const { text, caret } = insertAtCaret(el, draft, snippet);
+    draft = text;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(caret, caret);
+      autoResize();
+    });
+  }
+
+  async function runUploads(files: File[]) {
+    await uploadFiles(files, {
+      link: attachTo ?? undefined,
+      onInsert: insertSnippet,
+      onBusy: (b) => (uploading = b),
+    });
+  }
+
+  function onEditorPaste(e: ClipboardEvent) {
+    const files = filesFromClipboard(e);
+    if (files.length > 0) {
+      e.preventDefault();
+      void runUploads(files);
+    }
+  }
+
+  function onEditorDrop(e: DragEvent) {
+    const files = filesFromDrop(e);
+    dragOver = false;
+    if (files.length > 0) {
+      e.preventDefault();
+      void runUploads(files);
+    }
+  }
+
+  function onEditorDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault();
+      dragOver = true;
+    }
+  }
+
+  function onEditorFilePicked(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      void runUploads(Array.from(input.files));
+      input.value = "";
+    }
+  }
+
   // ── Reference autocomplete (LIF-239) ─────────────────
   //
   // Typing "#foo" or "LIF-"/"lif-4" right before the caret opens an
@@ -520,14 +590,20 @@
       the parent prose font + line-height so vertical math also matches.
     -->
     <!-- svelte-ignore a11y_autofocus -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <textarea
       bind:value={draft}
       bind:this={textareaEl}
       class="em-textarea"
+      class:em-textarea--drag={dragOver}
       {placeholder}
       onkeydown={handleTextareaKey}
       oninput={handleTextareaInput}
       onblur={closeAutocomplete}
+      onpaste={onEditorPaste}
+      ondrop={onEditorDrop}
+      ondragover={onEditorDragOver}
+      ondragleave={() => (dragOver = false)}
       autofocus
     ></textarea>
     <div class="em-footer">
@@ -537,8 +613,26 @@
       <button class="em-cancel" onclick={cancelEdit} disabled={saving}>
         Cancel
       </button>
-      <span class="em-hint">Markdown · Esc to cancel · ⌘S to save</span>
+      <button
+        type="button"
+        class="em-attach"
+        onclick={() => fileInputEl?.click()}
+        disabled={saving || uploading}
+        title="Attach a file"
+      >
+        <Paperclip size={13} />
+        {uploading ? "Uploading…" : "Attach"}
+      </button>
+      <span class="em-hint">Markdown · drag/paste to upload · ⌘S to save</span>
     </div>
+    <input
+      bind:this={fileInputEl}
+      type="file"
+      class="em-file-input"
+      multiple
+      accept="image/*,application/pdf,text/plain,.log,application/zip"
+      onchange={onEditorFilePicked}
+    />
   {/if}
 
   <!--
@@ -682,6 +776,39 @@
   .em-textarea::placeholder {
     color: var(--text-faint);
   }
+  /* LIF-262: subtle drag-over ring on the editor while a file hovers. */
+  .em-textarea--drag {
+    outline: 2px dashed var(--accent);
+    outline-offset: 4px;
+    border-radius: 0.375rem;
+  }
+
+  .em-file-input {
+    display: none;
+  }
+
+  .em-attach {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3125rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    background: transparent;
+    padding: 0.375rem 0.625rem;
+    border-radius: 0.375rem;
+    border: 0;
+    transition:
+      background 0.15s var(--ease-out-expo),
+      color 0.15s var(--ease-out-expo);
+  }
+  .em-attach:hover:not(:disabled) {
+    background: var(--bg-subtle);
+    color: var(--accent);
+  }
+  .em-attach:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   .em-footer {
     display: flex;
@@ -730,7 +857,8 @@
   @media (prefers-reduced-motion: reduce) {
     .em-empty-cta,
     .em-save,
-    .em-cancel {
+    .em-cancel,
+    .em-attach {
       transition-duration: 0.001s;
     }
   }

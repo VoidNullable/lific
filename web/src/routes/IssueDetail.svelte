@@ -403,6 +403,7 @@
   deleteNounLabel="issue"
   onRetry={() => loadIssue(issueIdentifier)}
   identifier={issue?.identifier ?? issueIdentifier}
+  attachEntity={issue ? { entity_type: "issue", entity_id: issue.id } : null}
   backRoute={backHref()}
   backLabel={backText()}
   {editable}

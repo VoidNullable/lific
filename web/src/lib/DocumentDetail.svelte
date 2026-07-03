@@ -20,6 +20,7 @@
   import Comments from "./Comments.svelte";
   import QuoteSelectionToolbar from "./QuoteSelectionToolbar.svelte";
   import EditableMarkdown from "./EditableMarkdown.svelte";
+  import AttachmentSection from "./AttachmentSection.svelte";
   import ModeToggle from "./ModeToggle.svelte";
   import InlineTitle from "./InlineTitle.svelte";
   import DeleteMenu from "./DeleteMenu.svelte";
@@ -96,6 +97,11 @@
     // can pause auto-refresh while the user is editing. Defaults to "read"
     // and is fully optional — IssueDetail doesn't bind it.
     bodyMode = $bindable<"read" | "edit">("read"),
+    // LIF-262: when set (e.g. { entity_type: "issue", entity_id }), the body
+    // editor + comment composer link uploads to this entity, and an
+    // "Attachments (n)" section is rendered below the body. Omitted for
+    // workspace pages / plans that don't opt in.
+    attachEntity = null,
   }: {
     navigate: (path: string) => void;
     loading?: boolean;
@@ -138,7 +144,12 @@
     breadcrumbExtra?: Snippet;
     bodyContent?: Snippet;
     bodyMode?: "read" | "edit";
+    attachEntity?: { entity_type: "issue" | "page"; entity_id: number } | null;
   } = $props();
+
+  // LIF-262: bump to force the AttachmentSection to re-fetch after a body or
+  // comment save may have linked/unlinked references server-side.
+  let attachmentRefresh = $state(0);
 
   // Register our topbar with Layout's chrome slot — same pattern the
   // list/board views use, so the chrome L stays seamless across
@@ -403,7 +414,19 @@
       emptyEditCta={bodyEmptyEditCta}
       emptyReadText={bodyEmptyReadText}
       proseMinHeight={bodyProseMinHeight}
-      onSave={onSaveBody}
+      onSave={async (next) => {
+        await onSaveBody(next);
+        attachmentRefresh += 1;
+      }}
+      attachTo={attachEntity}
+    />
+  {/if}
+
+  {#if attachEntity}
+    <AttachmentSection
+      entityType={attachEntity.entity_type}
+      entityId={attachEntity.entity_id}
+      refreshKey={attachmentRefresh}
     />
   {/if}
 
@@ -412,7 +435,16 @@
   {/if}
 
   {#if onNewComment && comments}
-    <Comments bind:this={commentsRef} {comments} {editable} onSubmit={onNewComment} />
+    <Comments
+      bind:this={commentsRef}
+      {comments}
+      {editable}
+      onSubmit={async (content) => {
+        const created = await onNewComment(content);
+        if (created) attachmentRefresh += 1;
+        return created;
+      }}
+    />
   {/if}
 
   {#if metaFooter}{@render metaFooter()}{/if}
