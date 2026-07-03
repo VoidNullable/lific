@@ -10,11 +10,11 @@ Until now, authentication was a door with no rooms behind it: any logged-in acco
 
 - **Three roles per project**: `viewer` (read + comment), `maintainer` (full content and structure CRUD), and `lead` (everything, plus settings, membership, and project deletion). Multiple leads per project are supported; global admins override everything as the break-glass path.
 - **Default-deny, reads included.** With enforcement on, a non-member sees nothing — projects vanish from lists and search, and direct reads are refused. There is no implicit access floor.
-- **One enforcement layer, two transports.** REST handlers and all 26 MCP tools call the same `authz` module, so the web UI and agents can never drift apart. Cross-project operations (issue relations, plan-step issue links) require the role on every project touched.
+- **One enforcement layer, two transports.** REST handlers and all 29 MCP tools call the same `authz` module, so the web UI and agents can never drift apart. Cross-project operations (issue relations, plan-step issue links) require the role on every project touched.
 - **Agents inherit their owner.** A bot acts with its owning user's memberships and can never exceed them; OAuth-token requests resolve to their real user end to end. A token-backed agent that is a member keeps working under default-deny — verified by explicit lockout-regression tests on both transports.
 - **Safe, reversible rollout.** Enforcement is a runtime instance setting (`authz_enforced`, default off — flip it in Instance Settings or `lific instance set --authz-enforced true`). Legacy mode preserves pre-2.0 behavior bit-for-bit; existing project leads are backfilled as `lead` members automatically.
 - **Membership management** in Project Settings: list members with role badges, add by name, change roles inline, remove with confirmation — lead-gated, with last-lead protection so a project can't be orphaned. Every membership change lands in the audit log with actor attribution.
-- **Enumeration-derived coverage.** The test suite extracts every REST route and every MCP tool and fails if any surface is missing an authorization classification, so future endpoints can't ship ungated. The suite now stands at 793 tests.
+- **Enumeration-derived coverage.** The test suite extracts every REST route and every MCP tool and fails if any surface is missing an authorization classification, so future endpoints can't ship ungated. The suite now stands at 931 tests.
 
 ### Connect an agent in one command
 
@@ -24,6 +24,17 @@ Until now, authentication was a door with no rooms behind it: any logged-in acco
 - **`lific agents-md`** writes a maintained Lific section into a repo's AGENTS.md so agents learn the house conventions.
 - **Terminal citizenship**: shell completions for bash/zsh/fish, TTY-aware output (auto-JSON when piped, prompts never hang non-interactive runs), and piped output can no longer panic on SIGPIPE.
 - **For agents over MCP**: the server's instructions now teach Lific workflow conventions, cold read tools nudge self-onboarding on a zero-project instance, and the repo ships an MCP Registry manifest and publish runbook.
+
+### Agent tooling (MCP)
+
+- **Edit and delete comments over MCP**: new `edit_comment` and `delete_comment` tools, enforcing the same author-or-admin ownership rules as their REST counterparts.
+- **Batch issue edits in one call**: `bulk_update` applies a status/priority/module change to every issue matching a filter (capped at 500) and returns the affected count — triage that was N round-trips is now one.
+- **Schedule issues over MCP**: `create_issue` and `update_issue` now accept `start_date` and `target_date`, which already existed everywhere but the MCP layer.
+- **Clear fields, not just set them**: MCP can unassign an issue's module, move a page back to the folder root, and set or clear project and module emoji (empty string clears; omitted still skips).
+- **Find what's stuck**: `list_issues` gains a `blocked=true` filter — the inverse of `workable` — surfacing each blocked issue's unresolved blockers.
+- **Comments join full-text search**: comment threads are now indexed alongside issues and pages across search, MCP, and the web UI, with hits linking back to their parent issue or page.
+- **Duplicate relations are visible**: issues linked as `duplicate` now show that relation in `get_issue`, MCP output, and markdown export — it was previously write-only.
+- **Page listings paginate**: `list_resources(page)` honors the `limit`/`offset` it always documented, with the same over-fetch has-more hint as issue listings.
 
 ### Account and instance settings
 
@@ -66,6 +77,7 @@ Until now, authentication was a door with no rooms behind it: any logged-in acco
 - **Password changes revoke all other sessions** — a stolen session token no longer survives a password rotation.
 - **The session cookie's `Secure` flag is now gated on the request scheme**, fixing broken logins on plain-http and localhost deploys.
 - **OAuth approval CSRF tokens are bound to the approving session** (previously forgeable across users), the CSRF MAC comparison is constant-time, and token revocation validates its bearer before acting.
+- **API key expiry is now enforced.** `expires_at` existed in the schema and was shown by `lific key list`, but the auth path never checked it — an expired key authenticated forever. Both key lookups now reject expired keys, and `lific key create` gains `--expires`.
 
 ### Performance
 
