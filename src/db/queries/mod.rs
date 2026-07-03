@@ -1,4 +1,5 @@
 pub(crate) mod activity;
+pub(crate) mod attachments;
 pub(crate) mod comments;
 pub(crate) mod insights;
 mod issues;
