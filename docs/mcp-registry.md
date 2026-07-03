@@ -74,7 +74,45 @@ marker must be present in the crate version you publish. `Cargo.toml` already
 BEFORE (or together with) publishing to the MCP Registry, so the marker is live
 when the registry fetches it.
 
-## Runbook
+## How publishing works now — automated on release (LIF-253)
+
+**As of LIF-253, publishing to the MCP Registry is automated in
+`.github/workflows/release.yml`.** You do not normally run `mcp-publisher` by
+hand — cutting a release does it for you. The manual runbook below is the
+**fallback** for when the automated job fails (a flaky registry) or you need to
+re-publish out of band.
+
+The release workflow has a `publish-registry` job that:
+
+1. `needs: [verify, publish]` — it runs **after** the crates.io `publish` job,
+   so the crate (and its `mcp-name:` ownership marker) is live before the
+   registry fetches it.
+2. Installs a **pinned, checksum-verified** `mcp-publisher` (currently `v1.7.9`,
+   linux/amd64 SHA256 hardcoded in the workflow `env`) rather than a fetched
+   `latest` binary — reproducible and supply-chain-safe. Re-pin the version and
+   SHA256 together when bumping.
+3. Authenticates with **GitHub OIDC** — `./mcp-publisher login github-oidc` —
+   which needs `permissions: id-token: write` (set on the job). No stored
+   secret or PAT: the OIDC token proves the `io.github.VoidNullable/*`
+   namespace. The namespace casing must match `server.json`'s `name` and the
+   README marker exactly (the check is case-sensitive — see casing section).
+4. Waits (up to ~2 min) for the just-published crate version to appear on
+   crates.io, since the ownership check reads the crate's README.
+5. `./mcp-publisher publish`, with a retry loop that absorbs crates.io
+   propagation lag but **fails fast on a 422 validation error** (a bad
+   `server.json` — retrying wouldn't help).
+
+The job is marked **`continue-on-error: true`**: a flaky or slow registry never
+fails an otherwise-successful release (the binaries and crates.io publish have
+already shipped by the time this job runs). If it goes yellow/failed, re-run it
+manually with the runbook below.
+
+Version sync is enforced up front: the `verify` job asserts that **both**
+`server.json` version fields (top-level `version` and `packages[0].version`)
+equal the release tag, so a stale `server.json` fails the whole release fast
+instead of publishing the wrong version to the registry.
+
+## Runbook (manual fallback)
 
 ### One-time: install the publisher CLI
 
@@ -116,59 +154,44 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Voi
 
 ### Bumping the version on each release
 
-The registry is versioned. On every Lific release you must re-publish so the
-registry's `version` tracks the shipped crate.
+The registry is versioned. On every Lific release the registry's `version` must
+track the shipped crate. **The `publish-registry` CI job re-publishes for you**
+— you just have to keep `server.json`'s version in sync, and the `verify` job
+will fail the release if you forget.
 
 1. Bump `version` in **`Cargo.toml`** (the release source of truth).
 2. Update **both** `version` fields in **`server.json`** to the same value:
-   the top-level `version` and the `packages[0].version`. They should always
-   equal `Cargo.toml`'s version.
+   the top-level `version` and the `packages[0].version`. They must always
+   equal `Cargo.toml`'s version and the release tag — the `verify` job asserts
+   this and fails fast on drift.
 3. Cut the release as normal (see `AGENTS.md` → "Releasing a new version":
    commit, `git push` to magi, then `git tag vX.Y.Z && git push origin vX.Y.Z`).
-   That fires `release.yml`, which builds binaries and runs
-   `cargo publish` to crates.io.
-4. After crates.io shows the new version, run `mcp-publisher publish` from the
-   repo root (per "Every publish" above).
+   That fires `release.yml`, which builds binaries, runs `cargo publish` to
+   crates.io, and then (in `publish-registry`) publishes `server.json` to the
+   MCP Registry automatically.
+4. **Only if `publish-registry` failed** (it's `continue-on-error`, so check the
+   run): re-run the manual `mcp-publisher publish` from the repo root, per
+   "Every publish" above.
 
 > Tip: keep `Cargo.toml`, `server.json` (×2), and the release tag in lockstep.
 > A mismatch between the registry `version` and the crates.io version is the
-> most common drift.
+> most common drift — the `verify` job now catches it before any build runs.
 
-## Wiring into CI later (not done here)
+## CI wiring (done — LIF-253)
 
-The manual `mcp-publisher publish` step could be automated as a final job in
-`.github/workflows/release.yml`, running after the existing `publish`
-(crates.io) job so the crate — and its ownership marker — is live before the
-registry fetches it. The registry supports GitHub Actions OIDC auth
-(`mcp-publisher login github-oidc`), which avoids storing a long-lived token.
+The automated `publish-registry` job in `.github/workflows/release.yml` is the
+implementation of what this section used to describe as "later." It runs after
+the crates.io `publish` job, installs a pinned+checksummed `mcp-publisher`,
+authenticates via `mcp-publisher login github-oidc` (`id-token: write`), waits
+for crates.io propagation, and publishes — non-fatally (`continue-on-error`).
+See "How publishing works now" at the top of this doc for the details.
 
-**This has intentionally NOT been added** — CI changes need human review, and
-the release workflow's tag/mirror choreography (see the big comment atop
-`release.yml` and `AGENTS.md`) is load-bearing. Sketch of the job to add later,
-for reference only:
+If the registry's namespace normalization bug ([registry#689]) ever lands and
+forces lowercase, or the `server.json` schema version changes, update the three
+casing-linked strings (see casing section) and re-pin the schema together, then
+let the next release re-publish.
 
-```yaml
-  publish-registry:
-    needs: [verify, publish]   # after crates.io publish
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write          # for github-oidc
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
-            | tar xz mcp-publisher && sudo mv mcp-publisher /usr/local/bin/
-      - name: Publish to MCP Registry
-        run: |
-          mcp-publisher login github-oidc
-          mcp-publisher publish
-```
-
-Before adding that, confirm the OIDC token's namespace casing matches
-`io.github.VoidNullable` (see the casing section) and re-verify the schema
-version in `server.json` is still current.
+[registry#689]: https://github.com/modelcontextprotocol/registry/issues/689
 
 ## References
 

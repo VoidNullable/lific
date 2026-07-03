@@ -44,6 +44,27 @@ jobs:
             exit 1
           fi
           echo "version=${CARGO_VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Verify server.json version matches the tag
+        # server.json feeds the MCP Registry publish job (publish-registry
+        # below). The registry is versioned and rejects a re-publish of an
+        # existing version, so a stale server.json would either publish the
+        # WRONG version or get silently rejected on the next release. Assert
+        # both the top-level `version` and packages[0].version equal the tag,
+        # here in verify, so a drifted server.json fails the whole release fast
+        # instead of surfacing at the very last job.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TOP_VERSION="$(jq -r '.version' server.json)"
+          PKG_VERSION="$(jq -r '.packages[0].version' server.json)"
+          echo "tag=${TAG_VERSION}, server.json .version=${TOP_VERSION}, .packages[0].version=${PKG_VERSION}"
+          if [ "$TOP_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::server.json .version is '${TOP_VERSION}', expected '${TAG_VERSION}'. Bump server.json's top-level version to ${TAG_VERSION} before releasing."
+            exit 1
+          fi
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::server.json .packages[0].version is '${PKG_VERSION}', expected '${TAG_VERSION}'. Bump it to ${TAG_VERSION} before releasing."
+            exit 1
+          fi
       - name: Verify CHANGELOG.md has a section for this version
         # The publish job extracts the TOP `## ` section of CHANGELOG.md as the
         # GitHub release body. If the changelog wasn't updated before tagging,
@@ -210,3 +231,95 @@ jobs:
         run: cargo publish --allow-dirty --no-verify || echo "Publish failed (version may already exist)"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Publish server metadata to the official MCP Registry
+  # (registry.modelcontextprotocol.io). See docs/mcp-registry.md for the full
+  # story. This is a THIN, LATE step: the registry stores metadata only and
+  # points at the crate on crates.io, so it must run AFTER `publish` — the crate
+  # (and the `mcp-name:` ownership marker in its README) has to be live before
+  # the registry fetches and validates it.
+  #
+  # This job is deliberately non-fatal: `continue-on-error: true` means a flaky
+  # or slow registry never fails an otherwise-successful release (the binaries
+  # and crates.io publish have already shipped by the time we get here). If the
+  # registry publish fails, re-run it manually per docs/mcp-registry.md.
+  publish-registry:
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      id-token: write   # required for `mcp-publisher login github-oidc`
+      contents: read
+    env:
+      # Pin the publisher CLI + its linux/amd64 checksum rather than tracking
+      # releases/latest — reproducibility and supply-chain hygiene (a fetched
+      # `latest` binary is unverifiable at run time). Re-pin VERSION and SHA256
+      # together when bumping; the SHA is the digest of
+      # mcp-publisher_linux_amd64.tar.gz for this release.
+      MCP_PUBLISHER_VERSION: v1.7.9
+      MCP_PUBLISHER_SHA256: ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o mcp-publisher.tar.gz
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --version || true
+
+      # GitHub OIDC: the `id-token: write` permission above lets mcp-publisher
+      # prove ownership of the io.github.VoidNullable/* namespace from the
+      # workflow's OIDC token — no stored secret or PAT required. The namespace
+      # casing (capital V, N) must match server.json's `name` and the README
+      # marker exactly; the registry's namespace check is case-sensitive
+      # (see docs/mcp-registry.md → "Namespace and casing").
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      # Wait for the just-published crate version to be visible on crates.io
+      # before publishing to the registry. The registry verifies crate
+      # ownership by fetching the crate's README (the `mcp-name:` marker), so
+      # it must be live first. The `publish` job already ran `cargo publish`,
+      # but the crates.io index/CDN takes a few seconds to propagate.
+      - name: Wait for crate version on crates.io
+        run: |
+          set -uo pipefail
+          IDENT="$(jq -r '.packages[0].identifier' server.json)"
+          VERSION="$(jq -r '.packages[0].version' server.json)"
+          echo "Waiting for ${IDENT}@${VERSION} on crates.io..."
+          for i in $(seq 1 24); do   # 24 x 5s = 2 min cap
+            if curl -fsS "https://crates.io/api/v1/crates/${IDENT}/${VERSION}" >/dev/null 2>&1; then
+              echo "Found ${IDENT}@${VERSION}"
+              exit 0
+            fi
+            echo "  attempt ${i}: not visible yet, sleeping 5s"
+            sleep 5
+          done
+          echo "::warning::${IDENT}@${VERSION} still not visible on crates.io after 2 min; attempting registry publish anyway."
+
+      # Publish server.json to the registry. Retry to absorb crates.io
+      # propagation lag on the ownership check, but fail fast on a deterministic
+      # 422 validation rejection (a bad server.json — retrying just burns time).
+      - name: Publish to MCP Registry
+        run: |
+          set -uo pipefail
+          for i in $(seq 1 10); do
+            if out="$(./mcp-publisher publish 2>&1)"; then
+              echo "$out"
+              echo "Published to the MCP Registry."
+              exit 0
+            fi
+            echo "$out"
+            if printf '%s' "$out" | grep -qiE '422|validation'; then
+              echo "::error::MCP Registry rejected server.json (validation error) — fix server.json; retrying won't help."
+              exit 1
+            fi
+            echo "::warning::publish attempt ${i} failed (registry flaky or crate not yet propagated); waiting 15s"
+            sleep 15
+          done
+          echo "::error::MCP Registry publish did not succeed after retries."
+          exit 1
