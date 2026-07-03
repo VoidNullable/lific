@@ -160,6 +160,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "import source markers",
         include_str!("../../migrations/033_import_source.sql"),
     ),
+    (
+        34,
+        "comment search",
+        include_str!("../../migrations/034_comment_search.sql"),
+    ),
 ];
 
 /// Highest migration version this binary knows how to apply. Used by

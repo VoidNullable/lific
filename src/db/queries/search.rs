@@ -14,9 +14,10 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
     if let Some(ref rt) = q.result_type
         && rt != "issue"
         && rt != "page"
+        && rt != "comment"
     {
         return Err(LificError::BadRequest(format!(
-            "invalid result_type '{rt}'. Use issue or page."
+            "invalid result_type '{rt}'. Use issue, page, or comment."
         )));
     }
     // "relevance" = BM25 rank (FTS5 default). "recent" = most recently
@@ -24,7 +25,9 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
     // side matched. Fixed fragments only — never interpolated user input.
     let order_clause = match q.sort.as_deref() {
         None | Some("relevance") => "ORDER BY rank",
-        Some("recent") => "ORDER BY COALESCE(i.updated_at, pg.updated_at) DESC, rank",
+        Some("recent") => {
+            "ORDER BY COALESCE(i.updated_at, pg.updated_at, ci.updated_at, cpg.updated_at) DESC, rank"
+        }
         Some(other) => {
             return Err(LificError::BadRequest(format!(
                 "invalid sort '{other}'. Use relevance or recent."
@@ -49,17 +52,29 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
         return Ok(Vec::new());
     }
 
+    // Comment hits (LIF-146) carry no title of their own; they link back to a
+    // parent issue or page. `c` is the comment row; `ci`/`cpg` are its parent
+    // issue/page, and `cip`/`cpp` those parents' projects — so a comment match
+    // renders as "on <parent identifier>" and navigates to the parent.
     let base_sql = "SELECT s.entity_type, s.entity_id, s.title,
                 CASE WHEN s.body = '' OR s.body IS NULL
                      THEN snippet(search_index, 0, '**', '**', '...', 32)
                      ELSE snippet(search_index, 1, '**', '**', '...', 32)
                 END,
                 s.project_id,
-                p.identifier, i.sequence, pg.sequence
+                p.identifier, i.sequence, pg.sequence,
+                c.issue_id, c.page_id,
+                cip.identifier, ci.sequence,
+                cpp.identifier, cpg.sequence
          FROM search_index s
          LEFT JOIN issues i ON s.entity_type = 'issue' AND i.id = s.entity_id
          LEFT JOIN pages pg ON s.entity_type = 'page' AND pg.id = s.entity_id
-         LEFT JOIN projects p ON p.id = s.project_id";
+         LEFT JOIN projects p ON p.id = s.project_id
+         LEFT JOIN comments c ON s.entity_type = 'comment' AND c.id = s.entity_id
+         LEFT JOIN issues ci ON c.issue_id = ci.id
+         LEFT JOIN pages cpg ON c.page_id = cpg.id
+         LEFT JOIN projects cip ON cip.id = ci.project_id
+         LEFT JOIN projects cpp ON cpp.id = cpg.project_id";
 
     let mut conditions = vec!["search_index MATCH ?1".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query.clone())];
@@ -87,6 +102,14 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
         let project_ident: Option<String> = row.get(5)?;
         let issue_seq: Option<i64> = row.get(6)?;
         let page_seq: Option<i64> = row.get(7)?;
+        // Comment parent linkage (LIF-146): a comment resolves to its parent's
+        // identifier so the hit navigates to the issue/page it lives on.
+        let cmt_issue_id: Option<i64> = row.get(8)?;
+        let cmt_page_id: Option<i64> = row.get(9)?;
+        let cmt_issue_proj: Option<String> = row.get(10)?;
+        let cmt_issue_seq: Option<i64> = row.get(11)?;
+        let cmt_page_proj: Option<String> = row.get(12)?;
+        let cmt_page_seq: Option<i64> = row.get(13)?;
         let identifier = match entity_type.as_str() {
             "issue" => match (project_ident.as_deref(), issue_seq) {
                 (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
@@ -97,6 +120,22 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
                 (None, Some(seq)) => Some(format!("DOC-{seq}")),
                 _ => None,
             },
+            "comment" => {
+                if cmt_issue_id.is_some() {
+                    match (cmt_issue_proj.as_deref(), cmt_issue_seq) {
+                        (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
+                        _ => None,
+                    }
+                } else if cmt_page_id.is_some() {
+                    match (cmt_page_proj.as_deref(), cmt_page_seq) {
+                        (Some(pi), Some(seq)) => Some(format!("{pi}-DOC-{seq}")),
+                        (None, Some(seq)) => Some(format!("DOC-{seq}")),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         Ok(SearchResult {
@@ -116,10 +155,42 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
 mod tests {
     use super::*;
     use crate::db;
+    use crate::db::queries::comments::{self, CommentParent};
     use crate::db::queries::{issues, pages, projects};
+    use rusqlite::params;
 
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
+    }
+
+    fn seed_user(conn: &rusqlite::Connection, username: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+             VALUES (?1, ?2, 'x', ?1, 0, 0)",
+            params![username, format!("{username}@test.local")],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_issue(conn: &rusqlite::Connection, pid: i64, title: &str) -> i64 {
+        issues::create_issue(
+            conn,
+            &CreateIssue {
+                project_id: pid,
+                title: title.into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+                source: None,
+            },
+        )
+        .unwrap()
+        .id
     }
 
     fn seed_project(conn: &rusqlite::Connection, ident: &str) -> i64 {
@@ -486,7 +557,7 @@ mod tests {
             &conn,
             &SearchQuery {
                 query: "anything".into(),
-                result_type: Some("comment".into()),
+                result_type: Some("widget".into()),
                 ..Default::default()
             },
         );
@@ -568,5 +639,249 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].result_type, "page", "fresher entity must rank first");
         assert_eq!(results[1].result_type, "issue");
+    }
+
+    // ── Comment indexing (LIF-146) ────────────────────────────
+
+    #[test]
+    fn search_finds_issue_comment_and_links_to_parent() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Some issue");
+        let uid = seed_user(&conn, "alice");
+        comments::create_comment(
+            &conn,
+            CommentParent::Issue(iid),
+            uid,
+            "we decided to use the flux capacitor approach",
+        )
+        .unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "flux".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, "comment");
+        // A comment hit links back to its parent issue's identifier.
+        assert_eq!(results[0].identifier, Some("TST-1".into()));
+        assert!(results[0].snippet.contains("flux"));
+    }
+
+    #[test]
+    fn search_finds_page_comment_and_links_to_parent() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let page = pages::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "Design Doc".into(),
+                content: String::new(),
+                status: "draft".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+        let uid = seed_user(&conn, "bob");
+        comments::create_comment(
+            &conn,
+            CommentParent::Page(page.id),
+            uid,
+            "the quokka migration plan lives here",
+        )
+        .unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "quokka".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, "comment");
+        // A page comment links back to its parent page's DOC identifier.
+        assert_eq!(results[0].identifier, Some("TST-DOC-1".into()));
+    }
+
+    #[test]
+    fn search_reflects_comment_edit() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Some issue");
+        let uid = seed_user(&conn, "alice");
+        let comment = comments::create_comment(
+            &conn,
+            CommentParent::Issue(iid),
+            uid,
+            "original zorblatt wording",
+        )
+        .unwrap();
+
+        // Original term is findable.
+        assert_eq!(
+            search(
+                &conn,
+                &SearchQuery {
+                    query: "zorblatt".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+
+        comments::update_comment(&conn, comment.id, "revised gribblenaut wording").unwrap();
+
+        // Old term is gone from the index...
+        assert!(
+            search(
+                &conn,
+                &SearchQuery {
+                    query: "zorblatt".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty(),
+            "edited-away term must no longer match"
+        );
+        // ...and the new term is now searchable, still linked to the parent.
+        let after = search(
+            &conn,
+            &SearchQuery {
+                query: "gribblenaut".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].result_type, "comment");
+        assert_eq!(after[0].identifier, Some("TST-1".into()));
+    }
+
+    #[test]
+    fn search_drops_deleted_comment_from_index() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Some issue");
+        let uid = seed_user(&conn, "alice");
+        let comment = comments::create_comment(
+            &conn,
+            CommentParent::Issue(iid),
+            uid,
+            "ephemeral snorfblat note",
+        )
+        .unwrap();
+
+        comments::delete_comment(&conn, comment.id).unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "snorfblat".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(results.is_empty(), "deleted comment must leave the index");
+    }
+
+    #[test]
+    fn search_filters_by_comment_result_type() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        // An issue and a comment that both match "overlap".
+        let iid = seed_issue(&conn, pid, "overlap in the issue title");
+        let uid = seed_user(&conn, "alice");
+        comments::create_comment(&conn, CommentParent::Issue(iid), uid, "overlap in the comment")
+            .unwrap();
+
+        let comments_only = search(
+            &conn,
+            &SearchQuery {
+                query: "overlap".into(),
+                result_type: Some("comment".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(comments_only.len(), 1);
+        assert_eq!(comments_only[0].result_type, "comment");
+    }
+
+    #[test]
+    fn search_backfills_preexisting_comments() {
+        // Comments written before the trigger fires (simulated by inserting a
+        // comment then rebuilding the index the way migration 034's backfill
+        // does) must become searchable. We approximate a "pre-existing" row by
+        // clearing the FTS entry the trigger created, then running the same
+        // INSERT...SELECT the migration uses.
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Some issue");
+        let uid = seed_user(&conn, "alice");
+        let comment =
+            comments::create_comment(&conn, CommentParent::Issue(iid), uid, "backfillme term")
+                .unwrap();
+        // Remove the trigger-created FTS row to simulate an un-indexed comment.
+        conn.execute(
+            "DELETE FROM search_index WHERE entity_type = 'comment' AND entity_id = ?1",
+            params![comment.id],
+        )
+        .unwrap();
+        assert!(
+            search(
+                &conn,
+                &SearchQuery {
+                    query: "backfillme".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty(),
+            "precondition: comment is not yet indexed"
+        );
+
+        // Re-run the migration's backfill statement.
+        conn.execute_batch(
+            "INSERT INTO search_index(title, body, entity_type, entity_id, project_id)
+             SELECT '', c.content, 'comment', c.id,
+                    COALESCE(i.project_id, pg.project_id)
+             FROM comments c
+             LEFT JOIN issues i ON c.issue_id = i.id
+             LEFT JOIN pages  pg ON c.page_id  = pg.id
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM search_index s
+                 WHERE s.entity_type = 'comment' AND s.entity_id = c.id
+             );",
+        )
+        .unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "backfillme".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, "comment");
+        assert_eq!(results[0].identifier, Some("TST-1".into()));
     }
 }

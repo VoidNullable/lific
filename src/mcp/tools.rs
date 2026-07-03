@@ -448,10 +448,20 @@ impl LificMcp {
                 let mut out = format!("{} results:\n", results.len());
                 for r in &results {
                     let ident = r.identifier.as_deref().unwrap_or("");
-                    out.push_str(&format!(
-                        "- [{}] {} {} — {}\n",
-                        r.result_type, ident, r.title, r.snippet
-                    ));
+                    // A comment hit has no title of its own; render it as a
+                    // match on its parent so the reader knows to open the
+                    // parent issue/page to find the thread (LIF-146).
+                    if r.result_type == "comment" {
+                        out.push_str(&format!(
+                            "- [comment] on {ident} — {}\n",
+                            r.snippet
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "- [{}] {} {} — {}\n",
+                            r.result_type, ident, r.title, r.snippet
+                        ));
+                    }
                 }
                 append_pagination_hint(&mut out, has_more, offset + limit);
                 out
@@ -4316,7 +4326,7 @@ mod tests {
 
         let bad = m.search(Parameters(SearchInput {
             query: "findable".into(),
-            result_type: Some("comment".into()),
+            result_type: Some("widget".into()),
             ..Default::default()
         }));
         assert!(bad.contains("Error"), "got: {bad}");
