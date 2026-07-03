@@ -12,7 +12,7 @@ export const SCENES = {
   hook: 100,
   jira: 78,
   linear: 85,
-  foss: 180,
+  foss: 250,
   reveal: 120,
   terminal: 270,
   ui: 240,

@@ -161,6 +161,14 @@ const iconSvg = (path: string, color: string) => (
   </svg>
 );
 
+// Service names verified against each project's official compose files:
+// makeplane/plane docker-compose (13: web admin space live api worker
+// beat-worker migrator proxy postgres valkey rabbitmq minio),
+// taigaio/taiga-docker (9: db back async async-rabbitmq front events
+// events-rabbitmq protected gateway), hcengineering/huly-selfhost
+// ARCHITECTURE_OVERVIEW (14 services), opf/openproject-docker-compose
+// stable/17 (9: db cache proxy web worker cron seeder autoheal
+// hocuspocus).
 const TOOLS: FossTool[] = [
   {
     name: "Plane",
@@ -173,7 +181,7 @@ const TOOLS: FossTool[] = [
     icon: (
       <Img src={staticFile("taiga.png")} style={{ width: 40, height: 40 }} />
     ),
-    blocks: ["postgres", "rabbitmq", "rabbitmq", "back", "+5 more"],
+    blocks: ["postgres", "taiga-back", "async-rabbitmq", "events-rabbitmq", "+5 more"],
     fact: "9 containers, 2 RabbitMQ instances",
   },
   {
@@ -187,22 +195,23 @@ const TOOLS: FossTool[] = [
   {
     name: "OpenProject",
     icon: iconSvg(OPENPROJECT_PATH, "#0770B8"),
-    blocks: ["postgres 16", "memcached", "web workers", "background jobs"],
-    fact: "quad-core + 4 GB minimum",
+    blocks: ["postgres", "memcached", "worker", "cron", "hocuspocus", "+4 more"],
+    fact: "9 services, quad-core + 4 GB minimum",
   },
 ];
 
-// Blocks land in synchronized waves: wave i lands at WAVE_0 + i * WAVE_GAP.
-const WAVE_0 = 34;
+// Build-up: the headline sits alone for a beat, THEN "heavy." booms in
+// (the only shake in the scene), then the stacks pile with poise.
+const HEAVY_AT = 34;
+const WAVE_0 = 58;
 const WAVE_GAP = 9;
 const DROP_DUR = 8;
 const BLOCK_H = 40; // 34px block + 6 gap
 const landAt = (wave: number) => WAVE_0 + wave * WAVE_GAP + DROP_DUR;
 
-const HEAVY_AT = 12;
-const LINE_A_AT = 106;
-const LINE_B_AT = 122;
-const FOOT_AT = 144;
+const LINE_A_AT = 126;
+const LINE_B_AT = 140;
+const FOOT_AT = 158;
 
 /** One container block dropping into a card's stack. */
 const ContainerBlock: React.FC<{ label: string; wave: number }> = ({
@@ -214,10 +223,11 @@ const ContainerBlock: React.FC<{ label: string; wave: number }> = ({
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const start = WAVE_0 + wave * WAVE_GAP;
+  // Poised, not violent: soft landing, shorter fall.
   const s = spring({
     frame: frame - start,
     fps,
-    config: { damping: 13, stiffness: 240, mass: 0.7 },
+    config: { damping: 16, stiffness: 170, mass: 0.7 },
   });
   if (frame < start) return null;
   return (
@@ -235,7 +245,7 @@ const ContainerBlock: React.FC<{ label: string; wave: number }> = ({
         fontSize: 16,
         color: last ? C.error : C.textMuted,
         opacity: Math.min(1, s * 2),
-        transform: `translateY(${(1 - s) * -70}px)`,
+        transform: `translateY(${(1 - s) * -50}px)`,
         boxSizing: "border-box",
       }}
     >
@@ -263,17 +273,11 @@ export const AgitateFoss: React.FC = () => {
     config: { damping: 13, stiffness: 220, mass: 0.6 },
   });
 
-  // Frame thud: decaying impulse at the headline slam + every wave landing,
-  // growing with the pile.
-  const maxWaves = Math.max(...TOOLS.map((t) => t.blocks.length));
+  // ONE frame shudder, on the "heavy." boom only.
   let thud = 0;
-  const impulse = (t0: number, amp: number) => {
-    if (frame >= t0 && frame < t0 + 8) {
-      thud += Math.sin((frame - t0) * 2.4) * amp * (1 - (frame - t0) / 8);
-    }
-  };
-  impulse(HEAVY_AT, 7);
-  for (let w = 0; w < maxWaves; w++) impulse(landAt(w), 2.5 + w * 0.9);
+  if (frame >= HEAVY_AT && frame < HEAVY_AT + 10) {
+    thud = Math.sin((frame - HEAVY_AT) * 2.2) * 10 * (1 - (frame - HEAVY_AT) / 10);
+  }
 
   const lineIn = (at: number) =>
     interpolate(frame, [at, at + 14], [0, 1], {
@@ -323,9 +327,9 @@ export const AgitateFoss: React.FC = () => {
               fps,
               config: { damping: 11, stiffness: 170, mass: 0.8 },
             });
-            const sagY = landed === 0 ? 0 : (landed - 1) * 5 + sag * 5;
+            const sagY = landed === 0 ? 0 : (landed - 1) * 3 + sag * 3;
             const enter = spring({
-              frame: frame - 14 - col * 3,
+              frame: frame - 44 - col * 3,
               fps,
               config: { damping: 200, stiffness: 120 },
             });
