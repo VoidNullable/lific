@@ -338,8 +338,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
 
             match action {
-                KeyAction::Create { name, user } => {
-                    let key = auth::create_api_key(&pool, &manager, &name)?;
+                KeyAction::Create {
+                    name,
+                    user,
+                    expires,
+                } => {
+                    let key = auth::create_api_key_with_expiry(
+                        &pool,
+                        &manager,
+                        &name,
+                        expires.as_deref(),
+                    )?;
 
                     // If --user was provided, assign the key to that user
                     let assigned = if let Some(ref username) = user {

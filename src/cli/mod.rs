@@ -925,6 +925,12 @@ pub enum KeyAction {
         /// Username to assign this key to
         #[arg(short, long)]
         user: Option<String>,
+
+        /// Expiry as an ISO 8601 date (2026-12-31) or datetime
+        /// (2026-12-31T23:59:59Z). After this instant the key stops
+        /// authenticating. Omit for a key that never expires.
+        #[arg(short, long)]
+        expires: Option<String>,
     },
 
     /// Assign an existing API key to a user
@@ -1417,10 +1423,15 @@ mod tests {
         let cli = Cli::try_parse_from(["lific", "key", "create", "--name", "test-key"]).unwrap();
         match cli.command {
             Command::Key {
-                action: KeyAction::Create { name, user },
+                action: KeyAction::Create {
+                    name,
+                    user,
+                    expires,
+                },
             } => {
                 assert_eq!(name, "test-key");
                 assert!(user.is_none());
+                assert!(expires.is_none());
             }
             _ => panic!("expected Key Create"),
         }
@@ -1434,10 +1445,43 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Key {
-                action: KeyAction::Create { name, user },
+                action: KeyAction::Create {
+                    name,
+                    user,
+                    expires,
+                },
             } => {
                 assert_eq!(name, "my-key");
                 assert_eq!(user, Some("blake".into()));
+                assert!(expires.is_none());
+            }
+            _ => panic!("expected Key Create"),
+        }
+    }
+
+    #[test]
+    fn parse_key_create_with_expires() {
+        let cli = Cli::try_parse_from([
+            "lific",
+            "key",
+            "create",
+            "--name",
+            "temp-key",
+            "--expires",
+            "2026-12-31",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Key {
+                action: KeyAction::Create {
+                    name,
+                    user,
+                    expires,
+                },
+            } => {
+                assert_eq!(name, "temp-key");
+                assert!(user.is_none());
+                assert_eq!(expires, Some("2026-12-31".into()));
             }
             _ => panic!("expected Key Create"),
         }

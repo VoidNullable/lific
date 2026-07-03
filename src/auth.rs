@@ -31,6 +31,17 @@ pub fn create_api_key(
     manager: &ApiKeyManagerV0,
     name: &str,
 ) -> Result<String, crate::error::LificError> {
+    create_api_key_with_expiry(db, manager, name, None)
+}
+
+/// Like [`create_api_key`] but writes an optional `expires_at` (ISO 8601). Once
+/// past, the auth path (LIF-131) refuses the key. `None` means never expires.
+pub fn create_api_key_with_expiry(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    name: &str,
+    expires_at: Option<&str>,
+) -> Result<String, crate::error::LificError> {
     let conn = db.write()?;
 
     let exists: bool = conn
@@ -56,8 +67,8 @@ pub fn create_api_key(
     let key_id = api_key.expose_hash().key_id().to_string();
 
     conn.execute(
-        "INSERT INTO api_keys (name, key_hash, key_id) VALUES (?1, ?2, ?3)",
-        params![name, hash, key_id],
+        "INSERT INTO api_keys (name, key_hash, key_id, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        params![name, hash, key_id, expires_at],
     )?;
 
     Ok(plaintext)
@@ -331,7 +342,8 @@ pub async fn require_api_key(
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
         };
         conn.query_row(
-            "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0",
+            "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
+             AND (expires_at IS NULL OR expires_at > datetime('now'))",
             params![key_id],
             |row| {
                 Ok(ApiKeyRow {
@@ -349,7 +361,8 @@ pub async fn require_api_key(
         let conn = auth.db.read().ok()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0",
+                "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0 \
+                 AND (expires_at IS NULL OR expires_at > datetime('now'))",
             )
             .ok()?;
         let rows: Vec<ApiKeyRow> = stmt
@@ -860,5 +873,122 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(bytes.as_ref(), b"none");
+    }
+
+    // ── LIF-131: api_keys.expires_at must be enforced at auth time ──────────
+    //
+    // The column existed (migration 003) and `lific key list` showed it, but
+    // the auth path never checked it, so an expired key authenticated forever.
+    // These drive the real `require_api_key` middleware: a 401 means the key
+    // was refused, a 200 means it authenticated (body "none" = no bound user).
+
+    /// Overwrite a key's expires_at directly (bypassing the CLI/date parsing)
+    /// so enforcement can be exercised deterministically.
+    fn set_key_expiry(pool: &db::DbPool, name: &str, expires_at: &str) {
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "UPDATE api_keys SET expires_at = ?1 WHERE name = ?2",
+            params![expires_at, name],
+        )
+        .unwrap();
+    }
+
+    async fn auth_status(pool: &db::DbPool, key: &str) -> StatusCode {
+        echo_app(test_auth_state(pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn expired_key_id_lookup_is_rejected() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "expired").unwrap();
+        // Expire it well in the past.
+        set_key_expiry(&pool, "expired", "2000-01-01T00:00:00Z");
+
+        assert_eq!(
+            auth_status(&pool, &key).await,
+            StatusCode::UNAUTHORIZED,
+            "an expired key must not authenticate (key_id lookup path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn unexpired_key_authenticates() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "future").unwrap();
+        // Far-future expiry: still valid.
+        set_key_expiry(&pool, "future", "2999-12-31T23:59:59Z");
+
+        assert_eq!(
+            auth_status(&pool, &key).await,
+            StatusCode::OK,
+            "a key with a future expiry must still authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_expiry_authenticates() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        // Default create leaves expires_at NULL — the never-expires case.
+        let key = create_api_key(&pool, &manager, "forever").unwrap();
+
+        assert_eq!(
+            auth_status(&pool, &key).await,
+            StatusCode::OK,
+            "a NULL expires_at means the key never expires (unchanged behavior)"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_legacy_key_without_key_id_is_rejected() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "legacy-expired").unwrap();
+        // Simulate a pre-migration key (NULL key_id) that has also expired,
+        // exercising the fallback scan path.
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "UPDATE api_keys SET key_id = NULL, expires_at = '2000-01-01T00:00:00Z' \
+                 WHERE name = 'legacy-expired'",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            auth_status(&pool, &key).await,
+            StatusCode::UNAUTHORIZED,
+            "an expired legacy key must not authenticate (NULL key_id scan path)"
+        );
+    }
+
+    #[test]
+    fn create_api_key_with_expiry_writes_column() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key_with_expiry(&pool, &manager, "dated", Some("2030-06-01")).unwrap();
+
+        let conn = pool.read().unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT expires_at FROM api_keys WHERE name = 'dated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("2030-06-01"));
     }
 }
