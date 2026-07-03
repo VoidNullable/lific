@@ -13,7 +13,13 @@
 
   import Markdown from "./Markdown.svelte";
   import { formatDate, formatRelative } from "./format";
-  import type { Comment } from "./api";
+  import {
+    listMentionCandidates,
+    type Comment,
+    type MentionCandidate,
+  } from "./api";
+  import { fuzzyMatch } from "./fuzzy";
+  import { MENTION_RE } from "./mentions";
   import { MessageSquare, CornerDownLeft } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import { tick } from "svelte";
@@ -23,11 +29,16 @@
     editable = true,
     onSubmit,
     placeholder = "Write a comment\u2026",
+    // LIF-263: project the comments belong to. When set, the composer
+    // fetches @mention candidates and offers autocomplete. Null (workspace
+    // pages) disables mentions entirely.
+    projectId = null,
   }: {
     comments: Comment[];
     editable?: boolean;
     onSubmit: (content: string) => Promise<Comment | null>;
     placeholder?: string;
+    projectId?: number | null;
   } = $props();
 
   let draft = $state("");
@@ -35,6 +46,135 @@
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
+
+  // ── @mention autocomplete (LIF-263) ─────────────────────
+  //
+  // Candidates are fetched once when the project id is known; the popover
+  // opens when the caret sits in an `@token` run, fuzzy-filters on username
+  // + display name, and is keyboard-first (↑/↓/Enter/Tab select, Esc
+  // dismisses). Selecting replaces the active `@token` with `@username `.
+
+  let candidates = $state<MentionCandidate[]>([]);
+
+  $effect(() => {
+    const pid = projectId;
+    if (pid == null) {
+      candidates = [];
+      return;
+    }
+    let cancelled = false;
+    listMentionCandidates(pid).then((r) => {
+      if (!cancelled && r.ok) candidates = r.data;
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Active mention query: `@` + the partial token immediately left of the
+  // caret. `null` when the caret isn't in a mention context.
+  let mentionOpen = $state(false);
+  let mentionQuery = $state("");
+  // Character offset of the `@` that started the active token.
+  let mentionStart = $state(0);
+  let mentionIndex = $state(0);
+
+  // Only match an `@run` that ends exactly at the caret and begins at a word
+  // boundary — mirrors the render/extract rule so the composer and the
+  // stored result agree on what a token is.
+  const ACTIVE_MENTION_RE = /(^|[^\w@-])@([A-Za-z0-9_-]*)$/;
+
+  let mentionMatches = $derived.by<MentionCandidate[]>(() => {
+    if (!mentionOpen) return [];
+    const q = mentionQuery.trim();
+    if (q === "") return candidates.slice(0, 8);
+    return candidates
+      .map((c) => {
+        const byUser = fuzzyMatch(q, c.username);
+        const byName = fuzzyMatch(q, c.display_name);
+        const score = Math.max(byUser?.score ?? 0, byName?.score ?? 0);
+        return { c, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8)
+      .map((x) => x.c);
+  });
+
+  function updateMentionContext() {
+    const el = textareaEl;
+    if (!el || candidates.length === 0) {
+      mentionOpen = false;
+      return;
+    }
+    const caret = el.selectionStart ?? 0;
+    const before = draft.slice(0, caret);
+    const m = before.match(ACTIVE_MENTION_RE);
+    if (m) {
+      mentionOpen = true;
+      mentionQuery = m[2];
+      mentionStart = caret - m[2].length - 1; // index of the '@'
+      mentionIndex = 0;
+    } else {
+      mentionOpen = false;
+    }
+  }
+
+  function selectMention(cand: MentionCandidate) {
+    const el = textareaEl;
+    if (!el) return;
+    const caret = el.selectionStart ?? draft.length;
+    const before = draft.slice(0, mentionStart);
+    const after = draft.slice(caret);
+    const insert = `@${cand.username} `;
+    draft = before + insert + after;
+    mentionOpen = false;
+    // Restore caret just past the inserted token + trailing space.
+    const nextCaret = before.length + insert.length;
+    tick().then(() => {
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+      resize();
+    });
+  }
+
+  function onMentionKeydown(e: KeyboardEvent): boolean {
+    if (!mentionOpen || mentionMatches.length === 0) return false;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      mentionIndex = (mentionIndex + 1) % mentionMatches.length;
+      return true;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      mentionIndex =
+        (mentionIndex - 1 + mentionMatches.length) % mentionMatches.length;
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      selectMention(mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)]);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      mentionOpen = false;
+      return true;
+    }
+    return false;
+  }
+
+  function initialsOf(name: string): string {
+    return name
+      .split(/[\s_-]+/)
+      .slice(0, 2)
+      .map((w) => w[0]?.toUpperCase() ?? "")
+      .join("");
+  }
+
+  // Keep MENTION_RE referenced so tree-shaking + lint don't complain when
+  // the composer path is the only consumer in this module.
+  void MENTION_RE;
 
   // ⌘ on Mac, Ctrl elsewhere — match the platform the user expects.
   const isMac =
@@ -52,10 +192,17 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // The mention popover consumes ↑/↓/Enter/Tab/Esc while open.
+    if (onMentionKeydown(e)) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit();
     }
+  }
+
+  function onInput() {
+    resize();
+    updateMentionContext();
   }
 
   // Grow the textarea with its content; CSS min-height floors it.
@@ -124,7 +271,7 @@
               </span>
             </div>
             <div class="cmt__md">
-              <Markdown content={comment.content} class="text-sm" />
+              <Markdown content={comment.content} mentions={candidates} class="text-sm" />
             </div>
           </div>
         </li>
@@ -144,14 +291,49 @@
 
   {#if editable}
     <div class="cmt__composer">
-      <textarea
-        bind:this={textareaEl}
-        bind:value={draft}
-        {placeholder}
-        class="cmt__input"
-        oninput={resize}
-        onkeydown={onKeydown}
-      ></textarea>
+      <div class="cmt__input-wrap">
+        <textarea
+          bind:this={textareaEl}
+          bind:value={draft}
+          {placeholder}
+          class="cmt__input"
+          oninput={onInput}
+          onkeydown={onKeydown}
+          onclick={updateMentionContext}
+          onblur={() => setTimeout(() => (mentionOpen = false), 120)}
+        ></textarea>
+
+        {#if mentionOpen && mentionMatches.length > 0}
+          <ul class="mention-pop" role="listbox" aria-label="Mention a user">
+            {#each mentionMatches as cand, i (cand.user_id)}
+              <li>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={i === mentionIndex}
+                  class="mention-pop__row"
+                  class:is-active={i === mentionIndex}
+                  onmousedown={(e) => {
+                    e.preventDefault();
+                    selectMention(cand);
+                  }}
+                  onmouseenter={() => (mentionIndex = i)}
+                >
+                  <span class="mention-pop__avatar" aria-hidden="true">
+                    {initialsOf(cand.display_name || cand.username)}
+                  </span>
+                  <span class="mention-pop__text">
+                    <span class="mention-pop__name">{cand.display_name || cand.username}</span>
+                    <span class="mention-pop__user">@{cand.username}</span>
+                  </span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if mentionOpen && candidates.length > 0}
+          <div class="mention-pop mention-pop--empty">No people match</div>
+        {/if}
+      </div>
       <div class="cmt__toolbar">
         <span class="cmt__hint">Markdown supported</span>
         <div class="cmt__actions">
@@ -314,10 +496,19 @@
     border: 1px solid var(--border);
     border-radius: 0.75rem;
     background: var(--surface);
-    overflow: hidden;
+    /* visible (not hidden) so the @mention popover can overhang the
+       composer edge; children carry their own rounding where it matters. */
+    overflow: visible;
     transition:
       border-color 0.18s var(--ease-out-expo),
       box-shadow 0.18s var(--ease-out-expo);
+  }
+
+  .cmt__input-wrap {
+    position: relative;
+    border-top-left-radius: 0.75rem;
+    border-top-right-radius: 0.75rem;
+    overflow: visible;
   }
   .cmt__composer:focus-within {
     border-color: var(--accent);
@@ -400,6 +591,90 @@
   .cmt__send:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* ── @mention popover (LIF-263) ─────────────────────── */
+  /* Command-Palette vocabulary: a floating surface card with a soft
+     shadow, tight rows, an avatar/initials leading each row, and an
+     accent-tinted active row. Anchored just below the caret line by
+     sitting at the top of the textarea wrap. */
+  .mention-pop {
+    position: absolute;
+    z-index: 40;
+    left: 0.5rem;
+    top: 100%;
+    margin-top: 0.25rem;
+    min-width: 15rem;
+    max-width: 22rem;
+    max-height: 15rem;
+    overflow-y: auto;
+    list-style: none;
+    margin-block: 0.25rem 0;
+    padding: 0.25rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.625rem;
+    box-shadow:
+      0 10px 24px -8px rgb(0 0 0 / 0.28),
+      0 2px 6px -2px rgb(0 0 0 / 0.16);
+  }
+  .mention-pop--empty {
+    padding: 0.625rem 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+  .mention-pop li {
+    list-style: none;
+  }
+  .mention-pop__row {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    border: 0;
+    border-radius: 0.4375rem;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .mention-pop__row.is-active {
+    background: var(--accent-subtle);
+  }
+  .mention-pop__avatar {
+    flex-shrink: 0;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-subtle);
+    color: var(--accent);
+    border: 1px solid var(--border);
+    font-size: 0.5625rem;
+    font-weight: 700;
+    user-select: none;
+  }
+  .mention-pop__text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+  .mention-pop__name {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mention-pop__user {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
   }
 
   @media (prefers-reduced-motion: reduce) {

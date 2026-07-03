@@ -316,6 +316,7 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  mentionProjectId={page?.project_id ?? null}
   {activity}
   {paletteActions}
   layout="wide"

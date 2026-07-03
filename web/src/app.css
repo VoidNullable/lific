@@ -756,6 +756,21 @@ html[data-motion="reduced"] *::after {
   color: var(--accent-text);
 }
 
+/* ── @mention chips (LIF-263) ──────────────────────────── */
+/* Subtle accent-tinted inline chip showing the mentioned user's display
+   name. Non-interactive in v1 (no link/hover target) — it's a marker, not
+   a control. Wraps cleanly with the surrounding prose rather than forcing
+   a nowrap run like identifier links do. */
+.prose .mention-chip {
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* ── Code block copy button (LIF-110) ──────────────────── */
 .prose .code-block-wrapper {
   position: relative;

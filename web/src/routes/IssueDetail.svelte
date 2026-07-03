@@ -426,6 +426,7 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  mentionProjectId={issue?.project_id ?? null}
   {activity}
   {paletteActions}
   layout="two-column"

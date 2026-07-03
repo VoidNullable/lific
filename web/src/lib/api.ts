@@ -343,6 +343,22 @@ export async function removeProjectMember(projectId: number, userId: number) {
   });
 }
 
+// ── @mention candidates (LIF-263) ───────────────────────────
+//
+// The users a comment composer may `@`-mention in this project. Scoped to
+// project members when `authz_enforced` is on, all non-bot users otherwise
+// — the server never returns anyone who can't see the project.
+
+export interface MentionCandidate {
+  user_id: number;
+  username: string;
+  display_name: string;
+}
+
+export async function listMentionCandidates(projectId: number) {
+  return request<MentionCandidate[]>(`/projects/${projectId}/mention-candidates`);
+}
+
 // ── Projects ────────────────────────────────────────────────
 
 export interface Project {
