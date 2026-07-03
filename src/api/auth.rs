@@ -53,14 +53,21 @@ pub(super) async fn auth_signup(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
+    headers: HeaderMap,
     Json(input): Json<SignupRequest>,
 ) -> Result<impl IntoResponse, LificError> {
-    // Rate limit signups to prevent Argon2 CPU exhaustion
-    let key = format!("signup:{}", input.email.to_lowercase());
+    // Rate limit signups to prevent Argon2 CPU exhaustion. Key on TWO things
+    // (LIF-138): the email AND the source IP. The attacker chooses the email,
+    // so an email-only key is bypassed by rotating addresses — each request
+    // still costing a full Argon2 hash. The per-IP key (same helper login
+    // uses) is what actually caps the DoS. `check` records on pass and the
+    // `||` short-circuits, so a rejected attempt never double-charges.
+    let email_key = format!("signup:{}", input.email.to_lowercase());
+    let ip_key = format!("signup_ip:{}", crate::ratelimit::client_ip(&headers));
     if let Some(Extension(ref rl)) = limiter
-        && !rl.check(&key)
+        && (!rl.check(&email_key) || !rl.check(&ip_key))
     {
-        let retry = rl.retry_after(&key);
+        let retry = rl.retry_after(&email_key).max(rl.retry_after(&ip_key));
         return Err(LificError::BadRequest(format!(
             "too many signup attempts — try again in {retry} seconds"
         )));
@@ -1356,5 +1363,80 @@ mod tests {
         // A different IP is unaffected.
         let (_, other) = login_attempt(&app, "someone", "198.51.100.2").await;
         assert!(!is_rate_limited(&other), "distinct IP should not be limited: {other}");
+    }
+
+    // ── LIF-138: signup rate limiting must also key on source IP ──
+
+    /// Fire one signup with a fresh username/email from source IP `xff`.
+    async fn signup_attempt(
+        app: &axum::Router,
+        n: usize,
+        xff: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let body = serde_json::json!({
+            "username": format!("user{n}"),
+            "email": format!("user{n}@test.com"),
+            "password": "securepass123",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/signup")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", xff)
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, parse_json(resp).await)
+    }
+
+    fn is_signup_rate_limited(body: &serde_json::Value) -> bool {
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("too many signup attempts")
+    }
+
+    #[tokio::test]
+    async fn signup_rate_limit_applies_per_ip_across_emails() {
+        // The DoS LIF-138 fixes: an email-only key is bypassed by rotating
+        // addresses, each request still paying a full Argon2 hash. Distinct
+        // emails from ONE IP must now be throttled by the per-IP bucket.
+        let app = login_app_with_limiter(5);
+        for i in 0..5 {
+            let (status, body) = signup_attempt(&app, i, "203.0.113.9").await;
+            assert_eq!(status, StatusCode::OK, "signup {i} should succeed: {body}");
+            assert!(!is_signup_rate_limited(&body), "signup {i} not yet limited: {body}");
+        }
+        // 6th: same IP, brand-new email → blocked by the IP bucket.
+        let (status, body) = signup_attempt(&app, 99, "203.0.113.9").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            is_signup_rate_limited(&body),
+            "6th signup from the same IP should be rate-limited: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_rate_limit_isolates_distinct_ips() {
+        // The per-IP cap must not leak across IPs: a fresh source can still
+        // sign up after another IP is capped.
+        let app = login_app_with_limiter(3);
+        for i in 0..3 {
+            let (status, _) = signup_attempt(&app, i, "198.51.100.7").await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        // Capping IP is now blocked.
+        let (_, capped) = signup_attempt(&app, 50, "198.51.100.7").await;
+        assert!(is_signup_rate_limited(&capped), "capped IP should be blocked: {capped}");
+        // A different IP is unaffected.
+        let (status, other) = signup_attempt(&app, 60, "198.51.100.8").await;
+        assert_eq!(status, StatusCode::OK, "distinct IP should not be limited: {other}");
     }
 }
