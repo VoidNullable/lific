@@ -20,8 +20,8 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **26 MCP tools in 5,213 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
-- **One ~21 MB binary.** Embedded SQLite, embedded web UI, backups built in. No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
+- **26 MCP tools in 5,231 tokens.** That's the measured size of the full `tools/list` response at v2.0.0 (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
+- **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
 Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive being spoken, logged, grepped, and pasted into a prompt.
@@ -31,14 +31,15 @@ Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive 
 ```bash
 cargo install lific     # or grab a binary from the releases page
 
-lific init              # writes lific.toml + creates the database
-lific start             # serves on :3456, prints your API key once
+lific init              # writes lific.toml with sensible defaults
+lific start             # creates the database, serves on :3456,
+                        # prints your API key once
 lific connect           # writes MCP config into your AI clients
 ```
 
 That's the whole thing. `lific connect` detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
-The web UI is at `http://localhost:3456`. The first account you create is the admin.
+The web UI is at `http://localhost:3456`. Sign up there to create your account, then grant it admin rights from the CLI: `lific user promote <username>`.
 
 Verify any setup with:
 
@@ -52,7 +53,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 ## What your agent can now do
 
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
-- **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one died. No `MEMORY.md`, no re-priming ritual.
+- **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
 - **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
@@ -146,7 +147,7 @@ Create keys anytime with `lific key create --name my-key`.
 <details>
 <summary>Web UI setup (if you prefer clicking)</summary>
 
-Go to **Settings > Connected Tools** in the web UI. Pick your tool, click Connect, and paste the generated config snippet.
+Go to **Settings > Connected tools** in the web UI. Pick your tool, click Connect, and paste the generated config snippet.
 
 Each connection creates a bot identity tied to your account (the CLI's `connect` does the same). Changes show up attributed to you, tagged with which tool made them.
 
@@ -183,7 +184,7 @@ lific search "authentication" --project APP
 
 ## MCP tools
 
-All 26, in 5,213 tokens:
+All 26, in 5,231 tokens:
 
 | Family | Tools |
 |--------|-------|
@@ -213,7 +214,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Auth** | OAuth 2.1 (PKCE, dynamic client registration, RFC 9728 discovery), RFC 8628 device flow, API keys, token revocation |
 | **Backups** | Automatic SQLite snapshots with configurable retention |
 | **CLI** | Full CRUD, TTY-aware JSON output, works with no server running |
-| **Single binary** | No runtime dependencies, embedded SQLite, ~21 MB |
+| **Single binary** | No runtime dependencies, embedded SQLite, ~25 MB |
 
 ## When Lific is the wrong tool
 
@@ -291,9 +292,9 @@ Issues and PRs welcome. If you're planning something big, open an issue first so
 
 ## MCP Registry
 
-Lific is published to the official [MCP Registry](https://registry.modelcontextprotocol.io).
+Lific ships a registry manifest (`server.json`) for the official [MCP Registry](https://registry.modelcontextprotocol.io). Its canonical registry name:
 
-- MCP Registry name: `mcp-name: io.github.VoidNullable/lific`
+- `mcp-name: io.github.VoidNullable/lific`
 
 ## License
 
