@@ -1893,8 +1893,35 @@ impl LificMcp {
             }
         };
 
+        // LIF-263: resolve the parent's project + the enforcement flag up
+        // front (read connections), then record @mentions in the same write
+        // that creates the comment. Same visible-member rules as the REST
+        // path — only tokens matching a visible member resolve.
+        let project_id: Option<i64> = match parent {
+            queries::comments::CommentParent::Issue(id) => {
+                match self.read(|conn| queries::get_issue(conn, id)) {
+                    Ok(i) => Some(i.project_id),
+                    Err(e) => return format!("Error: {e}"),
+                }
+            }
+            queries::comments::CommentParent::Page(id) => {
+                match self.read(|conn| queries::get_page(conn, id)) {
+                    Ok(p) => p.project_id,
+                    Err(e) => return format!("Error: {e}"),
+                }
+            }
+        };
+        let member_scoped = match crate::authz::authz_enforced(&self.db) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {e}"),
+        };
+
         match self.write(|conn| {
-            queries::comments::create_comment(conn, parent, user_id, &input.content)
+            let candidates =
+                queries::comments::mention_candidates(conn, project_id, member_scoped)?;
+            let c = queries::comments::create_comment(conn, parent, user_id, &input.content)?;
+            queries::comments::sync_mentions(conn, c.id, &c.content, &candidates)?;
+            Ok(c)
         }) {
             // Don't echo c.content back — the agent already supplied it in the
             // tool args, so repeating it just duplicates tokens in context
@@ -3238,6 +3265,53 @@ mod tests {
         assert!(result.contains("2 comment(s)"), "got: {result}");
         assert!(result.contains("Hello from MCP"), "got: {result}");
         assert!(result.contains("Second comment"), "got: {result}");
+    }
+
+    // LIF-263: the MCP add_comment path records @mentions too, using the
+    // same visible-member rules as REST (enforcement is off in this test
+    // fixture, so all non-bot users are candidates).
+    #[test]
+    fn add_comment_records_mentions() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Mention issue");
+        let _guard = seed_user(&m);
+
+        // Seed a second user to mention.
+        let ada_id = {
+            let conn = m.db.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &models::CreateUser {
+                    username: "ada".into(),
+                    email: "ada@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: Some("Ada".into()),
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+            .id
+        };
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "cc @ada and @ghost".into(),
+        }));
+        assert!(result.starts_with("Comment #"), "got: {result}");
+        let comment_id: i64 = result
+            .trim_start_matches("Comment #")
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let conn = m.db.read().unwrap();
+        let mentions =
+            crate::db::queries::comments::list_mention_user_ids(&conn, comment_id).unwrap();
+        assert_eq!(mentions, vec![ada_id], "only the real user @ada resolves");
     }
 
     #[test]

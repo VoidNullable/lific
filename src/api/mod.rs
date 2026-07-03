@@ -210,6 +210,12 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/members/{user_id}",
             patch(members::update_project_member).delete(members::remove_project_member),
         )
+        // @mention autocomplete candidates (LIF-263) — Viewer-gated,
+        // member-scoped when authz enforcement is on.
+        .route(
+            "/api/projects/{id}/mention-candidates",
+            get(comments::mention_candidates),
+        )
         // Per-status issue counts (topbar tallies — LIF-161)
         .route(
             "/api/projects/{id}/issue-counts",

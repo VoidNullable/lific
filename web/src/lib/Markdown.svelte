@@ -6,9 +6,21 @@
   import { openPeek } from "./issues/peek.svelte"; // LIF-248
   import { openContextMenu } from "./contextMenu.svelte"; // LIF-248
   import { PanelRight, ExternalLink } from "lucide-svelte";
+  import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
 
-  let { content, class: className = "" }: { content: string; class?: string } =
-    $props();
+  let {
+    content,
+    class: className = "",
+    // LIF-263: known mention targets (visible members). `@username` tokens
+    // that resolve against this set render as chips showing the display
+    // name; unknown tokens stay literal text.
+    mentions = [],
+  }: { content: string; class?: string; mentions?: MentionUser[] } = $props();
+
+  // Lowercased username → display name, for chip rendering.
+  let mentionMap = $derived(
+    new Map(mentions.map((m) => [m.username.toLowerCase(), m.display_name])),
+  );
 
   // LIF-239: identifiers must never be re-linked (or double-linked)
   // inside an existing <a> (would nest anchors — invalid HTML and
@@ -21,7 +33,10 @@
   const SKIP_LINKING_TAGS = new Set(["a", "code", "pre"]);
   const TAG_NAME_RE = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)\b/;
 
-  function linkIdentifiers(html: string): string {
+  // LIF-263: mentions are linked in the same tag-aware pass as identifiers,
+  // so `@user` inside <a>/<code>/<pre> is left alone too. The mention map is
+  // passed in so this stays a pure function of its inputs.
+  function linkIdentifiers(html: string, mentionKnown: Map<string, string>): string {
     let skipDepth = 0;
     return html.replace(/<[^>]+>|[^<]+/g, (token) => {
       if (token[0] === "<") {
@@ -35,7 +50,7 @@
         return token; // tags themselves are never rewritten
       }
       if (skipDepth > 0) return token; // inside <a>/<code>/<pre> — leave prose alone
-      return token.replace(IDENTIFIER_RE, (full, code, kindMarker, num) => {
+      let out = token.replace(IDENTIFIER_RE, (full, code, kindMarker, num) => {
         const kind = refKind(kindMarker);
         const identifier = kindMarker ? `${code}-${kindMarker}${num}` : `${code}-${num}`;
         const href = routeFor(code, kind, identifier);
@@ -45,6 +60,8 @@
         const dataAttr = kind === "issue" ? ` data-issue-ident="${identifier}"` : "";
         return `<a href="${href}" class="identifier-link"${dataAttr}>${identifier}</a>`;
       });
+      if (mentionKnown.size > 0) out = linkMentionsInText(out, mentionKnown);
+      return out;
     });
   }
 
@@ -89,10 +106,10 @@
   // generate (identifier <a href="#/...">, the mermaid/code wrapper <div>s with
   // their class + data-* attributes, GFM tables, task-list checkboxes).
   let html = $derived(
-    DOMPurify.sanitize(linkIdentifiers(rendered), {
-      // Keep the data-mermaid / data-lang / data-issue-ident hooks the
-      // post-render effects read.
-      ADD_ATTR: ["data-mermaid", "data-lang", "data-issue-ident"],
+    DOMPurify.sanitize(linkIdentifiers(rendered, mentionMap), {
+      // Keep the data-mermaid / data-lang / data-issue-ident / data-mention
+      // hooks the post-render effects (and mention chips) read.
+      ADD_ATTR: ["data-mermaid", "data-lang", "data-issue-ident", "data-mention"],
     })
   );
 

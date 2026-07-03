@@ -173,6 +173,9 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/projects/{id}/members"), Gated(Lead)),
         (("PATCH", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
         (("DELETE", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
+        // @mention autocomplete candidates (LIF-263) — Viewer-gated, and
+        // member-scoped in the query layer when enforcement is on.
+        (("GET", "/api/projects/{id}/mention-candidates"), Gated(Viewer)),
         // ── Saved views (LIF-242, REST/web-only) ──
         // Gated(Viewer) is the *project-role* floor only — every one of
         // these additionally enforces strict per-user ownership in the

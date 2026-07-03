@@ -71,6 +71,9 @@
     // Comments (optional)
     comments,
     onNewComment,
+    // LIF-263: project id the comments belong to, used to fetch @mention
+    // autocomplete candidates. Null for workspace pages (no member list).
+    mentionProjectId = null,
     // Activity timeline (optional — LIF-157). The route owns fetching;
     // this shell just renders it between the body and the comments.
     activity,
@@ -129,6 +132,7 @@
     onDelete?: () => Promise<boolean>;
     comments?: Comment[];
     onNewComment?: (content: string) => Promise<Comment | null>;
+    mentionProjectId?: number | null;
     activity?: Activity[];
     paletteActions?: PaletteAction[];
     layout?: "two-column" | "wide";
@@ -412,7 +416,13 @@
   {/if}
 
   {#if onNewComment && comments}
-    <Comments bind:this={commentsRef} {comments} {editable} onSubmit={onNewComment} />
+    <Comments
+      bind:this={commentsRef}
+      {comments}
+      {editable}
+      onSubmit={onNewComment}
+      projectId={mentionProjectId}
+    />
   {/if}
 
   {#if metaFooter}{@render metaFooter()}{/if}
