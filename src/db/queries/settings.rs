@@ -27,10 +27,17 @@ pub struct InstanceSettings {
     /// scope only — REST/MCP are unaffected. Dangerous on a public instance.
     pub web_auto_login: bool,
     /// LIF-196: runtime flip for project-scoped default-deny authorization
-    /// (epic LIF-194). Off by default — today's exact lead/admin-only checks
-    /// apply. When true, `authz::require_role` enforces the full
+    /// (epic LIF-194). When true, `authz::require_role` enforces the full
     /// viewer/maintainer/lead membership matrix, including gated reads.
     /// See `src/authz.rs` and LIF-DOC-7.
+    ///
+    /// LIF-261: the *seed* default now depends on the install. `ensure` sets it
+    /// on for a fresh DB (zero users at row-creation time) and off for an
+    /// upgrade (users already exist); the code-level fallback in [`defaults`]
+    /// stays off for a never-seeded read. Once the row exists it's
+    /// authoritative — flip it at runtime via [`update`]. The agent-first flow
+    /// keeps working with the default on because unbound API keys are
+    /// operator-trusted.
     pub authz_enforced: bool,
 }
 
@@ -49,9 +56,20 @@ pub struct InstanceSettingsPatch {
 
 /// Seed the settings row if it does not exist yet, using `allow_signup` as the
 /// initial value (sourced from TOML at startup). No-op once the row exists.
+///
+/// LIF-261: on **row creation only**, `authz_enforced` is seeded to whether the
+/// DB has zero users at that moment. A fresh install (no users yet) enforces
+/// project-scoped authorization by default; an upgrade from a pre-2.0 instance
+/// (users already exist) seeds it off, preserving today's behavior. Because
+/// this is `INSERT OR IGNORE`, the row is authoritative once written — a later
+/// `ensure` (e.g. every `lific start`) never re-evaluates or flips it, so an
+/// admin who turns enforcement off stays off. The zero-user agent-first flow
+/// still works with the default on because unbound API keys are
+/// operator-trusted (see `src/authz.rs`).
 pub fn ensure(conn: &Connection, allow_signup: bool) -> Result<(), LificError> {
     conn.execute(
-        "INSERT OR IGNORE INTO instance_settings (id, allow_signup) VALUES (1, ?1)",
+        "INSERT OR IGNORE INTO instance_settings (id, allow_signup, authz_enforced)
+         VALUES (1, ?1, (SELECT COUNT(*) FROM users) = 0)",
         params![allow_signup],
     )?;
     Ok(())
@@ -254,6 +272,84 @@ mod tests {
         // A later ensure with a different default must NOT overwrite.
         ensure(&c, true).unwrap();
         assert!(!get(&c).unwrap().allow_signup, "row already existed, left intact");
+    }
+
+    // ── LIF-261: authz_enforced seed default depends on the install ──────
+
+    /// Insert a user directly so `ensure`'s `COUNT(*) FROM users` sees a
+    /// non-fresh DB. Password hash content is irrelevant to the seed logic.
+    fn seed_a_user(c: &Connection) {
+        c.execute(
+            "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+             VALUES ('someone', 'someone@test.local', 'x', 'Someone', 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_seeds_authz_enforced_on_for_a_fresh_install() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        // Zero users at seed time → fresh install → enforce by default.
+        ensure(&c, true).unwrap();
+        assert!(
+            get(&c).unwrap().authz_enforced,
+            "a fresh DB (no users) must seed authz_enforced ON"
+        );
+    }
+
+    #[test]
+    fn ensure_seeds_authz_enforced_off_when_users_already_exist() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        // An upgrade from a pre-2.0 instance: users predate the seed.
+        seed_a_user(&c);
+        ensure(&c, true).unwrap();
+        assert!(
+            !get(&c).unwrap().authz_enforced,
+            "a DB that already has users must seed authz_enforced OFF (preserve behavior)"
+        );
+    }
+
+    #[test]
+    fn ensure_never_flips_authz_enforced_after_the_row_exists() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        // First ensure on a fresh DB seeds ON and writes the row.
+        ensure(&c, true).unwrap();
+        assert!(get(&c).unwrap().authz_enforced);
+        // Now users appear (people sign up). A later ensure — as every `lific
+        // start` runs — must NOT re-evaluate and flip enforcement off.
+        seed_a_user(&c);
+        ensure(&c, true).unwrap();
+        assert!(
+            get(&c).unwrap().authz_enforced,
+            "the seeded row is authoritative — a later ensure must never flip it"
+        );
+    }
+
+    #[test]
+    fn admin_can_turn_seeded_on_enforcement_back_off() {
+        let pool = conn();
+        let c = pool.write().unwrap();
+        ensure(&c, true).unwrap();
+        assert!(get(&c).unwrap().authz_enforced, "fresh install seeds ON");
+
+        // An admin flips it off at runtime…
+        let s = update(
+            &c,
+            InstanceSettingsPatch { authz_enforced: Some(false), ..Default::default() },
+        )
+        .unwrap();
+        assert!(!s.authz_enforced);
+
+        // …and a subsequent ensure (next `lific start`) leaves that choice intact.
+        ensure(&c, true).unwrap();
+        assert!(
+            !get(&c).unwrap().authz_enforced,
+            "ensure must respect the admin's later opt-out"
+        );
     }
 
     #[test]

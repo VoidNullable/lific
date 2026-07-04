@@ -226,6 +226,22 @@ Honesty is cheaper than churn:
 
 For one human directing several agents across personal projects (the thing it's built for), none of those trade-offs bite.
 
+## Authorization
+
+Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership enforced on every REST and MCP call, including reads. **Fresh installs (created on 2.1+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in — nothing changes under you on upgrade. Toggle it at runtime:
+
+```bash
+lific instance set --authz-enforced true    # or false
+```
+
+**Unbound API keys bypass authorization by design.** A key with no user binding — the one `lific start` auto-mints on a keyless DB, and the ones `lific key create` and `connect`'s fresh-install path produce — is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That's what keeps the zero-user `init → start → connect` flow working with enforcement on. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
+
+```bash
+lific key list
+```
+
+Prefer per-tool **bot identities** (what `lific connect` mints when you have a user account) over unbound keys: a bot inherits its owner's project access and shows up in the audit log by name.
+
 ## Configuration
 
 <details>

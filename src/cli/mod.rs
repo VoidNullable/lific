@@ -905,10 +905,12 @@ pub enum InstanceAction {
         #[arg(long = "auto-login")]
         auto_login: Option<bool>,
 
-        /// LIF-197: enable project-scoped default-deny authorization (epic
-        /// LIF-194). Off by default — today's lead/admin-only checks apply.
-        /// When true, viewer/maintainer/lead project membership is enforced
-        /// on every REST/MCP call, including reads. See `src/authz.rs`.
+        /// Enable project-scoped default-deny authorization (LIF-194). When
+        /// true, viewer/maintainer/lead project membership is enforced on every
+        /// REST/MCP call, including reads. Fresh installs (created 2.1+) seed
+        /// this ON; upgrades keep it OFF until you set it. Unbound API keys
+        /// (from `lific start`/`lific key create`/`connect`) are operator-
+        /// trusted and bypass this by design — audit them with `lific key list`.
         #[arg(long = "authz-enforced")]
         authz_enforced: Option<bool>,
     },

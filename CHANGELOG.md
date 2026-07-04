@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Authorization on by default for fresh installs
+
+2.0 shipped project-scoped authorization opt-in (`authz_enforced` defaulted off), which meant a brand-new install had no authorization at all — any valid bearer token could read, mutate, or delete every project. Fresh installs now **enforce by default**, without breaking the zero-user `init → start → connect` flow.
+
+- **Install-dependent seed.** On the first run that creates the settings row, `authz_enforced` is seeded from whether the database has any users yet: a fresh install (zero users) enforces by default; an instance upgraded from an earlier version (users already exist) stays off. The row is authoritative once written — later starts never re-evaluate or flip it, and an admin who turns enforcement off stays off.
+- **Operator-key trust rule.** The agent-first flow runs on user-unbound API keys, which resolve to no effective user and would be default-denied under enforcement. Such keys can only be minted with shell access to the server (`lific start`'s auto-key, `lific key create`, `connect`'s fresh-install path), so in enforced mode they are now treated as **operator-trusted** (admin-equivalent). The signal is credential-type-specific and set only on the unbound-API-key auth path — a legacy pre-binding OAuth token also resolves to no user but is **not** granted operator power and stays default-denied (covered by explicit regression tests on both REST and MCP).
+- **Unbound API keys bypass authorization by design.** Audit them with `lific key list`. Prefer per-tool bot identities (what `lific connect` mints once you have a user account), which inherit their owner's project access and are attributed by name.
+
+### Upgrading
+
+- The database upgrades itself automatically on first launch; there is no migration for this change. **Existing instances are unaffected** — because they already have users (and already have the settings row), enforcement stays exactly where you left it. Only brand-new installs get enforcement on by default.
+- If you run a public instance and want authorization on, set it explicitly: `lific instance set --authz-enforced true`.
+- Unbound API keys are operator-trusted and bypass authorization in enforced mode. Review them with `lific key list` and revoke any you don't recognize.
+
 ## v2.0.0 (2026-07-02)
 
 Lific 2.0 is three releases in one. The web UI moves from complete to fast, personal, and pleasant — a real home page, analytics, saved views, undo, a peek panel, full keyboard control, and a theming system. Underneath it, Lific gets real authorization: project-scoped membership and roles, enforced identically across the REST API and every MCP tool. And around it, a new CLI connects any of 11 AI clients in one command, with health checks, device-flow login, and per-tool agent identities. No breaking API changes — authorization enforcement is opt-in, and existing setups keep working bit-for-bit.

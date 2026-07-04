@@ -5,10 +5,16 @@
 //! ## Two modes, one runtime flag
 //!
 //! Enforcement is gated by the instance setting `authz_enforced` (migration
-//! 027, off by default — see [`db::queries::settings`]). This mirrors how
-//! `web_auto_login` (LIF-215) and `allow_signup` (LIF-211) are read: a plain
-//! column on the single `instance_settings` row, read fresh on every check so
-//! flipping it takes effect without a restart.
+//! 027 — see [`db::queries::settings`]). This mirrors how `web_auto_login`
+//! (LIF-215) and `allow_signup` (LIF-211) are read: a plain column on the
+//! single `instance_settings` row, read fresh on every check so flipping it
+//! takes effect without a restart.
+//!
+//! LIF-261: the *seed* default is install-dependent. `settings::ensure` turns
+//! it ON for a fresh install (zero users at row-creation time) and OFF for an
+//! upgrade (users already exist), then the row is authoritative forever. The
+//! zero-user agent-first flow survives the default-on because unbound API keys
+//! are operator-trusted (see below).
 //!
 //! - **Flag off (legacy mode)** — reproduces today's behavior exactly:
 //!   `min = Lead` runs the pre-LIF-194 `require_project_lead` check
