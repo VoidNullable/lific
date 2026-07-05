@@ -15,6 +15,14 @@ export function formatDate(iso: string): string {
   });
 }
 
+// Absolute date + time down to the minute, for tooltips / `title` on
+// relative timestamps (LIF-285). formatDate already includes hh:mm today,
+// so this is currently an alias — kept as a named export so TimeAgo has a
+// stable "full timestamp" formatter even if formatDate's shape changes.
+export function formatDateTime(iso: string): string {
+  return formatDate(iso);
+}
+
 export function formatRelative(iso: string): string {
   const d = new Date(iso + "Z");
   const now = new Date();

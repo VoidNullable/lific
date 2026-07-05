@@ -5,7 +5,7 @@
   // scoped to the selected weeks window.
 
   import type { ActorStat } from "../api";
-  import { formatRelative } from "../format";
+  import TimeAgo from "../TimeAgo.svelte";
 
   let { actors }: { actors: ActorStat[] } = $props();
 
@@ -53,7 +53,7 @@
             {/if}
           </div>
           <div class="text-micro text-[var(--text-faint)]">
-            last seen {formatRelative(a.last_ts)}
+            last seen <TimeAgo date={a.last_ts} />
           </div>
         </div>
         <span class="text-caption text-[var(--text-muted)] tabular-nums shrink-0">

@@ -26,7 +26,6 @@
   import { slide } from "svelte/transition";
   import { motionReduced } from "../lib/theme";
   import { getContext } from "svelte";
-  import { formatRelative } from "../lib/format";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { compareIssues as compareIssuesPure } from "../lib/issues/sort";
   import { computeSearchResult, RESULT_CAP } from "../lib/issues/search";

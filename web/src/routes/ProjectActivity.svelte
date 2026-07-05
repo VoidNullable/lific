@@ -20,7 +20,8 @@
   import StatusIcon from "../lib/StatusIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
-  import { formatDate, formatRelative } from "../lib/format";
+  import { formatDate } from "../lib/format";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import {
     ChevronRight, ChevronDown, History, ArrowUpRight,
     CircleDot, FileText, MessageSquare, Layers, Tag, FolderClosed, Box,
@@ -498,12 +499,10 @@
                       {/if}
                     </div>
 
-                    <span
+                    <TimeAgo
                       class="shrink-0 text-micro text-[var(--text-faint)] tabular-nums"
-                      title={formatDate(a.ts)}
-                    >
-                      {formatRelative(a.ts)}
-                    </span>
+                      date={a.ts}
+                    />
                     <ChevronDown
                       size={12}
                       class="shrink-0 text-[var(--text-faint)] transition-transform
@@ -554,7 +553,7 @@
                             <p class="text-micro text-[var(--text-muted)] m-0 mt-0.5">
                               {standing.stat.actions.toLocaleString()} action{standing.stat.actions === 1 ? "" : "s"}
                               in this project · {ordinal(standing.rank)} most active
-                              · last seen {formatRelative(standing.stat.last_ts)}
+                              · last seen <TimeAgo date={standing.stat.last_ts} />
                             </p>
                           {/if}
                         </div>
@@ -680,7 +679,7 @@
                       {/if}
                     </div>
                     <div class="text-micro text-[var(--text-faint)]">
-                      via {s.top_transport} · {formatRelative(s.last_ts)}
+                      via {s.top_transport} · <TimeAgo date={s.last_ts} />
                     </div>
                   </div>
                   <span class="text-caption text-[var(--text-muted)] tabular-nums shrink-0">

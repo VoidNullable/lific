@@ -14,7 +14,7 @@
   } from "../lib/api";
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
-  import { formatRelative } from "../lib/format";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users } from "lucide-svelte";
   import { getContext, onMount } from "svelte";
 
@@ -482,7 +482,7 @@
                   {u.is_admin ? "Admin" : "Member"}
                 </span>
                 <span class="hidden sm:block text-caption text-[var(--text-faint)] tabular-nums shrink-0 w-[5.5rem] text-right">
-                  {formatRelative(u.created_at)}
+                  <TimeAgo date={u.created_at} />
                 </span>
               </div>
             {/each}

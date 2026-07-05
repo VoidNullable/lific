@@ -15,7 +15,7 @@
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
-  import { formatRelative } from "../format";
+  import TimeAgo from "../TimeAgo.svelte";
   import { STATUSES, PRIORITIES, descriptionPreview } from "./grouping";
   import { openContextMenu } from "../contextMenu.svelte"; // LIF-248
   import { projectCodeOf } from "../references"; // LIF-248
@@ -471,6 +471,6 @@
 
   <!-- Updated time. Hidden below sm to give the title room (LIF-229). -->
   <span class="hidden sm:block text-caption text-[var(--text-faint)] shrink-0 w-[60px] text-right">
-    {formatRelative(issue.updated_at)}
+    <TimeAgo date={issue.updated_at} />
   </span>
 </div>

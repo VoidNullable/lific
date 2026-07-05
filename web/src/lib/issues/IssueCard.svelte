@@ -5,7 +5,7 @@
   import type { Issue, Label } from "../api";
   import PriorityIcon from "../PriorityIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
-  import { formatRelative } from "../format";
+  import TimeAgo from "../TimeAgo.svelte";
   import { PanelRight, ExternalLink } from "lucide-svelte";
   import { openContextMenu } from "../contextMenu.svelte"; // LIF-248
   import { projectCodeOf } from "../references"; // LIF-248
@@ -135,7 +135,7 @@
     {/if}
     <div class="flex-1"></div>
     <span class="text-micro text-[var(--text-faint)] tabular-nums">
-      {formatRelative(issue.updated_at)}
+      <TimeAgo date={issue.updated_at} />
     </span>
   </div>
 </article>

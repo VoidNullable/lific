@@ -12,7 +12,7 @@
   // CommentThread with no other changes.
 
   import Markdown from "./Markdown.svelte";
-  import { formatDate, formatRelative } from "./format";
+  import TimeAgo from "./TimeAgo.svelte";
   import {
     listMentionCandidates,
     type Comment,
@@ -320,9 +320,7 @@
           <div class="cmt__body">
             <div class="cmt__meta">
               <span class="cmt__author">{author}</span>
-              <span class="cmt__time" title={formatDate(comment.created_at)}>
-                {formatRelative(comment.created_at)}
-              </span>
+              <span class="cmt__time"><TimeAgo date={comment.created_at} /></span>
             </div>
             <div class="cmt__md">
               <Markdown content={comment.content} mentions={candidates} class="text-sm" />

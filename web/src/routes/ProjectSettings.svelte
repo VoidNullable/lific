@@ -27,7 +27,8 @@
   import ProgressRing from "../lib/ProgressRing.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
-  import { formatRelative, formatDate } from "../lib/format";
+  import { formatDate } from "../lib/format";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import {
     ChevronRight, Download, Pencil, Copy, Check, ArrowRight, History,
     AlertTriangle, ChevronDown,
@@ -444,7 +445,7 @@
 
             <div class="flex items-center gap-3 mt-2.5 text-caption text-[var(--text-faint)] tabular-nums">
               <span>Created {formatDate(project.created_at)}</span>
-              {#if activity[0]}<span>·</span><span>Active {formatRelative(activity[0].ts)}</span>{/if}
+              {#if activity[0]}<span>·</span><span>Active <TimeAgo date={activity[0].ts} /></span>{/if}
             </div>
           </div>
 
@@ -548,7 +549,7 @@
                   <p class="text-[var(--text-muted)]">
                     <span class="font-medium text-[var(--text)]">{actorName(a)}</span>
                     {activityText(a)}
-                    <span class="text-[var(--text-faint)] tabular-nums">· {formatRelative(a.ts)}</span>
+                    <span class="text-[var(--text-faint)] tabular-nums">· <TimeAgo date={a.ts} /></span>
                   </p>
                 </div>
               {/each}

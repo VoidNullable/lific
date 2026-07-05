@@ -36,6 +36,7 @@
   } from "lucide-svelte";
   import Select from "../lib/Select.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
+  import TimeAgo from "../lib/TimeAgo.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import ErrorState from "../lib/ErrorState.svelte";
@@ -428,16 +429,6 @@
     if (!res.ok) {
       pages = pages.map((p) => (p.id === page.id ? { ...p, pinned: !next } : p));
     }
-  }
-
-  function formatRelative(iso: string): string {
-    const d = new Date(iso + "Z");
-    const now = new Date();
-    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
-    if (diffDays < 1) return "today";
-    if (diffDays === 1) return "yesterday";
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   }
 
   // ── Drag and drop ────────────────────────────────────
@@ -1141,7 +1132,7 @@
                       {/if}
                       <div class="flex items-center gap-2 mt-1.5 text-micro text-[var(--text-faint)]">
                         {#if fName}<span class="truncate">{fName}</span><span>·</span>{/if}
-                        <span class="tabular-nums shrink-0">{formatRelative(page.updated_at)}</span>
+                        <TimeAgo class="tabular-nums shrink-0" date={page.updated_at} />
                         {#if page.status !== "active"}
                           <span class="flex items-center gap-1 shrink-0">
                             <pMeta.icon size={10} /> {pMeta.label}
@@ -1430,12 +1421,11 @@
             </div>
           {/if}
 
-          <span
+          <TimeAgo
             class="text-body-sm text-[var(--text-faint)] shrink-0 tabular-nums
                    group-hover:text-[var(--text-muted)] transition-colors"
-          >
-            {formatRelative(page.updated_at)}
-          </span>
+            date={page.updated_at}
+          />
 
           <!-- LIF-183: pin toggle. Always visible (accent) when pinned;
                otherwise revealed on hover. LIF-234: for a viewer, a pinned

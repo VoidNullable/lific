@@ -10,7 +10,8 @@
   // should be available, not loud.
 
   import type { Activity } from "./api";
-  import { formatDate, formatRelative } from "./format";
+  import { formatDate } from "./format";
+  import TimeAgo from "./TimeAgo.svelte";
   import StatusIcon from "./StatusIcon.svelte";
   import PriorityIcon from "./PriorityIcon.svelte";
   import { History, ChevronDown } from "lucide-svelte";
@@ -239,7 +240,7 @@
               class="text-caption text-[var(--text-faint)] whitespace-nowrap"
               title="{formatDate(a.ts)} · via {a.transport}"
             >
-              · {formatRelative(a.ts)} via {a.transport}
+              · <TimeAgo date={a.ts} /> via {a.transport}
             </span>
           </div>
 
