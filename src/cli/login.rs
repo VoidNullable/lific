@@ -281,31 +281,37 @@ pub fn run_login_with_flow<F: DeviceFlow>(
         return Ok(());
     }
 
-    // Interactive: show the code prominently, then poll.
+    // Interactive: show the code prominently, then poll under a spinner.
     let complete = resp
         .verification_uri_complete
         .clone()
         .unwrap_or_else(|| resp.verification_uri.clone());
-    eprintln!();
-    eprintln!("  To sign in, visit:");
-    eprintln!("    {}", resp.verification_uri);
-    eprintln!("  and enter the code:");
-    eprintln!();
-    eprintln!("    {}", resp.user_code);
-    eprintln!();
-    eprintln!("  Or open this URL directly:");
-    eprintln!("    {complete}");
-    eprintln!();
-    eprintln!("  Waiting for approval…");
+    use crate::cli::ui;
+    ui::intro("lific login");
+    ui::note(
+        "To sign in, enter this code",
+        format!(
+            "{}\n\nat {}\nor open directly: {}",
+            resp.user_code, resp.verification_uri, complete
+        ),
+    );
 
+    let spinner = cliclack::spinner();
+    spinner.start("Waiting for approval on the other device…");
     let outcome = poll_loop(
         flow,
         &resp.device_code,
         resp.interval.max(1),
         resp.expires_in,
         std::thread::sleep,
-    )?;
-    finish(args, base, outcome, json)
+    );
+    match &outcome {
+        Ok(PollOutcome::Approved(_)) => spinner.stop("Approved"),
+        Ok(PollOutcome::Denied) => spinner.error("Denied"),
+        Ok(PollOutcome::Expired) => spinner.error("Expired"),
+        Err(_) => spinner.error("Failed"),
+    }
+    finish(args, base, outcome?, json)
 }
 
 /// Handle a terminal poll outcome: store the token (unless `--no-store`) and
@@ -325,8 +331,8 @@ fn finish(args: &LoginArgs, base: &str, outcome: PollOutcome, json: bool) -> Res
                         .unwrap_or_default()
                     );
                 } else {
-                    println!("Approved. Token (not stored):");
-                    println!("{token}");
+                    crate::cli::ui::note("Approved. Token (not stored)", &token);
+                    crate::cli::ui::outro("Done");
                 }
                 return Ok(());
             }
@@ -342,7 +348,7 @@ fn finish(args: &LoginArgs, base: &str, outcome: PollOutcome, json: bool) -> Res
                     .unwrap_or_default()
                 );
             } else {
-                println!("Signed in to {base}. Token stored.");
+                crate::cli::ui::outro(format!("Signed in to {base}. Token stored."));
             }
             Ok(())
         }
@@ -375,9 +381,9 @@ pub fn run_logout(url: Option<&str>, cfg: &Config, json: bool) -> Result<(), Str
             .unwrap_or_default()
         );
     } else if removed {
-        println!("Signed out of {base}.");
+        crate::cli::ui::step(format!("Signed out of {base}."));
     } else {
-        println!("No stored credential for {base}.");
+        crate::cli::ui::info(format!("No stored credential for {base}."));
     }
     Ok(())
 }

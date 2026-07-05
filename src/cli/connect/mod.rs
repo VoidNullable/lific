@@ -229,11 +229,11 @@ pub fn resolve_clients_inner(
     }
 
     if !stdin_tty {
-        return Err(
+        return Err(format!(
             "no client selected and stdin is not a TTY. Pass --client <id> (repeatable) to choose \
-             clients, and --yes to skip prompts. Run with --client to see the list."
-                .into(),
-        );
+             clients, and --yes to skip prompts. Known clients: {}",
+            clients::all_client_ids().join(", ")
+        ));
     }
 
     let detected = detect_clients(base, scope);
@@ -260,65 +260,42 @@ pub fn detect_clients(base: &PathBase, scope: Scope) -> Vec<DetectedClient> {
         .collect()
 }
 
-/// The default interactive picker: print detected clients numbered, read a
-/// comma-separated selection (or "all"), return the chosen ids.
+/// The default interactive picker: a real arrow-key multiselect (space to
+/// toggle, enter to confirm). Detected clients are listed first and
+/// preselected; the rest follow so an undetected client can still be chosen.
 fn interactive_picker(detected: &[DetectedClient]) -> Result<Vec<String>, String> {
-    use std::io::Write;
-
     let any_installed = detected.iter().any(|c| c.detected);
-    let list: Vec<&DetectedClient> = if any_installed {
-        detected.iter().filter(|c| c.detected).collect()
-    } else {
-        detected.iter().collect()
-    };
+    let mut ordered: Vec<&DetectedClient> = detected.iter().filter(|c| c.detected).collect();
+    ordered.extend(detected.iter().filter(|c| !c.detected));
 
-    let mut err = std::io::stderr();
-    if !any_installed {
-        let _ = writeln!(
-            err,
-            "No installed clients detected in this scope. All known clients:"
+    let mut prompt = cliclack::multiselect(if any_installed {
+        "Which clients should connect to Lific?"
+    } else {
+        "No installed clients detected in this scope — pick any to configure anyway:"
+    })
+    .required(true);
+    for c in &ordered {
+        prompt = prompt.item(
+            c.id.clone(),
+            &c.display,
+            if c.detected { "detected" } else { "" },
         );
-    } else {
-        let _ = writeln!(err, "Detected clients:");
     }
-    for (i, c) in list.iter().enumerate() {
-        let _ = writeln!(err, "  {}. {} ({})", i + 1, c.display, c.id);
+    let initial: Vec<String> = ordered
+        .iter()
+        .filter(|c| c.detected)
+        .map(|c| c.id.clone())
+        .collect();
+    if !initial.is_empty() {
+        prompt = prompt.initial_values(initial);
     }
-    let _ = write!(
-        err,
-        "Select clients to configure (comma-separated numbers, or 'all'): "
-    );
-    let _ = err.flush();
-
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read selection: {e}"))?;
-    let line = line.trim();
-    if line.is_empty() {
-        return Err("no selection made".into());
-    }
-    if line.eq_ignore_ascii_case("all") {
-        return Ok(list.iter().map(|c| c.id.clone()).collect());
-    }
-    let mut chosen = Vec::new();
-    for tok in line.split(',') {
-        let tok = tok.trim();
-        if tok.is_empty() {
-            continue;
+    prompt.interact().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            "cancelled".to_string()
+        } else {
+            format!("selection failed: {e}")
         }
-        let n: usize = tok
-            .parse()
-            .map_err(|_| format!("invalid selection '{tok}'"))?;
-        if n == 0 || n > list.len() {
-            return Err(format!("selection {n} out of range"));
-        }
-        chosen.push(list[n - 1].id.clone());
-    }
-    if chosen.is_empty() {
-        return Err("no valid selection".into());
-    }
-    Ok(chosen)
+    })
 }
 
 // ── Key minting ──────────────────────────────────────────────
@@ -754,10 +731,11 @@ fn maybe_write_agents_md(
     let consented = if args.yes {
         true
     } else if stdin_tty {
-        crate::cli::term::confirm(
+        cliclack::confirm(
             "Write a Lific block into ./AGENTS.md so agents in this repo know about it?",
-            "--yes",
         )
+        .initial_value(true)
+        .interact()
         .unwrap_or(false)
     } else {
         false
@@ -824,10 +802,10 @@ fn print_json(result: &ConnectResult) {
 }
 
 fn print_human(result: &ConnectResult) {
-    println!();
+    use crate::cli::ui;
+
     if result.dry_run {
-        println!("  Dry run — no files were written.");
-        println!();
+        ui::info("Dry run — no files were written.");
     }
     for o in &result.outcomes {
         match (&o.action, &o.error) {
@@ -837,71 +815,71 @@ fn print_human(result: &ConnectResult) {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
-                println!("  [{}] {action}: {path}", o.display);
+                ui::step(format!("{} — {action} {}", o.display, ui::dim(&path)));
             }
             (None, Some(err)) => {
-                println!("  [{}] skipped: {err}", o.display);
+                ui::warn(format!("{} — skipped: {err}", o.display));
                 if let Some(snippet) = &o.manual_snippet {
-                    println!("      Merge this in manually:");
-                    for line in snippet.lines() {
-                        println!("        {line}");
-                    }
+                    ui::note(format!("{} — merge this in manually", o.display), snippet);
                 }
             }
             (None, None) => {}
         }
         for note in &o.notes {
-            println!("      note: {note}");
+            ui::info(note);
         }
-        // LIF-259: print this tool's own key right under its line.
+        // LIF-259: this tool's own key right under its line.
         if let Some(key) = &o.key {
-            println!("      key: {key}");
             // Codex reads its key from an env var — show the export for it.
-            if o.id == "codex" {
-                println!("      export LIFIC_API_KEY=\"{key}\"");
-            }
+            let body = if o.id == "codex" {
+                format!("{key}\n\nexport LIFIC_API_KEY=\"{key}\"")
+            } else {
+                key.clone()
+            };
+            ui::note(format!("{} API key", o.display), body);
         }
-        // --oauth: print the client's native auth command instead of a key.
+        // --oauth: the client's native auth command instead of a key.
         if let Some(hint) = &o.auth_hint {
-            println!("      Next: {hint}");
+            ui::info(format!("Next: {}", ui::command(hint)));
         }
         if result.dry_run
             && let Some(contents) = &o.dry_run_contents
         {
-            println!("      ---");
-            for line in contents.lines() {
-                println!("      {line}");
-            }
-            println!("      ---");
+            let path = o
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            ui::note(path, contents.trim_end());
         }
     }
 
     if let Some(a) = &result.agents_md {
-        println!();
-        println!("  AGENTS.md {}: {}", a.action, a.path.display());
+        ui::step(format!(
+            "AGENTS.md {} {}",
+            a.action,
+            ui::dim(a.path.display())
+        ));
     }
 
     // One consolidated warning when real keys were written (LIF-259).
     let wrote_any_key = result.outcomes.iter().any(|o| o.key.is_some());
     if wrote_any_key {
-        println!();
         match result.key_origin {
             Some(KeyOrigin::Provided) => {}
             _ => {
-                println!("  Save the key(s) above now. They will never be shown again.");
+                ui::warn("Save the key(s) above now. They will never be shown again.");
             }
         }
         if let Some(KeyOrigin::Unassigned) = result.key_origin {
-            println!(
-                "  (Unassigned keys — full access on this local instance. Create a user and \
-                 re-run --user <name> if you enable project authorization.)"
+            ui::info(
+                "Unassigned keys — full access on this local instance. Create a user and \
+                 re-run --user <name> if you enable project authorization.",
             );
         }
     }
 
-    println!();
-    println!("  Restart your client(s) to pick up the new MCP server.");
-    println!();
+    ui::outro("Restart your client(s) to pick up the new MCP server.");
 }
 
 #[cfg(test)]

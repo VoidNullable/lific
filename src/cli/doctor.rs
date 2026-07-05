@@ -54,23 +54,6 @@ pub enum Status {
     Skipped,
 }
 
-impl Status {
-    /// Colored (when `color`) single-character glyph for human output.
-    fn glyph(self, color: bool) -> String {
-        let (sym, ansi) = match self {
-            Status::Pass => ("✓", "\x1b[32m"),    // green
-            Status::Warn => ("!", "\x1b[33m"),    // yellow
-            Status::Fail => ("✗", "\x1b[31m"),    // red
-            Status::Skipped => ("-", "\x1b[90m"), // dim
-        };
-        if color {
-            format!("{ansi}{sym}\x1b[0m")
-        } else {
-            sym.to_string()
-        }
-    }
-}
-
 /// One check's result.
 #[derive(Debug, Clone, Serialize)]
 pub struct Check {
@@ -785,7 +768,8 @@ fn print_report(report: &Report, json: bool) {
         return;
     }
 
-    let color = crate::cli::term::stdout_is_tty();
+    use crate::cli::ui;
+    ui::intro("lific doctor");
     let name_width = report
         .checks
         .iter()
@@ -794,16 +778,19 @@ fn print_report(report: &Report, json: bool) {
         .unwrap_or(0);
 
     for c in &report.checks {
-        println!(
-            "{} {:<width$}  {}",
-            c.status.glyph(color),
-            c.name,
-            c.detail,
-            width = name_width
-        );
+        let line = format!("{:<width$}  {}", c.name, c.detail, width = name_width);
+        match c.status {
+            Status::Pass => ui::step(line),
+            Status::Warn => ui::warn(line),
+            Status::Fail => ui::error(line),
+            Status::Skipped => ui::skipped(line),
+        }
     }
-    println!();
-    println!("{}", report.summary());
+    if report.ok {
+        ui::outro(report.summary());
+    } else {
+        ui::outro_cancel(report.summary());
+    }
 }
 
 #[cfg(test)]
@@ -901,24 +888,6 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["checks"][0]["status"], "fail");
-    }
-
-    // ── Glyphs ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn glyphs_plain_without_color() {
-        assert_eq!(Status::Pass.glyph(false), "✓");
-        assert_eq!(Status::Warn.glyph(false), "!");
-        assert_eq!(Status::Fail.glyph(false), "✗");
-        assert_eq!(Status::Skipped.glyph(false), "-");
-    }
-
-    #[test]
-    fn glyphs_colored_wrap_in_ansi() {
-        let g = Status::Pass.glyph(true);
-        assert!(g.starts_with("\x1b[32m"));
-        assert!(g.ends_with("\x1b[0m"));
-        assert!(g.contains('✓'));
     }
 
     // ── connect_host ─────────────────────────────────────────────────────

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The CLI got a facelift — clack-style sessions and real selectors
+
+Human-facing CLI output moved from bare `println!` walls to a proper prompt UI (via `cliclack`, the Rust implementation of the @clack/prompts look): a `┌ lific init` session header, a gutter connecting `◇` completed steps, boxed notes for things you must actually read (API keys, next steps, manual snippets), and a `└` outro.
+
+- **`lific connect` has a real picker now.** The "type comma-separated numbers" prompt is gone: an arrow-key multi-select lists every client with installed ones marked `(detected)` and preselected — space toggles, enter confirms. The AGENTS.md question is a proper confirm prompt.
+- **Sessions everywhere**: `init`, `connect`, `doctor` (`◇`/`▲`/`■` per check severity, summary as the outro), `login` (code in a note block, a live spinner while waiting for approval), `service`, `restore`, `dump`, plus key and user management output.
+- **`lific user create`'s password prompt is masked now** — it previously echoed the password in plaintext.
+- **Agents see zero change.** JSON output (explicit `--json` or piped stdout), non-TTY fail-fast prompts, and every machine-readable shape are byte-for-byte untouched; the pretty layer renders only for humans at a terminal.
+
 ### `lific init` now sets up everything — including a service that survives reboot
 
 The 60-second setup used to end with a server tied to an open terminal: close it (or log out) and your agents' "missing memory" was gone. `lific init` is now the whole onboarding story:

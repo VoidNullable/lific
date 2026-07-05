@@ -99,6 +99,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hmac = { version = "0.12", features = ["std"] }
+cliclack = "0.5.4"
+console = "0.16.4"
 
 # SIGPIPE handling for piped CLI output (see main.rs); unix only.
 [target.'cfg(unix)'.dependencies]

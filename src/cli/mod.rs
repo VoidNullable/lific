@@ -7,6 +7,7 @@ pub mod import;
 pub mod login;
 pub mod service;
 pub mod term;
+pub mod ui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

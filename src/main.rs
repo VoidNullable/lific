@@ -179,15 +179,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 println!("{}", serde_json::to_string_pretty(&out_json)?);
             } else {
-                println!("Wrote backup archive: {}", result.archive_path.display());
-                println!("  lific version:    {}", m.lific_version);
-                println!("  schema version:   {}", m.schema_version);
-                println!("  created at:       {}", m.created_at);
-                println!("  database size:    {} bytes", m.db_size_bytes);
-                println!(
-                    "  attachments:      {} ({} bytes)",
-                    m.attachment_count, m.attachment_bytes
-                );
+                use cli::ui;
+                ui::step(format!(
+                    "Wrote backup archive {}",
+                    ui::command(result.archive_path.display())
+                ));
+                ui::info(ui::dim(format!(
+                    "lific {} · schema v{} · db {} bytes · {} attachments ({} bytes)",
+                    m.lific_version,
+                    m.schema_version,
+                    m.db_size_bytes,
+                    m.attachment_count,
+                    m.attachment_bytes
+                )));
             }
             return Ok(());
         }
@@ -219,17 +223,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 println!("{}", serde_json::to_string_pretty(&out_json)?);
             } else {
-                println!("Restored from archive: {}", archive.display());
-                println!("  database:        {}", result.db_path.display());
-                println!("  from lific:      {}", m.lific_version);
-                println!("  schema version:  {}", m.schema_version);
-                println!("  created at:      {}", m.created_at);
-                println!("  attachments:     {}", result.attachment_count);
+                use cli::ui;
+                ui::intro("lific restore");
+                ui::step(format!("Restored from {}", ui::command(archive.display())));
+                ui::info(ui::dim(format!(
+                    "database {} · from lific {} · schema v{} · {} attachments",
+                    result.db_path.display(),
+                    m.lific_version,
+                    m.schema_version,
+                    result.attachment_count
+                )));
                 if let Some(moved) = &result.moved_existing_to {
-                    println!("  previous db moved aside to: {}", moved.display());
+                    ui::warn(format!(
+                        "previous database moved aside to {}",
+                        moved.display()
+                    ));
                 }
-                println!();
-                println!("Start the server; any pending migrations will apply on startup.");
+                ui::outro("Start the server; any pending migrations will apply on startup.");
             }
             return Ok(());
         }
@@ -367,19 +377,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        if let Some(ref username) = assigned {
-                            println!();
-                            println!("  API Key created: {name} (assigned to {username})");
+                        let title = if let Some(ref username) = assigned {
+                            format!("API key '{name}' created (assigned to {username}) — save it now, it will not be shown again")
                         } else {
-                            println!();
-                            println!("  API Key created: {name}");
-                        }
-                        println!();
-                        println!("  {key}");
-                        println!();
-                        println!("  Save this key now. It will never be shown again.");
-                        println!("  Use as: Authorization: Bearer {key}");
-                        println!();
+                            format!("API key '{name}' created — save it now, it will not be shown again")
+                        };
+                        cli::ui::note(
+                            title,
+                            format!("{key}\n\nUse it as: Authorization: Bearer <key>"),
+                        );
                     }
                 }
                 KeyAction::List => {
@@ -417,7 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let out = serde_json::json!({ "revoked": name });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        println!("Revoked key: {name}");
+                        cli::ui::step(format!("Revoked key '{name}'"));
                     }
                 }
                 KeyAction::Rotate { name } => {
@@ -426,13 +432,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let out = serde_json::json!({ "name": name, "key": key });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        println!();
-                        println!("  Key rotated: {name}");
-                        println!();
-                        println!("  {key}");
-                        println!();
-                        println!("  Save this key now. It will never be shown again.");
-                        println!();
+                        cli::ui::note(
+                            format!("Key '{name}' rotated — save it now, it will not be shown again"),
+                            &key,
+                        );
                     }
                 }
                 KeyAction::Assign { name, user } => {
@@ -445,7 +448,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let out = serde_json::json!({ "name": name, "user": user });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        println!("Assigned key '{name}' to user '{user}'");
+                        cli::ui::step(format!("Assigned key '{name}' to user '{user}'"));
                     }
                 }
             }
@@ -464,11 +467,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     admin,
                     bot,
                 } => {
-                    // Prompt for password if not provided
+                    // Prompt for password if not provided. On a TTY use a
+                    // masked prompt (the old prompt echoed the password in
+                    // plaintext); piped stdin keeps the read-a-line behavior
+                    // so scripts can feed it.
                     let pw = match password {
                         Some(p) => p,
+                        None if cli::term::stdin_is_tty() => {
+                            cliclack::password("Password").interact()?
+                        }
                         None => {
-                            eprint!("Password: ");
                             let mut buf = String::new();
                             std::io::stdin().read_line(&mut buf)?;
                             buf.trim().to_string()
@@ -506,9 +514,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
                         let role = if user.is_admin { " (admin)" } else { "" };
-                        println!("User created: {}{role}", user.username);
-                        println!("  email: {}", user.email);
-                        println!("  display_name: {}", user.display_name);
+                        cli::ui::step(format!(
+                            "User created: {}{role} {}",
+                            user.username,
+                            cli::ui::dim(format!("({})", user.email))
+                        ));
                     }
                 }
                 UserAction::List => {
@@ -555,7 +565,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let out = serde_json::json!({ "promoted": username });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        println!("Promoted '{username}' to admin.");
+                        cli::ui::step(format!("Promoted '{username}' to admin."));
                     }
                 }
                 UserAction::Demote { username } => {
@@ -565,7 +575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let out = serde_json::json!({ "demoted": username });
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     } else {
-                        println!("Demoted '{username}' from admin.");
+                        cli::ui::step(format!("Demoted '{username}' from admin."));
                     }
                 }
             }
@@ -948,7 +958,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dry_run,
                 skip_agents,
             };
-            let result = cli::connect::run(&args, &cfg, &pool, &base)?;
+            if !json {
+                cli::ui::intro("lific connect");
+            }
+            let result = match cli::connect::run(&args, &cfg, &pool, &base) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Close the clack session cleanly instead of leaving a
+                    // dangling gutter, then surface the error normally.
+                    if !json {
+                        cli::ui::outro_cancel(&e);
+                        std::process::exit(1);
+                    }
+                    return Err(e.into());
+                }
+            };
             cli::connect::print_result(&result, json);
             return Ok(());
         }
@@ -1015,17 +1039,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Build the top-level CORS layer applied to the entire app.
-///
-/// When `cors_origins` is empty, allows any origin (suitable for a local-first
-/// tool exposed via Tailscale Funnel where the auth layer is the real gate).
-/// Otherwise, allows only the listed origins.
-///
-/// Methods, request headers, and exposed response headers are all configured
-/// for the union of REST + MCP needs. Notably we accept the MCP transport
-/// headers (`mcp-protocol-version`, `mcp-session-id`, `last-event-id`) and
-/// expose `mcp-session-id` and `www-authenticate` so MCP clients can read
-/// the session id back and so 401 responses surface the resource metadata.
 /// The locally dialable base URL for this instance (bind-any hosts map to
 /// loopback, same rule as the OAuth issuer derivation in `start`).
 fn local_url(cfg: &Config) -> String {
@@ -1080,7 +1093,11 @@ async fn cmd_init(
     json_flag: bool,
     no_service: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use cli::ui;
     let json = cli::term::wants_json(json_flag);
+    if !json {
+        ui::intro("lific init");
+    }
     let config_path = std::path::Path::new("lific.toml");
     let created_config = if config_path.exists() {
         false
@@ -1192,54 +1209,73 @@ async fn cmd_init(
     }
 
     if created_config {
-        println!("Created lific.toml");
+        ui::step("Created lific.toml");
     } else {
-        println!("Using existing lific.toml");
+        ui::step("Using existing lific.toml");
     }
-    println!("Database ready: {}", cfg.database.path.display());
+    ui::step(format!("Database ready {}", ui::dim(cfg.database.path.display())));
 
     if let Some(ref key) = new_key {
-        print_initial_key(key);
+        ui::note(
+            "Initial API key — save it now, it will not be shown again",
+            format!("{key}\n\nUse it as: Authorization: Bearer <key>"),
+        );
     }
 
     if let Some((mgr, ref report)) = service_report {
-        println!(
-            "Service installed: {} ({})",
-            report.manager, report.definition
-        );
+        ui::step(format!(
+            "Service installed — {} {}",
+            report.manager,
+            ui::dim(&report.definition)
+        ));
         if report.linger == Some(false) {
-            println!(
-                "  note: `loginctl enable-linger` didn't succeed — the service will stop \
-                 when you log out. Run it manually to fix that."
+            ui::warn(
+                "`loginctl enable-linger` didn't succeed — the service will stop when you \
+                 log out. Run it manually to fix that.",
             );
         }
         if healthy {
-            println!("Lific is running at {url}");
+            ui::step(format!("Lific is running at {}", ui::command(&url)));
         } else if let Some(ref e) = service_error {
-            println!("warning: {e}");
+            ui::warn(e);
         } else {
-            println!(
-                "warning: service started but the server didn't answer at {url} within 15s"
-            );
-            println!("  check logs: {}", cli::service::logs_hint(mgr));
+            ui::warn(format!(
+                "service started but the server didn't answer at {url} within 15s — check \
+                 logs: {}",
+                cli::service::logs_hint(mgr)
+            ));
         }
     } else if no_service {
-        println!("Service install skipped (--no-service). Run the server with: lific start");
+        ui::info(format!(
+            "Service install skipped (--no-service). Run the server with {}",
+            ui::command("lific start")
+        ));
     } else if let Some(e) = service_error {
-        println!("warning: couldn't install a background service: {e}");
-        println!("  run the server in the foreground instead: lific start");
+        ui::warn(format!("couldn't install a background service: {e}"));
+        ui::info(format!(
+            "run the server in the foreground instead: {}",
+            ui::command("lific start")
+        ));
     }
 
-    println!();
-    println!("Next steps:");
-    println!("  1. Open {url} and create your account");
-    println!("  2. lific user promote --username <you>");
-    println!("  3. lific connect        # wire up your AI tools");
-    println!();
-    println!("Verify anytime with `lific doctor`.");
+    ui::note(
+        "Next steps",
+        format!(
+            "1. Open {url} and create your account\n2. {}\n3. {}   {}",
+            ui::command("lific user promote --username <you>"),
+            ui::command("lific connect"),
+            ui::dim("# wire up your AI tools"),
+        ),
+    );
+
+    let mut outro_msg = format!("Verify anytime with {}", ui::command("lific doctor"));
     if service_report.is_some() {
-        println!("Manage the service: lific service status | restart | stop | uninstall");
+        outro_msg.push_str(&format!(
+            " · manage the service with {}",
+            ui::command("lific service status|restart|stop|uninstall")
+        ));
     }
+    ui::outro(outro_msg);
     Ok(())
 }
 
@@ -1249,6 +1285,7 @@ fn cmd_service(
     json_flag: bool,
     action: &ServiceAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use cli::ui;
     let json = cli::term::wants_json(json_flag);
     let Some(mgr) = cli::service::detect() else {
         return Err("no supported service manager found (needs a systemd user session on \
@@ -1269,17 +1306,19 @@ fn cmd_service(
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!(
-                    "Service installed and started: {} ({})",
-                    report.manager, report.definition
-                );
+                ui::intro("lific service install");
+                ui::step(format!(
+                    "Service installed and started — {} {}",
+                    report.manager,
+                    ui::dim(&report.definition)
+                ));
                 if report.linger == Some(false) {
-                    println!(
-                        "  note: `loginctl enable-linger` didn't succeed — the service will \
-                         stop when you log out. Run it manually to fix that."
+                    ui::warn(
+                        "`loginctl enable-linger` didn't succeed — the service will stop \
+                         when you log out. Run it manually to fix that.",
                     );
                 }
-                println!("Logs: {}", cli::service::logs_hint(mgr));
+                ui::outro(format!("Logs: {}", ui::command(cli::service::logs_hint(mgr))));
             }
         }
         ServiceAction::Uninstall => {
@@ -1290,7 +1329,9 @@ fn cmd_service(
                     serde_json::json!({ "uninstalled": true, "definition": removed })
                 );
             } else {
-                println!("Service stopped and uninstalled (removed {removed})");
+                ui::intro("lific service uninstall");
+                ui::step(format!("Service stopped and uninstalled {}", ui::dim(&removed)));
+                ui::outro(format!("Reinstall anytime with {}", ui::command("lific service install")));
             }
         }
         ServiceAction::Status => {
@@ -1298,18 +1339,22 @@ fn cmd_service(
             if json {
                 println!("{}", serde_json::to_string_pretty(&s)?);
             } else if s.active {
-                println!(
+                ui::step(format!(
                     "Service is running ({}) — {}",
                     s.manager,
-                    local_url(cfg)
-                );
+                    ui::command(local_url(cfg))
+                ));
             } else if s.installed {
-                println!(
-                    "Service is installed but NOT running ({}). Start it: lific service restart",
-                    s.manager
-                );
+                ui::error(format!(
+                    "Service is installed but NOT running ({}). Start it: {}",
+                    s.manager,
+                    ui::command("lific service restart")
+                ));
             } else {
-                println!("Service is not installed. Install it: lific service install");
+                ui::error(format!(
+                    "Service is not installed. Install it: {}",
+                    ui::command("lific service install")
+                ));
             }
             if !(s.installed && s.active) {
                 std::process::exit(1);
@@ -1320,7 +1365,10 @@ fn cmd_service(
             if json {
                 println!("{}", serde_json::json!({ "stopped": true }));
             } else {
-                println!("Service stopped (still installed; it returns on reboot or `lific service restart`)");
+                ui::step(format!(
+                    "Service stopped {}",
+                    ui::dim("(still installed; it returns on reboot or `lific service restart`)")
+                ));
             }
         }
         ServiceAction::Restart => {
@@ -1328,13 +1376,24 @@ fn cmd_service(
             if json {
                 println!("{}", serde_json::json!({ "restarted": true }));
             } else {
-                println!("Service restarted — {}", local_url(cfg));
+                ui::step(format!("Service restarted — {}", ui::command(local_url(cfg))));
             }
         }
     }
     Ok(())
 }
 
+/// Build the top-level CORS layer applied to the entire app.
+///
+/// When `cors_origins` is empty, allows any origin (suitable for a local-first
+/// tool exposed via Tailscale Funnel where the auth layer is the real gate).
+/// Otherwise, allows only the listed origins.
+///
+/// Methods, request headers, and exposed response headers are all configured
+/// for the union of REST + MCP needs. Notably we accept the MCP transport
+/// headers (`mcp-protocol-version`, `mcp-session-id`, `last-event-id`) and
+/// expose `mcp-session-id` and `www-authenticate` so MCP clients can read
+/// the session id back and so 401 responses surface the resource metadata.
 fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_methods([
