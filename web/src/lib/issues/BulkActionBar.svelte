@@ -52,11 +52,18 @@
 </script>
 
 <!-- The outer div owns viewport centering; the inner div owns the entrance
-     fly so the two transforms don't fight. -->
-<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-40">
+     fly so the two transforms don't fight.
+     LIF-276: below sm the bar pins to both edges (inset-x-3) instead of
+     centering a min-content row — six inline controls exceed a 360px
+     viewport. The row wraps if it still can't fit, and bottom offset
+     respects the home-indicator safe area. -->
+<div
+  class="fixed z-40 inset-x-3 bottom-[max(1rem,env(safe-area-inset-bottom))]
+         sm:inset-x-auto sm:bottom-6 sm:left-1/2 sm:-translate-x-1/2"
+>
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
-    class="flex items-center gap-0.5 pl-3 pr-1.5 py-1.5
+    class="flex flex-wrap items-center justify-center gap-0.5 gap-y-1 pl-3 pr-1.5 py-1.5
            bg-[var(--surface)] border border-[var(--border)]
            rounded-xl shadow-[0_8px_28px_rgba(0,0,0,0.18)]"
     in:fly={{ y: 8, duration: 180 }}
