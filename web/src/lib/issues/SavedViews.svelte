@@ -347,9 +347,12 @@
                   <span class="truncate">{v.name}</span>
                   {#if active}<Check size={13} class="text-[var(--accent)] shrink-0" />{/if}
                 </button>
+                <!-- LIF-275: pointer-coarse keeps these visible on touch,
+                     where hover-reveal never fires. -->
                 <button
                   class="shrink-0 size-6 grid place-items-center rounded
                          text-[var(--text-faint)] opacity-0 group-hover:opacity-100
+                         pointer-coarse:opacity-100
                          hover:text-[var(--text)] transition"
                   title="Rename"
                   onclick={() => startRename(v)}
@@ -359,6 +362,7 @@
                 <button
                   class="shrink-0 size-6 grid place-items-center rounded
                          text-[var(--text-faint)] opacity-0 group-hover:opacity-100
+                         pointer-coarse:opacity-100
                          hover:text-[var(--error)] transition"
                   title="Delete"
                   onclick={() => deleteView(v)}

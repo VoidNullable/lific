@@ -75,16 +75,18 @@
       {issue.identifier}
     </span>
     <div class="flex-1"></div>
-    <!-- LIF-244: hover-only peek trigger, hidden on touch (no hover
-         capability) via the `[@media(hover:hover)]` variant — same
-         reasoning as IssueRow's peek button. -->
+    <!-- LIF-244: hover-revealed peek trigger on pointer devices. On touch
+         it's always visible (LIF-275) — with drag being the only other
+         board interaction, this is the touch path to change status/
+         priority/module via the peek bottom sheet. -->
     <Tooltip content="Peek">
       <button
         class="hidden shrink-0 size-5 items-center justify-center rounded
                text-[var(--text-faint)] hover:text-[var(--accent)]
                hover:bg-[var(--bg-subtle)] transition-colors
                [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
-               [@media(hover:hover)]:group-hover:opacity-100"
+               [@media(hover:hover)]:group-hover:opacity-100
+               pointer-coarse:flex pointer-coarse:opacity-100 pointer-coarse:size-7"
         onclick={(e) => {
           e.stopPropagation();
           onPeek(issue);

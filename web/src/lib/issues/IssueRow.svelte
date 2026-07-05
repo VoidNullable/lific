@@ -188,7 +188,7 @@
       : 'border-[var(--border)] text-transparent hover:border-[var(--text-faint)]'}
            {isSelected || selectionActive
       ? 'opacity-100'
-      : 'opacity-0 group-hover:opacity-100'}"
+      : 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100'}"
     title={isSelected ? "Deselect" : "Select  ·  X"}
     onclick={(e) => {
       e.stopPropagation();
@@ -330,7 +330,7 @@
       <button
         class="max-w-[130px] flex items-center gap-1 text-micro
                text-[var(--text-muted)] transition-opacity hover:text-[var(--text)]
-               {mod ? '' : 'opacity-0 group-hover:opacity-100'}"
+               {mod ? '' : 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100'}"
         onclick={(e) => {
           e.stopPropagation();
           onToggleModuleDropdown(issue);
@@ -408,7 +408,7 @@
     >
       <button
         class="size-6 flex items-center justify-end transition-opacity hover:opacity-100
-               {issue.priority === 'none' ? 'opacity-0 group-hover:opacity-100' : ''}"
+               {issue.priority === 'none' ? 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100' : ''}"
         onclick={(e) => {
           e.stopPropagation();
           onTogglePriorityDropdown(issue);
@@ -448,18 +448,18 @@
     {/if}
   </div>
 
-  <!-- LIF-244: peek affordance. Hover-only trigger for the slide-over
-       preview — mirrors the checkbox/priority hover pattern above, but
-       `[@media(hover:hover)]` (rather than plain `group-hover`) also
-       fully removes it on touch (no hover capability), where a phantom
-       hover-in-waiting affordance would just be a dead tap target. -->
+  <!-- LIF-244: peek affordance. Hover-revealed on pointer devices. On touch
+       (LIF-275) it's ALWAYS visible instead of removed — the peek panel is
+       the mobile bottom sheet with full status/priority/module editing, so
+       hiding its only trigger made that whole surface unreachable. -->
   <Tooltip content="Peek">
     <button
       class="hidden shrink-0 size-6 items-center justify-center rounded
              text-[var(--text-faint)] hover:text-[var(--accent)]
              hover:bg-[var(--bg-subtle)] transition-colors
              [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
-             [@media(hover:hover)]:group-hover:opacity-100"
+             [@media(hover:hover)]:group-hover:opacity-100
+             pointer-coarse:flex pointer-coarse:opacity-100 pointer-coarse:size-8"
       onclick={(e) => {
         e.stopPropagation();
         onPeek(issue);

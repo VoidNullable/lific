@@ -482,7 +482,8 @@
 
           <!-- row actions (LIF-234: hidden for viewers) -->
           {#if canEdit}
-          <div class="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          <!-- LIF-275: pointer-coarse keeps step actions reachable on touch. -->
+          <div class="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity shrink-0">
             {#if step.issue_identifier}
               <button class="p-1 rounded text-[var(--text-faint)] hover:text-[var(--text)] text-micro" title="Detach issue" onclick={() => detachIssue(step)}>unlink</button>
             {:else}
