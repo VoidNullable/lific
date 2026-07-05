@@ -17,8 +17,8 @@
 
 import { peekState } from "./issues/peek.svelte";
 import { commandPaletteState } from "./commandPaletteState.svelte";
-import { shortcutHelpState } from "./shortcutHelp.svelte";
-import { contextMenuState } from "./contextMenu.svelte"; // LIF-248
+import { shortcutHelpState } from "./shortcutHelpState.svelte";
+import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
 
 export type ShortcutScope = "global" | "list" | "board" | "peek" | "palette" | "editor";
 

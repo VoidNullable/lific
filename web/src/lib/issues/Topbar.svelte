@@ -24,7 +24,7 @@
   import type { SortField } from "./sort";
   import type { GroupBy, Density, LaneBy } from "./grouping";
   import type { IssueListState } from "./state.svelte";
-  import { toggleShortcutHelp } from "../shortcutHelp.svelte";
+  import { toggleShortcutHelp } from "../shortcutHelpState.svelte";
 
   let {
     view,

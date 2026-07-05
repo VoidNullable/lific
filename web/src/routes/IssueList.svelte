@@ -50,7 +50,7 @@
   } from "../lib/issues/state.svelte"; // LIF-243: undo layer
   import { scheduleDelete, hasPendingDeletes } from "../lib/issues/deferredDelete.svelte"; // LIF-283
   import { shortcutsSuppressed } from "../lib/shortcuts"; // LIF-245
-  import { shortcutHelpState } from "../lib/shortcutHelp.svelte"; // LIF-245
+  import { shortcutHelpState } from "../lib/shortcutHelpState.svelte"; // LIF-245
   import { commandPaletteState } from "../lib/commandPaletteState.svelte"; // LIF-245
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
 

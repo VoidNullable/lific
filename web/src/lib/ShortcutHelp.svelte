@@ -9,7 +9,7 @@
   // Styling deliberately mirrors CommandPalette.svelte's modal (same
   // scrim, corner radius, shadow, border) so the two overlays read as one
   // family rather than two different modal languages.
-  import { shortcutHelpState, closeShortcutHelp } from "./shortcutHelp.svelte";
+  import { shortcutHelpState, closeShortcutHelp } from "./shortcutHelpState.svelte";
   import { SHORTCUTS, SCOPE_ORDER, SCOPE_LABEL } from "./shortcuts";
   import { X } from "lucide-svelte";
 

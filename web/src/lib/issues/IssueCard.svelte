@@ -7,7 +7,7 @@
   import Tooltip from "../Tooltip.svelte";
   import TimeAgo from "../TimeAgo.svelte";
   import { PanelRight, ExternalLink } from "lucide-svelte";
-  import { openContextMenu } from "../contextMenu.svelte"; // LIF-248
+  import { openContextMenu } from "../contextMenuState.svelte"; // LIF-248
   import { projectCodeOf } from "../references"; // LIF-248
 
   let {

@@ -11,7 +11,7 @@
   // edge. Same math family as Select.svelte's fixed-position dropdown and
   // IssueHoverCard's flip-above-when-no-room logic, just anchored to a
   // point instead of a trigger element's bounding rect.
-  import { contextMenuState, closeContextMenu, type ContextMenuItem } from "./contextMenu.svelte";
+  import { contextMenuState, closeContextMenu, type ContextMenuItem } from "./contextMenuState.svelte";
   import { motionReduced } from "./theme";
   import { fade } from "svelte/transition";
 

@@ -34,7 +34,7 @@
   import Skeleton from "../lib/Skeleton.svelte";
   import { formatDate } from "../lib/format";
   import { peekState } from "../lib/issues/peek.svelte"; // LIF-248
-  import { contextMenuState } from "../lib/contextMenu.svelte"; // LIF-248
+  import { contextMenuState } from "../lib/contextMenuState.svelte"; // LIF-248
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
   import {

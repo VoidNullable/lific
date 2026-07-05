@@ -33,7 +33,7 @@
   import type { Activity, Comment } from "./api";
   import { isTypingContext } from "./shortcuts";
   import { peekState } from "./issues/peek.svelte"; // LIF-248
-  import { contextMenuState } from "./contextMenu.svelte"; // LIF-248
+  import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
   import type { PaletteAction, PaletteContext } from "./palette";
 
   let {

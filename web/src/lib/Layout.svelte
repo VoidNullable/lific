@@ -17,10 +17,10 @@
   import { setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
-  import { contextMenuState } from "./contextMenu.svelte";
+  import { contextMenuState } from "./contextMenuState.svelte";
   import ContextMenu from "./ContextMenu.svelte"; // LIF-248
   import { commandPaletteState } from "./commandPaletteState.svelte";
-  import { toggleShortcutHelp } from "./shortcutHelp.svelte";
+  import { toggleShortcutHelp } from "./shortcutHelpState.svelte";
   import { isTypingContext } from "./shortcuts";
   import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
 

@@ -4,7 +4,7 @@
   import IssueHoverCard from "./IssueHoverCard.svelte";
   import { IDENTIFIER_RE, refKind, routeFor, projectCodeOf } from "./references";
   import { openPeek } from "./issues/peek.svelte"; // LIF-248
-  import { openContextMenu } from "./contextMenu.svelte"; // LIF-248
+  import { openContextMenu } from "./contextMenuState.svelte"; // LIF-248
   import { PanelRight, ExternalLink } from "lucide-svelte";
   import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
   import { downloadAttachment } from "./api"; // LIF-262

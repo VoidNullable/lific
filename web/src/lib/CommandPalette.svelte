@@ -26,7 +26,7 @@
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { commandPaletteState } from "./commandPaletteState.svelte";
-  import { shortcutHelpState } from "./shortcutHelp.svelte";
+  import { shortcutHelpState } from "./shortcutHelpState.svelte";
   import ProjectIcon from "./ProjectIcon.svelte";
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box, CornerDownLeft,
