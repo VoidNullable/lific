@@ -31,15 +31,17 @@ Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive 
 ```bash
 cargo install lific     # or grab a binary from the releases page
 
-lific init              # writes lific.toml with sensible defaults
-lific start             # creates the database, serves on :3456,
-                        # prints your API key once
+lific init              # config + database + your API key, printed once —
+                        # then installs a background service and starts it.
+                        # The server is now on :3456 and survives reboot.
 lific connect           # writes MCP config into your AI clients
 ```
 
-That's the whole thing. `lific connect` detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
+That's the whole thing. `lific init` sets up everything in the current directory and registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS), so it isn't a process tied to your terminal — it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
-The web UI is at `http://localhost:3456`. Sign up there to create your account, then grant it admin rights from the CLI: `lific user promote <username>`.
+Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging)? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
+
+The web UI is at `http://localhost:3456`. Sign up there to create your account, then grant it admin rights from the CLI: `lific user promote --username <username>`.
 
 Verify any setup with:
 
@@ -207,7 +209,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
 | **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
 | **MCP interface** | 29 tools, human-readable identifiers, compact schema, session instructions |
-| **Onboarding** | `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
+| **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
 | **REST API** | Full CRUD for all resources, search, board view |
 | **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
 | **User accounts** | Individual auth, per-tool bot identities, project membership and roles |
@@ -253,6 +255,7 @@ Prefer per-tool **bot identities** (what `lific connect` mints when you have a u
 [server]
 host = "0.0.0.0"
 port = 3456
+cors_origins = []
 
 [database]
 path = "lific.db"
@@ -265,6 +268,9 @@ retain = 24
 
 [log]
 level = "info"
+
+[auth]
+allow_signup = true
 ```
 
 CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs.

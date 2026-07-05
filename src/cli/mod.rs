@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod exec;
 pub mod import;
 pub mod login;
+pub mod service;
 pub mod term;
 
 use clap::{Parser, Subcommand};
@@ -109,8 +110,26 @@ pub enum Command {
         key: Option<String>,
     },
 
-    /// Generate a default lific.toml config file
-    Init,
+    /// Set up a ready-to-use Lific instance in the current directory.
+    ///
+    /// One command, whole story: writes lific.toml (kept if already present),
+    /// creates the database, prints your initial API key, installs a
+    /// background service (systemd user unit on Linux, LaunchAgent on macOS)
+    /// and starts it, then waits until the server answers. Re-running is safe
+    /// and repairs whatever is missing. Use `--no-service` if you'd rather run
+    /// `lific start` in the foreground yourself.
+    Init {
+        /// Only write config and create the database; don't install or start
+        /// a background service.
+        #[arg(long = "no-service")]
+        no_service: bool,
+    },
+
+    /// Manage the background service that `lific init` installs.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
 
     /// Write a single self-contained backup archive of the whole data set.
     ///
@@ -318,6 +337,28 @@ pub enum Command {
         #[command(subcommand)]
         action: ImportAction,
     },
+}
+
+// ── Service ──────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ServiceAction {
+    /// Install the background service for the instance in the current
+    /// directory (or --config) and start it. Safe to re-run; rewrites the
+    /// definition to match this binary and config.
+    Install,
+
+    /// Stop the service and remove its definition.
+    Uninstall,
+
+    /// Show whether the service is installed and running.
+    Status,
+
+    /// Stop the running service (keeps it installed; it returns on reboot).
+    Stop,
+
+    /// Restart the service (or start it if stopped).
+    Restart,
 }
 
 // ── Import ───────────────────────────────────────────────────
@@ -1059,7 +1100,45 @@ mod tests {
     #[test]
     fn parse_init() {
         let cli = Cli::try_parse_from(["lific", "init"]).unwrap();
-        assert!(matches!(cli.command, Command::Init));
+        assert!(matches!(
+            cli.command,
+            Command::Init { no_service: false }
+        ));
+    }
+
+    #[test]
+    fn parse_init_no_service() {
+        let cli = Cli::try_parse_from(["lific", "init", "--no-service"]).unwrap();
+        assert!(matches!(cli.command, Command::Init { no_service: true }));
+    }
+
+    #[test]
+    fn parse_service_actions() {
+        for (arg, want) in [
+            ("install", "Install"),
+            ("uninstall", "Uninstall"),
+            ("status", "Status"),
+            ("stop", "Stop"),
+            ("restart", "Restart"),
+        ] {
+            let cli = Cli::try_parse_from(["lific", "service", arg]).unwrap();
+            let Command::Service { action } = cli.command else {
+                panic!("expected Service for {arg}");
+            };
+            let got = match action {
+                ServiceAction::Install => "Install",
+                ServiceAction::Uninstall => "Uninstall",
+                ServiceAction::Status => "Status",
+                ServiceAction::Stop => "Stop",
+                ServiceAction::Restart => "Restart",
+            };
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn service_requires_an_action() {
+        assert!(Cli::try_parse_from(["lific", "service"]).is_err());
     }
 
     #[test]

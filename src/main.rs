@@ -31,7 +31,7 @@ use axum::{
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, InstanceAction, KeyAction, UserAction};
+use cli::{Cli, Command, InstanceAction, KeyAction, ServiceAction, UserAction};
 use config::Config;
 
 // Commands that operate directly on the database (no server required)
@@ -154,15 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
-        Command::Init => {
-            let config_path = std::path::Path::new("lific.toml");
-            if config_path.exists() {
-                eprintln!("lific.toml already exists in current directory");
-                std::process::exit(1);
-            }
-            std::fs::write(config_path, Config::default_toml())?;
-            println!("Created lific.toml with default settings");
-            return Ok(());
+        Command::Init { no_service } => {
+            return cmd_init(&cfg, cli.json, no_service).await;
+        }
+
+        Command::Service { action } => {
+            return cmd_service(&cfg, cli.json, &action);
         }
 
         Command::Dump { out } => {
@@ -629,16 +626,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !auth::has_any_keys(&pool) {
                 let key = auth::create_api_key(&pool, &manager, "default")?;
                 info!("no API keys found, auto-generated initial key");
-                println!();
-                println!("  ┌─────────────────────────────────────────────────────┐");
-                println!("  │  No API keys found. Generated initial key:          │");
-                println!("  │                                                     │");
-                println!("  │  {key}");
-                println!("  │                                                     │");
-                println!("  │  Save this key now. It will never be shown again.   │");
-                println!("  │  Use as: Authorization: Bearer <key>                │");
-                println!("  └─────────────────────────────────────────────────────┘");
-                println!();
+                print_initial_key(&key);
             } else {
                 let count = auth::list_api_keys(&pool)?
                     .iter()
@@ -1038,6 +1026,315 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// headers (`mcp-protocol-version`, `mcp-session-id`, `last-event-id`) and
 /// expose `mcp-session-id` and `www-authenticate` so MCP clients can read
 /// the session id back and so 401 responses surface the resource metadata.
+/// The locally dialable base URL for this instance (bind-any hosts map to
+/// loopback, same rule as the OAuth issuer derivation in `start`).
+fn local_url(cfg: &Config) -> String {
+    let host = match cfg.server.host.as_str() {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        h => h,
+    };
+    format!("http://{}:{}", host, cfg.server.port)
+}
+
+/// Print the one-time initial API key. No box-drawing: keys are longer than
+/// any fixed-width frame (the old box rendered broken), and plain lines are
+/// easier to copy.
+fn print_initial_key(key: &str) {
+    println!();
+    println!("  Initial API key — save it now, it will not be shown again:");
+    println!();
+    println!("    {key}");
+    println!();
+    println!("  Use it as: Authorization: Bearer <key>");
+    println!();
+}
+
+/// Poll `<base>/api/health` until it answers 200 or the deadline passes.
+async fn wait_healthy(base_url: &str, timeout: std::time::Duration) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let url = format!("{base_url}/api/health");
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = client.get(&url).send().await
+            && resp.status().is_success()
+        {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    false
+}
+
+/// `lific init`: everything needed to go from nothing to a running, reachable
+/// instance in one command — config, database, initial API key, and a
+/// background service that survives reboot. Idempotent: re-running repairs
+/// whatever is missing and never overwrites existing config or keys.
+async fn cmd_init(
+    cfg: &Config,
+    json_flag: bool,
+    no_service: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = cli::term::wants_json(json_flag);
+    let config_path = std::path::Path::new("lific.toml");
+    let created_config = if config_path.exists() {
+        false
+    } else {
+        std::fs::write(config_path, Config::default_toml())?;
+        true
+    };
+
+    // Create + migrate the database and seed instance settings now, while the
+    // instance has zero users — this is the moment the authz-enforced default
+    // is decided.
+    let pool = db::open(&cfg.database.path)?;
+    {
+        let conn = pool.write()?;
+        db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
+    }
+
+    // Mint the initial API key HERE, in the operator's terminal. Once the
+    // server runs as a background service, its stdout goes to the journal
+    // where nobody would see a printed key.
+    let new_key = if auth::has_any_keys(&pool) {
+        None
+    } else {
+        let manager =
+            auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
+        Some(auth::create_api_key(&pool, &manager, "default")?)
+    };
+    // Release the CLI's DB handles before the service process opens the file.
+    drop(pool);
+
+    // Background service: the README's 60-second setup has to end with a
+    // server that is still alive tomorrow, not a process tied to a terminal.
+    let url = local_url(cfg);
+    let mut service_report = None;
+    let mut service_error = None;
+    let mut healthy = false;
+    if !no_service {
+        match cli::service::detect() {
+            Some(mgr) => {
+                let plan = cli::service::ServicePlan::for_current_exe(
+                    std::path::Path::new("."),
+                    config_path,
+                )?;
+                match cli::service::install(mgr, &plan) {
+                    Ok(report) => {
+                        healthy = wait_healthy(&url, std::time::Duration::from_secs(15)).await;
+                        // A 200 alone can lie (another process may own the
+                        // port while our unit crash-loops on AddrInUse), and
+                        // silence alone is ambiguous. Cross-check the unit's
+                        // own active state to say something precise.
+                        let active =
+                            cli::service::status(mgr).map(|s| s.active).unwrap_or(false);
+                        match (healthy, active) {
+                            (true, true) => {}
+                            (true, false) => {
+                                healthy = false;
+                                service_error = Some(format!(
+                                    "something is answering at {url}, but it isn't the \
+                                     installed service — another server is likely already \
+                                     using the port. Check: {}",
+                                    cli::service::logs_hint(mgr)
+                                ));
+                            }
+                            (false, false) => {
+                                service_error = Some(format!(
+                                    "the service failed to stay running — most often the \
+                                     port is already in use. Check: {}",
+                                    cli::service::logs_hint(mgr)
+                                ));
+                            }
+                            (false, true) => {
+                                service_error = Some(format!(
+                                    "the service is running but didn't answer at {url} \
+                                     within 15s. Check: {}",
+                                    cli::service::logs_hint(mgr)
+                                ));
+                            }
+                        }
+                        service_report = Some((mgr, report));
+                    }
+                    Err(e) => service_error = Some(e),
+                }
+            }
+            None => {
+                service_error = Some(
+                    "no supported service manager found (needs a systemd user session on \
+                     Linux, or launchd on macOS)"
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    if json {
+        let out = serde_json::json!({
+            "config": { "path": "lific.toml", "created": created_config },
+            "database": cfg.database.path.display().to_string(),
+            "key": new_key,
+            "url": url,
+            "service": {
+                "requested": !no_service,
+                "installed": service_report.as_ref().map(|(_, r)| serde_json::to_value(r).unwrap_or_default()),
+                "healthy": healthy,
+                "error": service_error,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if created_config {
+        println!("Created lific.toml");
+    } else {
+        println!("Using existing lific.toml");
+    }
+    println!("Database ready: {}", cfg.database.path.display());
+
+    if let Some(ref key) = new_key {
+        print_initial_key(key);
+    }
+
+    if let Some((mgr, ref report)) = service_report {
+        println!(
+            "Service installed: {} ({})",
+            report.manager, report.definition
+        );
+        if report.linger == Some(false) {
+            println!(
+                "  note: `loginctl enable-linger` didn't succeed — the service will stop \
+                 when you log out. Run it manually to fix that."
+            );
+        }
+        if healthy {
+            println!("Lific is running at {url}");
+        } else if let Some(ref e) = service_error {
+            println!("warning: {e}");
+        } else {
+            println!(
+                "warning: service started but the server didn't answer at {url} within 15s"
+            );
+            println!("  check logs: {}", cli::service::logs_hint(mgr));
+        }
+    } else if no_service {
+        println!("Service install skipped (--no-service). Run the server with: lific start");
+    } else if let Some(e) = service_error {
+        println!("warning: couldn't install a background service: {e}");
+        println!("  run the server in the foreground instead: lific start");
+    }
+
+    println!();
+    println!("Next steps:");
+    println!("  1. Open {url} and create your account");
+    println!("  2. lific user promote --username <you>");
+    println!("  3. lific connect        # wire up your AI tools");
+    println!();
+    println!("Verify anytime with `lific doctor`.");
+    if service_report.is_some() {
+        println!("Manage the service: lific service status | restart | stop | uninstall");
+    }
+    Ok(())
+}
+
+/// `lific service <action>`: manage the background service `init` installs.
+fn cmd_service(
+    cfg: &Config,
+    json_flag: bool,
+    action: &ServiceAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = cli::term::wants_json(json_flag);
+    let Some(mgr) = cli::service::detect() else {
+        return Err("no supported service manager found (needs a systemd user session on \
+                    Linux, or launchd on macOS)"
+            .into());
+    };
+    match action {
+        ServiceAction::Install => {
+            let config_path = std::path::Path::new("lific.toml");
+            if !config_path.exists() {
+                return Err(
+                    "no lific.toml in the current directory — run `lific init` first".into(),
+                );
+            }
+            let plan =
+                cli::service::ServicePlan::for_current_exe(std::path::Path::new("."), config_path)?;
+            let report = cli::service::install(mgr, &plan)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Service installed and started: {} ({})",
+                    report.manager, report.definition
+                );
+                if report.linger == Some(false) {
+                    println!(
+                        "  note: `loginctl enable-linger` didn't succeed — the service will \
+                         stop when you log out. Run it manually to fix that."
+                    );
+                }
+                println!("Logs: {}", cli::service::logs_hint(mgr));
+            }
+        }
+        ServiceAction::Uninstall => {
+            let removed = cli::service::uninstall(mgr)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "uninstalled": true, "definition": removed })
+                );
+            } else {
+                println!("Service stopped and uninstalled (removed {removed})");
+            }
+        }
+        ServiceAction::Status => {
+            let s = cli::service::status(mgr)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&s)?);
+            } else if s.active {
+                println!(
+                    "Service is running ({}) — {}",
+                    s.manager,
+                    local_url(cfg)
+                );
+            } else if s.installed {
+                println!(
+                    "Service is installed but NOT running ({}). Start it: lific service restart",
+                    s.manager
+                );
+            } else {
+                println!("Service is not installed. Install it: lific service install");
+            }
+            if !(s.installed && s.active) {
+                std::process::exit(1);
+            }
+        }
+        ServiceAction::Stop => {
+            cli::service::stop(mgr)?;
+            if json {
+                println!("{}", serde_json::json!({ "stopped": true }));
+            } else {
+                println!("Service stopped (still installed; it returns on reboot or `lific service restart`)");
+            }
+        }
+        ServiceAction::Restart => {
+            cli::service::restart(mgr)?;
+            if json {
+                println!("{}", serde_json::json!({ "restarted": true }));
+            } else {
+                println!("Service restarted — {}", local_url(cfg));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_methods([

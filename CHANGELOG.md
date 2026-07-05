@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### `lific init` now sets up everything — including a service that survives reboot
+
+The 60-second setup used to end with a server tied to an open terminal: close it (or log out) and your agents' "missing memory" was gone. `lific init` is now the whole onboarding story:
+
+- **One command**: writes `lific.toml` (kept if present), creates and migrates the database, mints and prints your initial API key, installs a background service, starts it, and verifies the server actually answers before claiming success. Re-running is safe and repairs whatever is missing.
+- **Real service integration**: a systemd user unit on Linux (`~/.config/systemd/user/lific.service`, with best-effort `loginctl enable-linger` so it outlives logout) or a launchd LaunchAgent on macOS (`~/Library/LaunchAgents/dev.lific.plist`). Starts on boot, restarts on failure.
+- **`lific service install | uninstall | status | stop | restart`** manages the service afterward; `status` exits nonzero when the service isn't running, so scripts and agents can gate on it.
+- **Honest failure modes**: no service manager (containers, WSL without systemd) falls back to clear `lific start` instructions; a port squatted by another process is diagnosed as such instead of reported as success (init cross-checks the unit's own state against the health probe, so a stranger answering on :3456 can't fake a working install).
+- **The API key prints during `init`, in your terminal** — not into a service journal nobody reads. The old box-drawing around the key (which rendered broken) is gone; `lific start` remains for foreground use (`lific init --no-service` skips service setup entirely).
+- The README's 60-second setup now matches reality, and its `lific user promote <username>` example is corrected to the actual `--username` syntax.
+
 ### Authorization on by default for fresh installs
 
 2.0 shipped project-scoped authorization opt-in (`authz_enforced` defaulted off), which meant a brand-new install had no authorization at all — any valid bearer token could read, mutate, or delete every project. Fresh installs now **enforce by default**, without breaking the zero-user `init → start → connect` flow.
