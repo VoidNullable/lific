@@ -35,6 +35,17 @@
     drawerOpen = false;
   }
 
+  // LIF-272: while the drawer is open, project taps expand/collapse sub-navs
+  // in place instead of navigating (navigation would close the drawer and
+  // dump you on Overview before you ever saw the sub-nav). This tracks which
+  // project is unfolded inside the drawer; it's seeded with the active
+  // project on open so the drawer comes up matching the docked sidebar.
+  let drawerExpandedProject = $state<string | null>(null);
+  function openDrawer() {
+    drawerExpandedProject = activeProject;
+    drawerOpen = true;
+  }
+
   // Escape dismisses the drawer, and "?" summons the Shortcut Help overlay
   // from anywhere in the app (LIF-245) — registered as a window listener
   // via effect because <svelte:window> may only appear at the component's
@@ -238,16 +249,29 @@
   // Whether the active project's sub-nav is currently visible. Hidden while a
   // drag is in flight (collapsing every tree keeps the reorder list compact and
   // unambiguous) and while the user has manually folded it.
+  //
+  // LIF-272: in drawer mode the expansion is driven by drawerExpandedProject
+  // instead of route activeness, so any project can be unfolded for browsing
+  // without navigating.
   function subnavOpen(project: Project): boolean {
-    return (
-      activeProject === project.identifier && !manuallyCollapsed && !dragActive
-    );
+    if (dragActive) return false;
+    if (drawerOpen) return drawerExpandedProject === project.identifier;
+    return activeProject === project.identifier && !manuallyCollapsed;
   }
 
   // Clicking a project: if it's already the active one, toggle its sub-nav
   // (collapse/expand) in place rather than re-navigating. Otherwise navigate
   // into it, which makes it active and — via the reset effect — expands it.
+  //
+  // LIF-272: while the mobile drawer is open, a project tap NEVER navigates —
+  // it toggles that project's sub-nav so the user can pick the page they
+  // actually want. The drawer stays open until a leaf item is chosen.
   function onProjectClick(project: Project) {
+    if (drawerOpen) {
+      drawerExpandedProject =
+        drawerExpandedProject === project.identifier ? null : project.identifier;
+      return;
+    }
     if (activeProject === project.identifier) {
       manuallyCollapsed = !manuallyCollapsed;
     } else {
@@ -405,7 +429,7 @@
                      {isProjectActive
                 ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                 : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              aria-expanded={isProjectActive ? open : undefined}
+              aria-expanded={drawerOpen || isProjectActive ? open : undefined}
               onclick={() => onProjectClick(project)}
             >
               <ChevronRight
@@ -545,7 +569,7 @@
                  text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
           aria-label="Open menu"
           aria-expanded={drawerOpen}
-          onclick={() => (drawerOpen = true)}
+          onclick={openDrawer}
         >
           <Menu size={20} />
         </button>
