@@ -232,9 +232,12 @@
   <div class="h-full flex flex-col">
     <!-- Content -->
     <div class="flex-1 overflow-y-auto">
-      <div class="max-w-[960px] mx-auto flex gap-0 min-h-full">
+      <!-- LIF-274: stacks below md (form on top, meta below) — the fixed
+           220px sidebar next to a px-8 column left ~76px of usable form
+           width on phones. -->
+      <div class="max-w-[960px] mx-auto flex flex-col md:flex-row gap-0 min-h-full">
         <!-- Main column -->
-        <div class="flex-1 min-w-0 px-8 py-6">
+        <div class="flex-1 min-w-0 px-4 sm:px-6 md:px-8 py-6">
           <!-- Title -->
           <input
             type="text"
@@ -264,7 +267,8 @@
         <!-- Sidebar. Same issue-meta-* spacing system as IssueDetail so
              the field rhythm matches the detail page exactly (LIF-126). -->
         <aside
-          class="w-[220px] shrink-0 border-l border-[var(--border)] py-6 px-5"
+          class="w-full md:w-[220px] shrink-0 border-t md:border-t-0 md:border-l
+                 border-[var(--border)] py-4 md:py-6 px-4 sm:px-6 md:px-5"
         >
           <div class="issue-meta-aside">
             <!-- Status -->
