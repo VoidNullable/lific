@@ -7,6 +7,7 @@
   <a href="https://crates.io/crates/lific"><img src="https://img.shields.io/crates/v/lific" alt="crates.io"></a>
   <a href="https://github.com/VoidNullable/lific/releases"><img src="https://img.shields.io/github/v/release/VoidNullable/lific" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/VoidNullable/lific" alt="License"></a>
+  <a href="https://discord.gg/uWvaFC4f7D"><img src="https://img.shields.io/discord/1516612377196363889?logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -332,6 +333,10 @@ cargo build --release
 ```
 
 The frontend is a Svelte 5 SPA built with Vite. `bun run build` outputs static files to `web/dist/`, which `cargo build` embeds into the binary. The final binary is fully self-contained with no runtime dependencies.
+
+## Community
+
+Questions, feedback, or a setup worth showing off? Join the [Lific Discord](https://discord.gg/uWvaFC4f7D). Release announcements land there too, and support questions get answered fastest in #support.
 
 ## Contributing
 
