@@ -99,9 +99,18 @@ export const IssueRow: React.FC<{
   issue: IssueData;
   isLast?: boolean;
   focused?: boolean;
+  /** 0..1 cursor-hover highlight (bg-[var(--bg-subtle)], like the real
+   *  row's hover state). Independent of `focused` (keyboard selection). */
+  hover?: number;
   style?: React.CSSProperties;
-}> = ({ issue, isLast = false, focused = false, style }) => {
+}> = ({ issue, isLast = false, focused = false, hover = 0, style }) => {
   const struck = issue.status === "done" || issue.status === "cancelled";
+  // Hover tints the row toward --bg-subtle; focus (accent) wins if set.
+  const bg = focused
+    ? C.accentSubtle
+    : hover > 0
+      ? `rgba(23,28,26,${hover})` // C.bgSubtle (#171c1a) at `hover`
+      : "transparent";
   return (
     <div
       style={{
@@ -112,7 +121,7 @@ export const IssueRow: React.FC<{
         borderBottom: isLast ? "none" : `1px solid ${C.border}`,
         // border-l-2 — accent when focused, else transparent
         borderLeft: `2px solid ${focused ? C.accent : "transparent"}`,
-        backgroundColor: focused ? C.accentSubtle : "transparent",
+        backgroundColor: bg,
         boxSizing: "border-box",
         fontFamily: BODY,
         ...style,
@@ -261,7 +270,21 @@ export const IssueListPage: React.FC<{
   rowReveal?: (globalIndex: number) => { opacity: number; dy: number };
   /** 0..1 crossfade of the List|Board switcher pill (0 = List active). */
   switchT?: number;
-}> = ({ width, height, groups, counts, totalLabel, rowReveal, switchT }) => {
+  /** Flat row index the cursor is hovering (subtle bg highlight). */
+  hoverIndex?: number;
+  /** Strength of the hover highlight, 0..1. */
+  hoverStrength?: number;
+}> = ({
+  width,
+  height,
+  groups,
+  counts,
+  totalLabel,
+  rowReveal,
+  switchT,
+  hoverIndex,
+  hoverStrength = 0,
+}) => {
   // Flat running index so the scene can stagger rows across group borders.
   let rowIndex = -1;
 
@@ -332,6 +355,7 @@ export const IssueListPage: React.FC<{
                       <IssueRow
                         issue={issue}
                         isLast={si === g.issues.length - 1}
+                        hover={hoverIndex === rowIndex ? hoverStrength : 0}
                       />
                     </div>
                   );
