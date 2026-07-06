@@ -629,6 +629,7 @@ mod api_tests {
             ))))
             .layer(Extension(crate::config::AuthConfig {
                 allow_signup: true,
+                required: true,
                 secure_cookies: false,
             }))
             .layer(Extension(Some(AuthUser {
@@ -663,6 +664,7 @@ mod api_tests {
         let lead_app = with_attachment_layers(crate::api::router(db.clone(), &[]))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
+                required: true,
                 secure_cookies: false,
             }))
             .layer(axum::Extension(Some(AuthUser {
@@ -816,6 +818,7 @@ mod api_tests {
         let app = with_attachment_layers_store(crate::api::router(db.clone(), &[]), store.clone())
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
+                required: true,
                 secure_cookies: false,
             }))
             .layer(axum::Extension(Some(AuthUser {
@@ -916,10 +919,12 @@ mod cookie_fallback_tests {
             db: db.clone(),
             manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
+            required: true,
         };
         with_attachment_layers(crate::api::router(db, &[]))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
+                required: true,
                 secure_cookies: false,
             }))
             .layer(axum::middleware::from_fn_with_state(

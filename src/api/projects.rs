@@ -492,7 +492,7 @@ mod tests {
             conn.last_insert_rowid()
         };
         let app = crate::api::router(db.clone(), &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),

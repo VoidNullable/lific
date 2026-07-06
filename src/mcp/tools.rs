@@ -6637,6 +6637,7 @@ mod authz_gating_tests {
             db: (*m.db).clone(),
             manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
+            required: true,
         };
         let app = Router::new()
             .route("/call/get_issue/{ident}", get(get_issue_h))

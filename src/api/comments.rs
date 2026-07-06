@@ -272,7 +272,7 @@ mod tests {
         drop(conn);
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -440,7 +440,7 @@ mod tests {
 
         // Build app as "other" (non-owner, non-admin)
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
                 username: other.username,
@@ -550,7 +550,7 @@ mod tests {
 
         // Build app as admin
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
                 username: admin.username,
@@ -625,7 +625,7 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -776,7 +776,7 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
                 username: other.username,
@@ -865,7 +865,7 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
                 username: admin.username,
@@ -1227,7 +1227,7 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username,

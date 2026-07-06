@@ -26,6 +26,20 @@ There was no password reset at all: the web UI's change-password requires the cu
 - Both commands now root the instance at `--config <path>`: `init` creates the file there (parent directories included), and the service definition's `ExecStart`/`WorkingDirectory` derive from the config file's canonical location - a relative `database.path` resolves beside the config at runtime, exactly as `init` resolved it at setup time.
 - `lific service install --config <missing path>` fails fast with the path it looked at instead of silently installing a unit for the wrong instance.
 
+### Auth optional through config - `[auth] required = false`
+
+For a private, local, single-user instance, authentication itself can now be turned off: with `required = false` under `[auth]`, a request that presents **no credential at all** is treated as operator-equivalent (the same trust rail 2.0 gave unbound API keys) on both REST and MCP. A presented-but-invalid token still 401s - a broken client config surfaces as an error instead of silently degrading to anonymous-with-admin-powers, and real credentials keep resolving to their real identity.
+
+Deliberately a config-file key rather than a runtime instance setting: turning auth off requires shell access to the server, exactly like minting an operator key. Guard rails: `lific start` **refuses to boot** when auth is optional and `server.public_url` points anywhere but localhost (loopback IPs are verified as IPs - `127.evil.com` doesn't count), and otherwise logs a prominent warning that the default `0.0.0.0` bind makes the instance LAN-reachable.
+
+### `lific init` uses standard OS directories by default
+
+`init` used to create `lific.toml` + `lific.db` in whatever directory it ran from - run it in three directories, get three accidental instances. A bare `lific init` now roots the instance in your OS's standard locations: config at `~/.config/lific/lific.toml` and database at `~/.local/share/lific/lific.db` on Linux (macOS/Windows equivalents), with backups and attachments beside the database in the data dir. Since config discovery already probes the user config dir, every other command finds this instance from any directory with no flags.
+
+- `lific init --here` keeps the old directory-local layout (`./lific.toml` + `./lific.db`) for repo-scoped instances.
+- A `lific.toml` already in the current directory wins over the OS dirs: re-running bare `init` beside an existing directory-local instance repairs it rather than silently creating a second instance in XDG.
+- `lific service install` without `--config` now discovers the config the same way `Config::load` does (cwd, then user config dir, then system config dir) instead of insisting on `./lific.toml`.
+
 ### Config discovered in standard system locations
 
 The config search order gains the platform system config dir as a last-resort fallback, for one machine-level config shared by every invocation: `/etc/lific/lific.toml` on Linux/BSD, `/Library/Application Support/Lific/lific.toml` on macOS, `%ProgramData%\lific\lific.toml` on Windows. Full order: `--config` > `./lific.toml` > user config dir (`~/.config/lific/`, `$XDG_CONFIG_HOME` respected) > system config dir. First match wins; a relative `database.path` anchors to the config file's own directory regardless of where it was found.

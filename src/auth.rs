@@ -17,6 +17,9 @@ pub struct AuthState {
     pub db: DbPool,
     pub manager: ApiKeyManagerV0,
     pub public_url: String,
+    /// LIF-294: mirror of `[auth] required`. When false, a request with no
+    /// credential at all passes as operator-equivalent; see `require_api_key`.
+    pub required: bool,
 }
 
 /// Create the API key manager with our prefix.
@@ -290,6 +293,32 @@ pub async fn require_api_key(
                 return crate::actor::scope(actor, next.run(request)).await;
             }
             // Missing/invalid/expired cookie session falls through to 401 below.
+        }
+
+        // LIF-294: `[auth] required = false` — a credential-less request is
+        // the operator (same trust rail as an unbound API key, LIF-261).
+        // ONLY this no-credential path is affected: a presented-but-invalid
+        // token still falls through to the 401s below, so a broken client
+        // config surfaces as an error instead of silently degrading to
+        // anonymous-with-admin-powers.
+        if !auth.required {
+            let actor = crate::actor::ActorCtx {
+                user_id: None,
+                transport: if is_mcp_request {
+                    crate::actor::Transport::Mcp
+                } else {
+                    crate::actor::Transport::Api
+                },
+            };
+            request
+                .extensions_mut()
+                .insert(Option::<crate::db::models::AuthUser>::None);
+            request.extensions_mut().insert(OperatorCredential);
+            return crate::actor::scope(
+                actor,
+                crate::authz::operator_scope(true, next.run(request)),
+            )
+            .await;
         }
 
         if is_mcp_request {
@@ -828,6 +857,7 @@ mod tests {
             db: pool.clone(),
             manager: create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
+            required: true,
         }
     }
 
@@ -934,6 +964,134 @@ mod tests {
             b"none",
             "a legacy key with no bound user must stay unresolved (default-deny)"
         );
+    }
+
+    // ── LIF-294: [auth] required = false ─────────────────────────
+
+    /// Router whose handler reports whether the request runs with the
+    /// operator bypass: with authz enforcement ON, `visible_project_ids`
+    /// for a `None` user returns unrestricted (None) only inside an
+    /// operator context.
+    fn operator_probe_app(auth_state: AuthState, pool: db::DbPool) -> Router {
+        Router::new()
+            .route(
+                "/probe",
+                get(move || {
+                    let pool = pool.clone();
+                    async move {
+                        match crate::authz::visible_project_ids(&pool, &None).unwrap() {
+                            None => "unrestricted".to_string(),
+                            Some(ids) => format!("restricted:{}", ids.len()),
+                        }
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(auth_state, require_api_key))
+    }
+
+    #[tokio::test]
+    async fn auth_not_required_credentialless_request_passes_as_operator() {
+        let pool = test_db();
+        enable_enforcement(&pool);
+        let mut state = test_auth_state(&pool);
+        state.required = false;
+
+        let resp = operator_probe_app(state, pool.clone())
+            .oneshot(Request::builder().uri("/probe").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            b"unrestricted",
+            "with [auth] required=false, an anonymous request must carry the operator bypass"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_required_default_credentialless_request_still_401s() {
+        let pool = test_db();
+        let resp = echo_app(test_auth_state(&pool)) // required: true
+            .oneshot(Request::builder().uri("/echo").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // THE critical negative: optional auth must never mask a bad credential.
+    // A client that DOES send a token is asking to be authenticated; if that
+    // token is garbage the request fails loudly instead of silently running
+    // with anonymous operator powers.
+    #[tokio::test]
+    async fn auth_not_required_presented_invalid_tokens_still_401() {
+        let pool = test_db();
+        let mut state = test_auth_state(&pool);
+        state.required = false;
+
+        for bad in [
+            "lific_sk-garbage",          // malformed API key
+            "lific_sess_expiredorfake",  // unknown session
+            "lific_at_neverissued",      // unknown OAuth token
+        ] {
+            let resp = echo_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/echo")
+                        .header("authorization", format!("Bearer {bad}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "presented-but-invalid credential '{bad}' must 401 even with auth optional"
+            );
+        }
+    }
+
+    // A real credential presented while auth is optional authenticates
+    // normally — identity resolution is unchanged.
+    #[tokio::test]
+    async fn auth_not_required_valid_session_still_resolves_user() {
+        let pool = test_db();
+        let (token, user_id) = {
+            let conn = pool.write().unwrap();
+            let user = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "optionaluser".into(),
+                    email: "optional@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let token = crate::db::queries::users::create_session(&conn, user.id, None)
+                .unwrap()
+                .token;
+            (token, user.id)
+        };
+        let mut state = test_auth_state(&pool);
+        state.required = false;
+
+        let resp = echo_app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), format!("user:{user_id}:optionaluser:false").as_bytes());
     }
 
     #[tokio::test]

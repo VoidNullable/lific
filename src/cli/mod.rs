@@ -111,7 +111,7 @@ pub enum Command {
         key: Option<String>,
     },
 
-    /// Set up a ready-to-use Lific instance in the current directory.
+    /// Set up a ready-to-use Lific instance.
     ///
     /// One command, whole story: writes lific.toml (kept if already present),
     /// creates the database, prints your initial API key, installs a
@@ -119,11 +119,26 @@ pub enum Command {
     /// and starts it, then waits until the server answers. Re-running is safe
     /// and repairs whatever is missing. Use `--no-service` if you'd rather run
     /// `lific start` in the foreground yourself.
+    ///
+    /// By default the instance lives in your OS's standard locations (config
+    /// in ~/.config/lific/, data in ~/.local/share/lific/ on Linux; macOS and
+    /// Windows equivalents) so running init from any directory targets the
+    /// same instance. Use `--here` for a directory-local instance
+    /// (./lific.toml + ./lific.db, the pre-2.1 behavior), or `--config
+    /// <path>` to root it at an explicit config file. If the current
+    /// directory already has a lific.toml, init keeps operating on it.
     Init {
         /// Only write config and create the database; don't install or start
         /// a background service.
         #[arg(long = "no-service")]
         no_service: bool,
+
+        /// Create the instance in the current directory (./lific.toml,
+        /// ./lific.db) instead of the OS config/data directories.
+        /// Conflicts with --config (which already names an exact location;
+        /// enforced at run time because --config is a global arg).
+        #[arg(long)]
+        here: bool,
     },
 
     /// Manage the background service that `lific init` installs.
@@ -1183,14 +1198,32 @@ mod tests {
         let cli = Cli::try_parse_from(["lific", "init"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Init { no_service: false }
+            Command::Init {
+                no_service: false,
+                here: false
+            }
         ));
     }
 
     #[test]
     fn parse_init_no_service() {
         let cli = Cli::try_parse_from(["lific", "init", "--no-service"]).unwrap();
-        assert!(matches!(cli.command, Command::Init { no_service: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Init {
+                no_service: true,
+                here: false
+            }
+        ));
+    }
+
+    // LIF-295: --here forces the directory-local layout. (Its conflict with
+    // the global --config is enforced at run time in cmd_init, out of clap's
+    // reach — covered by main.rs's init_target_tests.)
+    #[test]
+    fn parse_init_here() {
+        let cli = Cli::try_parse_from(["lific", "init", "--here"]).unwrap();
+        assert!(matches!(cli.command, Command::Init { here: true, .. }));
     }
 
     #[test]

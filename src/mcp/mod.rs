@@ -308,6 +308,7 @@ mod tests {
             db: pool.clone(),
             manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
+            required: true,
         };
 
         let resp = mcp_echo_app(auth_state)
@@ -430,6 +431,7 @@ mod tests {
             db: pool.clone(),
             manager,
             public_url: "https://example.com".into(),
+            required: true,
         };
         let app = Router::new()
             .route("/mcp-gate", get(gate))

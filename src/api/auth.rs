@@ -792,6 +792,7 @@ mod tests {
         }
         let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
             allow_signup: true,
+            required: true,
             secure_cookies: false,
         }));
 
@@ -836,6 +837,7 @@ mod tests {
         }
         let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
             allow_signup: true,
+            required: true,
             secure_cookies: false,
         }));
 
@@ -854,6 +856,7 @@ mod tests {
         let db = crate::db::open_memory().expect("test db");
         let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
             allow_signup: true,
+            required: true,
             secure_cookies: false,
         }));
 
@@ -1020,6 +1023,7 @@ mod tests {
         }
         let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
             allow_signup: true,
+            required: true,
             secure_cookies: false,
         }));
 
@@ -1258,6 +1262,7 @@ mod tests {
         crate::api::router(db, &[])
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
+                required: true,
                 secure_cookies: false,
             }))
             .layer(axum::Extension(limiter))

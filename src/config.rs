@@ -20,6 +20,20 @@ pub struct Config {
 pub struct AuthConfig {
     /// Allow self-service signup via the API. If false, only admins can create users via CLI.
     pub allow_signup: bool,
+    /// Require a bearer credential on every REST/MCP request (default: true).
+    ///
+    /// LIF-294: setting this to `false` makes auth optional for local
+    /// single-user use: a request presenting NO credential at all is treated
+    /// as operator-equivalent (the same trust rail as unbound API keys,
+    /// LIF-261). A presented-but-invalid token still 401s — bad credentials
+    /// are never masked as anonymous. Deliberately a config-file key rather
+    /// than a runtime instance setting: turning auth off requires shell
+    /// access to the server, same as minting an operator key.
+    ///
+    /// Guard rails in `lific start`: refuses to boot when this is false and
+    /// `server.public_url` points anywhere but localhost, and logs a loud
+    /// warning otherwise (the default bind is 0.0.0.0 — LAN-reachable).
+    pub required: bool,
     /// Emit the session cookie with the `Secure` attribute (HTTPS-only).
     ///
     /// LIF-207: `Secure` is correct in production (Tailscale Funnel = HTTPS),
@@ -38,6 +52,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             allow_signup: true,
+            required: true,
             secure_cookies: true,
         }
     }
@@ -47,16 +62,39 @@ impl AuthConfig {
     /// Build the runtime auth config, deriving `secure_cookies` from the
     /// server's public URL scheme. Only an explicit `http://` public_url turns
     /// `Secure` off; everything else (https, or unset) stays secure-by-default.
-    pub fn from_server(allow_signup: bool, public_url: Option<&str>) -> Self {
+    pub fn from_server(file: &AuthConfig, public_url: Option<&str>) -> Self {
         let secure_cookies = match public_url {
             Some(url) => !url.trim().to_ascii_lowercase().starts_with("http://"),
             None => true,
         };
         Self {
-            allow_signup,
+            allow_signup: file.allow_signup,
+            required: file.required,
             secure_cookies,
         }
     }
+}
+
+/// Does this URL point at the local machine? Backs the LIF-294 startup guard:
+/// an auth-optional instance must never have a non-localhost `public_url`.
+/// Conservative — anything unparseable counts as NOT localhost.
+pub fn is_localhost_url(url: &str) -> bool {
+    let rest = url.trim();
+    let rest = rest.split("://").nth(1).unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.to_ascii_lowercase();
+    // A literal IP must actually be loopback ("127.evil.com" is a valid DNS
+    // name pointing anywhere, so prefix matching would be a hole).
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    host == "localhost"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,9 +266,37 @@ impl Config {
         }
     }
 
+    /// First existing config file among the standard search locations, if
+    /// any. Used by commands that operate on "the instance" without an
+    /// explicit `--config` (e.g. `lific service install`) so they agree with
+    /// what `Config::load` would pick.
+    pub fn discover_path() -> Option<PathBuf> {
+        Self::candidate_paths(None).into_iter().find(|p| p.exists())
+    }
+
+    /// LIF-295: the OS-standard home for a `lific init` instance — config
+    /// file in the user config dir, database in the user data dir (Linux:
+    /// `~/.config/lific/lific.toml` + `~/.local/share/lific/lific.db`;
+    /// macOS/Windows equivalents via `dirs`). `None` when the platform dirs
+    /// can't be resolved (no HOME) — callers fall back to the cwd.
+    pub fn os_default_instance() -> Option<(PathBuf, PathBuf)> {
+        let config = dirs::config_dir()?.join("lific").join(CONFIG_FILENAME);
+        let db = dirs::data_dir()?.join("lific").join("lific.db");
+        Some((config, db))
+    }
+
     /// Generate a default config file as a TOML string.
     pub fn default_toml() -> String {
         toml::to_string_pretty(&Config::default()).unwrap_or_default()
+    }
+
+    /// Like [`Config::default_toml`] but with an explicit database path
+    /// (LIF-295: the XDG-split init writes an absolute data-dir path so the
+    /// config and data can live in different standard directories).
+    pub fn default_toml_with_db(db_path: &Path) -> String {
+        let mut cfg = Config::default();
+        cfg.database.path = db_path.to_path_buf();
+        toml::to_string_pretty(&cfg).unwrap_or_default()
     }
 
     /// Resolve the backup directory relative to the database path if not absolute.
@@ -416,14 +482,59 @@ enabled = false
     // LIF-207: Secure cookie flag is derived from the public_url scheme.
     #[test]
     fn auth_config_secure_cookies_from_scheme() {
+        let auth = AuthConfig::default();
         // HTTPS public URL → Secure on.
-        assert!(AuthConfig::from_server(true, Some("https://lific.example")).secure_cookies);
+        assert!(AuthConfig::from_server(&auth, Some("https://lific.example")).secure_cookies);
         // Explicit HTTP → Secure off (otherwise the browser drops the cookie).
-        assert!(!AuthConfig::from_server(true, Some("http://localhost:3456")).secure_cookies);
-        assert!(!AuthConfig::from_server(true, Some("HTTP://Localhost")).secure_cookies);
+        assert!(!AuthConfig::from_server(&auth, Some("http://localhost:3456")).secure_cookies);
+        assert!(!AuthConfig::from_server(&auth, Some("HTTP://Localhost")).secure_cookies);
         // Unset → secure-by-default (don't weaken when we don't know).
-        assert!(AuthConfig::from_server(true, None).secure_cookies);
-        // allow_signup is passed through untouched.
-        assert!(!AuthConfig::from_server(false, None).allow_signup);
+        assert!(AuthConfig::from_server(&auth, None).secure_cookies);
+        // allow_signup / required are passed through untouched.
+        let closed = AuthConfig {
+            allow_signup: false,
+            required: false,
+            ..AuthConfig::default()
+        };
+        let runtime = AuthConfig::from_server(&closed, None);
+        assert!(!runtime.allow_signup);
+        assert!(!runtime.required);
+    }
+
+    // LIF-294: auth is required unless the config explicitly opts out.
+    #[test]
+    fn auth_required_defaults_to_true_and_parses_from_toml() {
+        assert!(AuthConfig::default().required);
+        let cfg: Config = toml::from_str("[auth]\nrequired = false\n").unwrap();
+        assert!(!cfg.auth.required);
+        // Omitting the key keeps the secure default even when [auth] is present.
+        let cfg: Config = toml::from_str("[auth]\nallow_signup = false\n").unwrap();
+        assert!(cfg.auth.required);
+    }
+
+    // LIF-294: the startup guard's localhost check.
+    #[test]
+    fn is_localhost_url_accepts_only_loopback() {
+        for url in [
+            "http://localhost:3456",
+            "http://localhost",
+            "https://LOCALHOST/lific",
+            "http://127.0.0.1:3456",
+            "http://127.5.5.5",
+            "http://[::1]:3456",
+            "http://user@localhost:3456/path",
+        ] {
+            assert!(is_localhost_url(url), "{url} should count as localhost");
+        }
+        for url in [
+            "https://magi.tailb93ac8.ts.net",
+            "http://192.168.1.10:3456",
+            "http://127.evil.com",       // DNS name, not a loopback IP
+            "https://localhost.example", // ditto
+            "http://[::2]",
+            "",
+        ] {
+            assert!(!is_localhost_url(url), "{url} must NOT count as localhost");
+        }
     }
 }

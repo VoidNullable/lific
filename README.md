@@ -38,7 +38,7 @@ lific init              # config + database + your API key, printed once -
 lific connect           # writes MCP config into your AI clients
 ```
 
-That's the whole thing. `lific init` sets up everything in the current directory and registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS), so it isn't a process tied to your terminal - it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
+That's the whole thing. `lific init` sets everything up in your OS's standard locations (config in `~/.config/lific/`, data in `~/.local/share/lific/` on Linux; macOS and Windows equivalents) so it works the same from any directory - use `lific init --here` if you'd rather keep a directory-local instance (`./lific.toml` + `./lific.db`). It registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS), so it isn't a process tied to your terminal - it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
 Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging)? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
 
@@ -253,6 +253,8 @@ Forgotten password? The operator can reset one from the shell (this signs out al
 lific user set-password --username sam
 ```
 
+**Auth can be turned off entirely for a private, local instance** with `required = false` under `[auth]` in `lific.toml`. Credential-less requests then get admin-equivalent access; a presented-but-invalid token still fails loudly. This is a config-file key on purpose (flipping it requires shell access, like minting an operator key), and it comes with guard rails: the server refuses to start if `server.public_url` points anywhere but localhost, and logs a prominent warning otherwise - the default bind is `0.0.0.0`, so keep an auth-less instance loopback-only or firewalled.
+
 **Unbound API keys bypass authorization by design.** A key with no user binding - the one `lific start` auto-mints on a keyless DB, and the ones `lific key create` and `connect`'s fresh-install path produce - is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That's what keeps the zero-user `init → start → connect` flow working with enforcement on. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
 
 ```bash
@@ -288,6 +290,7 @@ level = "info"
 
 [auth]
 allow_signup = true
+required = true
 ```
 
 CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs.

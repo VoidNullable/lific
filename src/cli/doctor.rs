@@ -1114,6 +1114,7 @@ mod tests {
             db: pool.clone(),
             manager: crate::auth::create_key_manager().unwrap(),
             public_url: issuer.to_string(),
+            required: true,
         };
 
         let authed = axum::Router::new()

@@ -154,12 +154,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
-        Command::Init { no_service } => {
+        Command::Init { no_service, here } => {
             // LIF-292: init/service must honor --config; they take the raw
             // flag (not the pre-loaded cfg) because init may need to CREATE
             // the file at that path and then reload anchored to it.
-            return cmd_init(cli.config.as_deref(), cli.db.as_deref(), cli.json, no_service)
-                .await;
+            return cmd_init(
+                cli.config.as_deref(),
+                cli.db.as_deref(),
+                cli.json,
+                no_service,
+                here,
+            )
+            .await;
         }
 
         Command::Service { action } => {
@@ -784,6 +790,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .init();
 
+            // LIF-294: guard rails for auth-optional mode. Refuse outright
+            // when the instance says it's publicly reachable; shout otherwise
+            // (the default bind is 0.0.0.0 — the whole LAN can reach it).
+            if !cfg.auth.required {
+                if let Some(url) = cfg.server.public_url.as_deref()
+                    && !config::is_localhost_url(url)
+                {
+                    return Err(format!(
+                        "refusing to start: [auth] required = false while server.public_url \
+                         ({url}) is not localhost — an instance without authentication must \
+                         never be publicly reachable. Re-enable auth or remove public_url."
+                    )
+                    .into());
+                }
+                warn!(
+                    host = %cfg.server.host,
+                    "AUTH IS DISABLED ([auth] required = false): every credential-less request \
+                     gets admin-equivalent access. Anyone who can reach this address owns the \
+                     instance — keep it loopback-only or firewalled."
+                );
+            }
+
             let pool = db::open(&cfg.database.path)?;
             info!(path = %cfg.database.path.display(), "database ready");
 
@@ -851,6 +879,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db: pool.clone(),
                 manager,
                 public_url: issuer.clone(),
+                required: cfg.auth.required,
             };
 
             // Start backup task
@@ -942,7 +971,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .layer(axum::Extension(attachment_config))
                 .layer(axum::Extension(attachment_upload_limiter))
                 .layer(axum::Extension(crate::config::AuthConfig::from_server(
-                    cfg.auth.allow_signup,
+                    &cfg.auth,
                     cfg.server.public_url.as_deref(),
                 )))
                 .layer(axum::Extension(manager_ext))
@@ -1289,22 +1318,61 @@ async fn wait_healthy(base_url: &str, timeout: std::time::Duration) -> bool {
 /// instance in one command — config, database, initial API key, and a
 /// background service that survives reboot. Idempotent: re-running repairs
 /// whatever is missing and never overwrites existing config or keys.
+/// LIF-295: where `lific init` roots the instance.
+///
+/// Returns `(config_path, default_db_path)`; `default_db_path` is `Some`
+/// only for the OS-dirs layout, where the generated config must carry an
+/// explicit absolute `database.path` (config dir and data dir differ).
+///
+/// - `--config <p>` → root at `p`, relative db beside it.
+/// - `--here`, or a `lific.toml` already in the cwd (repairing an existing
+///   directory-local instance must win over silently starting a second
+///   instance in the OS dirs), or unresolvable platform dirs → cwd layout.
+/// - otherwise → OS config dir + OS data dir (`Config::os_default_instance`).
+fn resolve_init_target(
+    config_flag: Option<&std::path::Path>,
+    here: bool,
+    cwd_config_exists: bool,
+    os_default: Option<(std::path::PathBuf, std::path::PathBuf)>,
+) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+    if let Some(p) = config_flag {
+        return (p.to_path_buf(), None);
+    }
+    if here || cwd_config_exists {
+        return (std::path::PathBuf::from("lific.toml"), None);
+    }
+    match os_default {
+        Some((config, db)) => (config, Some(db)),
+        None => (std::path::PathBuf::from("lific.toml"), None),
+    }
+}
+
 async fn cmd_init(
     config_flag: Option<&std::path::Path>,
     db_flag: Option<&std::path::Path>,
     json_flag: bool,
     no_service: bool,
+    here: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cli::ui;
+    // clap can't express this conflict: --config is a global arg on the
+    // top-level Cli, out of the subcommand's conflicts_with reach.
+    if here && config_flag.is_some() {
+        return Err("--here conflicts with --config — pick one location".into());
+    }
     let json = cli::term::wants_json(json_flag);
     if !json {
         ui::intro("lific init");
     }
-    // LIF-292: honor --config — the instance roots wherever the config file
-    // lives. Default stays ./lific.toml (current directory).
-    let config_path: std::path::PathBuf = config_flag
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("lific.toml"));
+    // LIF-292 + LIF-295: the instance roots wherever the config file lives —
+    // an explicit --config, the cwd (--here / existing ./lific.toml), or the
+    // OS-standard config+data dirs by default.
+    let (config_path, default_db) = resolve_init_target(
+        config_flag,
+        here,
+        std::path::Path::new("lific.toml").exists(),
+        Config::os_default_instance(),
+    );
     let created_config = if config_path.exists() {
         false
     } else {
@@ -1313,7 +1381,11 @@ async fn cmd_init(
         {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&config_path, Config::default_toml())?;
+        let toml = match &default_db {
+            Some(db) => Config::default_toml_with_db(db),
+            None => Config::default_toml(),
+        };
+        std::fs::write(&config_path, toml)?;
         true
     };
 
@@ -1330,7 +1402,13 @@ async fn cmd_init(
 
     // Create + migrate the database and seed instance settings now, while the
     // instance has zero users — this is the moment the authz-enforced default
-    // is decided.
+    // is decided. The data dir may not exist yet under the OS-dirs layout
+    // (LIF-295: db lives in ~/.local/share/lific/, not beside the config).
+    if let Some(parent) = cfg.database.path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     let pool = db::open(&cfg.database.path)?;
     {
         let conn = pool.write()?;
@@ -1515,10 +1593,15 @@ fn cmd_service(
     match action {
         ServiceAction::Install => {
             // LIF-292: honor --config; the unit is rendered around this
-            // exact file, not whatever lific.toml sits in the cwd.
-            let config_path: std::path::PathBuf = config_flag
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| std::path::PathBuf::from("lific.toml"));
+            // exact file. Without the flag, discover the instance the same
+            // way Config::load does (cwd → user config dir → system config
+            // dir, LIF-295) so a bare install finds the OS-dirs instance
+            // that a bare `lific init` created.
+            let config_path: std::path::PathBuf = match config_flag {
+                Some(p) => p.to_path_buf(),
+                None => Config::discover_path()
+                    .unwrap_or_else(|| std::path::PathBuf::from("lific.toml")),
+            };
             if !config_path.exists() {
                 return Err(format!(
                     "config not found at {} — run `lific init` first (or point --config at an \
@@ -1742,6 +1825,80 @@ async fn shutdown_signal(pool: db::DbPool) {
     info!("shutdown signal received, checkpointing WAL...");
     backup::checkpoint_wal(&pool);
     info!("shutdown complete");
+}
+
+#[cfg(test)]
+mod init_target_tests {
+    use super::resolve_init_target;
+    use std::path::{Path, PathBuf};
+
+    fn os_default() -> Option<(PathBuf, PathBuf)> {
+        Some((
+            PathBuf::from("/home/u/.config/lific/lific.toml"),
+            PathBuf::from("/home/u/.local/share/lific/lific.db"),
+        ))
+    }
+
+    // LIF-295: bare init targets the OS dirs, with an explicit db path so the
+    // generated config can split config dir from data dir.
+    #[test]
+    fn bare_init_targets_os_dirs() {
+        let (config, db) = resolve_init_target(None, false, false, os_default());
+        assert_eq!(config, Path::new("/home/u/.config/lific/lific.toml"));
+        assert_eq!(db.as_deref(), Some(Path::new("/home/u/.local/share/lific/lific.db")));
+    }
+
+    #[test]
+    fn here_flag_forces_cwd_layout() {
+        let (config, db) = resolve_init_target(None, true, false, os_default());
+        assert_eq!(config, Path::new("lific.toml"));
+        assert_eq!(db, None, "cwd layout keeps the relative default db");
+    }
+
+    // Repairing an existing directory-local instance must win over creating
+    // a second instance in the OS dirs.
+    #[test]
+    fn existing_cwd_config_wins_over_os_dirs() {
+        let (config, db) = resolve_init_target(None, false, true, os_default());
+        assert_eq!(config, Path::new("lific.toml"));
+        assert_eq!(db, None);
+    }
+
+    #[test]
+    fn explicit_config_flag_wins_over_everything() {
+        let (config, db) = resolve_init_target(
+            Some(Path::new("/srv/lific/lific.toml")),
+            false,
+            true,
+            os_default(),
+        );
+        assert_eq!(config, Path::new("/srv/lific/lific.toml"));
+        assert_eq!(db, None);
+    }
+
+    #[test]
+    fn unresolvable_platform_dirs_fall_back_to_cwd() {
+        let (config, db) = resolve_init_target(None, false, false, None);
+        assert_eq!(config, Path::new("lific.toml"));
+        assert_eq!(db, None);
+    }
+
+    // The --here / --config conflict is enforced in cmd_init (clap can't
+    // express it: --config is a global arg). The guard runs before any
+    // filesystem access, so calling it here is side-effect free.
+    #[tokio::test]
+    async fn init_rejects_here_with_config() {
+        let err = super::cmd_init(
+            Some(Path::new("/tmp/nonexistent/lific.toml")),
+            None,
+            true, // json
+            true, // no_service
+            true, // here
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--here conflicts with --config"));
+    }
 }
 
 #[cfg(test)]

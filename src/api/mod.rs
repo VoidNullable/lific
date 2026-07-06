@@ -478,7 +478,7 @@ pub(crate) mod test_helpers {
             conn.last_insert_rowid()
         };
         with_attachment_layers(super::router(db, &[]))
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),
@@ -600,7 +600,7 @@ pub(crate) mod test_helpers {
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
         with_attachment_layers(super::router(db, &[]))
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -1380,11 +1380,12 @@ mod authz_gating_tests {
             db: db.clone(),
             manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
+            required: true,
         };
         // The real request path: api::router behind the real require_api_key
         // middleware — not the app_as_user() Extension-injection shortcut.
         let app = crate::api::router(db.clone(), &[])
-            .layer(axum::Extension(crate::config::AuthConfig { allow_signup: true, secure_cookies: false }))
+            .layer(axum::Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
             .layer(axum::middleware::from_fn_with_state(auth_state, crate::auth::require_api_key));
 
         async fn get_with_token(app: axum::Router, uri: String, token: &str) -> SC {
