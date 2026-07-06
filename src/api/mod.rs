@@ -463,6 +463,12 @@ pub(crate) mod test_helpers {
     }
 
     pub fn test_app() -> Router {
+        test_app_with_auth(true)
+    }
+
+    /// Like [`test_app`] but with an explicit `[auth] required` value, for
+    /// LIF-297's auth-optional web bootstrap tests.
+    pub fn test_app_with_auth(required: bool) -> Router {
         let db = crate::db::open_memory().expect("test db");
         // Insert a real admin row so FK constraints (e.g. projects.lead_user_id
         // now defaults to the creator — see LIF-102) pass. Direct SQL skips
@@ -478,7 +484,7 @@ pub(crate) mod test_helpers {
             conn.last_insert_rowid()
         };
         with_attachment_layers(super::router(db, &[]))
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required, secure_cookies: false }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),

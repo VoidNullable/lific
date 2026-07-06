@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.1 (2026-07-06)
+
+Fixes the 2.1.0 field report "auth required false isn't working": REST and MCP honored `[auth] required = false`, but the **web UI still showed a login screen** - the SPA decides signed-in state via `/api/auth/me` (400 for the anonymous operator) and only skips the login form when the instance advertises single-user auto-login.
+
+Auth-optional now activates that exact rail: `GET /api/instance` advertises auto-login when auth is off (the SPA bootstrap signal only - the admin settings page keeps showing the stored toggle), and `POST /api/auth/auto-login` mints the first-admin session under `required = false` just as it does under `web_auto_login`. The browser goes straight to the dashboard, signed in as the first admin. With zero accounts there is nobody to sign in as, so the signup screen still appears once; the two flags share a threat model (admin for whoever can reach the page), and auth-off already refuses to start with a non-localhost `public_url`.
+
 ## v2.1.0 (2026-07-06)
 
 A release driven entirely by 2.0 field reports. The authorization default made project access a real concept, but the CLI had no way to manage it and no way to reset a password; `lific init`/`lific service` quietly ignored `--config`; and configuration lived wherever the command happened to run instead of where an OS keeps config. 2.1 closes all of it: project membership and password resets from the CLI, config discovered (and created) in standard OS locations, `--config` honored everywhere, and - for private local instances - the option to turn auth off entirely.

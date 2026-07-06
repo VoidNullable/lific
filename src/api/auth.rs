@@ -230,7 +230,13 @@ pub(super) async fn auth_auto_login(
 ) -> Result<impl IntoResponse, LificError> {
     let conn = db.write()?;
     let settings = crate::db::queries::settings::get(&conn)?;
-    if !settings.web_auto_login {
+    // LIF-297: `[auth] required = false` implies single-user mode for the
+    // browser too — an instance that lets anonymous API callers act as the
+    // operator has no business showing its own operator a login form. The
+    // config key shares web_auto_login's threat model (both hand out admin
+    // to whoever can reach the page) and auth-off already refuses to start
+    // with a non-localhost public_url.
+    if !settings.web_auto_login && auth_cfg.required {
         return Err(LificError::Forbidden(
             "single-user auto-login is not enabled on this instance".into(),
         ));
@@ -309,6 +315,7 @@ pub(super) async fn auth_logout(
 ///     band via the CLI, never by web signup).
 pub(super) async fn instance_info(
     State(db): State<DbPool>,
+    Extension(auth_cfg): Extension<crate::config::AuthConfig>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let (settings, has_users) = with_read(&db, |conn| {
         let settings = crate::db::queries::settings::get(conn)?;
@@ -324,7 +331,10 @@ pub(super) async fn instance_info(
         "login_message": settings.login_message,
         // LIF-215: tells the unauthenticated web app to silently sign in as the
         // admin (single-user mode) instead of showing the login form.
-        "web_auto_login": settings.web_auto_login,
+        // LIF-297: `[auth] required = false` activates the same rail — this is
+        // the SPA's bootstrap signal, not the stored setting (the admin
+        // settings endpoint keeps reporting the real DB flag).
+        "web_auto_login": settings.web_auto_login || !auth_cfg.required,
     })))
 }
 
@@ -965,6 +975,52 @@ mod tests {
         let app = test_app();
         let resp = json_post(&app, "/api/auth/auto-login", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── LIF-297: [auth] required = false implies web auto-login ──
+
+    #[tokio::test]
+    async fn auth_optional_instance_reports_auto_login() {
+        // The DB flag stays false; the config alone must flip the SPA's
+        // bootstrap signal so the shipped frontend skips the login form.
+        let app = test_app_with_auth(false);
+        let resp = json_get(&app, "/api/instance").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(
+            data["web_auto_login"], true,
+            "auth-optional instances must advertise auto-login to the web app: {data}"
+        );
+
+        // Control: with auth required (default), the signal reflects the DB
+        // flag, which is off.
+        let resp = json_get(&test_app(), "/api/instance").await;
+        assert_eq!(parse_json(resp).await["web_auto_login"], false);
+    }
+
+    #[tokio::test]
+    async fn auth_optional_auto_login_mints_admin_session_without_db_flag() {
+        let app = test_app_with_auth(false); // web_auto_login stays false in the DB
+        let resp = json_post(&app, "/api/auth/auto-login", serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert!(
+            data["token"].as_str().unwrap().starts_with("lific_sess_"),
+            "auto-login must mint a real session under auth-optional: {data}"
+        );
+        assert_eq!(data["user"]["username"], "test-admin");
+        assert_eq!(data["user"]["is_admin"], true);
+    }
+
+    #[tokio::test]
+    async fn auth_optional_admin_settings_surface_keeps_real_flag() {
+        // The OR only applies to the public bootstrap signal; the admin
+        // settings endpoint must keep showing the stored value so the toggle
+        // in the settings UI reflects reality.
+        let app = test_app_with_auth(false);
+        let resp = json_get(&app, "/api/instance/settings").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["web_auto_login"], false);
     }
 
     #[tokio::test]
