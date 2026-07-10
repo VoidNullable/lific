@@ -23,6 +23,7 @@
   import { toggleShortcutHelp } from "./shortcutHelpState.svelte";
   import { isTypingContext } from "./shortcuts";
   import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
+  import { startAutoRefresh } from "./autoRefresh.svelte";
 
   // Ref to the command palette so the sidebar's "Jump to…" affordance can
   // summon it (LIF-192).
@@ -138,6 +139,17 @@
     refreshProjects();
     closeDrawer();
   });
+
+  $effect(() =>
+    startAutoRefresh({
+      refresh: refreshProjects,
+      isBusy: () => dragActive,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        event.type === "projects.reordered" ||
+        event.type.startsWith("project."),
+    }),
+  );
 
   async function loadUser() {
     const res = await me();

@@ -44,6 +44,7 @@
     Moon,
   } from "lucide-svelte";
   import { getContext } from "svelte";
+  import { startAutoRefresh } from "../lib/autoRefresh.svelte";
 
   const topbarCtx = getContext<{
     set: (s: import("svelte").Snippet | undefined) => void;
@@ -74,17 +75,33 @@
     loadData();
   });
 
-  async function loadData() {
-    loading = true;
-    error = "";
+  $effect(() =>
+    startAutoRefresh({
+      refresh: () => loadData(false),
+      isBusy: () => loading,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        event.type.startsWith("project.") ||
+        event.type.startsWith("issue."),
+    }),
+  );
+
+  async function loadData(initial = true) {
+    if (initial) {
+      loading = true;
+      error = "";
+    }
     recents = getRecents();
 
     const [meRes, projRes] = await Promise.all([me(), listProjects()]);
     if (!meRes.ok) {
+      if (initial) {
       error = meRes.error;
       loading = false;
+      }
       return;
     }
+    error = "";
     user = meRes.data;
     if (projRes.ok) projects = projRes.data;
 
@@ -123,7 +140,7 @@
       activityItems = [];
     }
 
-    loading = false;
+    if (initial) loading = false;
   }
 
   function topProjectIds(issues: Issue[], projs: Project[]): number[] {
@@ -385,7 +402,7 @@
       <ErrorState title="Couldn't load your dashboard" message={error}>
         <button
           class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-          onclick={loadData}
+          onclick={() => loadData()}
         >
           Try again
         </button>

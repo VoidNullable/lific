@@ -12,6 +12,7 @@ use rmcp::{
 
 use crate::db::DbPool;
 use crate::db::models::AuthUser;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 /// Serialization lock for MCP request handling.
 /// Ensures only one MCP request processes at a time, preventing the race
@@ -113,15 +114,25 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
 #[derive(Clone)]
 pub struct LificMcp {
     db: Arc<DbPool>,
+    realtime: RealtimeHub,
     tool_router: ToolRouter<Self>,
 }
 
 impl LificMcp {
     pub fn new(db: DbPool) -> Self {
+        Self::with_realtime(db, RealtimeHub::new())
+    }
+
+    pub fn with_realtime(db: DbPool, realtime: RealtimeHub) -> Self {
         Self {
             db: Arc::new(db),
+            realtime,
             tool_router: Self::create_tool_router(),
         }
+    }
+
+    fn emit(&self, event: RealtimeEvent) {
+        self.realtime.send(event);
     }
 
     fn read<F, T>(&self, f: F) -> Result<T, String>
@@ -278,9 +289,12 @@ mod tests {
             })
             .await
         }
-        Router::new().route("/mcp-echo", get(echo)).layer(
-            middleware::from_fn_with_state(auth_state, crate::auth::require_api_key),
-        )
+        Router::new()
+            .route("/mcp-echo", get(echo))
+            .layer(middleware::from_fn_with_state(
+                auth_state,
+                crate::auth::require_api_key,
+            ))
     }
 
     #[tokio::test]
@@ -347,10 +361,16 @@ mod tests {
         assert!(!current_is_operator());
 
         let seen = with_request_identity(None, true, || async { current_is_operator() }).await;
-        assert!(seen, "operator flag must be visible inside the request scope");
+        assert!(
+            seen,
+            "operator flag must be visible inside the request scope"
+        );
 
         // Cleared after the request completes.
-        assert!(!current_is_operator(), "operator flag must be cleared after the request");
+        assert!(
+            !current_is_operator(),
+            "operator flag must be cleared after the request"
+        );
     }
 
     #[tokio::test]

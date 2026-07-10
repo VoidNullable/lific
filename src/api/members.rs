@@ -30,6 +30,7 @@ use crate::authz;
 use crate::db::queries::members;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{with_read, with_write};
 
@@ -41,7 +42,10 @@ pub(super) async fn list_project_members(
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<MemberWithUser>>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
-    with_read(&db, |conn| members::list_members_with_users(conn, project_id)).map(Json)
+    with_read(&db, |conn| {
+        members::list_members_with_users(conn, project_id)
+    })
+    .map(Json)
 }
 
 /// GET /api/projects/{id}/my-role — the caller's own effective role on this
@@ -94,16 +98,18 @@ pub(super) async fn my_project_role(
 /// if `user_id` doesn't resolve to a real user.
 pub(super) async fn add_project_member(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(project_id): Path<i64>,
     Json(input): Json<AddMember>,
 ) -> Result<Json<ProjectMember>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Lead)?;
     let role = input.role.as_deref().unwrap_or("viewer").to_string();
-    with_write(&db, |conn| {
+    let member = with_write(&db, |conn| {
         members::add_member(conn, project_id, input.user_id, &role)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(member))
 }
 
 /// PATCH /api/projects/{id}/members/{user_id} — change an existing
@@ -111,21 +117,24 @@ pub(super) async fn add_project_member(
 /// the project's sole `lead`.
 pub(super) async fn update_project_member(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((project_id, user_id)): Path<(i64, i64)>,
     Json(input): Json<ChangeMemberRole>,
 ) -> Result<Json<ProjectMember>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Lead)?;
-    with_write(&db, |conn| {
+    let member = with_write(&db, |conn| {
         members::change_role(conn, project_id, user_id, &input.role)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(member))
 }
 
 /// DELETE /api/projects/{id}/members/{user_id} — remove a member. 404 if
 /// they aren't a member; 409 if they're the project's sole `lead`.
 pub(super) async fn remove_project_member(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((project_id, user_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -133,6 +142,7 @@ pub(super) async fn remove_project_member(
     with_write(&db, |conn| {
         members::remove_member_guarded(conn, project_id, user_id)
     })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -181,7 +191,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Confirm gone: listing no longer includes them.
-        let list = parse_json(json_get(&lead_app, &format!("/api/projects/{project_id}/members")).await).await;
+        let list =
+            parse_json(json_get(&lead_app, &format!("/api/projects/{project_id}/members")).await)
+                .await;
         assert!(
             list.as_array()
                 .unwrap()
@@ -296,7 +308,12 @@ mod tests {
 
         let non_member_app = app_as_user(db, &non_member);
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/projects/{project_id}/members")).await.status(),
+            json_get(
+                &non_member_app,
+                &format!("/api/projects/{project_id}/members")
+            )
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
     }
@@ -318,7 +335,11 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-        let resp = json_delete(&lead_app, &format!("/api/projects/{project_id}/members/{}", lead.id)).await;
+        let resp = json_delete(
+            &lead_app,
+            &format!("/api/projects/{project_id}/members/{}", lead.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
 
         // Promote a second lead, then the original can be demoted/removed.
@@ -336,7 +357,11 @@ mod tests {
             serde_json::json!({ "role": "maintainer" }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK, "demotion allowed once a second lead exists");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "demotion allowed once a second lead exists"
+        );
     }
 
     // ── POST duplicate / unknown user / bad role ──────────────────
@@ -464,7 +489,11 @@ mod tests {
         .await;
 
         let feed = parse_json(
-            json_get(&lead_app, &format!("/api/projects/{project_id}/activity?limit=100")).await,
+            json_get(
+                &lead_app,
+                &format!("/api/projects/{project_id}/activity?limit=100"),
+            )
+            .await,
         )
         .await;
         let items = feed["items"].as_array().unwrap();
@@ -478,7 +507,9 @@ mod tests {
             .collect();
 
         assert!(
-            member_rows.iter().any(|a| a["action"] == "create" && a["new_value"] == "viewer"),
+            member_rows
+                .iter()
+                .any(|a| a["action"] == "create" && a["new_value"] == "viewer"),
             "expected a member create row: {member_rows:#?}"
         );
         assert!(
@@ -489,7 +520,9 @@ mod tests {
             "expected a member role-change row: {member_rows:#?}"
         );
         assert!(
-            member_rows.iter().any(|a| a["action"] == "delete" && a["old_value"] == "maintainer"),
+            member_rows
+                .iter()
+                .any(|a| a["action"] == "delete" && a["old_value"] == "maintainer"),
             "expected a member delete row: {member_rows:#?}"
         );
         assert!(
@@ -505,7 +538,11 @@ mod tests {
         let (db, _admin, lead, maintainer, viewer, _non_member, project_id) =
             setup_membership_test();
 
-        for (user, expected) in [(&lead, "lead"), (&maintainer, "maintainer"), (&viewer, "viewer")] {
+        for (user, expected) in [
+            (&lead, "lead"),
+            (&maintainer, "maintainer"),
+            (&viewer, "viewer"),
+        ] {
             let app = app_as_user(db.clone(), user);
             let resp = json_get(&app, &format!("/api/projects/{project_id}/my-role")).await;
             assert_eq!(resp.status(), StatusCode::OK, "{} my-role", user.username);

@@ -1,26 +1,6 @@
-// LIF-129 — Tier 0 auto-refresh.
-//
-// The issue/page views load once on mount and then go stale: anything
-// that mutates data out-of-band (the MCP agent, the REST API, a second
-// tab) is invisible until you navigate away and back. This helper gives
-// those views a gentle "converge on server state" loop without any
-// backend change.
-//
-// Design constraints (the anti-enshittification rules from LIF-129):
-//   - Pause while the tab is hidden; refetch once the moment it's shown
-//     or the window regains focus. Focus-revalidation does most of the
-//     real work — the interval is just a backstop for a left-open tab.
-//   - Never refetch mid-interaction. The caller passes `isBusy()` and we
-//     skip any tick it vetoes (drag in progress, a popover open, inline
-//     create open, a page mid-edit, or a mutation in flight). A refresh
-//     that yanks state out from under the user is worse than a stale one.
-//   - Coalesce: visibility + focus can fire together; we debounce the
-//     eager revalidate so that's one fetch, not two.
-//
-// This intentionally owns no data and does no merging. Each view passes
-// its own `refresh` (which already knows how to load and how to keep
-// optimistic state coherent). Keeping the helper dumb keeps the per-view
-// safety logic where the state actually lives.
+// Auto-refresh keeps mounted views close to server state. It owns no data:
+// callers decide when a refresh is relevant and when local UI state is too
+// busy to disturb.
 
 export interface AutoRefreshOptions {
   /** Re-fetch the view's data. Should be safe to call repeatedly; the
@@ -35,7 +15,17 @@ export interface AutoRefreshOptions {
    *  timer) — used by the page detail view, where the body editor makes
    *  a periodic poll more disruptive than it's worth. */
   intervalMs?: number;
+  /** Return true when a realtime event is relevant to this mounted view. */
+  shouldRefresh?: (event: RealtimeEvent) => boolean;
 }
+
+export const REALTIME_INVALIDATE_EVENT = "lific:realtime";
+const BUSY_RETRY_MS = 2000;
+
+export type RealtimeEvent = {
+  type: string;
+  [key: string]: unknown;
+};
 
 /**
  * Start an auto-refresh loop. Returns a cleanup function that clears the
@@ -43,7 +33,7 @@ export interface AutoRefreshOptions {
  * tears down on unmount / dependency change:
  *
  * ```ts
- * $effect(() => startAutoRefresh({ refresh, isBusy, intervalMs: 15_000 }));
+ * $effect(() => startAutoRefresh({ refresh, isBusy }));
  * ```
  */
 export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
@@ -52,49 +42,92 @@ export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
     return () => {};
   }
 
-  const { refresh, isBusy, intervalMs } = opts;
+  const { refresh, isBusy, intervalMs, shouldRefresh } = opts;
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let eagerDebounce: ReturnType<typeof setTimeout> | null = null;
+  let retryDebounce: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  let refreshing = false;
+  let pending = false;
 
-  const hidden = () => document.hidden;
-  const busy = () => (isBusy ? isBusy() : false);
+  function schedulePendingRetry() {
+    if (!disposed && !retryDebounce) {
+      retryDebounce = setTimeout(() => {
+        retryDebounce = null;
+        if (pending) void runRefresh();
+      }, BUSY_RETRY_MS);
+    }
+  }
 
-  function tick() {
-    if (disposed || hidden() || busy()) return;
-    void refresh();
+  async function runRefresh() {
+    const busy = isBusy?.() ?? false;
+    const waiting = disposed || document.hidden || busy || refreshing;
+
+    pending ||= busy || refreshing;
+    if (busy) schedulePendingRetry();
+
+    if (!waiting) {
+      pending = false;
+      refreshing = true;
+      try {
+        await refresh();
+      } catch (err) {
+        console.warn("auto-refresh failed", err);
+      } finally {
+        refreshing = false;
+      }
+      if (pending) {
+        pending = false;
+        void runRefresh();
+      }
+    }
   }
 
   // Visibility/focus revalidate, debounced so the visibilitychange +
   // window.focus pair that fires on tab-switch-back is a single fetch.
   function scheduleEager() {
-    if (disposed || hidden()) return;
-    if (eagerDebounce) clearTimeout(eagerDebounce);
-    eagerDebounce = setTimeout(() => {
-      eagerDebounce = null;
-      if (disposed || hidden() || busy()) return;
-      void refresh();
-    }, 50);
+    if (!disposed && !document.hidden) {
+      if (eagerDebounce) clearTimeout(eagerDebounce);
+      eagerDebounce = setTimeout(() => {
+        eagerDebounce = null;
+        void runRefresh();
+      }, 50);
+    }
   }
 
   function onVisibility() {
-    if (document.hidden) return;
-    scheduleEager();
+    if (!document.hidden) {
+      scheduleEager();
+    }
+  }
+
+  function onRealtime(event: Event) {
+    const detail = (event as CustomEvent<RealtimeEvent>).detail;
+    if (detail && shouldRefresh?.(detail)) {
+      scheduleEager();
+    }
   }
 
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("focus", scheduleEager);
+  if (shouldRefresh) {
+    window.addEventListener(REALTIME_INVALIDATE_EVENT, onRealtime);
+  }
 
   if (intervalMs && intervalMs > 0) {
-    timer = setInterval(tick, intervalMs);
+    timer = setInterval(() => void runRefresh(), intervalMs);
   }
 
   return () => {
     disposed = true;
     if (timer) clearInterval(timer);
     if (eagerDebounce) clearTimeout(eagerDebounce);
+    if (retryDebounce) clearTimeout(retryDebounce);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("focus", scheduleEager);
+    if (shouldRefresh) {
+      window.removeEventListener(REALTIME_INVALIDATE_EVENT, onRealtime);
+    }
   };
 }

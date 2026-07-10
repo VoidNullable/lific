@@ -71,7 +71,10 @@ pub(super) async fn create_view(
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let user = require_user(auth_user)?;
-    with_write(&db, |conn| views::create_view(conn, project_id, user.id, &input)).map(Json)
+    with_write(&db, |conn| {
+        views::create_view(conn, project_id, user.id, &input)
+    })
+    .map(Json)
 }
 
 /// PATCH /api/projects/{id}/views/{view_id} — rename, replace the config,
@@ -86,7 +89,9 @@ pub(super) async fn update_view(
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let user = require_user(auth_user)?;
-    with_write(&db, |conn| views::update_view(conn, view_id, project_id, user.id, &input))
+    with_write(&db, |conn| {
+        views::update_view(conn, view_id, project_id, user.id, &input)
+    })
         .map(Json)
 }
 
@@ -98,7 +103,9 @@ pub(super) async fn delete_view(
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let user = require_user(auth_user)?;
-    with_write(&db, |conn| views::delete_view(conn, view_id, project_id, user.id))?;
+    with_write(&db, |conn| {
+        views::delete_view(conn, view_id, project_id, user.id)
+    })?;
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -127,7 +134,8 @@ mod tests {
         assert_eq!(created["is_default"], false);
         let view_id = created["id"].as_i64().unwrap();
 
-        let list = parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
+        let list =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
 
         let resp = json_patch(
@@ -142,7 +150,8 @@ mod tests {
         let resp = json_delete(&app, &format!("/api/projects/{project_id}/views/{view_id}")).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let list = parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
+        let list =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
         assert!(list.as_array().unwrap().is_empty());
     }
 
@@ -161,7 +170,12 @@ mod tests {
                 serde_json::json!({ "name": format!("{}'s view", actor.username), "config": "{}" }),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::OK, "{} should be able to save a view", actor.username);
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{} should be able to save a view",
+                actor.username
+            );
         }
     }
 
@@ -199,8 +213,12 @@ mod tests {
         let b_app = app_as_user(db, &non_member);
 
         // B's list must not include A's view.
-        let b_list = parse_json(json_get(&b_app, &format!("/api/projects/{project_id}/views")).await).await;
-        assert!(b_list.as_array().unwrap().is_empty(), "B must not see A's views: {b_list:#?}");
+        let b_list =
+            parse_json(json_get(&b_app, &format!("/api/projects/{project_id}/views")).await).await;
+        assert!(
+            b_list.as_array().unwrap().is_empty(),
+            "B must not see A's views: {b_list:#?}"
+        );
 
         // B's PATCH/DELETE on A's view_id must 404, not 403 (existence
         // must not be confirmable via a different status code) and not 200.
@@ -212,11 +230,16 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        let resp = json_delete(&b_app, &format!("/api/projects/{project_id}/views/{view_id}")).await;
+        let resp = json_delete(
+            &b_app,
+            &format!("/api/projects/{project_id}/views/{view_id}"),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // A's view is untouched by B's rejected attempts.
-        let a_list = parse_json(json_get(&a_app, &format!("/api/projects/{project_id}/views")).await).await;
+        let a_list =
+            parse_json(json_get(&a_app, &format!("/api/projects/{project_id}/views")).await).await;
         assert_eq!(a_list.as_array().unwrap().len(), 1);
         assert_eq!(a_list.as_array().unwrap()[0]["name"], "A's private view");
     }
@@ -252,9 +275,18 @@ mod tests {
         .await;
         assert_eq!(second["is_default"], true);
 
-        let list = parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
-        let first_after = list.as_array().unwrap().iter().find(|v| v["id"] == first_id).unwrap();
-        assert_eq!(first_after["is_default"], false, "first default must be cleared: {list:#?}");
+        let list =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
+        let first_after = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == first_id)
+            .unwrap();
+        assert_eq!(
+            first_after["is_default"], false,
+            "first default must be cleared: {list:#?}"
+        );
     }
 
     // ── Validation ───────────────────────────────────────────────────
@@ -324,7 +356,12 @@ mod tests {
         let non_member_app = app_as_user(db, &non_member);
 
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/projects/{project_id}/views")).await.status(),
+            json_get(
+                &non_member_app,
+                &format!("/api/projects/{project_id}/views")
+            )
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
@@ -348,7 +385,10 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            json_delete(&non_member_app, &format!("/api/projects/{project_id}/views/{view_id}"))
+            json_delete(
+                &non_member_app,
+                &format!("/api/projects/{project_id}/views/{view_id}")
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN

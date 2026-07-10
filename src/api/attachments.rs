@@ -620,6 +620,7 @@ mod api_tests {
         use axum::Extension;
         use std::sync::Arc;
         let app = crate::api::router(db, &[])
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
             .layer(Extension(crate::storage::AttachmentStore::new(
                 std::env::temp_dir().join(format!("lific_sz_{}", std::process::id())),
             )))
@@ -662,6 +663,7 @@ mod api_tests {
 
         // Lead creates an issue and uploads an attachment linked to it.
         let lead_app = with_attachment_layers(crate::api::router(db.clone(), &[]))
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,
@@ -816,6 +818,7 @@ mod api_tests {
             conn.last_insert_rowid()
         };
         let app = with_attachment_layers_store(crate::api::router(db.clone(), &[]), store.clone())
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,

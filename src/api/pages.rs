@@ -6,6 +6,7 @@ use axum::{
 use crate::authz;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{filter_visible, with_read, with_write};
 
@@ -97,6 +98,7 @@ pub(super) async fn get_page(
 
 pub(super) async fn create_page(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreatePage>,
 ) -> Result<Json<Page>, LificError> {
@@ -107,11 +109,15 @@ pub(super) async fn create_page(
         super::attachments::sync_links(conn, AttachmentEntity::Page, page.id, &page.content)?;
         Ok(page)
     })?;
+    if let Some(project_id) = page.project_id {
+        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    }
     Ok(Json(page))
 }
 
 pub(super) async fn update_page(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
     Json(input): Json<UpdatePage>,
@@ -124,17 +130,24 @@ pub(super) async fn update_page(
         super::attachments::sync_links(conn, AttachmentEntity::Page, page.id, &page.content)?;
         Ok(page)
     })?;
+    if let Some(project_id) = page.project_id {
+        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    }
     Ok(Json(page))
 }
 
 pub(super) async fn delete_page_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
     require_page_role(&db, &auth_user, project_id, Role::Maintainer)?;
     with_write(&db, |conn| crate::db::queries::delete_page(conn, id))?;
+    if let Some(project_id) = project_id {
+        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    }
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 

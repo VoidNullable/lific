@@ -92,8 +92,12 @@ fn extract_rest_routes(src: &str) -> Vec<(String, String)> {
         let call_body = &src[start..i.saturating_sub(1)];
         idx = i;
 
-        let Some(q1) = call_body.find('"') else { continue };
-        let Some(q2_rel) = call_body[q1 + 1..].find('"') else { continue };
+        let Some(q1) = call_body.find('"') else {
+            continue;
+        };
+        let Some(q2_rel) = call_body[q1 + 1..].find('"') else {
+            continue;
+        };
         let path = call_body[q1 + 1..q1 + 1 + q2_rel].to_string();
 
         for method in METHODS {
@@ -124,34 +128,66 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
     use Classification::{Exempt, Filtered, Gated};
     use Gate::*;
 
-    const NOT_PROJECT_SCOPED: &str =
-        "global account/instance surface, not project-scoped — gated (or intentionally open) independent of authz.rs";
+    const NOT_PROJECT_SCOPED: &str = "global account/instance surface, not project-scoped — gated (or intentionally open) independent of authz.rs";
     const OWNERSHIP: &str = "author-or-admin ownership check (ownership, not project role)";
     const PUBLIC: &str = "unauthenticated by design (auth screen / health check)";
 
     HashMap::from([
         // ── Public / instance ──
         (("GET", "/api/instance"), Exempt(PUBLIC)),
-        (("GET", "/api/instance/settings"), Exempt(NOT_PROJECT_SCOPED)),
-        (("PATCH", "/api/instance/settings"), Exempt(NOT_PROJECT_SCOPED)),
+        (
+            ("GET", "/api/instance/settings"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
+        (
+            ("PATCH", "/api/instance/settings"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
         (("GET", "/api/health"), Exempt(PUBLIC)),
+        (
+            ("GET", "/api/events/ws"),
+            Exempt("cookie-authenticated event stream, not project-scoped"),
+        ),
         // ── Auth: self-service, own account, not project-scoped ──
         (("POST", "/api/auth/signup"), Exempt(PUBLIC)),
         (("POST", "/api/auth/login"), Exempt(PUBLIC)),
-        (("POST", "/api/auth/auto-login"), Exempt("public but instance-flag gated — LIF-215")),
+        (
+            ("POST", "/api/auth/auto-login"),
+            Exempt("public but instance-flag gated — LIF-215"),
+        ),
         (("POST", "/api/auth/logout"), Exempt(NOT_PROJECT_SCOPED)),
         (("GET", "/api/auth/me"), Exempt(NOT_PROJECT_SCOPED)),
         (("PATCH", "/api/auth/me"), Exempt(NOT_PROJECT_SCOPED)),
-        (("POST", "/api/auth/me/password"), Exempt(NOT_PROJECT_SCOPED)),
-        (("DELETE", "/api/auth/me/sessions"), Exempt(NOT_PROJECT_SCOPED)),
+        (
+            ("POST", "/api/auth/me/password"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
+        (
+            ("DELETE", "/api/auth/me/sessions"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
         (("GET", "/api/auth/keys"), Exempt(NOT_PROJECT_SCOPED)),
         (("POST", "/api/auth/keys"), Exempt(NOT_PROJECT_SCOPED)),
-        (("DELETE", "/api/auth/keys/{id}"), Exempt(NOT_PROJECT_SCOPED)),
+        (
+            ("DELETE", "/api/auth/keys/{id}"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
         (("GET", "/api/auth/bots"), Exempt(NOT_PROJECT_SCOPED)),
         (("POST", "/api/auth/bots"), Exempt(NOT_PROJECT_SCOPED)),
-        (("POST", "/api/auth/bots/{id}/disconnect"), Exempt(NOT_PROJECT_SCOPED)),
-        (("DELETE", "/api/auth/bots/{id}"), Exempt(NOT_PROJECT_SCOPED)),
-        (("GET", "/api/users"), Exempt("global user directory for UI dropdowns; auth-required only, via the outer auth_middleware_wrapper")),
+        (
+            ("POST", "/api/auth/bots/{id}/disconnect"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
+        (
+            ("DELETE", "/api/auth/bots/{id}"),
+            Exempt(NOT_PROJECT_SCOPED),
+        ),
+        (
+            ("GET", "/api/users"),
+            Exempt(
+                "global user directory for UI dropdowns; auth-required only, via the outer auth_middleware_wrapper",
+            ),
+        ),
         // ── Comments: Viewer to read/create (project resolved from parent) ──
         (("GET", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
         (("POST", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
@@ -165,16 +201,41 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // Upload is open to any authenticated user (per-user rate-limited); the
         // blob only becomes project-visible once linked into an entity, so
         // there's no project to gate at upload time.
-        (("POST", "/api/attachments"), Exempt("any authenticated user may upload; per-user rate-limited; linked-to-project visibility happens on entity save — LIF-262")),
+        (
+            ("POST", "/api/attachments"),
+            Exempt(
+                "any authenticated user may upload; per-user rate-limited; linked-to-project visibility happens on entity save — LIF-262",
+            ),
+        ),
         // Download/delete authorize dynamically against EVERY project the
         // attachment is linked into (Viewer to read, Maintainer/uploader/admin
         // to delete), which no single fixed gate level captures.
-        (("GET", "/api/attachments/{id}"), Exempt("read gated at Viewer on any linked project, or uploader/admin when still unlinked — dynamic, see api::attachments::authorize_read (LIF-262)")),
-        (("DELETE", "/api/attachments/{id}"), Exempt("delete gated at uploader, Maintainer on any linked project, or admin — dynamic, see api::attachments::authorize_delete (LIF-262)")),
+        (
+            ("GET", "/api/attachments/{id}"),
+            Exempt(
+                "read gated at Viewer on any linked project, or uploader/admin when still unlinked — dynamic, see api::attachments::authorize_read (LIF-262)",
+            ),
+        ),
+        (
+            ("DELETE", "/api/attachments/{id}"),
+            Exempt(
+                "delete gated at uploader, Maintainer on any linked project, or admin — dynamic, see api::attachments::authorize_delete (LIF-262)",
+            ),
+        ),
         // ── Projects ──
         (("GET", "/api/projects"), Filtered),
-        (("POST", "/api/projects"), Exempt("open to any authenticated user; creator auto-becomes lead — LIF-DOC-7 decision #13")),
-        (("PUT", "/api/projects/reorder"), Exempt("require_authenticated only; instance-wide sidebar chrome, not a project edit — LIF-233")),
+        (
+            ("POST", "/api/projects"),
+            Exempt(
+                "open to any authenticated user; creator auto-becomes lead — LIF-DOC-7 decision #13",
+            ),
+        ),
+        (
+            ("PUT", "/api/projects/reorder"),
+            Exempt(
+                "require_authenticated only; instance-wide sidebar chrome, not a project edit — LIF-233",
+            ),
+        ),
         (("GET", "/api/projects/{id}"), Gated(Viewer)),
         (("PUT", "/api/projects/{id}"), Gated(Lead)),
         (("DELETE", "/api/projects/{id}"), Gated(ProjectDelete)),
@@ -184,14 +245,23 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Membership management (LIF-199, REST/web-only) ──
         (("GET", "/api/projects/{id}/members"), Gated(Viewer)),
         (("POST", "/api/projects/{id}/members"), Gated(Lead)),
-        (("PATCH", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
-        (("DELETE", "/api/projects/{id}/members/{user_id}"), Gated(Lead)),
+        (
+            ("PATCH", "/api/projects/{id}/members/{user_id}"),
+            Gated(Lead),
+        ),
+        (
+            ("DELETE", "/api/projects/{id}/members/{user_id}"),
+            Gated(Lead),
+        ),
         // LIF-234: caller's own effective role — Viewer-gated, drives
         // role-aware UI affordances.
         (("GET", "/api/projects/{id}/my-role"), Gated(Viewer)),
         // @mention autocomplete candidates (LIF-263) — Viewer-gated, and
         // member-scoped in the query layer when enforcement is on.
-        (("GET", "/api/projects/{id}/mention-candidates"), Gated(Viewer)),
+        (
+            ("GET", "/api/projects/{id}/mention-candidates"),
+            Gated(Viewer),
+        ),
         // ── Saved views (LIF-242, REST/web-only) ──
         // Gated(Viewer) is the *project-role* floor only — every one of
         // these additionally enforces strict per-user ownership in the
@@ -202,8 +272,14 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // a teammate's. See src/api/views.rs's module doc comment.
         (("GET", "/api/projects/{id}/views"), Gated(Viewer)),
         (("POST", "/api/projects/{id}/views"), Gated(Viewer)),
-        (("PATCH", "/api/projects/{id}/views/{view_id}"), Gated(Viewer)),
-        (("DELETE", "/api/projects/{id}/views/{view_id}"), Gated(Viewer)),
+        (
+            ("PATCH", "/api/projects/{id}/views/{view_id}"),
+            Gated(Viewer),
+        ),
+        (
+            ("DELETE", "/api/projects/{id}/views/{view_id}"),
+            Gated(Viewer),
+        ),
         // ── Issues ──
         (("GET", "/api/issues"), Filtered),
         (("POST", "/api/issues"), Gated(Maintainer)),
@@ -251,8 +327,14 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("GET", "/api/plans/resolve/{identifier}"), Gated(Viewer)),
         (("GET", "/api/plans/{id}/activity"), Gated(Viewer)),
         (("POST", "/api/plans/{id}/steps"), Gated(Maintainer)),
-        (("PUT", "/api/plans/{plan_id}/steps/{step_id}"), Gated(Maintainer)),
-        (("DELETE", "/api/plans/{plan_id}/steps/{step_id}"), Gated(Maintainer)),
+        (
+            ("PUT", "/api/plans/{plan_id}/steps/{step_id}"),
+            Gated(Maintainer),
+        ),
+        (
+            ("DELETE", "/api/plans/{plan_id}/steps/{step_id}"),
+            Gated(Maintainer),
+        ),
         // ── Search ──
         (("GET", "/api/search"), Filtered),
     ])
@@ -465,5 +547,3 @@ fn mcp_manifest_mixed_reasons_are_non_empty() {
         }
     }
 }
-
-

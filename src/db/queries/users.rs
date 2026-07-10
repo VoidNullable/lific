@@ -7,6 +7,8 @@ use rusqlite::{params, Connection};
 use crate::db::models::*;
 use crate::error::LificError;
 
+pub(crate) const INVALID_SESSION_MESSAGE: &str = "invalid or expired session";
+
 // ── Password hashing ─────────────────────────────────────────
 
 /// Hash a password with argon2 using a random salt.
@@ -354,7 +356,7 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                LificError::BadRequest("invalid or expired session".into())
+                LificError::BadRequest(INVALID_SESSION_MESSAGE.into())
             }
             other => other.into(),
         })?;

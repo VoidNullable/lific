@@ -289,8 +289,15 @@
     ]);
     if (pRes.ok) pages = pRes.data;
     if (fRes.ok) {
+      const previousFolderIds = new Set(folders.map((folder) => folder.id));
+      const nextFolderIds = new Set(fRes.data.map((folder) => folder.id));
       folders = fRes.data;
-      expandedFolders = new Set(fRes.data.map((f: Folder) => f.id));
+      expandedFolders = new Set(
+        [...expandedFolders].filter((id) => nextFolderIds.has(id)),
+      );
+      for (const folder of fRes.data) {
+        if (!previousFolderIds.has(folder.id)) expandedFolders.add(folder.id);
+      }
     }
     if (lRes.ok) labels = lRes.data;
     loading = false;
@@ -298,22 +305,32 @@
 
   async function reloadPages() {
     if (!project) return;
-    const res = await listPages(
-      project.id,
-      undefined,
-      filterLabel || undefined,
-      serverStatusFilter(),
-    );
-    if (res.ok) pages = res.data;
+    const [pagesRes, foldersRes, labelsRes] = await Promise.all([
+      listPages(project.id, undefined, filterLabel || undefined, serverStatusFilter()),
+      listFolders(project.id),
+      listLabels(project.id),
+    ]);
+    if (pagesRes.ok) pages = pagesRes.data;
+    if (foldersRes.ok) {
+      const previousFolderIds = new Set(folders.map((folder) => folder.id));
+      const nextFolderIds = new Set(foldersRes.data.map((folder) => folder.id));
+      folders = foldersRes.data;
+      expandedFolders = new Set(
+        [...expandedFolders].filter((id) => nextFolderIds.has(id)),
+      );
+      for (const folder of foldersRes.data) {
+        if (!previousFolderIds.has(folder.id)) expandedFolders.add(folder.id);
+      }
+    }
+    if (labelsRes.ok) labels = labelsRes.data;
   }
 
   // ── LIF-129: auto-refresh ────────────────────────────
-  // Background poll (15s) + revalidate on tab focus so the page tree picks
-  // up pages created/edited/deleted out-of-band. Vetoed while dragging a
+  // Revalidate on tab focus and relevant realtime events so the page tree
+  // picks up pages created/edited/deleted out-of-band. Vetoed while dragging a
   // page/folder, while an inline create input is open, or while the
   // search box is focused — refreshing under any of those would yank the
-  // user's interaction. Only re-pulls pages (folders/labels change rarely
-  // and reconcile on the next mount/navigation).
+  // user's interaction. The refresh keeps the full project tree in sync.
   function autoRefreshBusy(): boolean {
     return (
       loading ||
@@ -327,7 +344,9 @@
     startAutoRefresh({
       refresh: reloadPages,
       isBusy: autoRefreshBusy,
-      intervalMs: 15_000,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        (typeof event.project_id === "number" && event.project_id === project?.id),
     }),
   );
 

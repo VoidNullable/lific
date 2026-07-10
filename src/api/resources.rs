@@ -6,6 +6,7 @@ use axum::{
 use crate::authz;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_structure_role, with_read, with_write};
 
@@ -40,15 +41,19 @@ pub(super) async fn get_module(
 
 pub(super) async fn create_module(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateModule>,
 ) -> Result<Json<Module>, LificError> {
     require_structure_role(&db, &auth_user, input.project_id)?;
-    with_write(&db, |conn| crate::db::queries::create_module(conn, &input)).map(Json)
+    let module = with_write(&db, |conn| crate::db::queries::create_module(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id: module.project_id });
+    Ok(Json(module))
 }
 
 pub(super) async fn update_module(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateModule>,
@@ -57,14 +62,16 @@ pub(super) async fn update_module(
         crate::db::queries::get_resource_project_id(conn, "modules", id)
     })?;
     require_structure_role(&db, &auth_user, project_id)?;
-    with_write(&db, |conn| {
+    let module = with_write(&db, |conn| {
         crate::db::queries::update_module(conn, id, &input)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(module))
 }
 
 pub(super) async fn delete_module_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -73,6 +80,7 @@ pub(super) async fn delete_module_handler(
     })?;
     require_structure_role(&db, &auth_user, project_id)?;
     with_write(&db, |conn| crate::db::queries::delete_module(conn, id))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -97,15 +105,19 @@ pub(super) async fn list_labels(
 
 pub(super) async fn create_label(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateLabel>,
 ) -> Result<Json<Label>, LificError> {
     require_structure_role(&db, &auth_user, input.project_id)?;
-    with_write(&db, |conn| crate::db::queries::create_label(conn, &input)).map(Json)
+    let label = with_write(&db, |conn| crate::db::queries::create_label(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id: input.project_id });
+    Ok(Json(label))
 }
 
 pub(super) async fn update_label_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateLabel>,
@@ -114,11 +126,16 @@ pub(super) async fn update_label_handler(
         crate::db::queries::get_resource_project_id(conn, "labels", id)
     })?;
     require_structure_role(&db, &auth_user, project_id)?;
-    with_write(&db, |conn| crate::db::queries::update_label(conn, id, &input)).map(Json)
+    let label = with_write(&db, |conn| {
+        crate::db::queries::update_label(conn, id, &input)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(label))
 }
 
 pub(super) async fn delete_label_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -127,6 +144,7 @@ pub(super) async fn delete_label_handler(
     })?;
     require_structure_role(&db, &auth_user, project_id)?;
     with_write(&db, |conn| crate::db::queries::delete_label(conn, id))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -138,6 +156,7 @@ pub(super) struct MergeLabel {
 
 pub(super) async fn merge_label_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<MergeLabel>,
@@ -155,10 +174,11 @@ pub(super) async fn merge_label_handler(
         ));
     }
     require_structure_role(&db, &auth_user, source_project)?;
-    with_write(&db, |conn| {
+    let label = with_write(&db, |conn| {
         crate::db::queries::merge_label(conn, id, input.into)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id: source_project });
+    Ok(Json(label))
 }
 
 // ── Folder endpoints ─────────────────────────────────────────
@@ -182,15 +202,19 @@ pub(super) async fn list_folders_handler(
 
 pub(super) async fn create_folder(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateFolder>,
 ) -> Result<Json<Folder>, LificError> {
     require_structure_role(&db, &auth_user, input.project_id)?;
-    with_write(&db, |conn| crate::db::queries::create_folder(conn, &input)).map(Json)
+    let folder = with_write(&db, |conn| crate::db::queries::create_folder(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id: input.project_id });
+    Ok(Json(folder))
 }
 
 pub(super) async fn delete_folder_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -199,6 +223,7 @@ pub(super) async fn delete_folder_handler(
     })?;
     require_structure_role(&db, &auth_user, project_id)?;
     with_write(&db, |conn| crate::db::queries::delete_folder(conn, id))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -301,9 +326,7 @@ mod tests {
         let (db, _, lead, regular, project_id) = setup_lead_test();
         let lead_app = app_as_user(db.clone(), &lead);
 
-        let mk = |name: &str| {
-            serde_json::json!({ "project_id": project_id, "name": name, "color": "#FF0000" })
-        };
+        let mk = |name: &str| serde_json::json!({ "project_id": project_id, "name": name, "color": "#FF0000" });
         let a = parse_json(json_post(&lead_app, "/api/labels", mk("bug")).await).await;
         let b = parse_json(json_post(&lead_app, "/api/labels", mk("defect")).await).await;
         let a_id = a["id"].as_i64().unwrap();
@@ -329,8 +352,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(parse_json(resp).await["id"].as_i64().unwrap(), b_id);
 
-        let list = parse_json(json_get(&lead_app, &format!("/api/labels?project_id={project_id}")).await).await;
-        let names: Vec<&str> = list.as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap()).collect();
+        let list =
+            parse_json(json_get(&lead_app, &format!("/api/labels?project_id={project_id}")).await)
+                .await;
+        let names: Vec<&str> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["defect"]);
     }
 }

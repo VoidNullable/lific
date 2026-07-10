@@ -79,7 +79,10 @@ fn fmt_steps(nodes: &[models::PlanStepNode], depth: usize, out: &mut String) {
             n.id, n.title, suffix
         ));
         if !n.description.is_empty() {
-            out.push_str(&format!("{indent}    {}\n", truncate_value(&n.description, 100)));
+            out.push_str(&format!(
+                "{indent}    {}\n",
+                truncate_value(&n.description, 100)
+            ));
         }
         if !n.children.is_empty() {
             fmt_steps(&n.children, depth + 1, out);
@@ -267,7 +270,10 @@ fn fmt_activity(a: &models::Activity) -> String {
         other => format!("{label} {other}"),
     };
 
-    format!("[{}] {}{} via {} — {}", a.ts, who, agent, a.transport, detail)
+    format!(
+        "[{}] {}{} via {} — {}",
+        a.ts, who, agent, a.transport, detail
+    )
 }
 
 // ── LIF-198: MCP authorization gates ────────────────────────────
@@ -430,7 +436,9 @@ impl LificMcp {
     fn require_step_issue_role_mcp(&self, step_id: i64, min: models::Role) -> Result<(), String> {
         match self.read(|conn| queries::plans::step_issue_id(conn, step_id))? {
             Some(issue_id) => {
-                let project_id = self.read(|conn| queries::get_issue(conn, issue_id))?.project_id;
+                let project_id = self
+                    .read(|conn| queries::get_issue(conn, issue_id))?
+                    .project_id;
                 require_role_mcp(&self.db, project_id, min)
             }
             None => Ok(()),
@@ -507,10 +515,7 @@ impl LificMcp {
                     // match on its parent so the reader knows to open the
                     // parent issue/page to find the thread (LIF-146).
                     if r.result_type == "comment" {
-                        out.push_str(&format!(
-                            "- [comment] on {ident} — {}\n",
-                            r.snippet
-                        ));
+                        out.push_str(&format!("- [comment] on {ident} — {}\n", r.snippet));
                     } else {
                         out.push_str(&format!(
                             "- [{}] {} {} — {}\n",
@@ -581,9 +586,9 @@ impl LificMcp {
             return format!("Error: {e}");
         }
 
-        match self.read(|conn| {
-            queries::activity::list_activity(conn, scope, Some(limit), Some(offset))
-        }) {
+        match self
+            .read(|conn| queries::activity::list_activity(conn, scope, Some(limit), Some(offset)))
+        {
             Ok(feed) if feed.items.is_empty() && offset == 0 => {
                 format!("No recorded activity for {ident} yet.")
             }
@@ -699,7 +704,10 @@ impl LificMcp {
                     out.push_str(&format!("Duplicates: {}\n", issue.duplicates.join(", ")));
                 }
                 if !issue.duplicated_by.is_empty() {
-                    out.push_str(&format!("Duplicated by: {}\n", issue.duplicated_by.join(", ")));
+                    out.push_str(&format!(
+                        "Duplicated by: {}\n",
+                        issue.duplicated_by.join(", ")
+                    ));
                 }
                 if !issue.description.is_empty() {
                     out.push_str(&format!("\n{}\n", issue.description));
@@ -784,7 +792,13 @@ impl LificMcp {
                 },
             )
         }) {
-            Ok(issue) => format!("Created {}: {}", issue.identifier, issue.title),
+            Ok(issue) => {
+                self.emit(crate::realtime::RealtimeEvent::IssueCreated {
+                    project_id: issue.project_id,
+                    issue_id: issue.id,
+                });
+                format!("Created {}: {}", issue.identifier, issue.title)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -811,7 +825,11 @@ impl LificMcp {
                 Some(name) if name.is_empty() => Some(None),
                 Some(name) => {
                     let issue = queries::get_issue(conn, id)?;
-                    Some(Some(queries::resolve_module_name(conn, issue.project_id, name)?))
+                    Some(Some(queries::resolve_module_name(
+                        conn,
+                        issue.project_id,
+                        name,
+                    )?))
                 }
                 None => None,
             };
@@ -831,7 +849,13 @@ impl LificMcp {
                 },
             )
         }) {
-            Ok(issue) => format!("Updated {}: {}", issue.identifier, fmt_issue(&issue)),
+            Ok(issue) => {
+                self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
+                    project_id: issue.project_id,
+                    issue_id: issue.id,
+                });
+                format!("Updated {}: {}", issue.identifier, fmt_issue(&issue))
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -879,8 +903,9 @@ impl LificMcp {
                     ..Default::default()
                 },
             )?;
-            let mut count = 0usize;
-            for issue in &issues {
+            issues
+                .iter()
+                .map(|issue| {
                 queries::update_issue(
                     conn,
                     issue.id,
@@ -895,12 +920,20 @@ impl LificMcp {
                         target_date: None,
                         labels: None,
                     },
-                )?;
-                count += 1;
-            }
-            Ok(count)
+                    )
+                    .map(|issue| (issue.project_id, issue.id))
+                })
+                .collect::<Result<Vec<_>, _>>()
         }) {
-            Ok(count) => format!("Updated {count} issue(s)"),
+            Ok(events) => {
+                for (project_id, issue_id) in &events {
+                    self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
+                        project_id: *project_id,
+                        issue_id: *issue_id,
+                    });
+                }
+                format!("Updated {} issue(s)", events.len())
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -971,7 +1004,13 @@ impl LificMcp {
 
             queries::update_issue(conn, id, &patch)
         }) {
-            Ok(issue) => format!("Edited {}: {}", issue.identifier, fmt_issue(&issue)),
+            Ok(issue) => {
+                self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
+                    project_id: issue.project_id,
+                    issue_id: issue.id,
+                });
+                format!("Edited {}: {}", issue.identifier, fmt_issue(&issue))
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1075,54 +1114,74 @@ impl LificMcp {
 
     #[tool(description = "Link two issues with a relation: blocks, relates_to, or duplicate")]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
-        let (source_id, target_id, source_project, target_project) = match self.read(|conn| {
+        let (source, target) = match self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
-            let source_project = queries::get_issue(conn, source_id)?.project_id;
-            let target_project = queries::get_issue(conn, target_id)?.project_id;
-            Ok((source_id, target_id, source_project, target_project))
+            Ok((
+                queries::get_issue(conn, source_id)?,
+                queries::get_issue(conn, target_id)?,
+            ))
         }) {
             Ok(v) => v,
             Err(e) => return format!("Error: {e}"),
         };
         // Cross-project relation: Maintainer required on BOTH sides (LIF-198
         // scope item 3), even when source and target share a project.
-        if let Err(e) = require_role_mcp(&self.db, source_project, models::Role::Maintainer) {
+        if let Err(e) = require_role_mcp(&self.db, source.project_id, models::Role::Maintainer) {
             return format!("Error: {e}");
         }
-        if let Err(e) = require_role_mcp(&self.db, target_project, models::Role::Maintainer) {
+        if let Err(e) = require_role_mcp(&self.db, target.project_id, models::Role::Maintainer) {
             return format!("Error: {e}");
         }
-        match self.write(|conn| {
-            queries::link_issues(conn, source_id, target_id, &input.relation_type)
-        }) {
-            Ok(()) => format!("{} {} {}", input.source, input.relation_type, input.target),
+        match self
+            .write(|conn| queries::link_issues(conn, source.id, target.id, &input.relation_type))
+        {
+            Ok(()) => {
+                self.emit(crate::realtime::RealtimeEvent::IssueLinked {
+                    project_id: source.project_id,
+                    issue_id: source.id,
+                });
+                self.emit(crate::realtime::RealtimeEvent::IssueLinked {
+                    project_id: target.project_id,
+                    issue_id: target.id,
+                });
+                format!("{} {} {}", input.source, input.relation_type, input.target)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
 
     #[tool(description = "Remove a relation between two issues")]
     fn unlink_issues(&self, Parameters(input): Parameters<UnlinkIssuesInput>) -> String {
-        let (source_id, target_id, source_project, target_project) = match self.read(|conn| {
+        let (source, target) = match self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
-            let source_project = queries::get_issue(conn, source_id)?.project_id;
-            let target_project = queries::get_issue(conn, target_id)?.project_id;
-            Ok((source_id, target_id, source_project, target_project))
+            Ok((
+                queries::get_issue(conn, source_id)?,
+                queries::get_issue(conn, target_id)?,
+            ))
         }) {
             Ok(v) => v,
             Err(e) => return format!("Error: {e}"),
         };
-        if let Err(e) = require_role_mcp(&self.db, source_project, models::Role::Maintainer) {
+        if let Err(e) = require_role_mcp(&self.db, source.project_id, models::Role::Maintainer) {
             return format!("Error: {e}");
         }
-        if let Err(e) = require_role_mcp(&self.db, target_project, models::Role::Maintainer) {
+        if let Err(e) = require_role_mcp(&self.db, target.project_id, models::Role::Maintainer) {
             return format!("Error: {e}");
         }
-        match self.write(|conn| {
-            queries::unlink_issues(conn, source_id, target_id)
-        }) {
-            Ok(()) => format!("Unlinked {} and {}", input.source, input.target),
+        match self.write(|conn| queries::unlink_issues(conn, source.id, target.id)) {
+            Ok(()) => {
+                self.emit(crate::realtime::RealtimeEvent::IssueUnlinked {
+                    project_id: source.project_id,
+                    issue_id: source.id,
+                });
+                self.emit(crate::realtime::RealtimeEvent::IssueUnlinked {
+                    project_id: target.project_id,
+                    issue_id: target.id,
+                });
+                format!("Unlinked {} and {}", input.source, input.target)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1139,7 +1198,9 @@ impl LificMcp {
             Ok((page, folder_name))
         }) {
             Ok((page, folder_name)) => {
-                if let Err(e) = require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer) {
+                if let Err(e) =
+                    require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer)
+                {
                     return format!("Error: {e}");
                 }
                 let mut out = format!(
@@ -1368,19 +1429,26 @@ impl LificMcp {
     fn delete(&self, Parameters(input): Parameters<DeleteInput>) -> String {
         match input.resource_type.as_str() {
             "issue" => {
-                let (id, project_id) = match self.read(|conn| {
+                let issue = match self.read(|conn| {
                     let id = queries::resolve_identifier(conn, &input.identifier)?;
-                    let project_id = queries::get_issue(conn, id)?.project_id;
-                    Ok((id, project_id))
+                    queries::get_issue(conn, id)
                 }) {
                     Ok(v) => v,
                     Err(e) => return format!("Error: {e}"),
                 };
-                if let Err(e) = require_role_mcp(&self.db, project_id, models::Role::Maintainer) {
+                if let Err(e) =
+                    require_role_mcp(&self.db, issue.project_id, models::Role::Maintainer)
+                {
                     return format!("Error: {e}");
                 }
-                match self.write(|conn| queries::delete_issue(conn, id)) {
-                    Ok(()) => format!("Deleted issue {}", input.identifier),
+                match self.write(|conn| queries::delete_issue(conn, issue.id)) {
+                    Ok(()) => {
+                        self.emit(crate::realtime::RealtimeEvent::IssueDeleted {
+                            project_id: issue.project_id,
+                            issue_id: issue.id,
+                        });
+                        format!("Deleted issue {}", input.identifier)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1397,7 +1465,10 @@ impl LificMcp {
                     return format!("Error: {e}");
                 }
                 match self.write(|conn| queries::plans::delete_plan(conn, id)) {
-                    Ok(()) => format!("Deleted plan {}", input.identifier),
+                    Ok(()) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                        format!("Deleted plan {}", input.identifier)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1410,26 +1481,42 @@ impl LificMcp {
                     Ok(v) => v,
                     Err(e) => return format!("Error: {e}"),
                 };
-                if let Err(e) = require_page_role_mcp(&self.db, project_id, models::Role::Maintainer) {
+                if let Err(e) =
+                    require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)
+                {
                     return format!("Error: {e}");
                 }
                 match self.write(|conn| queries::delete_page(conn, id)) {
-                    Ok(()) => format!("Deleted page {}", input.identifier),
+                    Ok(()) => {
+                        if let Some(project_id) = project_id {
+                            self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                        }
+                        format!("Deleted page {}", input.identifier)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
             "project" => {
-                let id = match self.read(|conn| {
-                    queries::resolve_project_identifier(conn, &input.identifier)
-                }) {
+                let id = match self
+                    .read(|conn| queries::resolve_project_identifier(conn, &input.identifier))
+                {
                     Ok(id) => id,
                     Err(e) => return format!("Error: {e}"),
                 };
                 if let Err(e) = require_project_delete_role_mcp(&self.db, id) {
                     return format!("Error: {e}");
                 }
-                match self.write(|conn| queries::delete_project(conn, id)) {
-                    Ok(()) => format!("Deleted project {}", input.identifier),
+                match self.write(|conn| queries::delete_project_with_audience(conn, id)) {
+                    Ok((project, audience)) => {
+                        let event = crate::realtime::RealtimeEvent::ProjectDeleted {
+                            project_id: project.id,
+                        };
+                        match audience {
+                            Some(user_ids) => self.realtime.send_to_users(event, user_ids),
+                            None => self.emit(event),
+                        }
+                        format!("Deleted project {}", input.identifier)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1813,7 +1900,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(p) => format!("Created project {} | {}", p.identifier, p.name),
+                    Ok(p) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectCreated {
+                            project_id: p.id,
+                        });
+                        format!("Created project {} | {}", p.identifier, p.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1841,7 +1933,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(p) => format!("Updated project {} | {}", p.identifier, p.name),
+                    Ok(p) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: p.id,
+                        });
+                        format!("Updated project {} | {}", p.identifier, p.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2050,15 +2147,13 @@ impl LificMcp {
         // For stdio/local MCP sessions (no HTTP auth), fall back to the first admin user.
         let user_id = match super::current_auth_user() {
             Some(u) => u.id,
-            None => {
-                match self.read(queries::users::first_admin) {
+            None => match self.read(queries::users::first_admin) {
                     Ok(Some(admin)) => admin.id,
                     Ok(None) => {
                         return "Error: no admin user exists to attribute comments to.".into();
                     }
                     Err(e) => return format!("Error: {e}"),
-                }
-            }
+            },
         };
 
         // LIF-263: resolve the parent's project + the enforcement flag up
@@ -2089,16 +2184,32 @@ impl LificMcp {
                 queries::comments::mention_candidates(conn, project_id, member_scoped)?;
             let c = queries::comments::create_comment(conn, parent, user_id, &input.content)?;
             queries::comments::sync_mentions(conn, c.id, &c.content, &candidates)?;
-            Ok(c)
+            let event = c
+                .issue_id
+                .map(|issue_id| {
+                    queries::get_issue(conn, issue_id).map(|issue| {
+                        crate::realtime::RealtimeEvent::IssueUpdated {
+                            project_id: issue.project_id,
+                            issue_id: issue.id,
+                        }
+                    })
+                })
+                .transpose()?;
+            Ok((c, event))
         }) {
             // Don't echo c.content back — the agent already supplied it in the
             // tool args, so repeating it just duplicates tokens in context
             // (LIF-115). The comment id is the useful new handle for any
             // follow-up edit/delete.
-            Ok(c) => format!(
+            Ok((c, event)) => {
+                if let Some(event) = event {
+                    self.emit(event);
+                }
+                format!(
                 "Comment #{} added to {} by {} at {}",
                 c.id, input.identifier, c.author, c.created_at
-            ),
+                )
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2154,8 +2265,8 @@ impl LificMcp {
 
         // Ownership: only the author or an admin may edit (mirrors
         // api::comments::update_comment_handler).
-        let existing = match self.read(|conn| queries::comments::get_comment(conn, input.comment_id))
-        {
+        let existing =
+            match self.read(|conn| queries::comments::get_comment(conn, input.comment_id)) {
             Ok(c) => c,
             Err(e) => return format!("Error: {e}"),
         };
@@ -2183,7 +2294,15 @@ impl LificMcp {
         }) {
             // Don't echo the new content back — the agent already supplied it
             // (LIF-115). The id is the stable handle.
-            Ok(c) => format!("Comment #{} edited at {}", c.id, c.updated_at),
+            Ok(c) => {
+                if let (Some(issue_id), Some(project_id)) = (c.issue_id, project_id) {
+                    self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
+                        project_id,
+                        issue_id,
+                    });
+                }
+                format!("Comment #{} edited at {}", c.id, c.updated_at)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2200,8 +2319,8 @@ impl LificMcp {
 
         // Ownership: only the author or an admin may delete (mirrors
         // api::comments::delete_comment_handler).
-        let existing = match self.read(|conn| queries::comments::get_comment(conn, input.comment_id))
-        {
+        let existing =
+            match self.read(|conn| queries::comments::get_comment(conn, input.comment_id)) {
             Ok(c) => c,
             Err(e) => return format!("Error: {e}"),
         };
@@ -2209,8 +2328,21 @@ impl LificMcp {
             return "Error: you can only delete your own comments".into();
         }
 
+        let project_id = match self.read(|conn| resolve_comment_project(conn, &existing)) {
+            Ok(project_id) => project_id,
+            Err(e) => return format!("Error: {e}"),
+        };
+
         match self.write(|conn| queries::comments::delete_comment(conn, input.comment_id)) {
-            Ok(()) => format!("Comment #{} deleted", input.comment_id),
+            Ok(()) => {
+                if let (Some(issue_id), Some(project_id)) = (existing.issue_id, project_id) {
+                    self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
+                        project_id,
+                        issue_id,
+                    });
+                }
+                format!("Comment #{} deleted", input.comment_id)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2247,7 +2379,12 @@ impl LificMcp {
                 },
             )
         }) {
-            Ok(plan) => format!("Created {}\n{}", plan.identifier, fmt_plan(&plan)),
+            Ok(plan) => {
+                self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                    project_id: plan.project_id,
+                });
+                format!("Created {}\n{}", plan.identifier, fmt_plan(&plan))
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2306,7 +2443,17 @@ impl LificMcp {
             )?;
             queries::plans::get_plan(conn, plan_id)
         }) {
-            Ok(plan) => format!("Edited step #{} in {}\n{}", input.step_id, plan.identifier, fmt_plan(&plan)),
+            Ok(plan) => {
+                self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                    project_id: plan.project_id,
+                });
+                format!(
+                    "Edited step #{} in {}\n{}",
+                    input.step_id,
+                    plan.identifier,
+                    fmt_plan(&plan)
+                )
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2352,6 +2499,7 @@ impl LificMcp {
         match self.write(|conn| {
             let plan_id = queries::plans::resolve_plan_identifier(conn, &input.plan)?;
             let mut notes: Vec<String> = Vec::new();
+            let mut events = Vec::new();
 
             match input.step_id {
                 // ── Plan-level update ──
@@ -2400,6 +2548,12 @@ impl LificMcp {
                             );
                             if let Some(iss) = &effect.issue_identifier {
                                 if effect.issue_status_changed {
+                                    let issue_id = queries::resolve_identifier(conn, iss)?;
+                                    let issue = queries::get_issue(conn, issue_id)?;
+                                    events.push(crate::realtime::RealtimeEvent::IssueUpdated {
+                                        project_id: issue.project_id,
+                                        issue_id: issue.id,
+                                    });
                                     msg.push_str(&format!(" → {iss} marked done"));
                                 } else if done {
                                     msg.push_str(&format!(" (linked {iss} already done)"));
@@ -2433,7 +2587,12 @@ impl LificMcp {
                             } else {
                                 queries::plans::step_parent(conn, step_id)?
                             };
-                            queries::plans::move_step(conn, step_id, new_parent, input.move_position)?;
+                            queries::plans::move_step(
+                                conn,
+                                step_id,
+                                new_parent,
+                                input.move_position,
+                            )?;
                             notes.push(format!("Moved step #{step_id}"));
                         }
                         if notes.is_empty() {
@@ -2444,9 +2603,15 @@ impl LificMcp {
             }
 
             let plan = queries::plans::get_plan(conn, plan_id)?;
-            Ok((notes, plan))
+            Ok((notes, plan, events))
         }) {
-            Ok((notes, plan)) => format!("{}\n{}", notes.join("; "), fmt_plan(&plan)),
+            Ok((notes, plan, events)) => {
+                events.into_iter().for_each(|event| self.emit(event));
+                self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                    project_id: plan.project_id,
+                });
+                format!("{}\n{}", notes.join("; "), fmt_plan(&plan))
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -2486,6 +2651,26 @@ mod tests {
     fn mcp() -> LificMcp {
         let db = crate::db::open_memory().expect("test db");
         LificMcp::new(db)
+    }
+
+    fn mcp_with_realtime() -> (
+        LificMcp,
+        tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>,
+    ) {
+        let db = crate::db::open_memory().expect("test db");
+        let realtime = crate::realtime::RealtimeHub::new();
+        let rx = realtime.subscribe();
+        (LificMcp::with_realtime(db, realtime), rx)
+    }
+
+    fn drain_realtime(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>) {
+        while rx.try_recv().is_ok() {}
+    }
+
+    fn realtime_events(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>,
+    ) -> Vec<crate::realtime::RealtimeEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok().map(|message| message.event)).collect()
     }
 
     /// Seed a project via manage_resource, return identifier.
@@ -2545,7 +2730,15 @@ mod tests {
             display_name: u.display_name,
             is_admin: u.is_admin,
         };
-        (mcp, au(admin), au(lead), au(maintainer), au(viewer), au(non_member), project_id)
+        (
+            mcp,
+            au(admin),
+            au(lead),
+            au(maintainer),
+            au(viewer),
+            au(non_member),
+            project_id,
+        )
     }
 
     // ── manage_resource ──
@@ -2881,6 +3074,34 @@ mod tests {
     }
 
     #[test]
+    fn bulk_update_emits_issue_updates() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Bulk Events", "BLE");
+        seed_issue(&m, "BLE", "One");
+        seed_issue(&m, "BLE", "Two");
+        drain_realtime(&mut rx);
+
+        let result = m.bulk_update(Parameters(BulkUpdateInput {
+            project: "BLE".into(),
+            set_status: Some("done".into()),
+            ..Default::default()
+        }));
+
+        assert_eq!(result, "Updated 2 issue(s)", "got: {result}");
+        let events = realtime_events(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(events.into_iter().all(|event| {
+            matches!(
+                event,
+                crate::realtime::RealtimeEvent::IssueUpdated {
+                    project_id: _,
+                    issue_id: _
+                }
+            )
+        }));
+    }
+
+    #[test]
     fn issue_delete() {
         let m = mcp();
         seed_project(&m, "Test", "DEL");
@@ -3070,10 +3291,7 @@ mod tests {
             ..Default::default()
         }));
         assert!(result.contains("1 issues"), "got: {result}");
-        assert!(
-            !result.contains("more results available"),
-            "got: {result}"
-        );
+        assert!(!result.contains("more results available"), "got: {result}");
     }
 
     // ── link / unlink ──
@@ -3651,7 +3869,8 @@ mod tests {
         drop(conn);
         *crate::mcp::MCP_REQUEST_USER
             .lock()
-            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = Some(models::AuthUser {
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) =
+            Some(models::AuthUser {
             id: user.id,
             username: user.username.clone(),
             display_name: user.display_name,
@@ -3885,15 +4104,24 @@ mod tests {
             identifier: "MIX-1".into(),
             ..Default::default()
         }));
-        assert!(issue_listing.contains("issue thread"), "got: {issue_listing}");
-        assert!(!issue_listing.contains("page thread"), "got: {issue_listing}");
+        assert!(
+            issue_listing.contains("issue thread"),
+            "got: {issue_listing}"
+        );
+        assert!(
+            !issue_listing.contains("page thread"),
+            "got: {issue_listing}"
+        );
 
         let page_listing = m.list_comments(Parameters(ListCommentsInput {
             identifier: "MIX-DOC-1".into(),
             ..Default::default()
         }));
         assert!(page_listing.contains("page thread"), "got: {page_listing}");
-        assert!(!page_listing.contains("issue thread"), "got: {page_listing}");
+        assert!(
+            !page_listing.contains("issue thread"),
+            "got: {page_listing}"
+        );
     }
 
     #[test]
@@ -3920,7 +4148,10 @@ mod tests {
             identifier: "DOC-1".into(),
             ..Default::default()
         }));
-        assert!(listing.contains("comment on workspace page"), "got: {listing}");
+        assert!(
+            listing.contains("comment on workspace page"),
+            "got: {listing}"
+        );
     }
 
     // ── LIF-113: edit_issue / edit_page (surgical string replacement) ────
@@ -3976,7 +4207,12 @@ mod tests {
 
     // ── edit_issue (MCP tool) ────
 
-    fn seed_issue_with_description(mcp: &LificMcp, project: &str, title: &str, desc: &str) -> String {
+    fn seed_issue_with_description(
+        mcp: &LificMcp,
+        project: &str,
+        title: &str,
+        desc: &str,
+    ) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: project.into(),
             title: title.into(),
@@ -4011,6 +4247,28 @@ mod tests {
         }));
         assert!(detail.contains("The quick red fox"), "got: {detail}");
         assert!(!detail.contains("brown"), "got: {detail}");
+    }
+
+    #[test]
+    fn edit_issue_emits_issue_update() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Edit Events", "EDE");
+        seed_issue_with_description(&m, "EDE", "T", "hello world");
+        drain_realtime(&mut rx);
+
+        let result = m.edit_issue(Parameters(EditIssueInput {
+            identifier: "EDE-1".into(),
+            old_string: "world".into(),
+            new_string: "there".into(),
+            field: None,
+            replace_all: None,
+        }));
+
+        assert!(result.starts_with("Edited"), "got: {result}");
+        assert!(matches!(
+            realtime_events(&mut rx).as_slice(),
+            [crate::realtime::RealtimeEvent::IssueUpdated { .. }]
+        ));
     }
 
     #[test]
@@ -4178,7 +4436,10 @@ mod tests {
         assert!(detail.contains("Stays"), "title preserved, got: {detail}");
         assert!(detail.contains("active"), "status preserved, got: {detail}");
         assert!(detail.contains("high"), "priority preserved, got: {detail}");
-        assert!(detail.contains("kept me"), "description edited, got: {detail}");
+        assert!(
+            detail.contains("kept me"),
+            "description edited, got: {detail}"
+        );
     }
 
     // ── edit_page (MCP tool) ────
@@ -4274,7 +4535,10 @@ mod tests {
             identifier: "EPP-DOC-1".into(),
         }));
         // Title preserved, content edited.
-        assert!(detail.contains("Original Title"), "title preserved, got: {detail}");
+        assert!(
+            detail.contains("Original Title"),
+            "title preserved, got: {detail}"
+        );
         assert!(detail.contains("kept me"), "content edited, got: {detail}");
 
         // Folder preserved — verified via list_pages with the folder filter.
@@ -4287,7 +4551,10 @@ mod tests {
             offset: None,
             ..Default::default()
         }));
-        assert!(listing.contains("EPP-DOC-1"), "folder preserved, got: {listing}");
+        assert!(
+            listing.contains("EPP-DOC-1"),
+            "folder preserved, got: {listing}"
+        );
     }
 
     #[test]
@@ -4752,13 +5019,19 @@ mod tests {
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
         }));
-        assert!(detail.contains("Status: active | Folder: Specs"), "got: {detail}");
+        assert!(
+            detail.contains("Status: active | Folder: Specs"),
+            "got: {detail}"
+        );
         assert!(detail.contains("Created: "), "got: {detail}");
         assert!(detail.contains("Updated: "), "got: {detail}");
         // Metadata header comes BEFORE the content.
         let header_pos = detail.find("Status: active").unwrap();
         let body_pos = detail.find("Body text").unwrap();
-        assert!(header_pos < body_pos, "metadata must precede content: {detail}");
+        assert!(
+            header_pos < body_pos,
+            "metadata must precede content: {detail}"
+        );
     }
 
     #[test]
@@ -4777,7 +5050,10 @@ mod tests {
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
         }));
-        assert!(detail.contains("Status: draft | Folder: none"), "got: {detail}");
+        assert!(
+            detail.contains("Status: draft | Folder: none"),
+            "got: {detail}"
+        );
     }
 
     #[test]
@@ -5101,9 +5377,15 @@ mod tests {
             comment_id: cid,
             content: "revised".into(),
         }));
-        assert!(edited.contains(&format!("Comment #{cid} edited")), "got: {edited}");
+        assert!(
+            edited.contains(&format!("Comment #{cid} edited")),
+            "got: {edited}"
+        );
         // LIF-115: must not echo the new content back.
-        assert!(!edited.contains("revised"), "must not echo content: {edited}");
+        assert!(
+            !edited.contains("revised"),
+            "must not echo content: {edited}"
+        );
 
         // The listing reflects the new body.
         let listing = m.list_comments(Parameters(ListCommentsInput {
@@ -5111,7 +5393,10 @@ mod tests {
             ..Default::default()
         }));
         assert!(listing.contains("revised"), "got: {listing}");
-        assert!(!listing.contains("original"), "old body should be gone: {listing}");
+        assert!(
+            !listing.contains("original"),
+            "old body should be gone: {listing}"
+        );
     }
 
     #[test]
@@ -5129,13 +5414,56 @@ mod tests {
         let cid = comment_id_from(&added);
 
         let deleted = m.delete_comment(Parameters(DeleteCommentInput { comment_id: cid }));
-        assert!(deleted.contains(&format!("Comment #{cid} deleted")), "got: {deleted}");
+        assert!(
+            deleted.contains(&format!("Comment #{cid} deleted")),
+            "got: {deleted}"
+        );
 
         let listing = m.list_comments(Parameters(ListCommentsInput {
             identifier: "PRJ-1".into(),
             ..Default::default()
         }));
-        assert!(listing.contains("No comments"), "comment should be gone: {listing}");
+        assert!(
+            listing.contains("No comments"),
+            "comment should be gone: {listing}"
+        );
+    }
+
+    #[test]
+    fn issue_comment_edit_and_delete_emit_updates() {
+        let (m, mut events) = mcp_with_realtime();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Realtime comments");
+        let author = make_user(&m, "author", false);
+        let _guard = act_as(&author);
+
+        let added = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "original".into(),
+        }));
+        let comment_id = comment_id_from(&added);
+        drain_realtime(&mut events);
+
+        m.edit_comment(Parameters(EditCommentInput {
+            comment_id,
+            content: "revised".into(),
+        }));
+        assert!(matches!(
+            realtime_events(&mut events).as_slice(),
+            [crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id: _,
+                issue_id: _
+            }]
+        ));
+
+        m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
+        assert!(matches!(
+            realtime_events(&mut events).as_slice(),
+            [crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id: _,
+                issue_id: _
+            }]
+        ));
     }
 
     #[test]
@@ -5200,7 +5528,10 @@ mod tests {
 
         let _guard = act_as(&admin);
         let deleted = m.delete_comment(Parameters(DeleteCommentInput { comment_id: cid }));
-        assert!(deleted.contains("deleted"), "admin delete must succeed: {deleted}");
+        assert!(
+            deleted.contains("deleted"),
+            "admin delete must succeed: {deleted}"
+        );
     }
 
     #[test]
@@ -5422,10 +5753,7 @@ mod tests {
             identifier: "TST-1".into(),
             ..Default::default()
         }));
-        assert!(
-            out.contains("opencode-blake (agent) via mcp"),
-            "got: {out}"
-        );
+        assert!(out.contains("opencode-blake (agent) via mcp"), "got: {out}");
     }
 
     /// Regression (LIF-155): rmcp executes tools on internally-spawned
@@ -5501,20 +5829,34 @@ mod tests {
                 PlanStepInput {
                     title: "Backend".into(),
                     steps: Some(vec![
-                        PlanStepInput { title: "schema".into(), ..Default::default() },
-                        PlanStepInput { title: "queries".into(), ..Default::default() },
+                        PlanStepInput {
+                            title: "schema".into(),
+                            ..Default::default()
+                        },
+                        PlanStepInput {
+                            title: "queries".into(),
+                            ..Default::default()
+                        },
                     ]),
                     ..Default::default()
                 },
-                PlanStepInput { title: "Frontend".into(), ..Default::default() },
+                PlanStepInput {
+                    title: "Frontend".into(),
+                    ..Default::default()
+                },
             ]),
         }));
         assert!(created.contains("PLN-PLAN-1"), "got: {created}");
         assert!(created.contains("Backend"));
         assert!(created.contains("schema"));
 
-        let got = m.get_plan(Parameters(GetPlanInput { plan: "PLN-PLAN-1".into() }));
-        assert!(got.contains("Frontend"), "get_plan should rehydrate tree: {got}");
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+        }));
+        assert!(
+            got.contains("Frontend"),
+            "get_plan should rehydrate tree: {got}"
+        );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
     }
 
@@ -5554,8 +5896,50 @@ mod tests {
         );
 
         // The issue is actually closed.
-        let issue = m.get_issue(Parameters(GetIssueInput { identifier: "PLN-1".into() }));
+        let issue = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PLN-1".into(),
+        }));
         assert!(issue.contains("done"), "issue should be done: {issue}");
+    }
+
+    #[test]
+    fn update_plan_step_done_emits_issue_update() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Plan Events", "PLE");
+        seed_issue(&m, "PLE", "Real work");
+
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "PLE".into(),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                issue: Some("PLE-1".into()),
+                ..Default::default()
+            }]),
+        }));
+        let step_id: i64 = created
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .expect("step id in output");
+        drain_realtime(&mut rx);
+
+        m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PLE-PLAN-1".into(),
+            step_id: Some(step_id),
+            done: Some(true),
+            ..Default::default()
+        }));
+
+        assert!(matches!(
+            realtime_events(&mut rx).as_slice(),
+            [
+                crate::realtime::RealtimeEvent::IssueUpdated { .. },
+                crate::realtime::RealtimeEvent::ProjectUpdated { .. },
+            ]
+        ));
     }
 
     #[test]
@@ -5588,7 +5972,9 @@ mod tests {
             replace_all: None,
         }));
         assert!(out.contains("Edited step"), "got: {out}");
-        let got = m.get_plan(Parameters(GetPlanInput { plan: "PLN-PLAN-1".into() }));
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+        }));
         assert!(got.contains("new text"), "edit should persist: {got}");
     }
 
@@ -5619,7 +6005,10 @@ mod tests {
             status: Some("active".into()),
             ..Default::default()
         }));
-        assert!(active.contains("No plans found."), "archived plan must not show as active: {active}");
+        assert!(
+            active.contains("No plans found."),
+            "archived plan must not show as active: {active}"
+        );
 
         let archived = m.list_resources(Parameters(ListResourcesInput {
             resource_type: "plan".into(),
@@ -5656,7 +6045,9 @@ mod tests {
             ..Default::default()
         }));
 
-        let got = m.get_plan(Parameters(GetPlanInput { plan: "PLN-PLAN-1".into() }));
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+        }));
         assert!(got.contains("[x]"), "step should be auto-completed: {got}");
         assert!(got.contains("via PLN-1"), "provenance should show: {got}");
     }
@@ -5677,8 +6068,13 @@ mod tests {
             project: None,
         }));
         assert!(out.contains("Deleted plan"), "got: {out}");
-        let got = m.get_plan(Parameters(GetPlanInput { plan: "PLN-PLAN-1".into() }));
-        assert!(got.contains("Error"), "deleted plan should not be found: {got}");
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+        }));
+        assert!(
+            got.contains("Error"),
+            "deleted plan should not be found: {got}"
+        );
     }
 }
 
@@ -5706,7 +6102,10 @@ mod authz_gating_tests {
     /// Run `f` as `user` via the production MCP identity wrapper, return
     /// the tool's string result.
     fn as_user(user: &models::AuthUser, f: impl FnOnce() -> String) -> String {
-        run(crate::mcp::with_request_user(Some(user.clone()), || async { f() }))
+        run(crate::mcp::with_request_user(
+            Some(user.clone()),
+            || async { f() },
+        ))
     }
 
     fn is_forbidden(s: &str) -> bool {
@@ -5761,8 +6160,7 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_read_denies_non_member_allows_viewer() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, project_id) =
-            setup_membership_mcp();
+        let (m, _admin, lead, _maintainer, viewer, non_member, project_id) = setup_membership_mcp();
         let _ = project_id;
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -5779,12 +6177,16 @@ mod authz_gating_tests {
         assert!(created.starts_with("Created"), "got: {created}");
 
         let denied = as_user(&non_member, || {
-            m.get_issue(Parameters(GetIssueInput { identifier: "MEM-1".into() }))
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+            }))
         });
         assert!(is_forbidden(&denied), "non-member get_issue: {denied}");
 
         let allowed = as_user(&viewer, || {
-            m.get_issue(Parameters(GetIssueInput { identifier: "MEM-1".into() }))
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+            }))
         });
         assert!(!is_forbidden(&allowed), "viewer get_issue: {allowed}");
         assert!(allowed.contains("Secret work"), "got: {allowed}");
@@ -5816,20 +6218,28 @@ mod authz_gating_tests {
         assert!(plan.starts_with("Created"), "got: {plan}");
 
         let denied_page = as_user(&non_member, || {
-            m.get_page(Parameters(GetPageInput { identifier: "MEM-DOC-1".into() }))
+            m.get_page(Parameters(GetPageInput {
+                identifier: "MEM-DOC-1".into(),
+            }))
         });
         assert!(is_forbidden(&denied_page), "got: {denied_page}");
         let denied_plan = as_user(&non_member, || {
-            m.get_plan(Parameters(GetPlanInput { plan: "MEM-PLAN-1".into() }))
+            m.get_plan(Parameters(GetPlanInput {
+                plan: "MEM-PLAN-1".into(),
+            }))
         });
         assert!(is_forbidden(&denied_plan), "got: {denied_plan}");
 
         let allowed_page = as_user(&viewer, || {
-            m.get_page(Parameters(GetPageInput { identifier: "MEM-DOC-1".into() }))
+            m.get_page(Parameters(GetPageInput {
+                identifier: "MEM-DOC-1".into(),
+            }))
         });
         assert!(!is_forbidden(&allowed_page), "got: {allowed_page}");
         let allowed_plan = as_user(&viewer, || {
-            m.get_plan(Parameters(GetPlanInput { plan: "MEM-PLAN-1".into() }))
+            m.get_plan(Parameters(GetPlanInput {
+                plan: "MEM-PLAN-1".into(),
+            }))
         });
         assert!(!is_forbidden(&allowed_plan), "got: {allowed_plan}");
     }
@@ -5879,7 +6289,10 @@ mod authz_gating_tests {
                 ..Default::default()
             }))
         });
-        assert!(none_visible.starts_with("0 projects"), "got: {none_visible}");
+        assert!(
+            none_visible.starts_with("0 projects"),
+            "got: {none_visible}"
+        );
 
         let one_visible = as_user(&viewer, || {
             m.list_resources(Parameters(ListResourcesInput {
@@ -5905,7 +6318,10 @@ mod authz_gating_tests {
                 ..Default::default()
             }))
         });
-        assert!(!projects.contains(NO_PROJECTS_NUDGE), "leaked nudge: {projects}");
+        assert!(
+            !projects.contains(NO_PROJECTS_NUDGE),
+            "leaked nudge: {projects}"
+        );
         assert!(projects.starts_with("0 projects"), "got: {projects}");
 
         let searched = as_user(&non_member, || {
@@ -5914,15 +6330,17 @@ mod authz_gating_tests {
                 ..Default::default()
             }))
         });
-        assert!(!searched.contains(NO_PROJECTS_NUDGE), "leaked nudge: {searched}");
+        assert!(
+            !searched.contains(NO_PROJECTS_NUDGE),
+            "leaked nudge: {searched}"
+        );
     }
 
     // ── Writes: content mutations gated at Maintainer ────────────
 
     #[test]
     fn issue_create_gated_by_maintainer_role() {
-        let (m, admin, lead, maintainer, viewer, non_member, _project_id) =
-            setup_membership_mcp();
+        let (m, admin, lead, maintainer, viewer, non_member, _project_id) = setup_membership_mcp();
 
         for (user, expect_ok) in [
             (&non_member, false),
@@ -5954,8 +6372,7 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_update_and_delete_gated_by_maintainer_role() {
-        let (m, _admin, lead, maintainer, viewer, non_member, _project_id) =
-            setup_membership_mcp();
+        let (m, _admin, lead, maintainer, viewer, non_member, _project_id) = setup_membership_mcp();
         let created = as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
                 project: "MEM".into(),
@@ -6041,7 +6458,10 @@ mod authz_gating_tests {
                 content: "viewers can comment".into(),
             }))
         });
-        assert!(!is_forbidden(&allowed), "viewer must be allowed to comment: {allowed}");
+        assert!(
+            !is_forbidden(&allowed),
+            "viewer must be allowed to comment: {allowed}"
+        );
 
         let denied = as_user(&non_member, || {
             m.add_comment(Parameters(AddCommentInput {
@@ -6271,7 +6691,10 @@ mod authz_gating_tests {
                 relation_type: "relates_to".into(),
             }))
         });
-        assert!(is_forbidden(&denied), "maintainer has no role on target's project: {denied}");
+        assert!(
+            is_forbidden(&denied),
+            "maintainer has no role on target's project: {denied}"
+        );
 
         {
             let conn = m.db.write().unwrap();
@@ -6290,7 +6713,10 @@ mod authz_gating_tests {
                 relation_type: "relates_to".into(),
             }))
         });
-        assert!(!is_forbidden(&allowed), "maintainer now has Maintainer on both sides: {allowed}");
+        assert!(
+            !is_forbidden(&allowed),
+            "maintainer now has Maintainer on both sides: {allowed}"
+        );
     }
 
     /// LIF-198 scope: `update_plan_step`'s `attach_issue` is the plan
@@ -6305,7 +6731,10 @@ mod authz_gating_tests {
                 project: "MEM".into(),
                 title: "Plan".into(),
                 anchor_issue: None,
-                steps: Some(vec![PlanStepInput { title: "step".into(), ..Default::default() }]),
+                steps: Some(vec![PlanStepInput {
+                    title: "step".into(),
+                    ..Default::default()
+                }]),
             }))
         });
         assert!(plan.starts_with("Created"), "got: {plan}");
@@ -6420,14 +6849,15 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let bot = {
             let conn = m.db.write().unwrap();
-            let bot = crate::db::queries::users::create_bot_user(
-                &conn,
-                maintainer.id,
-                "bot1",
-                "bot1",
-            )
+            let bot =
+                crate::db::queries::users::create_bot_user(&conn, maintainer.id, "bot1", "bot1")
             .unwrap();
-            models::AuthUser { id: bot.id, username: bot.username, display_name: bot.display_name, is_admin: bot.is_admin }
+            models::AuthUser {
+                id: bot.id,
+                username: bot.username,
+                display_name: bot.display_name,
+                is_admin: bot.is_admin,
+            }
         };
 
         let created = as_user(&bot, || {
@@ -6442,12 +6872,20 @@ mod authz_gating_tests {
                 ..Default::default()
             }))
         });
-        assert!(!is_forbidden(&created), "bot inherits maintainer's write access: {created}");
+        assert!(
+            !is_forbidden(&created),
+            "bot inherits maintainer's write access: {created}"
+        );
 
         let read = as_user(&bot, || {
-            m.get_issue(Parameters(GetIssueInput { identifier: "MEM-1".into() }))
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+            }))
         });
-        assert!(!is_forbidden(&read), "bot inherits maintainer's read access: {read}");
+        assert!(
+            !is_forbidden(&read),
+            "bot inherits maintainer's read access: {read}"
+        );
     }
 
     // ── Headline regression: non-member denied everywhere ────────
@@ -6471,7 +6909,9 @@ mod authz_gating_tests {
         assert!(created.starts_with("Created"), "got: {created}");
 
         let read = as_user(&non_member, || {
-            m.get_issue(Parameters(GetIssueInput { identifier: "MEM-1".into() }))
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+            }))
         });
         assert!(is_forbidden(&read), "read: {read}");
 
@@ -6521,9 +6961,14 @@ mod authz_gating_tests {
         assert!(created.starts_with("Created"), "got: {created}");
 
         let read = as_user(&admin, || {
-            m.get_issue(Parameters(GetIssueInput { identifier: "MEM-1".into() }))
+            m.get_issue(Parameters(GetIssueInput {
+                identifier: "MEM-1".into(),
+            }))
         });
-        assert!(!is_forbidden(&read), "admin must read a project they're not a member of: {read}");
+        assert!(
+            !is_forbidden(&read),
+            "admin must read a project they're not a member of: {read}"
+        );
         assert!(read.contains("Admin spot-check"), "got: {read}");
 
         let write = as_user(&admin, || {
@@ -6538,7 +6983,10 @@ mod authz_gating_tests {
                 ..Default::default()
             }))
         });
-        assert!(!is_forbidden(&write), "admin must write to a project they're not a member of: {write}");
+        assert!(
+            !is_forbidden(&write),
+            "admin must write to a project they're not a member of: {write}"
+        );
     }
 
     // ── Token-backed lockout regression (the epic's landmine) ────
@@ -6585,8 +7033,10 @@ mod authz_gating_tests {
 
         fn insert_oauth_token(db: &crate::db::DbPool, suffix: &str, user_id: i64) -> String {
             let token = format!("lific_at_test-{suffix}");
-            let hash: String =
-                Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = Sha256::digest(token.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
             let client_id = format!("client-{suffix}");
             let conn = db.write().unwrap();
@@ -6642,7 +7092,10 @@ mod authz_gating_tests {
         let app = Router::new()
             .route("/call/get_issue/{ident}", get(get_issue_h))
             .route("/call/create_issue", post(create_issue_h))
-            .layer(axum::middleware::from_fn_with_state(auth_state, crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                crate::auth::require_api_key,
+            ))
             .with_state(m.clone());
 
         async fn call_get(app: Router, uri: String, token: &str) -> String {
@@ -6656,8 +7109,15 @@ mod authz_gating_tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "dispatcher itself must not error");
-            let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "dispatcher itself must not error"
+            );
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
             String::from_utf8(bytes.to_vec()).unwrap()
         }
         async fn call_create(app: Router, body: serde_json::Value, token: &str) -> String {
@@ -6673,30 +7133,57 @@ mod authz_gating_tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "dispatcher itself must not error");
-            let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "dispatcher itself must not error"
+            );
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
             String::from_utf8(bytes.to_vec()).unwrap()
         }
 
-        let member_read = run(call_get(app.clone(), "/call/get_issue/MEM-1".into(), &member_token));
-        assert!(!is_forbidden(&member_read), "token-backed member must be able to read: {member_read}");
+        let member_read = run(call_get(
+            app.clone(),
+            "/call/get_issue/MEM-1".into(),
+            &member_token,
+        ));
+        assert!(
+            !is_forbidden(&member_read),
+            "token-backed member must be able to read: {member_read}"
+        );
 
         let member_write = run(call_create(
             app.clone(),
             serde_json::json!({"project": "MEM", "title": "by token member"}),
             &member_token,
         ));
-        assert!(!is_forbidden(&member_write), "token-backed member must be able to write: {member_write}");
+        assert!(
+            !is_forbidden(&member_write),
+            "token-backed member must be able to write: {member_write}"
+        );
 
-        let outsider_read = run(call_get(app.clone(), "/call/get_issue/MEM-1".into(), &outsider_token));
-        assert!(is_forbidden(&outsider_read), "token-backed non-member must be denied on read: {outsider_read}");
+        let outsider_read = run(call_get(
+            app.clone(),
+            "/call/get_issue/MEM-1".into(),
+            &outsider_token,
+        ));
+        assert!(
+            is_forbidden(&outsider_read),
+            "token-backed non-member must be denied on read: {outsider_read}"
+        );
 
         let outsider_write = run(call_create(
             app.clone(),
             serde_json::json!({"project": "MEM", "title": "by token outsider"}),
             &outsider_token,
         ));
-        assert!(is_forbidden(&outsider_write), "token-backed non-member must be denied on write: {outsider_write}");
+        assert!(
+            is_forbidden(&outsider_write),
+            "token-backed non-member must be denied on write: {outsider_write}"
+        );
     }
 
     // ── Flag OFF smoke: non-member agent can still mutate ────────

@@ -5,8 +5,9 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::plans::{self, StepDoneEffect};
-use crate::db::{models::*, DbPool};
+use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{filter_visible, with_read, with_write};
 
@@ -50,32 +51,40 @@ pub(super) async fn resolve_plan(
 
 pub(super) async fn create_plan(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreatePlan>,
 ) -> Result<Json<Plan>, LificError> {
     authz::require_role(&db, &auth_user, input.project_id, Role::Maintainer)?;
-    with_write(&db, |conn| plans::create_plan(conn, &input)).map(Json)
+    let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id: plan.project_id });
+    Ok(Json(plan))
 }
 
 pub(super) async fn update_plan(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
     Json(input): Json<UpdatePlan>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    with_write(&db, |conn| plans::update_plan(conn, id, &input)).map(Json)
+    let plan = with_write(&db, |conn| plans::update_plan(conn, id, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(plan))
 }
 
 pub(super) async fn delete_plan_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
     with_write(&db, |conn| plans::delete_plan(conn, id))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -90,13 +99,14 @@ pub(super) struct AddStepRequest {
 
 pub(super) async fn add_step(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(plan_id): Path<i64>,
     Json(input): Json<AddStepRequest>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    with_write(&db, |conn| {
+    let plan = with_write(&db, |conn| {
         plans::add_step(
             conn,
             plan_id,
@@ -106,8 +116,9 @@ pub(super) async fn add_step(
             input.issue_id,
         )?;
         plans::get_plan(conn, plan_id)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(plan))
 }
 
 #[derive(serde::Deserialize)]
@@ -134,6 +145,7 @@ pub(super) struct StepUpdateResponse {
 
 pub(super) async fn update_step(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((plan_id, step_id)): Path<(i64, i64)>,
     Json(input): Json<UpdateStepRequest>,
@@ -171,22 +183,25 @@ pub(super) async fn update_step(
         let plan = plans::get_plan(conn, plan_id)?;
         Ok(StepUpdateResponse { plan, effect })
     })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(resp))
 }
 
 pub(super) async fn delete_step_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((plan_id, step_id)): Path<(i64, i64)>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    with_write(&db, |conn| {
+    let plan = with_write(&db, |conn| {
         plans::assert_step_in_plan(conn, plan_id, step_id)?;
         plans::delete_step(conn, step_id)?;
         plans::get_plan(conn, plan_id)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(plan))
 }
 
 #[cfg(test)]
@@ -312,7 +327,8 @@ mod tests {
                     .uri(format!("/api/plans/{plan_id}/steps/{step_id}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({"description": "the body"})).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({"description": "the body"}))
+                            .unwrap(),
                     ))
                     .unwrap(),
             )
@@ -334,9 +350,15 @@ mod tests {
             .unwrap();
         let feed = body_json(resp).await;
         let items = feed["items"].as_array().unwrap();
-        assert!(items.iter().any(|a| a["entity_type"] == "plan" && a["action"] == "create"));
         assert!(
-            items.iter().any(|a| a["entity_type"] == "plan_step" && a["field"] == "description"),
+            items
+                .iter()
+                .any(|a| a["entity_type"] == "plan" && a["action"] == "create")
+        );
+        assert!(
+            items
+                .iter()
+                .any(|a| a["entity_type"] == "plan_step" && a["field"] == "description"),
             "step description edit must show in plan activity: {feed}"
         );
     }

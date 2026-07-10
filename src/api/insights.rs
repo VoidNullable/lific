@@ -10,7 +10,10 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::insights::{clamp_weeks, get_insights};
-use crate::db::{DbPool, models::{AuthUser, InsightsPayload, Role}};
+use crate::db::{
+    DbPool,
+    models::{AuthUser, InsightsPayload, Role},
+};
 use crate::error::LificError;
 
 use super::with_read;
@@ -67,7 +70,11 @@ mod tests {
         )
         .await;
 
-        let resp = json_get(&app, &format!("/api/projects/{project_id}/insights?weeks=6")).await;
+        let resp = json_get(
+            &app,
+            &format!("/api/projects/{project_id}/insights?weeks=6"),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = parse_json(resp).await;
 
@@ -98,7 +105,11 @@ mod tests {
         assert_eq!(body["weeks"], 12);
         assert_eq!(body["created_per_week"].as_array().unwrap().len(), 12);
 
-        let resp = json_get(&app, &format!("/api/projects/{project_id}/insights?weeks=999")).await;
+        let resp = json_get(
+            &app,
+            &format!("/api/projects/{project_id}/insights?weeks=999"),
+        )
+        .await;
         let body = parse_json(resp).await;
         assert_eq!(body["weeks"], 52);
     }
@@ -126,7 +137,12 @@ mod authz_gating_tests {
 
         let non_member_app = app_as_user(db.clone(), &non_member);
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/projects/{project_id}/insights")).await.status(),
+            json_get(
+                &non_member_app,
+                &format!("/api/projects/{project_id}/insights")
+            )
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
 

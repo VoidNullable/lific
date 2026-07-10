@@ -21,6 +21,7 @@
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
   import { hasSession, getInstance, autoLogin, saveSession } from "./lib/api";
+  import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
   import { motionReduced } from "./lib/theme";
   import { fade } from "svelte/transition";
   import { onMount } from "svelte";
@@ -48,6 +49,9 @@
   // "bootstrapping" only when there's no session, so the logged-in common case
   // never shows a spinner.
   let bootstrapping = $state(!hasSession());
+  let realtimeSocket: WebSocket | null = null;
+  let realtimeReconnect: ReturnType<typeof setTimeout> | null = null;
+  let realtimeDelayMs = 1000;
 
   onMount(async () => {
     if (!hasSession()) {
@@ -58,11 +62,13 @@
       }
     }
     bootstrapping = false;
+    syncRealtimeSocket();
   });
 
   function navigate(path: string) {
     window.location.hash = path;
     route = path;
+    syncRealtimeSocket();
   }
 
   $effect(() => {
@@ -77,15 +83,14 @@
   $effect(() => {
     // Hold off until the single-user auto-login probe resolves, so we don't
     // flash /login and then bounce into the app once the session lands.
-    if (bootstrapping) return;
-    if (hasSession()) {
-      // LIF-237: "/" is now a real route (Home) rather than a redirect
-      // target — only /login and /signup bounce once a session exists.
-      if (route === "/login" || route === "/signup") {
-        redirectToDefault();
-      }
-    } else {
-      if (route !== "/login" && route !== "/signup") {
+    if (!bootstrapping) {
+      if (hasSession()) {
+        // LIF-237: "/" is now a real route (Home) rather than a redirect
+        // target — only /login and /signup bounce once a session exists.
+        if (route === "/login" || route === "/signup") {
+          redirectToDefault();
+        }
+      } else if (route !== "/login" && route !== "/signup") {
         navigate("/login");
       }
     }
@@ -96,6 +101,84 @@
   // project.)
   function redirectToDefault() {
     navigate("/");
+  }
+
+  function socketUrl(): string {
+    const url = new URL("/api/events/ws", window.location.origin);
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
+  }
+
+  function closeRealtimeSocket() {
+    if (realtimeReconnect) {
+      clearTimeout(realtimeReconnect);
+      realtimeReconnect = null;
+    }
+    realtimeDelayMs = 1000;
+    if (realtimeSocket) {
+      realtimeSocket.close(1000, "teardown");
+      realtimeSocket = null;
+    }
+  }
+
+  function scheduleRealtimeReconnect() {
+    if (!realtimeReconnect && hasSession()) {
+      realtimeReconnect = window.setTimeout(() => {
+        realtimeReconnect = null;
+        syncRealtimeSocket();
+      }, realtimeDelayMs);
+      realtimeDelayMs = Math.min(realtimeDelayMs * 2, 10_000);
+    }
+  }
+
+  function hasLiveRealtimeSocket() {
+    return (
+      realtimeSocket?.readyState === WebSocket.OPEN ||
+      realtimeSocket?.readyState === WebSocket.CONNECTING
+    );
+  }
+
+  function syncRealtimeSocket() {
+    const shouldConnect = hasSession() && !bootstrapping;
+    const shouldOpen = shouldConnect && !hasLiveRealtimeSocket();
+
+    if (!shouldConnect) {
+      closeRealtimeSocket();
+    }
+
+    if (shouldOpen) {
+      openRealtimeSocket();
+    }
+  }
+
+  function openRealtimeSocket() {
+    const socket = new WebSocket(socketUrl());
+    realtimeSocket = socket;
+    socket.addEventListener("open", () => {
+      realtimeDelayMs = 1000;
+    });
+    socket.addEventListener("message", (message) => {
+      if (typeof message.data !== "string") return;
+      try {
+        const event = JSON.parse(message.data) as RealtimeEvent;
+        if (typeof event?.type === "string") {
+          window.dispatchEvent(
+            new CustomEvent<RealtimeEvent>(REALTIME_INVALIDATE_EVENT, { detail: event }),
+          );
+        }
+      } catch {
+        // HTTP refresh remains source of truth.
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (realtimeSocket === socket) {
+        realtimeSocket = null;
+        scheduleRealtimeReconnect();
+      }
+    });
+    socket.addEventListener("error", () => {
+      socket.close();
+    });
   }
 
   type ParsedRoute =

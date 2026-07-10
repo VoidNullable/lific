@@ -236,9 +236,8 @@ pub(super) async fn auth_auto_login(
         ));
     }
 
-    let admin = crate::db::queries::users::first_admin(&conn)?.ok_or_else(|| {
-        LificError::BadRequest("no admin account exists to sign in as".into())
-    })?;
+    let admin = crate::db::queries::users::first_admin(&conn)?
+        .ok_or_else(|| LificError::BadRequest("no admin account exists to sign in as".into()))?;
 
     let session = crate::db::queries::users::create_session(
         &conn,
@@ -384,7 +383,9 @@ pub(super) async fn instance_settings_patch(
         web_auto_login: input.web_auto_login,
         authz_enforced: input.authz_enforced,
     };
-    let s = with_write(&db, move |conn| crate::db::queries::settings::update(conn, patch))?;
+    let s = with_write(&db, move |conn| {
+        crate::db::queries::settings::update(conn, patch)
+    })?;
     Ok(Json(settings_json(&s)))
 }
 
@@ -468,7 +469,9 @@ pub(super) async fn change_password(
             &full.password_hash,
         )?;
         if !ok {
-            return Err(LificError::BadRequest("current password is incorrect".into()));
+            return Err(LificError::BadRequest(
+                "current password is incorrect".into(),
+            ));
         }
         crate::db::queries::users::update_password(conn, user.id, &input.new_password)?;
         // Kill every existing session (including any an attacker holds), then
@@ -730,7 +733,10 @@ mod tests {
         assert!(secure.contains("SameSite=Lax"));
 
         let insecure = super::session_cookie("lific_sess_x", "2099-01-01T00:00:00Z", false);
-        assert!(!insecure.contains("Secure"), "http deploy must omit Secure: {insecure}");
+        assert!(
+            !insecure.contains("Secure"),
+            "http deploy must omit Secure: {insecure}"
+        );
         assert!(insecure.contains("HttpOnly"));
         assert!(insecure.contains("SameSite=Lax"));
     }
@@ -917,7 +923,11 @@ mod tests {
         let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
         assert_eq!(data["authz_enforced"], false, "off by default");
 
-        let patch = json_patch(&app, "/api/instance/settings", serde_json::json!({ "authz_enforced": true }))
+        let patch = json_patch(
+            &app,
+            "/api/instance/settings",
+            serde_json::json!({ "authz_enforced": true }),
+        )
             .await;
         assert_eq!(patch.status(), StatusCode::OK);
         assert_eq!(parse_json(patch).await["authz_enforced"], true);
@@ -950,7 +960,11 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            json_patch(&app, "/api/instance/settings", serde_json::json!({ "allow_signup": true }))
+            json_patch(
+                &app,
+                "/api/instance/settings",
+                serde_json::json!({ "allow_signup": true })
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -1152,20 +1166,21 @@ mod tests {
         };
         let app = crate::api::test_helpers::app_as_user(db, &user);
 
-        let wrong =
-            serde_json::json!({ "current_password": "totally-wrong", "new_password": "newpassword123" });
+        let wrong = serde_json::json!({ "current_password": "totally-wrong", "new_password": "newpassword123" });
         let resp = json_post(&app, "/api/auth/me/password", wrong).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        let right =
-            serde_json::json!({ "current_password": "originalpass123", "new_password": "newpassword123" });
+        let right = serde_json::json!({ "current_password": "originalpass123", "new_password": "newpassword123" });
         let resp = json_post(&app, "/api/auth/me/password", right).await;
         assert_eq!(resp.status(), StatusCode::OK);
         // LIF-205: a successful change returns a fresh session token so the
         // current browser stays logged in after the old sessions are killed.
         let data = parse_json(resp).await;
         assert!(
-            data["token"].as_str().unwrap_or("").starts_with("lific_sess_"),
+            data["token"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("lific_sess_"),
             "password change should mint a new session token: {data}"
         );
         assert!(data["expires_at"].as_str().is_some());
@@ -1364,10 +1379,16 @@ mod tests {
         }
         // Attacker IP is now capped.
         let (_, attacker) = login_attempt(&app, "a-extra", "198.51.100.1").await;
-        assert!(is_rate_limited(&attacker), "attacker IP should be capped: {attacker}");
+        assert!(
+            is_rate_limited(&attacker),
+            "attacker IP should be capped: {attacker}"
+        );
         // A different IP is unaffected.
         let (_, other) = login_attempt(&app, "someone", "198.51.100.2").await;
-        assert!(!is_rate_limited(&other), "distinct IP should not be limited: {other}");
+        assert!(
+            !is_rate_limited(&other),
+            "distinct IP should not be limited: {other}"
+        );
     }
 
     // ── LIF-138: signup rate limiting must also key on source IP ──
@@ -1417,7 +1438,10 @@ mod tests {
         for i in 0..5 {
             let (status, body) = signup_attempt(&app, i, "203.0.113.9").await;
             assert_eq!(status, StatusCode::OK, "signup {i} should succeed: {body}");
-            assert!(!is_signup_rate_limited(&body), "signup {i} not yet limited: {body}");
+            assert!(
+                !is_signup_rate_limited(&body),
+                "signup {i} not yet limited: {body}"
+            );
         }
         // 6th: same IP, brand-new email → blocked by the IP bucket.
         let (status, body) = signup_attempt(&app, 99, "203.0.113.9").await;
@@ -1439,9 +1463,16 @@ mod tests {
         }
         // Capping IP is now blocked.
         let (_, capped) = signup_attempt(&app, 50, "198.51.100.7").await;
-        assert!(is_signup_rate_limited(&capped), "capped IP should be blocked: {capped}");
+        assert!(
+            is_signup_rate_limited(&capped),
+            "capped IP should be blocked: {capped}"
+        );
         // A different IP is unaffected.
         let (status, other) = signup_attempt(&app, 60, "198.51.100.8").await;
-        assert_eq!(status, StatusCode::OK, "distinct IP should not be limited: {other}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "distinct IP should not be limited: {other}"
+        );
     }
 }

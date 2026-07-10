@@ -123,12 +123,14 @@
   // the request was in flight.
   async function refreshPage() {
     const gen = loadGen;
-    const [res, actRes] = await Promise.all([
+    const [res, commentsRes, actRes] = await Promise.all([
       getPage(pageId),
+      listPageComments(pageId),
       listPageActivity(pageId),
     ]);
     if (gen !== loadGen) return; // navigated away mid-flight — discard
     if (res.ok) page = res.data;
+    if (commentsRes.ok) comments = commentsRes.data;
     if (actRes.ok) activity = actRes.data.items;
   }
 
@@ -140,6 +142,11 @@
       isBusy: () => bodyMode === "edit" || saving || loading,
       // Focus-only — no background interval for the page editor.
       intervalMs: 0,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        (event.type.startsWith("project.") &&
+          typeof event.project_id === "number" &&
+          event.project_id === page?.project_id),
     }),
   );
 
