@@ -1302,7 +1302,12 @@ impl LificMcp {
                 },
             )
         }) {
-            Ok(page) => format!("Created {}: {}", page.identifier, page.title),
+            Ok(page) => {
+                if let Some(project_id) = page.project_id {
+                    self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                }
+                format!("Created {}: {}", page.identifier, page.title)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1350,7 +1355,12 @@ impl LificMcp {
                 },
             )
         }) {
-            Ok(page) => format!("Updated {}: {}", page.identifier, page.title),
+            Ok(page) => {
+                if let Some(project_id) = page.project_id {
+                    self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                }
+                format!("Updated {}: {}", page.identifier, page.title)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1418,7 +1428,12 @@ impl LificMcp {
 
             queries::update_page(conn, id, &patch)
         }) {
-            Ok(page) => format!("Edited {}: {}", page.identifier, page.title),
+            Ok(page) => {
+                if let Some(project_id) = page.project_id {
+                    self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                }
+                format!("Edited {}: {}", page.identifier, page.title)
+            }
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1550,7 +1565,12 @@ impl LificMcp {
                     _ => unreachable!(),
                 };
                 match result {
-                    Ok(()) => format!("Deleted {} '{}'", input.resource_type, input.identifier),
+                    Ok(()) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Deleted {} '{}'", input.resource_type, input.identifier)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -1968,7 +1988,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(m) => format!("Created module [{}]: {}", m.id, m.name),
+                    Ok(m) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Created module [{}]: {}", m.id, m.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2002,7 +2027,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(m) => format!("Updated module: {}", m.name),
+                    Ok(m) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Updated module: {}", m.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2030,7 +2060,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(l) => format!("Created label: {} ({})", l.name, l.color),
+                    Ok(l) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Created label: {} ({})", l.name, l.color)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2062,7 +2097,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(l) => format!("Updated label: {} ({})", l.name, l.color),
+                    Ok(l) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Updated label: {} ({})", l.name, l.color)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2090,7 +2130,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(f) => format!("Created folder [{}]: {}", f.id, f.name),
+                    Ok(f) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Created folder [{}]: {}", f.id, f.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2121,7 +2166,12 @@ impl LificMcp {
                         },
                     )
                 }) {
-                    Ok(f) => format!("Updated folder: {}", f.name),
+                    Ok(f) => {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: pid,
+                        });
+                        format!("Updated folder: {}", f.name)
+                    }
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2184,17 +2234,18 @@ impl LificMcp {
                 queries::comments::mention_candidates(conn, project_id, member_scoped)?;
             let c = queries::comments::create_comment(conn, parent, user_id, &input.content)?;
             queries::comments::sync_mentions(conn, c.id, &c.content, &candidates)?;
-            let event = c
-                .issue_id
-                .map(|issue_id| {
-                    queries::get_issue(conn, issue_id).map(|issue| {
-                        crate::realtime::RealtimeEvent::IssueUpdated {
-                            project_id: issue.project_id,
-                            issue_id: issue.id,
-                        }
+            let event = match (c.issue_id, project_id) {
+                (Some(issue_id), Some(project_id)) => {
+                    Some(crate::realtime::RealtimeEvent::IssueUpdated {
+                        project_id,
+                        issue_id,
                     })
-                })
-                .transpose()?;
+                }
+                (None, Some(project_id)) => {
+                    Some(crate::realtime::RealtimeEvent::ProjectUpdated { project_id })
+                }
+                (_, None) => None,
+            };
             Ok((c, event))
         }) {
             // Don't echo c.content back — the agent already supplied it in the
@@ -2300,6 +2351,8 @@ impl LificMcp {
                         project_id,
                         issue_id,
                     });
+                } else if let Some(project_id) = project_id {
+                    self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
                 format!("Comment #{} edited at {}", c.id, c.updated_at)
             }
@@ -2340,6 +2393,8 @@ impl LificMcp {
                         project_id,
                         issue_id,
                     });
+                } else if let Some(project_id) = project_id {
+                    self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
                 format!("Comment #{} deleted", input.comment_id)
             }
@@ -2704,6 +2759,16 @@ mod tests {
         }));
         assert!(result.starts_with("Created"), "got: {result}");
         result
+    }
+
+    fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
+        mcp.read(|conn| queries::resolve_project_identifier(conn, identifier))
+            .expect("project id")
+    }
+
+    fn issue_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
+        mcp.read(|conn| queries::resolve_identifier(conn, identifier))
+            .expect("issue id")
     }
 
     /// LIF-198: MCP-side mirror of `api::test_helpers::setup_membership_test`
@@ -3079,6 +3144,9 @@ mod tests {
         seed_project(&m, "Bulk Events", "BLE");
         seed_issue(&m, "BLE", "One");
         seed_issue(&m, "BLE", "Two");
+        let project_id = project_id_for(&m, "BLE");
+        let first_issue_id = issue_id_for(&m, "BLE-1");
+        let second_issue_id = issue_id_for(&m, "BLE-2");
         drain_realtime(&mut rx);
 
         let result = m.bulk_update(Parameters(BulkUpdateInput {
@@ -3088,17 +3156,19 @@ mod tests {
         }));
 
         assert_eq!(result, "Updated 2 issue(s)", "got: {result}");
-        let events = realtime_events(&mut rx);
-        assert_eq!(events.len(), 2);
-        assert!(events.into_iter().all(|event| {
-            matches!(
-                event,
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![
                 crate::realtime::RealtimeEvent::IssueUpdated {
-                    project_id: _,
-                    issue_id: _
-                }
-            )
-        }));
+                    project_id,
+                    issue_id: first_issue_id,
+                },
+                crate::realtime::RealtimeEvent::IssueUpdated {
+                    project_id,
+                    issue_id: second_issue_id,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3801,6 +3871,58 @@ mod tests {
         assert!(result.contains("Documentation"), "got: {result}");
     }
 
+    #[test]
+    fn manage_resource_structure_mutations_emit_project_updates() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Structure Events", "STR");
+        let project_id = project_id_for(&m, "STR");
+        drain_realtime(&mut rx);
+
+        for (resource_type, name, updated_name) in [
+            ("module", "Core", "Core v2"),
+            ("label", "bug", "defect"),
+            ("folder", "Docs", "Documentation"),
+        ] {
+            let created = m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: resource_type.into(),
+                action: "create".into(),
+                project: Some("STR".into()),
+                name: Some(name.into()),
+                ..Default::default()
+            }));
+            assert!(!created.starts_with("Error"), "got: {created}");
+            assert_eq!(
+                realtime_events(&mut rx),
+                vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+            );
+
+            let updated = m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: resource_type.into(),
+                action: "update".into(),
+                project: Some("STR".into()),
+                current_name: Some(name.into()),
+                name: Some(updated_name.into()),
+                ..Default::default()
+            }));
+            assert!(!updated.starts_with("Error"), "got: {updated}");
+            assert_eq!(
+                realtime_events(&mut rx),
+                vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+            );
+
+            let deleted = m.delete(Parameters(DeleteInput {
+                resource_type: resource_type.into(),
+                identifier: updated_name.into(),
+                project: Some("STR".into()),
+            }));
+            assert!(!deleted.starts_with("Error"), "got: {deleted}");
+            assert_eq!(
+                realtime_events(&mut rx),
+                vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+            );
+        }
+    }
+
     // ── fmt_issue ──
 
     #[test]
@@ -4077,6 +4199,50 @@ mod tests {
     }
 
     #[test]
+    fn project_page_comment_mutations_emit_project_updates() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Page Comments", "PCO");
+        let project_id = project_id_for(&m, "PCO");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("PCO".into()),
+            title: "Design".into(),
+            content: None,
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+        let _guard = seed_user(&m);
+        drain_realtime(&mut rx);
+
+        let added = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PCO-DOC-1".into(),
+            content: "original".into(),
+        }));
+        let comment_id = comment_id_from(&added);
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
+
+        let edited = m.edit_comment(Parameters(EditCommentInput {
+            comment_id,
+            content: "revised".into(),
+        }));
+        assert!(edited.starts_with("Comment #"), "got: {edited}");
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
+
+        let deleted = m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
+        assert!(deleted.starts_with("Comment #"), "got: {deleted}");
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
+    }
+
+    #[test]
     fn page_and_issue_comments_do_not_cross_contaminate_via_mcp() {
         let m = mcp();
         seed_project(&m, "Mix", "MIX");
@@ -4254,6 +4420,8 @@ mod tests {
         let (m, mut rx) = mcp_with_realtime();
         seed_project(&m, "Edit Events", "EDE");
         seed_issue_with_description(&m, "EDE", "T", "hello world");
+        let project_id = project_id_for(&m, "EDE");
+        let issue_id = issue_id_for(&m, "EDE-1");
         drain_realtime(&mut rx);
 
         let result = m.edit_issue(Parameters(EditIssueInput {
@@ -4265,10 +4433,13 @@ mod tests {
         }));
 
         assert!(result.starts_with("Edited"), "got: {result}");
-        assert!(matches!(
-            realtime_events(&mut rx).as_slice(),
-            [crate::realtime::RealtimeEvent::IssueUpdated { .. }]
-        ));
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id,
+                issue_id,
+            }]
+        );
     }
 
     #[test]
@@ -4471,6 +4642,52 @@ mod tests {
         }));
         assert!(detail.contains("new body"), "got: {detail}");
         assert!(!detail.contains("old body"), "got: {detail}");
+    }
+
+    #[test]
+    fn project_scoped_page_mutations_emit_project_updates() {
+        let (m, mut rx) = mcp_with_realtime();
+        seed_project(&m, "Page Events", "PGE");
+        let project_id = project_id_for(&m, "PGE");
+        drain_realtime(&mut rx);
+
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: Some("PGE".into()),
+            title: "Design".into(),
+            content: Some("draft".into()),
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+        assert!(created.starts_with("Created"), "got: {created}");
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
+
+        let updated = m.update_page(Parameters(UpdatePageInput {
+            identifier: "PGE-DOC-1".into(),
+            title: Some("Design v2".into()),
+            ..Default::default()
+        }));
+        assert!(updated.starts_with("Updated"), "got: {updated}");
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
+
+        let edited = m.edit_page(Parameters(EditPageInput {
+            identifier: "PGE-DOC-1".into(),
+            old_string: "draft".into(),
+            new_string: "published".into(),
+            field: None,
+            replace_all: None,
+        }));
+        assert!(edited.starts_with("Edited"), "got: {edited}");
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![crate::realtime::RealtimeEvent::ProjectUpdated { project_id }]
+        );
     }
 
     #[test]
@@ -5434,6 +5651,8 @@ mod tests {
         let (m, mut events) = mcp_with_realtime();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Realtime comments");
+        let project_id = project_id_for(&m, "PRJ");
+        let issue_id = issue_id_for(&m, "PRJ-1");
         let author = make_user(&m, "author", false);
         let _guard = act_as(&author);
 
@@ -5448,22 +5667,22 @@ mod tests {
             comment_id,
             content: "revised".into(),
         }));
-        assert!(matches!(
-            realtime_events(&mut events).as_slice(),
-            [crate::realtime::RealtimeEvent::IssueUpdated {
-                project_id: _,
-                issue_id: _
+        assert_eq!(
+            realtime_events(&mut events),
+            vec![crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id,
+                issue_id,
             }]
-        ));
+        );
 
         m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
-        assert!(matches!(
-            realtime_events(&mut events).as_slice(),
-            [crate::realtime::RealtimeEvent::IssueUpdated {
-                project_id: _,
-                issue_id: _
+        assert_eq!(
+            realtime_events(&mut events),
+            vec![crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id,
+                issue_id,
             }]
-        ));
+        );
     }
 
     #[test]
@@ -5907,6 +6126,8 @@ mod tests {
         let (m, mut rx) = mcp_with_realtime();
         seed_project(&m, "Plan Events", "PLE");
         seed_issue(&m, "PLE", "Real work");
+        let project_id = project_id_for(&m, "PLE");
+        let issue_id = issue_id_for(&m, "PLE-1");
 
         let created = m.create_plan(Parameters(CreatePlanInput {
             project: "PLE".into(),
@@ -5933,13 +6154,16 @@ mod tests {
             ..Default::default()
         }));
 
-        assert!(matches!(
-            realtime_events(&mut rx).as_slice(),
-            [
-                crate::realtime::RealtimeEvent::IssueUpdated { .. },
-                crate::realtime::RealtimeEvent::ProjectUpdated { .. },
+        assert_eq!(
+            realtime_events(&mut rx),
+            vec![
+                crate::realtime::RealtimeEvent::IssueUpdated {
+                    project_id,
+                    issue_id,
+                },
+                crate::realtime::RealtimeEvent::ProjectUpdated { project_id },
             ]
-        ));
+        );
     }
 
     #[test]

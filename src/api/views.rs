@@ -32,6 +32,7 @@ use crate::authz;
 use crate::db::queries::views;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{with_read, with_write};
 
@@ -65,16 +66,18 @@ pub(super) async fn list_views(
 /// `config` (too large, or not valid JSON).
 pub(super) async fn create_view(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(project_id): Path<i64>,
     Json(input): Json<CreateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let user = require_user(auth_user)?;
-    with_write(&db, |conn| {
+    let view = with_write(&db, |conn| {
         views::create_view(conn, project_id, user.id, &input)
-    })
-    .map(Json)
+    })?;
+    realtime.send_to_users(RealtimeEvent::ProjectUpdated { project_id }, vec![user.id]);
+    Ok(Json(view))
 }
 
 /// PATCH /api/projects/{id}/views/{view_id} — rename, replace the config,
@@ -83,21 +86,24 @@ pub(super) async fn create_view(
 /// different user (see the module doc comment — never a 403 here).
 pub(super) async fn update_view(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((project_id, view_id)): Path<(i64, i64)>,
     Json(input): Json<UpdateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let user = require_user(auth_user)?;
-    with_write(&db, |conn| {
+    let view = with_write(&db, |conn| {
         views::update_view(conn, view_id, project_id, user.id, &input)
-    })
-        .map(Json)
+    })?;
+    realtime.send_to_users(RealtimeEvent::ProjectUpdated { project_id }, vec![user.id]);
+    Ok(Json(view))
 }
 
 /// DELETE /api/projects/{id}/views/{view_id} — same ownership 404 as PATCH.
 pub(super) async fn delete_view(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path((project_id, view_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -106,6 +112,7 @@ pub(super) async fn delete_view(
     with_write(&db, |conn| {
         views::delete_view(conn, view_id, project_id, user.id)
     })?;
+    realtime.send_to_users(RealtimeEvent::ProjectUpdated { project_id }, vec![user.id]);
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -153,6 +160,58 @@ mod tests {
         let list =
             parse_json(json_get(&app, &format!("/api/projects/{project_id}/views")).await).await;
         assert!(list.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn saved_view_mutations_emit_owner_scoped_project_updates() {
+        let test = test_app_with_realtime();
+        let (project_id, _) = seed_project(&test.app).await;
+        let mut events = test.realtime.subscribe();
+
+        let created = parse_json(
+            json_post(
+                &test.app,
+                &format!("/api/projects/{project_id}/views"),
+                serde_json::json!({ "name": "Realtime", "config": "{}" }),
+            )
+            .await,
+        )
+        .await;
+        let view_id = created["id"].as_i64().unwrap();
+        assert_project_update_event(&mut events, project_id).await;
+
+        let resp = json_patch(
+            &test.app,
+            &format!("/api/projects/{project_id}/views/{view_id}"),
+            serde_json::json!({ "name": "Renamed" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_project_update_event(&mut events, project_id).await;
+
+        let resp = json_delete(
+            &test.app,
+            &format!("/api/projects/{project_id}/views/{view_id}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_project_update_event(&mut events, project_id).await;
+    }
+
+    async fn assert_project_update_event(
+        events: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>,
+        project_id: i64,
+    ) {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(text) = event.message else {
+            panic!("expected text realtime event");
+        };
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["type"], "project.updated");
+        assert_eq!(event["project_id"], project_id);
     }
 
     #[tokio::test]

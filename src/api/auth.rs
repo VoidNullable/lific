@@ -7,6 +7,7 @@ use axum::{
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_admin, with_read, with_write};
 
@@ -370,6 +371,7 @@ pub(super) struct InstanceSettingsPatchReq {
 /// PATCH /api/instance/settings — partial update, admin only.
 pub(super) async fn instance_settings_patch(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<InstanceSettingsPatchReq>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -383,9 +385,17 @@ pub(super) async fn instance_settings_patch(
         web_auto_login: input.web_auto_login,
         authz_enforced: input.authz_enforced,
     };
-    let s = with_write(&db, move |conn| {
-        crate::db::queries::settings::update(conn, patch)
+    let authz_enforced = input.authz_enforced;
+    let (s, authz_changed) = with_write(&db, move |conn| {
+        let previous_authz_enforced = crate::db::queries::settings::get(conn)?.authz_enforced;
+        let settings = crate::db::queries::settings::update(conn, patch)?;
+        let authz_changed =
+            authz_enforced.is_some_and(|_| settings.authz_enforced != previous_authz_enforced);
+        Ok((settings, authz_changed))
     })?;
+    if authz_changed {
+        realtime.send(RealtimeEvent::ResyncRequired);
+    }
     Ok(Json(settings_json(&s)))
 }
 
@@ -934,6 +944,30 @@ mod tests {
 
         let data = parse_json(json_get(&app, "/api/instance/settings").await).await;
         assert_eq!(data["authz_enforced"], true, "persisted");
+    }
+
+    #[tokio::test]
+    async fn changing_authz_enforcement_emits_resync_required() {
+        let test = test_app_with_realtime();
+        let mut events = test.realtime.subscribe();
+
+        let resp = json_patch(
+            &test.app,
+            "/api/instance/settings",
+            serde_json::json!({ "authz_enforced": true }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(text) = event.message else {
+            panic!("expected text realtime event");
+        };
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["type"], "resync.required");
     }
 
     #[tokio::test]

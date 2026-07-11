@@ -152,7 +152,7 @@ pub(super) async fn update_step(
 ) -> Result<Json<StepUpdateResponse>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    let resp = with_write(&db, |conn| {
+    let (resp, issue_event) = with_write(&db, |conn| {
         plans::assert_step_in_plan(conn, plan_id, step_id)?;
         if let Some(ref t) = input.title {
             plans::set_step_title(conn, step_id, t)?;
@@ -181,9 +181,28 @@ pub(super) async fn update_step(
             plans::move_step(conn, step_id, new_parent, input.move_position)?;
         }
         let plan = plans::get_plan(conn, plan_id)?;
-        Ok(StepUpdateResponse { plan, effect })
+        let issue_event = if effect
+            .as_ref()
+            .is_some_and(|effect| effect.issue_status_changed)
+        {
+            plans::step_issue_id(conn, step_id)?
+                .map(|issue_id| {
+                    crate::db::queries::get_issue(conn, issue_id)
+                        .map(|issue| (issue.project_id, issue.id))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        Ok((StepUpdateResponse { plan, effect }, issue_event))
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    if let Some((issue_project_id, issue_id)) = issue_event {
+        realtime.send(RealtimeEvent::IssueUpdated {
+            project_id: issue_project_id,
+            issue_id,
+        });
+    }
     Ok(Json(resp))
 }
 
@@ -295,6 +314,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn completing_cross_project_linked_step_emits_issue_updated_for_issue_project() {
+        let test = test_app_with_realtime();
+        let (plan_project_id, _) = seed_project(&test.app).await;
+        let issue_project = body_json(
+            json_post(
+                &test.app,
+                "/api/projects",
+                serde_json::json!({
+                    "name": "Issue Project",
+                    "identifier": "ISS",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let issue_project_id = issue_project["id"].as_i64().unwrap();
+        let issue = body_json(
+            json_post(
+                &test.app,
+                "/api/issues",
+                serde_json::json!({
+                    "project_id": issue_project_id,
+                    "title": "Cross-project issue",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
+        let plan = body_json(
+            json_post(
+                &test.app,
+                "/api/plans",
+                serde_json::json!({
+                    "project_id": plan_project_id,
+                    "title": "Cross-project plan",
+                    "steps": [{"title": "Complete linked issue", "issue_id": issue_id}],
+                }),
+            )
+            .await,
+        )
+        .await;
+        let plan_id = plan["id"].as_i64().unwrap();
+        let step_id = plan["steps"][0]["id"].as_i64().unwrap();
+        let mut events = test.realtime.subscribe();
+
+        let resp = test
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/plans/{plan_id}/steps/{step_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({"done": true})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let project_event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(project_text) = project_event.message else {
+            panic!("expected text realtime event");
+        };
+        let project_event: serde_json::Value = serde_json::from_str(&project_text).unwrap();
+        assert_eq!(project_event["type"], "project.updated");
+        assert_eq!(project_event["project_id"], plan_project_id);
+
+        let issue_event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(issue_text) = issue_event.message else {
+            panic!("expected text realtime event");
+        };
+        let issue_event: serde_json::Value = serde_json::from_str(&issue_text).unwrap();
+        assert_eq!(issue_event["type"], "issue.updated");
+        assert_eq!(issue_event["project_id"], issue_project_id);
+        assert_eq!(issue_event["issue_id"], issue_id);
     }
 
     #[tokio::test]
