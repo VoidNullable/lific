@@ -971,6 +971,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patching_authz_enforcement_to_its_current_value_emits_nothing() {
+        let test = test_app_with_realtime();
+        let mut events = test.realtime.subscribe();
+
+        // Fresh instances default to authz_enforced = false; patching the
+        // same value is a no-op and must not trigger a fleet-wide resync.
+        let resp = json_patch(
+            &test.app,
+            "/api/instance/settings",
+            serde_json::json!({ "authz_enforced": false }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            events.try_recv().is_err(),
+            "no realtime event should be emitted for a no-op authz patch"
+        );
+    }
+
+    #[tokio::test]
     async fn instance_settings_forbidden_for_non_admin() {
         let db = crate::db::open_memory().expect("test db");
         let user = {
