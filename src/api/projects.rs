@@ -6,10 +6,11 @@ use axum::{
 use crate::authz;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{
-    filter_visible, require_authenticated, require_project_delete, require_project_lead,
-    with_read, with_write,
+    filter_visible, require_authenticated, require_project_delete, require_project_lead, with_read,
+    with_write,
 };
 
 pub(super) async fn list_projects(
@@ -34,6 +35,7 @@ pub(super) async fn get_project(
 
 pub(super) async fn create_project(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(mut input): Json<CreateProject>,
 ) -> Result<Json<Project>, LificError> {
@@ -45,20 +47,28 @@ pub(super) async fn create_project(
     {
         input.lead_user_id = Some(user.id);
     }
-    with_write(&db, |conn| crate::db::queries::create_project(conn, &input)).map(Json)
+    let project = with_write(&db, |conn| crate::db::queries::create_project(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectCreated {
+        project_id: project.id,
+    });
+    Ok(Json(project))
 }
 
 pub(super) async fn update_project(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, LificError> {
     require_project_lead(&db, &auth_user, id)?;
-    with_write(&db, |conn| {
+    let project = with_write(&db, |conn| {
         crate::db::queries::update_project(conn, id, &input)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated {
+        project_id: project.id,
+    });
+    Ok(Json(project))
 }
 
 /// PUT /api/projects/reorder — persist the sidebar order (LIF-233). Takes the
@@ -68,23 +78,35 @@ pub(super) async fn update_project(
 /// lead/admin-only.
 pub(super) async fn reorder_projects(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<ReorderProjects>,
 ) -> Result<Json<Vec<Project>>, LificError> {
     require_authenticated(&auth_user)?;
-    with_write(&db, |conn| {
+    let projects = with_write(&db, |conn| {
         crate::db::queries::reorder_projects(conn, &input.ids)
-    })
-    .map(Json)
+    })?;
+    realtime.send(RealtimeEvent::ProjectsReordered);
+    Ok(Json(projects))
 }
 
 pub(super) async fn delete_project_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     require_project_delete(&db, &auth_user, id)?;
-    with_write(&db, |conn| crate::db::queries::delete_project(conn, id))?;
+    let (project, audience) = with_write(&db, |conn| {
+        crate::db::queries::delete_project_with_audience(conn, id)
+    })?;
+    let event = RealtimeEvent::ProjectDeleted {
+        project_id: project.id,
+    };
+    match audience {
+        Some(user_ids) => realtime.send_to_users(event, user_ids),
+        None => realtime.send(event),
+    }
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -213,6 +235,7 @@ fn default_map_closed() -> String {
 /// the fetcher as a parameter so tests can stub the network entirely.
 pub(super) async fn import_github(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(project_id): Path<i64>,
     Json(req): Json<GithubImportRequest>,
@@ -223,6 +246,7 @@ pub(super) async fn import_github(
     // owned by whoever ran the import), so audit provenance is correct. On a
     // dry run we skip bot creation entirely.
     let owner_id = auth_user.as_ref().map(|u| u.id);
+    let dry_run = req.dry_run;
 
     let db2 = db.clone();
     let summary = tokio::task::spawn_blocking(move || {
@@ -230,6 +254,10 @@ pub(super) async fn import_github(
     })
     .await
     .map_err(|e| LificError::Internal(format!("import task failed: {e}")))??;
+
+    if !dry_run {
+        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    }
 
     Ok(Json(summary))
 }
@@ -243,10 +271,10 @@ fn run_github_import_blocking(
     owner_id: Option<i64>,
     req: &GithubImportRequest,
 ) -> Result<crate::import::ImportSummary, LificError> {
-    let (owner, name) = crate::import::github::parse_repo(&req.repo)
-        .map_err(LificError::BadRequest)?;
-    let state = crate::import::github::StateFilter::parse(&req.state)
-        .map_err(LificError::BadRequest)?;
+    let (owner, name) =
+        crate::import::github::parse_repo(&req.repo).map_err(LificError::BadRequest)?;
+    let state =
+        crate::import::github::StateFilter::parse(&req.state).map_err(LificError::BadRequest)?;
     let fetcher = crate::import::github::LiveGithub::new(&owner, &name, req.token.clone())
         .map_err(LificError::Internal)?;
     let slug = format!("{owner}/{name}");
@@ -278,9 +306,12 @@ pub(super) fn import_github_with(
         None
     } else {
         match owner_id {
-            Some(owner) => {
-                Some(crate::import::ensure_import_bot(db, owner, "github", "GitHub Import")?)
-            }
+            Some(owner) => Some(crate::import::ensure_import_bot(
+                db,
+                owner,
+                "github",
+                "GitHub Import",
+            )?),
             None => None,
         }
     };
@@ -442,12 +473,7 @@ mod tests {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;
 
-        for (title, status) in [
-            ("A", "todo"),
-            ("B", "active"),
-            ("C", "todo"),
-            ("D", "done"),
-        ] {
+        for (title, status) in [("A", "todo"), ("B", "active"), ("C", "todo"), ("D", "done")] {
             let body = serde_json::json!({
                 "project_id": project_id,
                 "title": title,
@@ -492,7 +518,12 @@ mod tests {
             conn.last_insert_rowid()
         };
         let app = crate::api::router(db.clone(), &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),
@@ -711,10 +742,7 @@ mod tests {
         let data = parse_json(resp).await;
         // Distinct message tells the user *why* they can't edit: no lead exists.
         assert!(
-            data["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("no lead"),
+            data["error"].as_str().unwrap_or("").contains("no lead"),
             "expected 'no lead' in error, got: {}",
             data["error"]
         );
@@ -788,7 +816,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let data = parse_json(resp).await;
-        assert!(data["emoji"].is_null(), "expected null emoji, got: {}", data["emoji"]);
+        assert!(
+            data["emoji"].is_null(),
+            "expected null emoji, got: {}",
+            data["emoji"]
+        );
     }
 
     #[tokio::test]
@@ -1036,7 +1068,9 @@ mod tests {
     // the same collect → apply pipeline the endpoint uses, with zero network.
 
     use crate::db::DbPool;
-    use crate::import::github::{GithubFetcher, GithubIssue, GithubComment, GithubUser, StateFilter};
+    use crate::import::github::{
+        GithubComment, GithubFetcher, GithubIssue, GithubUser, StateFilter,
+    };
 
     fn import_pool() -> (DbPool, i64, i64) {
         let db = crate::db::open_memory().unwrap();
@@ -1088,7 +1122,9 @@ mod tests {
         }
         fn fetch_comments(&self, _n: i64) -> Result<Vec<GithubComment>, String> {
             Ok(vec![GithubComment {
-                user: Some(GithubUser { login: "octocat".into() }),
+                user: Some(GithubUser {
+                    login: "octocat".into(),
+                }),
                 body: Some("nice".into()),
                 created_at: Some("2024-01-01T00:00:00Z".into()),
             }])
@@ -1110,7 +1146,13 @@ mod tests {
     fn import_github_dry_run_counts_and_writes_nothing() {
         let (db, pid, owner) = import_pool();
         let summary = import_github_with(
-            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(true),
+            &db,
+            pid,
+            Some(owner),
+            &FakeGithub,
+            "octocat/hello",
+            StateFilter::All,
+            &req(true),
         )
         .unwrap();
         assert!(summary.dry_run);
@@ -1120,7 +1162,9 @@ mod tests {
         assert_eq!(summary.labels_planned, 1);
         // Nothing written.
         let conn = db.read().unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -1128,7 +1172,13 @@ mod tests {
     fn import_github_real_run_writes_and_is_idempotent() {
         let (db, pid, owner) = import_pool();
         let s1 = import_github_with(
-            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(false),
+            &db,
+            pid,
+            Some(owner),
+            &FakeGithub,
+            "octocat/hello",
+            StateFilter::All,
+            &req(false),
         )
         .unwrap();
         assert_eq!(s1.issues_created, 2);
@@ -1137,7 +1187,13 @@ mod tests {
 
         // Re-run: idempotent no-op.
         let s2 = import_github_with(
-            &db, pid, Some(owner), &FakeGithub, "octocat/hello", StateFilter::All, &req(false),
+            &db,
+            pid,
+            Some(owner),
+            &FakeGithub,
+            "octocat/hello",
+            StateFilter::All,
+            &req(false),
         )
         .unwrap();
         assert_eq!(s2.issues_created, 0);

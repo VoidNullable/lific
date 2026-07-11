@@ -31,6 +31,7 @@ use crate::db::queries::attachments as q;
 use crate::db::{DbPool, queries};
 use crate::error::LificError;
 use crate::ratelimit::RateLimiter;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 use crate::storage::{self, AttachmentStore};
 
 use super::{with_read, with_write};
@@ -72,6 +73,7 @@ pub struct UploadResponse {
 pub(super) async fn upload_attachment(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(store): Extension<AttachmentStore>,
     Extension(config): Extension<AttachmentConfig>,
     Extension(limiter): Extension<Arc<AttachmentUploadLimiter>>,
@@ -153,14 +155,20 @@ pub(super) async fn upload_attachment(
     // Store bytes first (content-addressed), then record metadata.
     let sha = store.write(&bytes)?;
 
-    let attachment = with_write(&db, |conn| {
+    let (attachment, event) = with_write(&db, |conn| {
         let att = q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
         // If the caller asked to link immediately, do it here in the same txn.
-        if let (Some(entity), Some(eid)) = (link_entity, link_entity_id) {
+        let event = if let (Some(entity), Some(eid)) = (link_entity, link_entity_id) {
             q::link_attachment(conn, att.id, entity, eid)?;
-        }
-        Ok(att)
+            linked_entity_event(conn, entity, eid)?
+        } else {
+            None
+        };
+        Ok((att, event))
     })?;
+    if let Some(event) = event {
+        realtime.send(event);
+    }
 
     let resp = UploadResponse {
         id: attachment.id,
@@ -283,6 +291,7 @@ pub(super) async fn download_attachment(
 pub(super) async fn delete_attachment(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(store): Extension<AttachmentStore>,
     Path(id): Path<i64>,
 ) -> Result<axum::Json<serde_json::Value>, LificError> {
@@ -293,10 +302,14 @@ pub(super) async fn delete_attachment(
 
     authorize_delete(&db, &auth_user, &user, &attachment)?;
 
-    with_write(&db, |conn| {
+    let events = with_write(&db, |conn| {
+        let events = linked_attachment_events(conn, id)?;
         q::delete_attachment(conn, id)?;
-        Ok(())
+        Ok(events)
     })?;
+    for event in events {
+        realtime.send(event);
+    }
 
     // GC the sidecar only when no remaining row references the same bytes.
     let remaining = with_read(&db, |conn| q::count_rows_for_sha(conn, &attachment.sha256))?;
@@ -305,6 +318,74 @@ pub(super) async fn delete_attachment(
     }
 
     Ok(axum::Json(serde_json::json!({ "deleted": true })))
+}
+
+/// Return the invalidation event for one attachment link. Comment links refresh
+/// their parent issue or project page. Missing entities are ignored so an old
+/// dangling link does not prevent attachment deletion.
+fn linked_entity_event(
+    conn: &rusqlite::Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+) -> Result<Option<RealtimeEvent>, LificError> {
+    match entity {
+        AttachmentEntity::Issue => match queries::get_issue(conn, entity_id) {
+            Ok(issue) => Ok(Some(RealtimeEvent::IssueUpdated {
+                project_id: issue.project_id,
+                issue_id: issue.id,
+            })),
+            Err(LificError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        },
+        AttachmentEntity::Page => match queries::get_page(conn, entity_id) {
+            Ok(page) => Ok(page
+                .project_id
+                .map(|project_id| RealtimeEvent::ProjectUpdated { project_id })),
+            Err(LificError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        },
+        AttachmentEntity::Comment => match queries::comments::get_comment(conn, entity_id) {
+            Ok(comment) => {
+                if let Some(issue_id) = comment.issue_id {
+                    linked_entity_event(conn, AttachmentEntity::Issue, issue_id)
+                } else if let Some(page_id) = comment.page_id {
+                    linked_entity_event(conn, AttachmentEntity::Page, page_id)
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(LificError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+/// Snapshot all affected issue/page entities before an attachment's link rows
+/// cascade away. A single attachment can affect multiple projects.
+fn linked_attachment_events(
+    conn: &rusqlite::Connection,
+    attachment_id: i64,
+) -> Result<Vec<RealtimeEvent>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entity_type, entity_id FROM attachment_links WHERE attachment_id = ?1",
+    )?;
+    let links: Vec<(String, i64)> = stmt
+        .query_map([attachment_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut events = Vec::new();
+    for (entity_type, entity_id) in links {
+        let event = match entity_type.parse::<AttachmentEntity>() {
+            Ok(entity) => linked_entity_event(conn, entity, entity_id)?,
+            Err(_) => None,
+        };
+        if let Some(event) = event
+            && !events.contains(&event)
+        {
+            events.push(event);
+        }
+    }
+    Ok(events)
 }
 
 /// Re-scan an entity's markdown body for `/api/attachments/{id}` references
@@ -552,6 +633,98 @@ mod api_tests {
             .unwrap()
     }
 
+    async fn next_realtime_event(
+        events: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>,
+    ) -> serde_json::Value {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(text) = event.message else {
+            panic!("expected text realtime event");
+        };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn issue_linked_upload_and_delete_emit_issue_updated_events() {
+        let test = test_app_with_realtime();
+        let (project_id, _) = seed_project(&test.app).await;
+        let issue = parse_json(
+            json_post(
+                &test.app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": "Attachment target" }),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
+        let mut events = test.realtime.subscribe();
+
+        let resp = upload(
+            &test.app,
+            "issue.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let attachment_id = parse_json(resp).await["id"].as_i64().unwrap();
+        let event = next_realtime_event(&mut events).await;
+        assert_eq!(event["type"], "issue.updated");
+        assert_eq!(event["project_id"], project_id);
+        assert_eq!(event["issue_id"], issue_id);
+
+        let resp = json_delete(&test.app, &format!("/api/attachments/{attachment_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let event = next_realtime_event(&mut events).await;
+        assert_eq!(event["type"], "issue.updated");
+        assert_eq!(event["project_id"], project_id);
+        assert_eq!(event["issue_id"], issue_id);
+    }
+
+    #[tokio::test]
+    async fn project_page_linked_upload_and_delete_emit_project_updated_events() {
+        let test = test_app_with_realtime();
+        let (project_id, _) = seed_project(&test.app).await;
+        let page = parse_json(
+            json_post(
+                &test.app,
+                "/api/pages",
+                serde_json::json!({
+                    "project_id": project_id,
+                    "title": "Attachment target page",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let page_id = page["id"].as_i64().unwrap();
+        let mut events = test.realtime.subscribe();
+
+        let resp = upload(
+            &test.app,
+            "page.png",
+            "image/png",
+            &png_bytes(),
+            Some(("page", page_id)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let attachment_id = parse_json(resp).await["id"].as_i64().unwrap();
+        let event = next_realtime_event(&mut events).await;
+        assert_eq!(event["type"], "project.updated");
+        assert_eq!(event["project_id"], project_id);
+
+        let resp = json_delete(&test.app, &format!("/api/attachments/{attachment_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let event = next_realtime_event(&mut events).await;
+        assert_eq!(event["type"], "project.updated");
+        assert_eq!(event["project_id"], project_id);
+    }
+
     #[tokio::test]
     async fn upload_and_download_happy_path() {
         let app = test_app();
@@ -620,6 +793,7 @@ mod api_tests {
         use axum::Extension;
         use std::sync::Arc;
         let app = crate::api::router(db, &[])
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
             .layer(Extension(crate::storage::AttachmentStore::new(
                 std::env::temp_dir().join(format!("lific_sz_{}", std::process::id())),
             )))
@@ -662,6 +836,7 @@ mod api_tests {
 
         // Lead creates an issue and uploads an attachment linked to it.
         let lead_app = with_attachment_layers(crate::api::router(db.clone(), &[]))
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,
@@ -816,6 +991,7 @@ mod api_tests {
             conn.last_insert_rowid()
         };
         let app = with_attachment_layers_store(crate::api::router(db.clone(), &[]), store.clone())
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,
@@ -922,6 +1098,7 @@ mod cookie_fallback_tests {
             required: true,
         };
         with_attachment_layers(crate::api::router(db, &[]))
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,

@@ -15,6 +15,7 @@ mod import;
 mod mcp;
 mod oauth;
 mod ratelimit;
+mod realtime;
 mod storage;
 
 use std::sync::Arc;
@@ -896,6 +897,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // MCP StreamableHTTP service
             let db_for_mcp = pool.clone();
+            let realtime = realtime::RealtimeHub::new();
+            let realtime_for_mcp = realtime.clone();
             let mut mcp_allowed_hosts: Vec<String> =
                 vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
 
@@ -914,7 +917,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_allowed_hosts(mcp_allowed_hosts.clone());
 
             let mcp_service = StreamableHttpService::new(
-                move || Ok(mcp::LificMcp::new(db_for_mcp.clone())),
+                move || {
+                    Ok(mcp::LificMcp::with_realtime(
+                        db_for_mcp.clone(),
+                        realtime_for_mcp.clone(),
+                    ))
+                },
                 Arc::new(LocalSessionManager::default()),
                 mcp_config,
             );
@@ -966,6 +974,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await
                     }),
                 )
+                .layer(axum::Extension(realtime.clone()))
                 .layer(axum::Extension(login_limiter))
                 .layer(axum::Extension(attachment_store))
                 .layer(axum::Extension(attachment_config))
@@ -1034,6 +1043,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &token,
                         authless_user,
                         mcp_allowed_hosts.clone(),
+                        realtime.clone(),
                     )
                 });
 
@@ -1708,6 +1718,7 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PATCH,
             Method::PUT,
             Method::DELETE,
             Method::OPTIONS,
@@ -1753,13 +1764,19 @@ fn build_authless_mcp_router(
     token: &str,
     user: Option<db::models::AuthUser>,
     allowed_hosts: Vec<String>,
+    realtime: realtime::RealtimeHub,
 ) -> Router {
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts);
     let service = StreamableHttpService::new(
-        move || Ok(mcp::LificMcp::new(pool.clone())),
+        move || {
+            Ok(mcp::LificMcp::with_realtime(
+                pool.clone(),
+                realtime.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );
@@ -1780,22 +1797,27 @@ async fn auth_middleware_wrapper(
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let path = request.uri().path();
-    if path == "/api/health"
-        || path == "/api/instance"
-        || path == "/api/auth/signup"
-        || path == "/api/auth/login"
-        || path == "/api/auth/auto-login"
-        || path.starts_with("/.well-known/")
-        || path.starts_with("/oauth/")
-        || path == "/register"
-        || path == "/authorize"
-        || path == "/token"
-        || path == "/revoke"
-    {
+    if skips_auth_middleware(request.uri().path()) {
         return next.run(request).await;
     }
     auth::require_api_key(state, request, next).await
+}
+
+fn skips_auth_middleware(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/health"
+            | "/api/instance"
+            | "/api/auth/signup"
+            | "/api/auth/login"
+            | "/api/auth/auto-login"
+            | "/api/events/ws"
+            | "/register"
+            | "/authorize"
+            | "/token"
+            | "/revoke"
+    ) || path.starts_with("/.well-known/")
+        || path.starts_with("/oauth/")
 }
 
 /// Wait for SIGINT/SIGTERM, then checkpoint WAL before shutting down.
@@ -1908,6 +1930,12 @@ mod cors_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[test]
+    fn websocket_path_skips_header_auth_middleware() {
+        assert!(skips_auth_middleware("/api/events/ws"));
+        assert!(!skips_auth_middleware("/api/issues"));
+    }
+
     /// Build a minimal /mcp router behind an auth gate identical in spirit to
     /// the real one (returns 401 if Authorization is missing), wrapped with
     /// our global CORS layer.
@@ -1967,6 +1995,10 @@ mod cors_tests {
         assert!(
             allow_methods.contains("POST"),
             "POST must be in allowed methods, got: {allow_methods}"
+        );
+        assert!(
+            allow_methods.contains("PATCH"),
+            "PATCH must be in allowed methods, got: {allow_methods}"
         );
 
         let allow_headers = headers
@@ -2100,8 +2132,13 @@ mod authless_mcp_tests {
     async fn authless_path_serves_mcp_without_auth() {
         let pool = db::open_memory().unwrap();
         let token = "s3cret-authless-token-abcdef";
-        let router =
-            build_authless_mcp_router(pool, token, None, vec!["localhost".into()]);
+        let router = build_authless_mcp_router(
+            pool,
+            token,
+            None,
+            vec!["localhost".into()],
+            realtime::RealtimeHub::new(),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
@@ -2131,8 +2168,13 @@ mod authless_mcp_tests {
     #[tokio::test]
     async fn wrong_path_token_does_not_match() {
         let pool = db::open_memory().unwrap();
-        let router =
-            build_authless_mcp_router(pool, "the-right-token", None, vec!["localhost".into()]);
+        let router = build_authless_mcp_router(
+            pool,
+            "the-right-token",
+            None,
+            vec!["localhost".into()],
+            realtime::RealtimeHub::new(),
+        );
 
         let req = Request::builder()
             .method(Method::POST)

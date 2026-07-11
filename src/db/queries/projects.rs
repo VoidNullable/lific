@@ -239,6 +239,42 @@ pub fn delete_project(conn: &Connection, id: i64) -> Result<(), LificError> {
     Ok(())
 }
 
+pub fn delete_project_with_audience(
+    conn: &Connection,
+    id: i64,
+) -> Result<(Project, Option<Vec<i64>>), LificError> {
+    let project = get_project(conn, id)?;
+    let audience = if super::settings::get(conn)?.authz_enforced {
+        Some(project_viewer_ids(conn, &project)?)
+    } else {
+        None
+    };
+    delete_project(conn, id)?;
+    Ok((project, audience))
+}
+
+fn project_viewer_ids(conn: &Connection, project: &Project) -> Result<Vec<i64>, LificError> {
+    let mut ids: Vec<_> = super::members::list_members(conn, project.id)?
+        .into_iter()
+        .map(|member| member.user_id)
+        .collect();
+    if let Some(lead_id) = project.lead_user_id
+        && !ids.contains(&lead_id)
+    {
+        ids.push(lead_id);
+    }
+    let mut stmt = conn.prepare("SELECT id FROM users WHERE is_admin = 1")?;
+    let admins = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    admins.into_iter().for_each(|id| {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    });
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

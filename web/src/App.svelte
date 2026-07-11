@@ -20,10 +20,11 @@
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
-  import { hasSession, getInstance, autoLogin, saveSession } from "./lib/api";
+  import { hasSession, getInstance, autoLogin, saveSession, clearSession, me } from "./lib/api";
+  import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
   import { motionReduced } from "./lib/theme";
   import { fade } from "svelte/transition";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   // Path-style deep links (LIF-247): external tools (e.g. the Dashboard)
   // link to plain paths like /LIF/overview or /LIF/issues/LIF-42. The server
@@ -48,6 +49,11 @@
   // "bootstrapping" only when there's no session, so the logged-in common case
   // never shows a spinner.
   let bootstrapping = $state(!hasSession());
+  let realtimeSocket: WebSocket | null = null;
+  let realtimeReconnect: ReturnType<typeof setTimeout> | null = null;
+  let realtimeDelayMs = 1000;
+  let realtimeNeedsResync = false;
+  let realtimeDisposed = false;
 
   onMount(async () => {
     if (!hasSession()) {
@@ -58,11 +64,18 @@
       }
     }
     bootstrapping = false;
+    if (!realtimeDisposed) syncRealtimeSocket();
+  });
+
+  onDestroy(() => {
+    realtimeDisposed = true;
+    closeRealtimeSocket();
   });
 
   function navigate(path: string) {
     window.location.hash = path;
     route = path;
+    syncRealtimeSocket();
   }
 
   $effect(() => {
@@ -77,15 +90,14 @@
   $effect(() => {
     // Hold off until the single-user auto-login probe resolves, so we don't
     // flash /login and then bounce into the app once the session lands.
-    if (bootstrapping) return;
-    if (hasSession()) {
-      // LIF-237: "/" is now a real route (Home) rather than a redirect
-      // target — only /login and /signup bounce once a session exists.
-      if (route === "/login" || route === "/signup") {
-        redirectToDefault();
-      }
-    } else {
-      if (route !== "/login" && route !== "/signup") {
+    if (!bootstrapping) {
+      if (hasSession()) {
+        // LIF-237: "/" is now a real route (Home) rather than a redirect
+        // target — only /login and /signup bounce once a session exists.
+        if (route === "/login" || route === "/signup") {
+          redirectToDefault();
+        }
+      } else if (route !== "/login" && route !== "/signup") {
         navigate("/login");
       }
     }
@@ -96,6 +108,119 @@
   // project.)
   function redirectToDefault() {
     navigate("/");
+  }
+
+  function socketUrl(): string {
+    const url = new URL("/api/events/ws", window.location.origin);
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
+  }
+
+  function closeRealtimeSocket() {
+    if (realtimeReconnect) {
+      clearTimeout(realtimeReconnect);
+      realtimeReconnect = null;
+    }
+    realtimeDelayMs = 1000;
+    realtimeNeedsResync = false;
+    const socket = realtimeSocket;
+    realtimeSocket = null;
+    if (socket) {
+      socket.close(1000, "teardown");
+    }
+  }
+
+  function scheduleRealtimeReconnect() {
+    if (!realtimeDisposed && !realtimeReconnect && hasSession() && !hasLiveRealtimeSocket()) {
+      realtimeReconnect = window.setTimeout(() => {
+        realtimeReconnect = null;
+        syncRealtimeSocket();
+      }, realtimeDelayMs);
+      realtimeDelayMs = Math.min(realtimeDelayMs * 2, 10_000);
+    }
+  }
+
+  function hasLiveRealtimeSocket() {
+    return (
+      realtimeSocket?.readyState === WebSocket.OPEN ||
+      realtimeSocket?.readyState === WebSocket.CONNECTING
+    );
+  }
+
+  function syncRealtimeSocket() {
+    const shouldConnect = !realtimeDisposed && hasSession() && !bootstrapping;
+    const shouldOpen = shouldConnect && !hasLiveRealtimeSocket();
+
+    if (!shouldConnect) {
+      closeRealtimeSocket();
+    }
+
+    if (shouldOpen) {
+      openRealtimeSocket();
+    }
+  }
+
+  function dispatchRealtimeEvent(event: RealtimeEvent) {
+    window.dispatchEvent(
+      new CustomEvent<RealtimeEvent>(REALTIME_INVALIDATE_EVENT, { detail: event }),
+    );
+  }
+
+  async function reconnectAfterFailedRealtimeAttempt(sessionToken: string | null) {
+    const session = await me();
+
+    // A stale probe must not clear a session established after this socket
+    // attempt ended. Network failures have no HTTP status and must keep
+    // reconnecting so a temporarily unavailable server can recover.
+    if (realtimeDisposed || localStorage.getItem("lific_token") !== sessionToken) return;
+
+    if (!session.ok && session.status === 401) {
+      clearSession();
+      navigate("/login");
+      return;
+    }
+
+    scheduleRealtimeReconnect();
+  }
+
+  function openRealtimeSocket() {
+    const socket = new WebSocket(socketUrl());
+    realtimeSocket = socket;
+    let opened = false;
+    socket.addEventListener("open", () => {
+      if (realtimeSocket !== socket || realtimeDisposed) return;
+      opened = true;
+      realtimeDelayMs = 1000;
+      if (realtimeNeedsResync) {
+        realtimeNeedsResync = false;
+        dispatchRealtimeEvent({ type: "resync.required" });
+      }
+    });
+    socket.addEventListener("message", (message) => {
+      if (typeof message.data !== "string") return;
+      try {
+        const event = JSON.parse(message.data) as RealtimeEvent;
+        if (typeof event?.type === "string") {
+          dispatchRealtimeEvent(event);
+        }
+      } catch {
+        // HTTP refresh remains source of truth.
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (realtimeSocket === socket) {
+        realtimeSocket = null;
+        realtimeNeedsResync = true;
+        if (opened) {
+          scheduleRealtimeReconnect();
+        } else {
+          void reconnectAfterFailedRealtimeAttempt(localStorage.getItem("lific_token"));
+        }
+      }
+    });
+    socket.addEventListener("error", () => {
+      socket.close();
+    });
   }
 
   type ParsedRoute =

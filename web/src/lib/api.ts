@@ -18,10 +18,14 @@ export interface ApiError {
   error: string;
 }
 
+type RequestResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; status: number | null };
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
-): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+): Promise<RequestResult<T>> {
   const token = localStorage.getItem("lific_token");
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -37,7 +41,7 @@ async function request<T>(
     const body = await res.json();
 
     if (!res.ok) {
-      return { ok: false, error: body.error || `HTTP ${res.status}` };
+      return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
     }
 
     return { ok: true, data: body as T };
@@ -45,6 +49,7 @@ async function request<T>(
     return {
       ok: false,
       error: "Couldn't reach the server. Check your connection and try again.",
+      status: null,
     };
   }
 }

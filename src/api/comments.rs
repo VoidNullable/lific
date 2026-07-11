@@ -7,6 +7,7 @@ use crate::authz;
 use crate::db::queries::comments::{self, CommentParent};
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{with_read, with_write};
 
@@ -28,7 +29,12 @@ fn create_comment_with_mentions(
         let comment = comments::create_comment(conn, parent, user_id, content)?;
         comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         // LIF-262: link attachments referenced in the comment body.
-        super::attachments::sync_links(conn, AttachmentEntity::Comment, comment.id, &comment.content)?;
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+        )?;
         Ok(comment)
     })
 }
@@ -53,36 +59,43 @@ pub(super) async fn list_comments(
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(issue_id): Path<i64>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?
-        .project_id;
+    let project_id =
+        with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     require_comment_viewer(&db, &auth_user, Some(project_id))?;
     with_read(&db, |conn| {
-        crate::db::queries::comments::list_comments(conn, CommentParent::Issue(issue_id), None, None)
+        crate::db::queries::comments::list_comments(
+            conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+        )
     })
     .map(Json)
 }
 
 pub(super) async fn create_comment(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(issue_id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?
-        .project_id;
+    let project_id =
+        with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     require_comment_viewer(&db, &auth_user, Some(project_id))?;
 
     let user = auth_user
         .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
 
-    create_comment_with_mentions(
+    let comment = create_comment_with_mentions(
         &db,
         CommentParent::Issue(issue_id),
         Some(project_id),
         user.id,
         &input.content,
-    )
-    .map(Json)
+    )?;
+    realtime.send(issue_updated_event(project_id, issue_id));
+    Ok(Json(comment))
 }
 
 pub(super) async fn list_page_comments(
@@ -90,8 +103,7 @@ pub(super) async fn list_page_comments(
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(page_id): Path<i64>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?
-        .project_id;
+    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
     require_comment_viewer(&db, &auth_user, project_id)?;
     with_read(&db, |conn| {
         crate::db::queries::comments::list_comments(conn, CommentParent::Page(page_id), None, None)
@@ -101,25 +113,28 @@ pub(super) async fn list_page_comments(
 
 pub(super) async fn create_page_comment(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(page_id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?
-        .project_id;
+    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
     require_comment_viewer(&db, &auth_user, project_id)?;
 
     let user = auth_user
         .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
 
-    create_comment_with_mentions(
+    let comment = create_comment_with_mentions(
         &db,
         CommentParent::Page(page_id),
         project_id,
         user.id,
         &input.content,
-    )
-    .map(Json)
+    )?;
+    if let Some(project_id) = project_id {
+        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    }
+    Ok(Json(comment))
 }
 
 /// GET /api/projects/{id}/mention-candidates — the users who may be
@@ -142,6 +157,7 @@ pub(super) async fn mention_candidates(
 
 pub(super) async fn update_comment_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UpdateComment>,
@@ -165,15 +181,29 @@ pub(super) async fn update_comment_handler(
     let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
     let member_scoped = authz::authz_enforced(&db)?;
 
-    with_write(&db, |conn| {
+    let comment = with_write(&db, |conn| {
         let candidates = comments::mention_candidates(conn, project_id, member_scoped)?;
         let comment = comments::update_comment(conn, id, &input.content)?;
         comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         // LIF-262: re-scan the edited comment and reconcile links.
-        super::attachments::sync_links(conn, AttachmentEntity::Comment, comment.id, &comment.content)?;
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+        )?;
         Ok(comment)
-    })
-    .map(Json)
+    })?;
+    match (comment.issue_id, project_id) {
+        (Some(issue_id), Some(project_id)) => {
+            realtime.send(issue_updated_event(project_id, issue_id));
+        }
+        (None, Some(project_id)) if comment.page_id.is_some() => {
+            realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+        }
+        _ => {}
+    }
+    Ok(Json(comment))
 }
 
 /// Resolve the project a comment belongs to, via its issue or page parent.
@@ -182,7 +212,9 @@ fn resolve_comment_project(
     comment: &Comment,
 ) -> Result<Option<i64>, LificError> {
     if let Some(issue_id) = comment.issue_id {
-        Ok(Some(crate::db::queries::get_issue(conn, issue_id)?.project_id))
+        Ok(Some(
+            crate::db::queries::get_issue(conn, issue_id)?.project_id,
+        ))
     } else if let Some(page_id) = comment.page_id {
         Ok(crate::db::queries::get_page(conn, page_id)?.project_id)
     } else {
@@ -192,6 +224,7 @@ fn resolve_comment_project(
 
 pub(super) async fn delete_comment_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -207,10 +240,27 @@ pub(super) async fn delete_comment_handler(
         ));
     }
 
+    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
     with_write(&db, |conn| {
         crate::db::queries::comments::delete_comment(conn, id)
     })?;
+    match (existing.issue_id, project_id) {
+        (Some(issue_id), Some(project_id)) => {
+            realtime.send(issue_updated_event(project_id, issue_id));
+        }
+        (None, Some(project_id)) if existing.page_id.is_some() => {
+            realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+        }
+        _ => {}
+    }
     Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+fn issue_updated_event(project_id: i64, issue_id: i64) -> RealtimeEvent {
+    RealtimeEvent::IssueUpdated {
+        project_id,
+        issue_id,
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +322,12 @@ mod tests {
         drop(conn);
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -440,7 +495,12 @@ mod tests {
 
         // Build app as "other" (non-owner, non-admin)
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
                 username: other.username,
@@ -550,7 +610,12 @@ mod tests {
 
         // Build app as admin
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
                 username: admin.username,
@@ -625,7 +690,12 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -776,7 +846,12 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
                 username: other.username,
@@ -865,7 +940,12 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
                 username: admin.username,
@@ -975,12 +1055,18 @@ mod tests {
 
         // The project activity feed carries a "mention" row for ada.
         let feed = parse_json(
-            json_get(&app, &format!("/api/projects/{project_id}/activity?limit=100")).await,
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/activity?limit=100"),
+            )
+            .await,
         )
         .await;
         let items = feed["items"].as_array().unwrap();
         assert!(
-            items.iter().any(|a| a["action"] == "mention" && a["new_value"] == "ada"),
+            items
+                .iter()
+                .any(|a| a["action"] == "mention" && a["new_value"] == "ada"),
             "expected a mention activity row: {items:#?}"
         );
     }
@@ -1132,7 +1218,11 @@ mod tests {
 
         // Candidates: the non_member (not a project member) must be absent;
         // the viewer/maintainer/lead members present.
-        let resp = json_get(&lead_app, &format!("/api/projects/{project_id}/mention-candidates")).await;
+        let resp = json_get(
+            &lead_app,
+            &format!("/api/projects/{project_id}/mention-candidates"),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let cands = parse_json(resp).await;
         let arr = cands.as_array().unwrap();
@@ -1155,11 +1245,16 @@ mod tests {
         let comment_id = parse_json(resp).await["id"].as_i64().unwrap();
 
         let resolved = mention_ids(&db, comment_id);
-        assert!(!resolved.contains(&non_member.id), "non-member must not resolve");
+        assert!(
+            !resolved.contains(&non_member.id),
+            "non-member must not resolve"
+        );
         // viewer resolves.
         let viewer_id = {
             let conn = db.read().unwrap();
-            crate::db::queries::users::get_user_by_username(&conn, "viewer").unwrap().id
+            crate::db::queries::users::get_user_by_username(&conn, "viewer")
+                .unwrap()
+                .id
         };
         assert_eq!(resolved, vec![viewer_id]);
     }
@@ -1227,7 +1322,12 @@ mod tests {
         };
 
         let app = crate::api::router(db, &[])
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username,

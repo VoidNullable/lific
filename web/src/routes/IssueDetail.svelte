@@ -26,6 +26,7 @@
   import { scheduleDelete } from "../lib/issues/deferredDelete.svelte"; // LIF-283
   import { openPeek } from "../lib/issues/peek.svelte"; // LIF-248
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
+  import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
   import { ArrowUpRight } from "lucide-svelte";
 
@@ -81,6 +82,7 @@
 
   // Sidebar dropdown states (issue-specific; the body's read/edit mode
   // lives inside DocumentDetail).
+  let bodyMode = $state<"read" | "edit">("read");
   let statusOpen = $state(false);
   let priorityOpen = $state(false);
   let moduleOpen = $state(false);
@@ -120,8 +122,29 @@
     loadIssue(id);
   });
 
-  async function loadIssue(identifier: string) {
-    loading = true;
+  $effect(() =>
+    startAutoRefresh({
+      refresh: () => loadIssue(issueIdentifier, true),
+      isBusy: () =>
+        bodyMode === "edit" ||
+        saving ||
+        loading ||
+        statusOpen ||
+        priorityOpen ||
+        moduleOpen ||
+        labelsOpen,
+      intervalMs: 0,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        (typeof event.issue_id === "number" && event.issue_id === issue?.id) ||
+        (event.type.startsWith("project.") &&
+          typeof event.project_id === "number" &&
+          event.project_id === issue?.project_id),
+    }),
+  );
+
+  async function loadIssue(identifier: string, background = false) {
+    loading = !background;
     error = "";
     const res = await resolveIssue(identifier);
     if (!res.ok) {
@@ -451,6 +474,7 @@
   bodyEmptyReadText="No description"
   bodyProseMinHeight="60px"
   onSaveBody={saveDescription}
+  bind:bodyMode
   autofocusWhenEmpty
   {saving}
   {lastSaved}

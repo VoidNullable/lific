@@ -14,7 +14,9 @@ mod views;
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Json, Query, State},
+    extract::{DefaultBodyLimit, Extension, Json, Query, State, ws::WebSocketUpgrade},
+    http::{HeaderMap, header},
+    response::IntoResponse,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{self, CorsLayer};
@@ -38,10 +40,8 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
     let cors = if cors_origins.is_empty() {
         CorsLayer::new().allow_origin(cors::Any)
     } else {
-        let origins: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         CorsLayer::new().allow_origin(origins)
     };
 
@@ -120,10 +120,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             get(issues::resolve_issue),
         )
         // Activity (audit log read surface — LIF-156)
-        .route(
-            "/api/issues/{id}/activity",
-            get(activity::issue_activity),
-        )
+        .route("/api/issues/{id}/activity", get(activity::issue_activity))
         .route("/api/pages/{id}/activity", get(activity::page_activity))
         .route(
             "/api/projects/{id}/activity",
@@ -140,7 +137,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         .route("/api/export/issues/{identifier}", get(export::export_issue))
         .route("/api/export/pages/{identifier}", get(export::export_page))
-        .route("/api/export/projects/{identifier}", get(export::export_project))
+        .route(
+            "/api/export/projects/{identifier}",
+            get(export::export_project),
+        )
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))
         .route("/api/issues/unlink", post(issues::unlink_issues))
@@ -208,6 +208,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         // Users (for dropdowns)
         .route("/api/users", get(auth::list_users))
+        .route("/api/events/ws", get(events_ws))
         // Search
         .route("/api/search", get(search))
         // Board view
@@ -225,10 +226,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // The caller's own effective role on a project (LIF-234) — Viewer-gated,
         // so any member can learn their role to drive role-aware UI affordances
         // without reading the full roster or the admin-only instance settings.
-        .route(
-            "/api/projects/{id}/my-role",
-            get(members::my_project_role),
-        )
+        .route("/api/projects/{id}/my-role", get(members::my_project_role))
         // @mention autocomplete candidates (LIF-263) — Viewer-gated,
         // member-scoped when authz enforcement is on.
         .route(
@@ -268,8 +266,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         .route(
             "/api/attachments/{id}",
-            get(attachments::download_attachment)
-                .delete(attachments::delete_attachment),
+            get(attachments::download_attachment).delete(attachments::delete_attachment),
         )
         // Health
         .route("/api/health", get(health))
@@ -277,6 +274,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             cors.allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
+                axum::http::Method::PATCH,
                     axum::http::Method::PUT,
                     axum::http::Method::DELETE,
                 ])
@@ -286,6 +284,135 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
                 ]),
         )
         .with_state(db)
+        .layer(Extension(cors_origins.to_vec()))
+}
+
+async fn events_ws(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<crate::realtime::RealtimeHub>,
+    Extension(allowed_origins): Extension<Vec<String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, LificError> {
+    let session_token = validate_websocket_request(&db, &headers, &allowed_origins)?;
+    Ok(ws.on_upgrade(move |socket| {
+        crate::realtime::serve_socket(socket, realtime, db, session_token)
+    }))
+}
+
+fn validate_websocket_request(
+    db: &DbPool,
+    headers: &HeaderMap,
+    allowed_origins: &[String],
+) -> Result<String, LificError> {
+    match (
+        websocket_origin_allowed(headers, allowed_origins),
+        websocket_session_token(headers),
+    ) {
+        (false, _) => Err(LificError::Forbidden("websocket origin not allowed".into())),
+        (true, None) => Err(LificError::Forbidden("authentication required".into())),
+        (true, Some(token)) => with_read(db, |conn| {
+            match crate::db::queries::users::validate_session(conn, token) {
+                Ok(_) => Ok(token.to_string()),
+                Err(LificError::BadRequest(message))
+                    if message == crate::db::queries::users::INVALID_SESSION_MESSAGE =>
+                {
+                    Err(LificError::Forbidden(
+                        crate::db::queries::users::INVALID_SESSION_MESSAGE.into(),
+                    ))
+                }
+                Err(error) => Err(error),
+            }
+        }),
+    }
+}
+
+fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+    match headers.get(header::ORIGIN).map(|value| value.to_str()) {
+        None => true,
+        Some(Ok(origin)) => {
+            allowed_origins.iter().any(|allowed| allowed == origin)
+                || headers
+                .get(header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|host| {
+                        websocket_same_origin(origin, host, websocket_request_scheme(headers))
+                    })
+        }
+        Some(Err(_)) => false,
+    }
+}
+
+fn websocket_request_scheme(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            headers
+                .get("forwarded")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    value.split(';').find_map(|part| {
+                        part.trim()
+                            .strip_prefix("proto=")
+                            .map(str::trim)
+                            .filter(|proto| !proto.is_empty())
+                    })
+                })
+        })
+}
+
+fn websocket_same_origin(origin: &str, host: &str, request_scheme: Option<&str>) -> bool {
+    let Some(request_scheme) = request_scheme else {
+        return false;
+    };
+    let origin = origin.parse::<axum::http::Uri>().ok();
+    let host = host.parse::<axum::http::uri::Authority>().ok();
+
+    match (
+        origin.as_ref().and_then(axum::http::Uri::scheme_str),
+        origin.as_ref().and_then(axum::http::Uri::authority),
+        host.as_ref(),
+    ) {
+        (Some(scheme), Some(origin_authority), Some(host_authority))
+            if scheme.eq_ignore_ascii_case(request_scheme) =>
+        {
+            websocket_default_port(scheme).is_some_and(|default_port| {
+                let origin_port = origin_authority.port_u16().unwrap_or(default_port);
+                let host_port = host_authority.port_u16().unwrap_or(default_port);
+                origin_authority
+                    .host()
+                    .eq_ignore_ascii_case(host_authority.host())
+                    && origin_port == host_port
+            })
+        }
+        _ => false,
+    }
+}
+
+fn websocket_default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
+fn websocket_session_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookie| {
+            cookie.split(';').find_map(|part| {
+                part.trim()
+                    .strip_prefix("lific_token=")
+                    .map(str::trim)
+                    .filter(|token| token.starts_with("lific_sess_"))
+            })
+        })
 }
 
 // ── Shared helpers ───────────────────────────────────────────
@@ -429,6 +556,11 @@ pub(crate) mod test_helpers {
     use crate::db::DbPool;
     use crate::db::models::*;
 
+    pub struct RealtimeTestApp {
+        pub app: Router,
+        pub realtime: crate::realtime::RealtimeHub,
+    }
+
     /// A unique tempdir-backed attachment store for a test app, plus the
     /// config + rate-limiter extensions the attachment routes need. Layered
     /// onto every test app so the attachment endpoints work in tests without a
@@ -463,12 +595,20 @@ pub(crate) mod test_helpers {
     }
 
     pub fn test_app() -> Router {
-        test_app_with_auth(true)
+        test_app_with_realtime().app
     }
 
     /// Like [`test_app`] but with an explicit `[auth] required` value, for
     /// LIF-297's auth-optional web bootstrap tests.
     pub fn test_app_with_auth(required: bool) -> Router {
+        test_app_with_realtime_and_auth(required).app
+    }
+
+    pub fn test_app_with_realtime() -> RealtimeTestApp {
+        test_app_with_realtime_and_auth(true)
+    }
+
+    fn test_app_with_realtime_and_auth(required: bool) -> RealtimeTestApp {
         let db = crate::db::open_memory().expect("test db");
         // Insert a real admin row so FK constraints (e.g. projects.lead_user_id
         // now defaults to the creator — see LIF-102) pass. Direct SQL skips
@@ -483,14 +623,21 @@ pub(crate) mod test_helpers {
             .expect("seed test admin");
             conn.last_insert_rowid()
         };
-        with_attachment_layers(super::router(db, &[]))
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required, secure_cookies: false }))
+        let realtime = crate::realtime::RealtimeHub::new();
+        let app = with_attachment_layers(super::router(db, &[]))
+            .layer(Extension(realtime.clone()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),
                 display_name: "Test Admin".into(),
                 is_admin: true,
-            })))
+            })));
+        RealtimeTestApp { app, realtime }
     }
 
     /// Seed a project and return its id.
@@ -606,7 +753,12 @@ pub(crate) mod test_helpers {
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
         with_attachment_layers(super::router(db, &[]))
-            .layer(Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
                 username: user.username.clone(),
@@ -726,7 +878,12 @@ pub(crate) mod test_helpers {
         )
         .unwrap();
 
-        crate::db::queries::members::upsert_member(&conn, project.id, maintainer.id, Role::Maintainer)
+        crate::db::queries::members::upsert_member(
+            &conn,
+            project.id,
+            maintainer.id,
+            Role::Maintainer,
+        )
             .unwrap();
         crate::db::queries::members::upsert_member(&conn, project.id, viewer.id, Role::Viewer)
             .unwrap();
@@ -827,13 +984,17 @@ mod authz_gating_tests {
 
         let non_member_app = app_as_user(db.clone(), &non_member);
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/issues/{issue_id}")).await.status(),
+            json_get(&non_member_app, &format!("/api/issues/{issue_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
 
         let viewer_app = app_as_user(db, &viewer);
         assert_eq!(
-            json_get(&viewer_app, &format!("/api/issues/{issue_id}")).await.status(),
+            json_get(&viewer_app, &format!("/api/issues/{issue_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
     }
@@ -866,21 +1027,29 @@ mod authz_gating_tests {
 
         let non_member_app = app_as_user(db.clone(), &non_member);
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/pages/{page_id}")).await.status(),
+            json_get(&non_member_app, &format!("/api/pages/{page_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            json_get(&non_member_app, &format!("/api/plans/{plan_id}")).await.status(),
+            json_get(&non_member_app, &format!("/api/plans/{plan_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
 
         let viewer_app = app_as_user(db, &viewer);
         assert_eq!(
-            json_get(&viewer_app, &format!("/api/pages/{page_id}")).await.status(),
+            json_get(&viewer_app, &format!("/api/pages/{page_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
-            json_get(&viewer_app, &format!("/api/plans/{plan_id}")).await.status(),
+            json_get(&viewer_app, &format!("/api/plans/{plan_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
     }
@@ -951,8 +1120,7 @@ mod authz_gating_tests {
 
     #[tokio::test]
     async fn issue_create_gated_by_maintainer_role() {
-        let (db, admin, lead, maintainer, viewer, non_member, project_id) =
-            setup_membership_test();
+        let (db, admin, lead, maintainer, viewer, non_member, project_id) = setup_membership_test();
 
         for (user, expect_ok) in [
             (&non_member, false),
@@ -968,8 +1136,17 @@ mod authz_gating_tests {
                 serde_json::json!({ "project_id": project_id, "title": format!("by {}", user.username) }),
             )
             .await;
-            let expected = if expect_ok { StatusCode::OK } else { StatusCode::FORBIDDEN };
-            assert_eq!(resp.status(), expected, "{} create expected {expected}", user.username);
+            let expected = if expect_ok {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(
+                resp.status(),
+                expected,
+                "{} create expected {expected}",
+                user.username
+            );
         }
     }
 
@@ -991,14 +1168,22 @@ mod authz_gating_tests {
 
         let viewer_app = app_as_user(db.clone(), &viewer);
         assert_eq!(
-            json_put(&viewer_app, &format!("/api/issues/{issue_id}"), serde_json::json!({"title": "hijack"}))
+            json_put(
+                &viewer_app,
+                &format!("/api/issues/{issue_id}"),
+                serde_json::json!({"title": "hijack"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
         );
         let non_member_app = app_as_user(db.clone(), &non_member);
         assert_eq!(
-            json_put(&non_member_app, &format!("/api/issues/{issue_id}"), serde_json::json!({"title": "hijack"}))
+            json_put(
+                &non_member_app,
+                &format!("/api/issues/{issue_id}"),
+                serde_json::json!({"title": "hijack"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -1006,18 +1191,26 @@ mod authz_gating_tests {
 
         let lead_app = app_as_user(db.clone(), &lead);
         assert_eq!(
-            json_put(&lead_app, &format!("/api/issues/{issue_id}"), serde_json::json!({"title": "renamed"}))
+            json_put(
+                &lead_app,
+                &format!("/api/issues/{issue_id}"),
+                serde_json::json!({"title": "renamed"})
+            )
                 .await
                 .status(),
             StatusCode::OK
         );
 
         assert_eq!(
-            json_delete(&viewer_app, &format!("/api/issues/{issue_id}")).await.status(),
+            json_delete(&viewer_app, &format!("/api/issues/{issue_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            json_delete(&lead_app, &format!("/api/issues/{issue_id}")).await.status(),
+            json_delete(&lead_app, &format!("/api/issues/{issue_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
     }
@@ -1027,7 +1220,12 @@ mod authz_gating_tests {
         let (db, _admin, lead, maintainer, viewer, non_member, project_id) =
             setup_membership_test();
 
-        for (user, expect_ok) in [(&viewer, false), (&non_member, false), (&maintainer, true), (&lead, true)] {
+        for (user, expect_ok) in [
+            (&viewer, false),
+            (&non_member, false),
+            (&maintainer, true),
+            (&lead, true),
+        ] {
             let app = app_as_user(db.clone(), user);
             let resp = json_post(
                 &app,
@@ -1035,7 +1233,11 @@ mod authz_gating_tests {
                 serde_json::json!({ "project_id": project_id, "title": format!("page by {}", user.username) }),
             )
             .await;
-            let expected = if expect_ok { StatusCode::OK } else { StatusCode::FORBIDDEN };
+            let expected = if expect_ok {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            };
             assert_eq!(resp.status(), expected, "page create by {}", user.username);
 
             let resp = json_post(
@@ -1073,7 +1275,11 @@ mod authz_gating_tests {
             serde_json::json!({ "content": "viewers can comment" }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK, "viewer must be allowed to comment");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "viewer must be allowed to comment"
+        );
 
         let non_member_app = app_as_user(db, &non_member);
         let resp = json_post(
@@ -1094,14 +1300,22 @@ mod authz_gating_tests {
 
         let viewer_app = app_as_user(db.clone(), &viewer);
         assert_eq!(
-            json_post(&viewer_app, "/api/modules", serde_json::json!({"project_id": project_id, "name": "Nope"}))
+            json_post(
+                &viewer_app,
+                "/api/modules",
+                serde_json::json!({"project_id": project_id, "name": "Nope"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
         );
         let non_member_app = app_as_user(db.clone(), &non_member);
         assert_eq!(
-            json_post(&non_member_app, "/api/labels", serde_json::json!({"project_id": project_id, "name": "nope"}))
+            json_post(
+                &non_member_app,
+                "/api/labels",
+                serde_json::json!({"project_id": project_id, "name": "nope"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -1109,14 +1323,22 @@ mod authz_gating_tests {
 
         let maintainer_app = app_as_user(db.clone(), &maintainer);
         assert_eq!(
-            json_post(&maintainer_app, "/api/modules", serde_json::json!({"project_id": project_id, "name": "Backend"}))
+            json_post(
+                &maintainer_app,
+                "/api/modules",
+                serde_json::json!({"project_id": project_id, "name": "Backend"})
+            )
                 .await
                 .status(),
             StatusCode::OK,
             "maintainer should manage structure once enforcement loosens the gate"
         );
         assert_eq!(
-            json_post(&maintainer_app, "/api/folders", serde_json::json!({"project_id": project_id, "name": "Docs"}))
+            json_post(
+                &maintainer_app,
+                "/api/folders",
+                serde_json::json!({"project_id": project_id, "name": "Docs"})
+            )
                 .await
                 .status(),
             StatusCode::OK
@@ -1132,7 +1354,11 @@ mod authz_gating_tests {
 
         let maintainer_app = app_as_user(db.clone(), &maintainer);
         assert_eq!(
-            json_put(&maintainer_app, &format!("/api/projects/{project_id}"), serde_json::json!({"name": "Nope"}))
+            json_put(
+                &maintainer_app,
+                &format!("/api/projects/{project_id}"),
+                serde_json::json!({"name": "Nope"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -1140,7 +1366,11 @@ mod authz_gating_tests {
 
         let lead_app = app_as_user(db, &lead);
         assert_eq!(
-            json_put(&lead_app, &format!("/api/projects/{project_id}"), serde_json::json!({"name": "Renamed"}))
+            json_put(
+                &lead_app,
+                &format!("/api/projects/{project_id}"),
+                serde_json::json!({"name": "Renamed"})
+            )
                 .await
                 .status(),
             StatusCode::OK
@@ -1155,13 +1385,17 @@ mod authz_gating_tests {
 
         let maintainer_app = app_as_user(db.clone(), &maintainer);
         assert_eq!(
-            json_delete(&maintainer_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_delete(&maintainer_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
 
         let lead_app = app_as_user(db, &lead);
         assert_eq!(
-            json_delete(&lead_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_delete(&lead_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
     }
@@ -1174,7 +1408,12 @@ mod authz_gating_tests {
             setup_membership_test();
         let lead_app = app_as_user(db.clone(), &lead);
         let issue_a = parse_json(
-            json_post(&lead_app, "/api/issues", serde_json::json!({"project_id": project_id, "title": "A"})).await,
+            json_post(
+                &lead_app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": "A"}),
+            )
+            .await,
         )
         .await;
 
@@ -1208,18 +1447,27 @@ mod authz_gating_tests {
             "source": issue_a["identifier"], "target": issue_b["identifier"], "relation_type": "relates_to"
         });
         assert_eq!(
-            json_post(&maintainer_app, "/api/issues/link", link_body.clone()).await.status(),
+            json_post(&maintainer_app, "/api/issues/link", link_body.clone())
+                .await
+                .status(),
             StatusCode::FORBIDDEN,
             "maintainer has no role on the target's project"
         );
 
         {
             let conn = db.write().unwrap();
-            crate::db::queries::members::upsert_member(&conn, other_project_id, maintainer.id, Role::Maintainer)
+            crate::db::queries::members::upsert_member(
+                &conn,
+                other_project_id,
+                maintainer.id,
+                Role::Maintainer,
+            )
                 .unwrap();
         }
         assert_eq!(
-            json_post(&maintainer_app, "/api/issues/link", link_body).await.status(),
+            json_post(&maintainer_app, "/api/issues/link", link_body)
+                .await
+                .status(),
             StatusCode::OK,
             "maintainer now has Maintainer on both sides"
         );
@@ -1234,7 +1482,11 @@ mod authz_gating_tests {
 
         let maintainer_app = app_as_user(db.clone(), &maintainer);
         assert_eq!(
-            json_post(&maintainer_app, "/api/pages", serde_json::json!({"title": "Workspace doc"}))
+            json_post(
+                &maintainer_app,
+                "/api/pages",
+                serde_json::json!({"title": "Workspace doc"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -1242,7 +1494,13 @@ mod authz_gating_tests {
 
         let admin_app = app_as_user(db, &admin);
         assert_eq!(
-            json_post(&admin_app, "/api/pages", serde_json::json!({"title": "Workspace doc"})).await.status(),
+            json_post(
+                &admin_app,
+                "/api/pages",
+                serde_json::json!({"title": "Workspace doc"})
+            )
+            .await
+            .status(),
             StatusCode::OK
         );
     }
@@ -1273,24 +1531,36 @@ mod authz_gating_tests {
 
         // Read: project + issue, despite no membership row for admin.
         assert_eq!(
-            json_get(&admin_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_get(&admin_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::OK,
             "admin must read a project they're not a member of"
         );
         assert_eq!(
-            json_get(&admin_app, &format!("/api/issues/{issue_id}")).await.status(),
+            json_get(&admin_app, &format!("/api/issues/{issue_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
 
         // Write: create + update.
         assert_eq!(
-            json_post(&admin_app, "/api/issues", serde_json::json!({ "project_id": project_id, "title": "by admin" }))
+            json_post(
+                &admin_app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": "by admin" })
+            )
                 .await
                 .status(),
             StatusCode::OK
         );
         assert_eq!(
-            json_put(&admin_app, &format!("/api/issues/{issue_id}"), serde_json::json!({"title": "renamed by admin"}))
+            json_put(
+                &admin_app,
+                &format!("/api/issues/{issue_id}"),
+                serde_json::json!({"title": "renamed by admin"})
+            )
                 .await
                 .status(),
             StatusCode::OK
@@ -1361,8 +1631,10 @@ mod authz_gating_tests {
 
         fn insert_oauth_token(db: &crate::db::DbPool, suffix: &str, user_id: i64) -> String {
             let token = format!("lific_at_test-{suffix}");
-            let hash: String =
-                Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = Sha256::digest(token.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
             let client_id = format!("client-{suffix}");
             let conn = db.write().unwrap();
@@ -1391,8 +1663,16 @@ mod authz_gating_tests {
         // The real request path: api::router behind the real require_api_key
         // middleware — not the app_as_user() Extension-injection shortcut.
         let app = crate::api::router(db.clone(), &[])
-            .layer(axum::Extension(crate::config::AuthConfig { allow_signup: true, required: true, secure_cookies: false }))
-            .layer(axum::middleware::from_fn_with_state(auth_state, crate::auth::require_api_key));
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+            .layer(axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                crate::auth::require_api_key,
+            ));
 
         async fn get_with_token(app: axum::Router, uri: String, token: &str) -> SC {
             app.oneshot(
@@ -1429,7 +1709,12 @@ mod authz_gating_tests {
 
         // Token-backed MEMBER succeeds on read + write.
         assert_eq!(
-            get_with_token(app.clone(), format!("/api/issues/{issue_id}"), &member_token).await,
+            get_with_token(
+                app.clone(),
+                format!("/api/issues/{issue_id}"),
+                &member_token
+            )
+            .await,
             SC::OK,
             "token-backed member must be able to read"
         );
@@ -1447,7 +1732,12 @@ mod authz_gating_tests {
 
         // Token-backed NON-MEMBER is denied on both.
         assert_eq!(
-            get_with_token(app.clone(), format!("/api/issues/{issue_id}"), &outsider_token).await,
+            get_with_token(
+                app.clone(),
+                format!("/api/issues/{issue_id}"),
+                &outsider_token
+            )
+            .await,
             SC::FORBIDDEN,
             "token-backed non-member must be denied on read"
         );
@@ -1475,7 +1765,9 @@ mod authz_gating_tests {
 
         // Reads + content mutation stay open to any authenticated user.
         assert_eq!(
-            json_get(&random_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_get(&random_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
@@ -1492,14 +1784,22 @@ mod authz_gating_tests {
 
         // Structure endpoints stay lead-gated (not loosened to Maintainer).
         assert_eq!(
-            json_post(&random_app, "/api/modules", serde_json::json!({"project_id": project_id, "name": "Nope"}))
+            json_post(
+                &random_app,
+                "/api/modules",
+                serde_json::json!({"project_id": project_id, "name": "Nope"})
+            )
                 .await
                 .status(),
             StatusCode::FORBIDDEN
         );
         let lead_app = app_as_user(db.clone(), &lead);
         assert_eq!(
-            json_post(&lead_app, "/api/modules", serde_json::json!({"project_id": project_id, "name": "Yes"}))
+            json_post(
+                &lead_app,
+                "/api/modules",
+                serde_json::json!({"project_id": project_id, "name": "Yes"})
+            )
                 .await
                 .status(),
             StatusCode::OK
@@ -1507,12 +1807,16 @@ mod authz_gating_tests {
 
         // Project delete stays admin-only (lead denied, matching pre-LIF-194).
         assert_eq!(
-            json_delete(&lead_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_delete(&lead_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
         let admin_app = app_as_user(db, &admin);
         assert_eq!(
-            json_delete(&admin_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_delete(&admin_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
     }
@@ -1527,11 +1831,17 @@ mod authz_gating_tests {
 
         // Flag off (default): a non-member can read the project freely.
         assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_get(&regular_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::OK
         );
 
-        let resp = json_patch(&admin_app, "/api/instance/settings", serde_json::json!({"authz_enforced": true}))
+        let resp = json_patch(
+            &admin_app,
+            "/api/instance/settings",
+            serde_json::json!({"authz_enforced": true}),
+        )
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(parse_json(resp).await["authz_enforced"], true);
@@ -1539,8 +1849,219 @@ mod authz_gating_tests {
         // Same connection, next request: the non-member is now denied — no
         // restart required (authz::authz_enforced reads the row live).
         assert_eq!(
-            json_get(&regular_app, &format!("/api/projects/{project_id}")).await.status(),
+            json_get(&regular_app, &format!("/api/projects/{project_id}"))
+                .await
+                .status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    fn websocket_session() -> (crate::db::DbPool, String) {
+        let db = crate::db::open_memory().expect("test db");
+        let token = {
+            let conn = db.write().unwrap();
+            let user = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "ws-user".into(),
+                    email: "ws@test.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            crate::db::queries::users::create_session(&conn, user.id, None)
+                .unwrap()
+                .token
+        };
+        (db, token)
+    }
+
+    #[test]
+    fn websocket_session_token_reads_cookie_only() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer lific_sess_bearer".parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::COOKIE,
+            "theme=dark; lific_token=lific_sess_cookie; other=1"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            super::websocket_session_token(&headers),
+            Some("lific_sess_cookie")
+        );
+    }
+
+    #[test]
+    fn websocket_session_token_rejects_empty_credentials() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::COOKIE, "lific_token=".parse().unwrap());
+        assert_eq!(super::websocket_session_token(&headers), None);
+
+        headers.insert(
+            axum::http::header::COOKIE,
+            "lific_token=   ".parse().unwrap(),
+        );
+        assert_eq!(super::websocket_session_token(&headers), None);
+    }
+
+    #[test]
+    fn websocket_session_token_rejects_non_session_credentials() {
+        for value in ["lific_sk_live_x", "lific_at_x", "garbage"] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::COOKIE,
+                format!("lific_token={value}").parse().unwrap(),
+            );
+            assert_eq!(
+                super::websocket_session_token(&headers),
+                None,
+                "websocket cookie auth must only accept session tokens"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_missing_or_invalid_session_cookie() {
+        let (db, _) = websocket_session();
+
+        let missing = axum::http::HeaderMap::new();
+        assert!(matches!(
+            super::validate_websocket_request(&db, &missing, &[]),
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+
+        let mut invalid = axum::http::HeaderMap::new();
+        invalid.insert(
+            axum::http::header::COOKIE,
+            "lific_token=lific_sess_fake".parse().unwrap(),
+        );
+        assert!(matches!(
+            super::validate_websocket_request(&db, &invalid, &[]),
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn websocket_accepts_valid_session_cookie_before_upgrade() {
+        let (db, token) = websocket_session();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+
+        super::validate_websocket_request(&db, &headers, &[]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_origin_policy_uses_configured_origins() {
+        let origins = vec!["https://app.example.test".to_string()];
+        let (db, token) = websocket_session();
+
+        let mut rejected = axum::http::HeaderMap::new();
+        rejected.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example.test".parse().unwrap(),
+        );
+        rejected.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        assert!(matches!(
+            super::validate_websocket_request(&db, &rejected, &origins),
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+
+        let mut accepted = axum::http::HeaderMap::new();
+        accepted.insert(
+            axum::http::header::ORIGIN,
+            "https://app.example.test".parse().unwrap(),
+        );
+        accepted.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        super::validate_websocket_request(&db, &accepted, &origins).unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_origin_policy_rejects_cross_site_by_default() {
+        let (db, token) = websocket_session();
+
+        let mut rejected = axum::http::HeaderMap::new();
+        rejected.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example.test".parse().unwrap(),
+        );
+        rejected.insert(
+            axum::http::header::HOST,
+            "app.example.test".parse().unwrap(),
+        );
+        rejected.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        assert!(matches!(
+            super::validate_websocket_request(&db, &rejected, &[]),
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+
+        let mut malformed = axum::http::HeaderMap::new();
+        malformed.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        malformed.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        assert!(matches!(
+            super::validate_websocket_request(&db, &malformed, &[]),
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+
+        let mut same_origin = axum::http::HeaderMap::new();
+        same_origin.insert(
+            axum::http::header::ORIGIN,
+            "https://app.example.test".parse().unwrap(),
+        );
+        same_origin.insert(
+            axum::http::header::HOST,
+            "app.example.test".parse().unwrap(),
+        );
+        same_origin.insert("x-forwarded-proto", "https".parse().unwrap());
+        same_origin.insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        super::validate_websocket_request(&db, &same_origin, &[]).unwrap();
+
+        same_origin.insert(
+            axum::http::header::ORIGIN,
+            "https://app.example.test".parse().unwrap(),
+        );
+        same_origin.insert(
+            axum::http::header::HOST,
+            "app.example.test:443".parse().unwrap(),
+        );
+        super::validate_websocket_request(&db, &same_origin, &[]).unwrap();
+
+        same_origin.insert(
+            axum::http::header::ORIGIN,
+            "http://app.example.test:80".parse().unwrap(),
+        );
+        same_origin.insert(
+            axum::http::header::HOST,
+            "app.example.test".parse().unwrap(),
+        );
+        same_origin.insert("x-forwarded-proto", "http".parse().unwrap());
+        super::validate_websocket_request(&db, &same_origin, &[]).unwrap();
     }
 }

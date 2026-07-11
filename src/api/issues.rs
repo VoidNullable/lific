@@ -6,6 +6,7 @@ use axum::{
 use crate::authz;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
+use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{filter_visible, with_read, with_write};
 
@@ -21,7 +22,9 @@ pub(super) async fn list_issues(
     // Cross-project list: filter instead of denying (LIF-197 scope item 2).
     let visible = authz::visible_project_ids(&db, &auth_user)?;
     let issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
-    Ok(Json(filter_visible(issues, &visible, |i| Some(i.project_id))))
+    Ok(Json(filter_visible(issues, &visible, |i| {
+        Some(i.project_id)
+    })))
 }
 
 pub(super) async fn get_issue(
@@ -49,6 +52,7 @@ pub(super) async fn resolve_issue(
 
 pub(super) async fn create_issue(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<CreateIssue>,
 ) -> Result<Json<Issue>, LificError> {
@@ -64,11 +68,16 @@ pub(super) async fn create_issue(
         )?;
         Ok(issue)
     })?;
+    realtime.send(RealtimeEvent::IssueCreated {
+        project_id: issue.project_id,
+        issue_id: issue.id,
+    });
     Ok(Json(issue))
 }
 
 pub(super) async fn update_issue(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
     Json(input): Json<UpdateIssue>,
@@ -86,17 +95,30 @@ pub(super) async fn update_issue(
         )?;
         Ok(issue)
     })?;
+    realtime.send(RealtimeEvent::IssueUpdated {
+        project_id: issue.project_id,
+        issue_id: issue.id,
+    });
     Ok(Json(issue))
 }
 
 pub(super) async fn delete_issue_handler(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
-    with_write(&db, |conn| crate::db::queries::delete_issue(conn, id))?;
+    let issue = with_write(&db, |conn| {
+        let issue = crate::db::queries::get_issue(conn, id)?;
+        crate::db::queries::delete_issue(conn, id)?;
+        Ok(issue)
+    })?;
+    realtime.send(RealtimeEvent::IssueDeleted {
+        project_id: issue.project_id,
+        issue_id: issue.id,
+    });
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
@@ -115,49 +137,65 @@ pub(super) struct UnlinkRequest {
 
 pub(super) async fn link_issues(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<LinkRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let (source_id, target_id) = with_read(&db, |conn| {
+    let (source, target) = with_read(&db, |conn| {
         let source_id = crate::db::queries::resolve_identifier(conn, &input.source)?;
         let target_id = crate::db::queries::resolve_identifier(conn, &input.target)?;
-        Ok((source_id, target_id))
+        Ok((
+            crate::db::queries::get_issue(conn, source_id)?,
+            crate::db::queries::get_issue(conn, target_id)?,
+        ))
     })?;
     // Cross-project relation: the caller must be a Maintainer on BOTH sides
     // (LIF-197 scope item 3), even when source and target share a project.
-    let source_project = with_read(&db, |conn| crate::db::queries::get_issue(conn, source_id))?
-        .project_id;
-    let target_project = with_read(&db, |conn| crate::db::queries::get_issue(conn, target_id))?
-        .project_id;
-    authz::require_role(&db, &auth_user, source_project, Role::Maintainer)?;
-    authz::require_role(&db, &auth_user, target_project, Role::Maintainer)?;
+    authz::require_role(&db, &auth_user, source.project_id, Role::Maintainer)?;
+    authz::require_role(&db, &auth_user, target.project_id, Role::Maintainer)?;
 
     with_write(&db, |conn| {
-        crate::db::queries::link_issues(conn, source_id, target_id, &input.relation_type)
+        crate::db::queries::link_issues(conn, source.id, target.id, &input.relation_type)
     })?;
+    realtime.send(RealtimeEvent::IssueLinked {
+        project_id: source.project_id,
+        issue_id: source.id,
+    });
+    realtime.send(RealtimeEvent::IssueLinked {
+        project_id: target.project_id,
+        issue_id: target.id,
+    });
     Ok(Json(serde_json::json!({"linked": true})))
 }
 
 pub(super) async fn unlink_issues(
     State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Json(input): Json<UnlinkRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let (source_id, target_id) = with_read(&db, |conn| {
+    let (source, target) = with_read(&db, |conn| {
         let source_id = crate::db::queries::resolve_identifier(conn, &input.source)?;
         let target_id = crate::db::queries::resolve_identifier(conn, &input.target)?;
-        Ok((source_id, target_id))
+        Ok((
+            crate::db::queries::get_issue(conn, source_id)?,
+            crate::db::queries::get_issue(conn, target_id)?,
+        ))
     })?;
-    let source_project = with_read(&db, |conn| crate::db::queries::get_issue(conn, source_id))?
-        .project_id;
-    let target_project = with_read(&db, |conn| crate::db::queries::get_issue(conn, target_id))?
-        .project_id;
-    authz::require_role(&db, &auth_user, source_project, Role::Maintainer)?;
-    authz::require_role(&db, &auth_user, target_project, Role::Maintainer)?;
+    authz::require_role(&db, &auth_user, source.project_id, Role::Maintainer)?;
+    authz::require_role(&db, &auth_user, target.project_id, Role::Maintainer)?;
 
     with_write(&db, |conn| {
-        crate::db::queries::unlink_issues(conn, source_id, target_id)
+        crate::db::queries::unlink_issues(conn, source.id, target.id)
     })?;
+    realtime.send(RealtimeEvent::IssueUnlinked {
+        project_id: source.project_id,
+        issue_id: source.id,
+    });
+    realtime.send(RealtimeEvent::IssueUnlinked {
+        project_id: target.project_id,
+        issue_id: target.id,
+    });
     Ok(Json(serde_json::json!({"unlinked": true})))
 }
 
@@ -167,6 +205,31 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn issue_create_emits_realtime_event() {
+        let test = test_app_with_realtime();
+        let (project_id, _) = seed_project(&test.app).await;
+        let mut events = test.realtime.subscribe();
+        let body = serde_json::json!({
+            "project_id": project_id,
+            "title": "Fresh event",
+        });
+
+        let resp = json_post(&test.app, "/api/issues", body).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(text) = event.message else {
+            panic!("expected text realtime event");
+        };
+        let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["type"], "issue.created");
+        assert_eq!(event["project_id"], project_id);
+    }
 
     #[tokio::test]
     async fn issue_crud_lifecycle() {

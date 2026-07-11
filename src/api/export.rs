@@ -1,11 +1,11 @@
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::IntoResponse;
-use axum::Extension;
 
 use crate::authz;
-use crate::db::models::{AuthUser, Role};
 use crate::db::DbPool;
+use crate::db::models::{AuthUser, Role};
 use crate::error::LificError;
 
 use super::with_read;
@@ -36,10 +36,18 @@ pub(super) async fn export_issue(
         .into_iter()
         .next()
         .ok_or_else(|| LificError::Internal("issue export produced no files".into()))?;
-    let filename = file.path.rsplit('/').next().unwrap_or("issue.md").to_string();
+    let filename = file
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or("issue.md")
+        .to_string();
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
     headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
     Ok((headers, file.content))
 }
@@ -63,10 +71,18 @@ pub(super) async fn export_page(
         .into_iter()
         .next()
         .ok_or_else(|| LificError::Internal("page export produced no files".into()))?;
-    let filename = file.path.rsplit('/').next().unwrap_or("page.md").to_string();
+    let filename = file
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or("page.md")
+        .to_string();
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
     headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
     Ok((headers, file.content))
 }
@@ -77,8 +93,9 @@ pub(super) async fn export_project(
     Path(identifier): Path<String>,
     Query(q): Query<ProjectExportQuery>,
 ) -> Result<impl IntoResponse, LificError> {
-    let project_id =
-        with_read(&db, |conn| crate::db::queries::resolve_project_identifier(conn, &identifier))?;
+    let project_id = with_read(&db, |conn| {
+        crate::db::queries::resolve_project_identifier(conn, &identifier)
+    })?;
     authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
     let format = q.format.as_deref().unwrap_or("zip");
     let bundle = with_read(&db, |conn| crate::export::export_project(conn, &identifier))?;
@@ -89,7 +106,10 @@ pub(super) async fn export_project(
             let filename = format!("{}-export.zip", bundle.root.to_ascii_lowercase());
             let bytes = crate::export::bundle_to_zip(&bundle)?;
             let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/zip"),
+            );
             headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
             Ok((headers, bytes).into_response())
         }
@@ -129,7 +149,10 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/export/issues/{}", created["identifier"].as_str().unwrap()))
+                    .uri(format!(
+                        "/api/export/issues/{}",
+                        created["identifier"].as_str().unwrap()
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -164,13 +187,19 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/export/projects/{}", project["identifier"].as_str().unwrap()))
+                    .uri(format!(
+                        "/api/export/projects/{}",
+                        project["identifier"].as_str().unwrap()
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.headers()[axum::http::header::CONTENT_TYPE], "application/zip");
+        assert_eq!(
+            resp.headers()[axum::http::header::CONTENT_TYPE],
+            "application/zip"
+        );
     }
 }

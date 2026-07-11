@@ -96,7 +96,11 @@
         addingChildOf !== null ||
         editingTitleOf !== null ||
         editingDescOf !== null,
-      intervalMs: 15_000,
+      shouldRefresh: (event) =>
+        event.type === "resync.required" ||
+        (event.type.startsWith("project.") &&
+          typeof event.project_id === "number" &&
+          event.project_id === plan?.project_id),
     }),
   );
 

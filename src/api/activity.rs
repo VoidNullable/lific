@@ -32,9 +32,9 @@ async fn require_scope_viewer(
         ActivityScope::Page(id) => {
             with_read(db, |conn| crate::db::queries::get_page(conn, id))?.project_id
         }
-        ActivityScope::Plan(id) => Some(
-            with_read(db, |conn| crate::db::queries::plans::get_plan(conn, id))?.project_id,
-        ),
+        ActivityScope::Plan(id) => {
+            Some(with_read(db, |conn| crate::db::queries::plans::get_plan(conn, id))?.project_id)
+        }
         ActivityScope::Project(id) => Some(id),
     };
     match project_id {

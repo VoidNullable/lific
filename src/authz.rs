@@ -163,6 +163,24 @@ pub fn require_role(
     require_role_conn(&conn, auth_user, project_id, min)
 }
 
+pub(crate) fn can_view_project(
+    db: &DbPool,
+    user: &AuthUser,
+    project_id: i64,
+) -> Result<bool, LificError> {
+    if user.is_admin {
+        return Ok(true);
+    }
+    let conn = db.read()?;
+    if !authz_enforced_conn(&conn)? {
+        return Ok(true);
+    }
+    Ok(matches!(
+        queries::members::get_member_role(&conn, project_id, user.id)?,
+        Some(role) if role >= Role::Viewer
+    ))
+}
+
 fn require_role_conn(
     conn: &Connection,
     auth_user: &Option<AuthUser>,
