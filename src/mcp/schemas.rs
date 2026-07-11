@@ -70,6 +70,10 @@ pub struct ListIssuesInput {
 pub struct GetIssueInput {
     #[schemars(description = "Issue identifier like PRO-42 or ADA-7")]
     pub identifier: String,
+    #[schemars(
+        description = "Comment trail: 'recent' (default, last 3), 'all', or 'none'."
+    )]
+    pub include_comments: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -352,6 +356,10 @@ pub struct ListCommentsInput {
         description = "Sort direction by creation time: asc (default, oldest first) or desc (newest first)"
     )]
     pub order: Option<String>,
+    #[schemars(
+        description = "Max comments to return (applied after author filter, in the requested order). Combine with order=desc for the newest N."
+    )]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

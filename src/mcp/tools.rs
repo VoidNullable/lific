@@ -668,9 +668,17 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Get a single issue by identifier (e.g. LIF-1). Returns full details with relations."
+        description = "Get a single issue by identifier (e.g. LIF-1). Returns full details with relations. The comment trail defaults to the last 3 (include_comments='recent'); use 'all' for the whole thread or 'none' to suppress it."
     )]
     fn get_issue(&self, Parameters(input): Parameters<GetIssueInput>) -> String {
+        // Validate the comment-trail mode up front so a typo errors instead of
+        // silently defaulting.
+        let comment_mode = input.include_comments.as_deref().unwrap_or("recent");
+        if !matches!(comment_mode, "recent" | "all" | "none") {
+            return format!(
+                "Error: invalid include_comments '{comment_mode}'. Use recent, all, or none."
+            );
+        }
         match self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let issue = queries::get_issue(conn, id)?;
@@ -712,7 +720,7 @@ impl LificMcp {
                 if !issue.description.is_empty() {
                     out.push_str(&format!("\n{}\n", issue.description));
                 }
-                // Include comments
+                // Include comments per the requested trail mode (LIF-301).
                 if let Ok(comments) = self.read(|conn| {
                     queries::comments::list_comments(
                         conn,
@@ -722,12 +730,36 @@ impl LificMcp {
                     )
                 }) && !comments.is_empty()
                 {
-                    out.push_str(&format!("\n--- Comments ({}) ---\n", comments.len()));
-                    for c in &comments {
-                        out.push_str(&format!(
-                            "[{}] {} ({}): {}\n",
-                            c.created_at, c.author, c.author_display_name, c.content
-                        ));
+                    let total = comments.len();
+                    match comment_mode {
+                        // Emit only a stub pointing at list_comments.
+                        "none" => {
+                            out.push_str(&format!(
+                                "\n--- Comments ({total}, omitted — use list_comments) ---\n"
+                            ));
+                        }
+                        // Last 3 by default; full header only when truncating.
+                        "recent" if total > 3 => {
+                            out.push_str(&format!(
+                                "\n--- Comments ({total}, showing last 3 — use list_comments) ---\n"
+                            ));
+                            for c in &comments[total - 3..] {
+                                out.push_str(&format!(
+                                    "[{}] {} ({}): {}\n",
+                                    c.created_at, c.author, c.author_display_name, c.content
+                                ));
+                            }
+                        }
+                        // "all", or "recent" with <= 3 comments: today's format.
+                        _ => {
+                            out.push_str(&format!("\n--- Comments ({total}) ---\n"));
+                            for c in &comments {
+                                out.push_str(&format!(
+                                    "[{}] {} ({}): {}\n",
+                                    c.created_at, c.author, c.author_display_name, c.content
+                                ));
+                            }
+                        }
                     }
                 }
                 out
@@ -2335,8 +2367,19 @@ impl LificMcp {
                 format!("No comments on {}.", input.identifier)
             }
             Ok(comments) => {
-                let mut out = format!("{} comment(s) on {}:\n", comments.len(), input.identifier);
-                for c in &comments {
+                let total = comments.len();
+                // Clamp the limit floor to 1 (a 0/negative limit is
+                // meaningless) and truncate the already-filtered+ordered list.
+                let shown = match input.limit {
+                    Some(n) => (n.max(1) as usize).min(total),
+                    None => total,
+                };
+                let mut out = if shown < total {
+                    format!("Showing {shown} of {total} comment(s) on {}:\n", input.identifier)
+                } else {
+                    format!("{total} comment(s) on {}:\n", input.identifier)
+                };
+                for c in &comments[..shown] {
                     out.push_str(&format!(
                         "[{}] {} ({}): {}\n",
                         c.created_at, c.author, c.author_display_name, c.content
@@ -2985,6 +3028,7 @@ mod tests {
 
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "TST-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("First issue"), "got: {detail}");
         assert!(detail.contains("backlog"), "got: {detail}");
@@ -3020,6 +3064,7 @@ mod tests {
 
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "OPT-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("high"), "got: {detail}");
         assert!(detail.contains("todo"), "got: {detail}");
@@ -3174,12 +3219,14 @@ mod tests {
         for id in ["BLK-1", "BLK-2"] {
             let got = m.get_issue(Parameters(GetIssueInput {
                 identifier: id.into(),
+            ..Default::default()
             }));
             assert!(got.contains("Status: done"), "{id} not done: {got}");
         }
         // The out-of-filter issue is untouched (still active).
         let loose = m.get_issue(Parameters(GetIssueInput {
             identifier: "BLK-3".into(),
+            ..Default::default()
         }));
         assert!(loose.contains("Status: active"), "loose changed: {loose}");
     }
@@ -3233,6 +3280,7 @@ mod tests {
         // Verify gone
         let get = m.get_issue(Parameters(GetIssueInput {
             identifier: "DEL-1".into(),
+            ..Default::default()
         }));
         assert!(get.starts_with("Error"), "got: {get}");
     }
@@ -3242,6 +3290,7 @@ mod tests {
         let m = mcp();
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "NOPE-999".into(),
+            ..Default::default()
         }));
         assert!(result.starts_with("Error"), "got: {result}");
     }
@@ -3429,6 +3478,7 @@ mod tests {
         // Verify relation shows in get_issue
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "LNK-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Blocks"), "got: {detail}");
 
@@ -4280,9 +4330,193 @@ mod tests {
 
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "PRJ-1".into(),
+            ..Default::default()
         }));
         assert!(result.contains("Comments (1)"), "got: {result}");
         assert!(result.contains("Visible in get_issue"), "got: {result}");
+    }
+
+    // ── get_issue comment-trail controls (LIF-301) ──
+
+    /// Post `n` numbered comments on PRJ-1 and return the mcp + guard.
+    fn seed_comment_trail(m: &LificMcp, n: usize) {
+        for i in 1..=n {
+            m.add_comment(Parameters(AddCommentInput {
+                identifier: "PRJ-1".into(),
+                content: format!("comment number {i}"),
+            }));
+        }
+    }
+
+    #[test]
+    fn get_issue_recent_truncates_over_three_comments() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Chatty issue");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 9);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        // Stub header reports the total and the truncation.
+        assert!(
+            result.contains("--- Comments (9, showing last 3 — use list_comments) ---"),
+            "got: {result}"
+        );
+        // Only the LAST 3 (7,8,9) appear; earlier ones are hidden.
+        assert!(result.contains("comment number 7"), "got: {result}");
+        assert!(result.contains("comment number 8"), "got: {result}");
+        assert!(result.contains("comment number 9"), "got: {result}");
+        assert!(!result.contains("comment number 6"), "got: {result}");
+        assert!(!result.contains("comment number 1 "), "got: {result}");
+    }
+
+    #[test]
+    fn get_issue_recent_unchanged_at_three_or_fewer() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Few comments");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 3);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        assert!(result.contains("--- Comments (3) ---"), "got: {result}");
+        assert!(!result.contains("showing last 3"), "got: {result}");
+        assert!(result.contains("comment number 1"), "got: {result}");
+    }
+
+    #[test]
+    fn get_issue_all_shows_every_comment() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Full history");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 5);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+        assert!(result.contains("--- Comments (5) ---"), "got: {result}");
+        for i in 1..=5 {
+            assert!(result.contains(&format!("comment number {i}")), "got: {result}");
+        }
+    }
+
+    #[test]
+    fn get_issue_none_emits_stub_only() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Suppressed");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 9);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("none".into()),
+        }));
+        assert!(
+            result.contains("--- Comments (9, omitted — use list_comments) ---"),
+            "got: {result}"
+        );
+        assert!(!result.contains("comment number"), "got: {result}");
+    }
+
+    #[test]
+    fn get_issue_none_with_zero_comments_shows_nothing() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Quiet");
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("none".into()),
+        }));
+        assert!(!result.contains("Comments"), "got: {result}");
+    }
+
+    #[test]
+    fn get_issue_invalid_include_comments_errors() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Bad mode");
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("last5".into()),
+        }));
+        assert_eq!(
+            result,
+            "Error: invalid include_comments 'last5'. Use recent, all, or none."
+        );
+    }
+
+    #[test]
+    fn list_comments_limit_truncates_with_header() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Limited");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 9);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            limit: Some(3),
+            ..Default::default()
+        }));
+        assert!(
+            result.starts_with("Showing 3 of 9 comment(s) on PRJ-1:"),
+            "got: {result}"
+        );
+        // Default order is asc, so the first 3 are 1,2,3.
+        assert!(result.contains("comment number 1"), "got: {result}");
+        assert!(result.contains("comment number 3"), "got: {result}");
+        assert!(!result.contains("comment number 4"), "got: {result}");
+    }
+
+    #[test]
+    fn list_comments_limit_desc_returns_newest_first() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Newest N");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 9);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            order: Some("desc".into()),
+            limit: Some(2),
+            ..Default::default()
+        }));
+        assert!(
+            result.starts_with("Showing 2 of 9 comment(s) on PRJ-1:"),
+            "got: {result}"
+        );
+        // desc + limit 2 → the two newest (9, 8), not the oldest.
+        assert!(result.contains("comment number 9"), "got: {result}");
+        assert!(result.contains("comment number 8"), "got: {result}");
+        assert!(!result.contains("comment number 1"), "got: {result}");
+    }
+
+    #[test]
+    fn list_comments_no_limit_keeps_plain_header() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Unlimited");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 4);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("4 comment(s) on PRJ-1:"), "got: {result}");
+        assert!(!result.contains("Showing"), "got: {result}");
     }
 
     #[test]
@@ -4592,6 +4826,7 @@ mod tests {
 
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "EDI-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("The quick red fox"), "got: {detail}");
         assert!(!detail.contains("brown"), "got: {detail}");
@@ -4643,6 +4878,7 @@ mod tests {
         // Original content untouched.
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "EDN-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("hello world"), "got: {detail}");
     }
@@ -4682,6 +4918,7 @@ mod tests {
 
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "EDA-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("bar bar bar"), "got: {detail}");
     }
@@ -4739,6 +4976,7 @@ mod tests {
         // Description untouched.
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "EDT-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("body"), "got: {detail}");
     }
@@ -4785,6 +5023,7 @@ mod tests {
 
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "EDP-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Stays"), "title preserved, got: {detail}");
         assert!(detail.contains("active"), "status preserved, got: {detail}");
@@ -5113,6 +5352,7 @@ mod tests {
         assert!(!set.starts_with("Error"), "set failed: {set}");
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "CLM-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Module: Core"), "got: {detail}");
 
@@ -5130,6 +5370,7 @@ mod tests {
         assert!(!cleared.starts_with("Error"), "clear failed: {cleared}");
         let detail = m.get_issue(Parameters(GetIssueInput {
             identifier: "CLM-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Module: none"), "got: {detail}");
 
@@ -5665,6 +5906,7 @@ mod tests {
             identifier: "PRJ-1".into(),
             author: Some("testuser".into()),
             order: None,
+            limit: None,
         }));
         assert!(mine.contains("Mine"), "got: {mine}");
 
@@ -5672,6 +5914,7 @@ mod tests {
             identifier: "PRJ-1".into(),
             author: Some("ghost".into()),
             order: None,
+            limit: None,
         }));
         assert!(ghost.contains("No comments"), "got: {ghost}");
     }
@@ -5697,6 +5940,7 @@ mod tests {
             identifier: "PRJ-1".into(),
             author: None,
             order: Some("desc".into()),
+            limit: None,
         }));
         let second = listing.find("second").unwrap();
         let first = listing.find("first").unwrap();
@@ -5706,6 +5950,7 @@ mod tests {
             identifier: "PRJ-1".into(),
             author: None,
             order: Some("newest".into()),
+            limit: None,
         }));
         assert!(bad.contains("Error"), "got: {bad}");
     }
@@ -6299,6 +6544,7 @@ mod tests {
         // The issue is actually closed.
         let issue = m.get_issue(Parameters(GetIssueInput {
             identifier: "PLN-1".into(),
+            ..Default::default()
         }));
         assert!(issue.contains("done"), "issue should be done: {issue}");
     }
@@ -6585,6 +6831,7 @@ mod authz_gating_tests {
         let denied = as_user(&non_member, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
+            ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied), "non-member get_issue: {denied}");
@@ -6592,6 +6839,7 @@ mod authz_gating_tests {
         let allowed = as_user(&viewer, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
+            ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed), "viewer get_issue: {allowed}");
@@ -7286,6 +7534,7 @@ mod authz_gating_tests {
         let read = as_user(&bot, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
+            ..Default::default()
             }))
         });
         assert!(
@@ -7317,6 +7566,7 @@ mod authz_gating_tests {
         let read = as_user(&non_member, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
+            ..Default::default()
             }))
         });
         assert!(is_forbidden(&read), "read: {read}");
@@ -7369,6 +7619,7 @@ mod authz_gating_tests {
         let read = as_user(&admin, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
+            ..Default::default()
             }))
         });
         assert!(
@@ -7474,7 +7725,10 @@ mod authz_gating_tests {
             PathExtract(ident): PathExtract<String>,
         ) -> String {
             crate::mcp::with_request_user(auth_user, || async move {
-                mcp.get_issue(Parameters(GetIssueInput { identifier: ident }))
+                mcp.get_issue(Parameters(GetIssueInput {
+                    identifier: ident,
+                    ..Default::default()
+                }))
             })
             .await
         }
