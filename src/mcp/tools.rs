@@ -2635,7 +2635,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Mutate a plan or one of its steps. With `step_id`: toggle done (marking done closes a linked issue — the result reports it), attach/detach an issue, rename, add a child step, move/reorder, or delete. WITHOUT step_id: update the plan itself (status active/done/archived, title, anchor issue). Marking a plan done never closes its anchor issue."
+        description = "Mutate a plan or one of its steps. With `step_id`: toggle done (marking done closes a linked issue — the result reports it), attach/detach an issue, rename, add a child step, move/reorder, or delete. WITHOUT step_id: update the plan itself (status active/done/archived, title, anchor issue). Marking a plan done never closes its anchor issue. Returns a compact receipt by default (side-effect notes + a one-line progress summary); pass echo_tree=true to also re-render the full plan tree."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
         // LIF-198: Maintainer on the plan's own project gates every mutation
@@ -2786,7 +2786,22 @@ impl LificMcp {
                 self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                     project_id: plan.project_id,
                 });
-                format!("{}\n{}", notes.join("; "), fmt_plan(&plan))
+                // LIF-302: default to a compact receipt (notes + a one-line
+                // progress summary built from the same Plan fields as
+                // fmt_plan's header, minus the title and step tree). Pass
+                // echo_tree=true to restore the full re-rendered tree.
+                if input.echo_tree.unwrap_or(false) {
+                    format!("{}\n{}", notes.join("; "), fmt_plan(&plan))
+                } else {
+                    format!(
+                        "{}\n{} [{}]: {}/{} done",
+                        notes.join("; "),
+                        plan.identifier,
+                        plan.status,
+                        plan.done_count,
+                        plan.step_count
+                    )
+                }
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -6611,6 +6626,14 @@ mod tests {
             out.contains("→ PLN-1 marked done"),
             "must narrate the issue side effect: {out}"
         );
+        // LIF-302: default output is a compact receipt — notes plus a one-line
+        // progress summary, and NO step tree lines.
+        assert!(
+            out.contains("PLN-PLAN-1 [active]: 1/1 done"),
+            "receipt must carry progress counts: {out}"
+        );
+        // No step-tree lines (the "- [x] #N" render fmt_plan would emit).
+        assert!(!out.contains("- [x]"), "receipt must omit step lines: {out}");
 
         // The issue is actually closed.
         let issue = m.get_issue(Parameters(GetIssueInput {
@@ -6618,6 +6641,76 @@ mod tests {
             ..Default::default()
         }));
         assert!(issue.contains("done"), "issue should be done: {issue}");
+    }
+
+    // LIF-302: echo_tree=true restores the full re-rendered plan tree.
+    #[test]
+    fn update_plan_step_echo_tree_returns_full_tree() {
+        let m = mcp();
+        seed_project(&m, "Plans", "PET");
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "PET".into(),
+            title: "Tree plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![
+                PlanStepInput {
+                    title: "first step".into(),
+                    ..Default::default()
+                },
+                PlanStepInput {
+                    title: "second step".into(),
+                    ..Default::default()
+                },
+            ]),
+        }));
+        let step_id: i64 = created
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .expect("step id in output");
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PET-PLAN-1".into(),
+            step_id: Some(step_id),
+            done: Some(true),
+            echo_tree: Some(true),
+            ..Default::default()
+        }));
+        // The full tree renders both step titles and step-line markers.
+        assert!(out.contains("first step"), "got: {out}");
+        assert!(out.contains("second step"), "got: {out}");
+        assert!(out.contains("- ["), "echo_tree must render step lines: {out}");
+    }
+
+    // LIF-302: a plan-level update (no step_id) also returns the compact
+    // receipt, not the tree.
+    #[test]
+    fn update_plan_step_plan_level_returns_receipt() {
+        let m = mcp();
+        seed_project(&m, "Plans", "PPR");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: "PPR".into(),
+            title: "Rename me".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "only step".into(),
+                ..Default::default()
+            }]),
+        }));
+
+        let out = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PPR-PLAN-1".into(),
+            step_id: None,
+            status: Some("done".into()),
+            ..Default::default()
+        }));
+        assert!(
+            out.contains("PPR-PLAN-1 [done]: 0/1 done"),
+            "plan-level receipt must carry status + progress: {out}"
+        );
+        // No step tree — the only step's title must not appear.
+        assert!(!out.contains("only step"), "receipt must omit the tree: {out}");
     }
 
     #[test]

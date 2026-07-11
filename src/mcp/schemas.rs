@@ -476,6 +476,10 @@ pub struct UpdatePlanStepInput {
     pub move_position: Option<i64>,
     #[schemars(description = "Delete the step and its whole subtree")]
     pub delete: Option<bool>,
+    #[schemars(
+        description = "Echo the full re-rendered plan tree after the mutation (default false — mutations return a compact receipt; use get_plan to rehydrate)."
+    )]
+    pub echo_tree: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
