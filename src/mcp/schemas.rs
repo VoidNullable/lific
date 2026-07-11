@@ -14,6 +14,10 @@ pub struct SearchInput {
         description = "Sort mode: relevance (default, best match first) or recent (most recently updated first)"
     )]
     pub sort: Option<String>,
+    #[schemars(
+        description = "Match mode: 'fts' (default, tokenized full-text with prefix matching) or 'literal' (case-insensitive substring — for punctuation-heavy needles like core:sodom, [RequiredSpecs], --trace-plans that FTS tokenizes away)."
+    )]
+    pub mode: Option<String>,
     #[schemars(description = "Max results (default 20)")]
     pub limit: Option<i64>,
     #[schemars(

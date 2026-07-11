@@ -558,6 +558,9 @@ pub struct SearchQuery {
     /// Sort mode: "relevance" (default, BM25 rank) or "recent"
     /// (most recently updated first).
     pub sort: Option<String>,
+    /// Match mode: "fts" (default, tokenized full-text) or "literal"
+    /// (case-insensitive substring). See `db::queries::search`.
+    pub mode: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

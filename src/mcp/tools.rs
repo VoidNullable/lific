@@ -498,6 +498,7 @@ impl LificMcp {
                     project_id,
                     result_type: input.result_type.clone(),
                     sort: input.sort.clone(),
+                    mode: input.mode.clone(),
                     limit: Some(limit + 1),
                     offset: Some(offset),
                 },
@@ -3922,6 +3923,36 @@ mod tests {
         }));
         assert!(result.contains("1 results"), "got: {result}");
         assert!(result.contains("searchterm"), "got: {result}");
+    }
+
+    // LIF-304: literal mode surfaces punctuation-heavy needles FTS tokenizes
+    // away, and passes the snippet (with **needle**) through the MCP layer.
+    #[test]
+    fn mcp_search_literal_mode_finds_punctuation_needle() {
+        let m = mcp();
+        seed_project(&m, "Test", "SRC");
+        seed_issue(&m, "SRC", "wire up core:sodom pipeline");
+
+        let result = m.search(Parameters(SearchInput {
+            query: "core:sodom".into(),
+            mode: Some("literal".into()),
+            ..Default::default()
+        }));
+        assert!(result.contains("1 results"), "got: {result}");
+        assert!(result.contains("SRC-1"), "got: {result}");
+        assert!(result.contains("**core:sodom**"), "got: {result}");
+    }
+
+    #[test]
+    fn mcp_search_invalid_mode_errors() {
+        let m = mcp();
+        seed_project(&m, "Test", "SRC");
+        let result = m.search(Parameters(SearchInput {
+            query: "anything".into(),
+            mode: Some("regex".into()),
+            ..Default::default()
+        }));
+        assert!(result.contains("invalid mode"), "got: {result}");
     }
 
     #[test]

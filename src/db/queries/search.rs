@@ -20,6 +20,27 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
             "invalid result_type '{rt}'. Use issue, page, or comment."
         )));
     }
+
+    // LIF-304: dispatch on match mode. `fts` (default) tokenizes the query
+    // through FTS5; `literal` does a case-insensitive substring scan for
+    // punctuation-heavy needles (e.g. `core:sodom`, `[RequiredSpecs]`) that
+    // FTS's tokenizer strips away.
+    match q.mode.as_deref() {
+        None | Some("fts") => search_fts(conn, q, limit, offset),
+        Some("literal") => search_literal(conn, q, limit, offset),
+        Some(other) => Err(LificError::BadRequest(format!(
+            "invalid mode '{other}'. Use fts or literal."
+        ))),
+    }
+}
+
+/// FTS5 full-text path (the original `search` body).
+fn search_fts(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SearchResult>, LificError> {
     // "relevance" = BM25 rank (FTS5 default). "recent" = most recently
     // updated entity first; both joins are LEFT so COALESCE picks whichever
     // side matched. Fixed fragments only — never interpolated user input.
@@ -149,6 +170,297 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
     })?;
 
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Case-insensitive substring path (LIF-304).
+///
+/// Scans the same corpus as the FTS path — issues (title + description),
+/// pages (title + content), comments (content) — using
+/// `instr(lower(field), lower(?)) > 0`. This avoids LIKE-wildcard injection
+/// (a needle containing `%` / `_` is matched literally) at the cost of
+/// ASCII-only case folding: SQLite's `lower()` only folds A–Z, so non-ASCII
+/// letters compare case-sensitively. That's an acceptable limitation for the
+/// punctuation-heavy identifiers this mode targets (`core:sodom`,
+/// `[RequiredSpecs]`, `--trace-plans`).
+///
+/// Ordering is always most-recently-updated first: a substring scan has no
+/// relevance rank, so `sort=relevance` and `sort=recent` both order by
+/// recency (relevance is accepted without error so callers can pass their
+/// usual sort through). Snippets are built in Rust around the first match.
+fn search_literal(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SearchResult>, LificError> {
+    // Accept the same sort values the FTS path does, but both map to recency
+    // here (see doc comment) — reject only genuinely unknown values so the
+    // contract stays identical.
+    match q.sort.as_deref() {
+        None | Some("relevance") | Some("recent") => {}
+        Some(other) => {
+            return Err(LificError::BadRequest(format!(
+                "invalid sort '{other}'. Use relevance or recent."
+            )));
+        }
+    }
+
+    let needle = q.query.trim();
+    // LIF-133 parity: an empty / whitespace-only needle returns nothing
+    // rather than matching every row (instr(x, '') is always > 0).
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needle = needle.to_string();
+
+    let want = |rt: &str| q.result_type.as_deref().is_none_or(|f| f == rt);
+
+    // Collect (updated_at, SearchResult) so we can globally sort by recency
+    // across the three entity kinds before applying offset/limit. Each branch
+    // mirrors the FTS path's identifier + parent-linkage logic.
+    let mut rows: Vec<(String, SearchResult)> = Vec::new();
+
+    if want("issue") {
+        let mut stmt = conn.prepare(
+            "SELECT i.id, p.identifier, i.sequence, i.title, i.description,
+                    i.project_id, i.updated_at
+             FROM issues i
+             JOIN projects p ON p.id = i.project_id
+             WHERE instr(lower(i.title), lower(?1)) > 0
+                OR instr(lower(i.description), lower(?1)) > 0",
+        )?;
+        let mapped = stmt.query_map([&needle], |row| {
+            let id: i64 = row.get(0)?;
+            let proj: String = row.get(1)?;
+            let seq: i64 = row.get(2)?;
+            let title: String = row.get(3)?;
+            let body: String = row.get(4)?;
+            let project_id: Option<i64> = row.get(5)?;
+            let updated_at: String = row.get(6)?;
+            let snippet = literal_snippet(&title, &body, &needle);
+            Ok((
+                updated_at,
+                SearchResult {
+                    result_type: "issue".into(),
+                    id,
+                    identifier: Some(format!("{proj}-{seq}")),
+                    title,
+                    snippet,
+                    project_id,
+                },
+            ))
+        })?;
+        for r in mapped {
+            rows.push(r?);
+        }
+    }
+
+    if want("page") {
+        let mut stmt = conn.prepare(
+            "SELECT pg.id, p.identifier, pg.sequence, pg.title, pg.content,
+                    pg.project_id, pg.updated_at
+             FROM pages pg
+             LEFT JOIN projects p ON p.id = pg.project_id
+             WHERE instr(lower(pg.title), lower(?1)) > 0
+                OR instr(lower(pg.content), lower(?1)) > 0",
+        )?;
+        let mapped = stmt.query_map([&needle], |row| {
+            let id: i64 = row.get(0)?;
+            let proj: Option<String> = row.get(1)?;
+            let seq: i64 = row.get(2)?;
+            let title: String = row.get(3)?;
+            let body: String = row.get(4)?;
+            let project_id: Option<i64> = row.get(5)?;
+            let updated_at: String = row.get(6)?;
+            let identifier = match proj.as_deref() {
+                Some(pi) => Some(format!("{pi}-DOC-{seq}")),
+                None => Some(format!("DOC-{seq}")),
+            };
+            let snippet = literal_snippet(&title, &body, &needle);
+            Ok((
+                updated_at,
+                SearchResult {
+                    result_type: "page".into(),
+                    id,
+                    identifier,
+                    title,
+                    snippet,
+                    project_id,
+                },
+            ))
+        })?;
+        for r in mapped {
+            rows.push(r?);
+        }
+    }
+
+    if want("comment") {
+        // Mirror the FTS path's parent-linkage joins so a comment hit resolves
+        // to its parent issue/page identifier and inherits the parent's
+        // project_id for visibility filtering.
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.content, c.updated_at,
+                    c.issue_id, c.page_id,
+                    cip.identifier, ci.sequence, ci.project_id,
+                    cpp.identifier, cpg.sequence, cpg.project_id
+             FROM comments c
+             LEFT JOIN issues ci ON c.issue_id = ci.id
+             LEFT JOIN pages cpg ON c.page_id = cpg.id
+             LEFT JOIN projects cip ON cip.id = ci.project_id
+             LEFT JOIN projects cpp ON cpp.id = cpg.project_id
+             WHERE instr(lower(c.content), lower(?1)) > 0",
+        )?;
+        let mapped = stmt.query_map([&needle], |row| {
+            let id: i64 = row.get(0)?;
+            let content: String = row.get(1)?;
+            let updated_at: String = row.get(2)?;
+            let cmt_issue_id: Option<i64> = row.get(3)?;
+            let cmt_page_id: Option<i64> = row.get(4)?;
+            let cmt_issue_proj: Option<String> = row.get(5)?;
+            let cmt_issue_seq: Option<i64> = row.get(6)?;
+            let cmt_issue_project_id: Option<i64> = row.get(7)?;
+            let cmt_page_proj: Option<String> = row.get(8)?;
+            let cmt_page_seq: Option<i64> = row.get(9)?;
+            let cmt_page_project_id: Option<i64> = row.get(10)?;
+            let (identifier, project_id) = if cmt_issue_id.is_some() {
+                let ident = match (cmt_issue_proj.as_deref(), cmt_issue_seq) {
+                    (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
+                    _ => None,
+                };
+                (ident, cmt_issue_project_id)
+            } else if cmt_page_id.is_some() {
+                let ident = match (cmt_page_proj.as_deref(), cmt_page_seq) {
+                    (Some(pi), Some(seq)) => Some(format!("{pi}-DOC-{seq}")),
+                    (None, Some(seq)) => Some(format!("DOC-{seq}")),
+                    _ => None,
+                };
+                (ident, cmt_page_project_id)
+            } else {
+                (None, None)
+            };
+            // A comment has no title of its own, so the snippet always comes
+            // from the body.
+            let snippet = literal_snippet("", &content, &needle);
+            Ok((
+                updated_at,
+                SearchResult {
+                    result_type: "comment".into(),
+                    id,
+                    identifier,
+                    title: String::new(),
+                    snippet,
+                    project_id,
+                },
+            ))
+        })?;
+        for r in mapped {
+            rows.push(r?);
+        }
+    }
+
+    // Project filter: applied uniformly across all three entity kinds after
+    // collection (a comment's project_id is its parent's, resolved above). A
+    // workspace page has project_id = None and is only kept when the caller
+    // didn't scope to a project.
+    if let Some(pid) = q.project_id {
+        rows.retain(|(_, r)| r.project_id == Some(pid));
+    }
+
+    // Global recency sort (updated_at DESC), then id DESC as a stable
+    // tiebreak, before paging.
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.id.cmp(&a.1.id)));
+
+    Ok(rows
+        .into_iter()
+        .map(|(_, r)| r)
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect())
+}
+
+/// Build a snippet around the first case-insensitive match of `needle`.
+///
+/// Prefers the body; if the match is only in the title, snippets from the
+/// title (mirrors the FTS path's title-vs-body CASE). Takes ~32 chars of
+/// context on each side, wraps the matched substring in `**`, and adds
+/// leading/trailing `...` when the window is clipped. All slicing respects
+/// UTF-8 char boundaries.
+fn literal_snippet(title: &str, body: &str, needle: &str) -> String {
+    const CTX: usize = 32;
+    // Prefer the body match; fall back to the title.
+    let (source, start) = match find_ci(body, needle) {
+        Some(i) => (body, i),
+        None => match find_ci(title, needle) {
+            Some(i) => (title, i),
+            // Neither field contains it (shouldn't happen — the SQL filtered
+            // on a match — but stay robust): return a clipped body preview.
+            None => return clip_prefix(body.max(title), CTX * 2),
+        },
+    };
+    let match_end = start + needle.len();
+
+    // Expand the window to CTX chars on each side, snapping to char
+    // boundaries.
+    let win_start = floor_char_boundary(source, start.saturating_sub(CTX));
+    let win_end = ceil_char_boundary(source, (match_end + CTX).min(source.len()));
+
+    let mut out = String::new();
+    if win_start > 0 {
+        out.push_str("...");
+    }
+    out.push_str(&source[win_start..start]);
+    out.push_str("**");
+    out.push_str(&source[start..match_end]);
+    out.push_str("**");
+    out.push_str(&source[match_end..win_end]);
+    if win_end < source.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Byte offset of the first case-insensitive (ASCII-fold) occurrence of
+/// `needle` in `haystack`, or None. Matches SQLite's `instr(lower(), lower())`
+/// semantics (ASCII-only folding), so query and render agree.
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay = haystack.to_ascii_lowercase();
+    let nee = needle.to_ascii_lowercase();
+    hay.find(&nee)
+}
+
+/// Largest char boundary <= `idx`.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Smallest char boundary >= `idx`.
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+/// Clip a string to at most `max` bytes on a char boundary, adding a trailing
+/// `...` if clipped. Fallback preview only.
+fn clip_prefix(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let end = floor_char_boundary(s, max);
+    format!("{}...", &s[..end])
 }
 
 #[cfg(test)]
@@ -883,5 +1195,234 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].result_type, "comment");
         assert_eq!(results[0].identifier, Some("TST-1".into()));
+    }
+
+    // ── literal mode (LIF-304) ────────────────────────────────
+
+    fn lit(query: &str) -> SearchQuery {
+        SearchQuery {
+            query: query.into(),
+            mode: Some("literal".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn literal_finds_punctuation_needle_that_fts_misses() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        issues::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: pid,
+                title: "wire up core:sodom pipeline".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+                source: None,
+            },
+        )
+        .unwrap();
+
+        // FTS tokenizes "core:sodom" into separate words and the `:` is
+        // dropped, so a literal search for the exact token is the point.
+        let fts = search(
+            &conn,
+            &SearchQuery {
+                query: "core:sodom".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // FTS may match on "core" or "sodom" tokens; literal matches the exact
+        // punctuation-joined needle.
+        let lits = search(&conn, &lit("core:sodom")).unwrap();
+        assert_eq!(lits.len(), 1, "literal must find the exact needle");
+        assert_eq!(lits[0].identifier, Some("TST-1".into()));
+        assert!(lits[0].snippet.contains("**core:sodom**"), "got: {}", lits[0].snippet);
+        // Sanity: the presence/absence of the FTS hit isn't what we assert;
+        // literal is the reliable path here.
+        let _ = fts;
+    }
+
+    #[test]
+    fn literal_matches_bracketed_needle() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        pages::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "Spec".into(),
+                content: "see [RequiredSpecs] for the contract".into(),
+                status: "draft".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+
+        let lits = search(&conn, &lit("[RequiredSpecs]")).unwrap();
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].result_type, "page");
+        assert!(lits[0].snippet.contains("**[RequiredSpecs]**"), "got: {}", lits[0].snippet);
+    }
+
+    #[test]
+    fn literal_is_case_insensitive() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Handle the FooBar case");
+
+        let lits = search(&conn, &lit("foobar")).unwrap();
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].identifier, Some("TST-1".into()));
+    }
+
+    #[test]
+    fn literal_treats_like_wildcards_as_literal() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "progress is 50% done");
+        seed_issue(&conn, pid, "unrelated 50 percent");
+
+        // `%` must match a literal percent sign, not "any characters".
+        let lits = search(&conn, &lit("50%")).unwrap();
+        assert_eq!(lits.len(), 1, "%/_ must be literal, not wildcards");
+        assert_eq!(lits[0].identifier, Some("TST-1".into()));
+
+        // `_` is literal too.
+        seed_issue(&conn, pid, "call trace_plans here");
+        let underscore = search(&conn, &lit("trace_plans")).unwrap();
+        assert_eq!(underscore.len(), 1);
+    }
+
+    #[test]
+    fn literal_respects_project_filter() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let p1 = seed_project(&conn, "AAA");
+        let p2 = seed_project(&conn, "BBB");
+        seed_issue(&conn, p1, "core:sodom in alpha");
+        seed_issue(&conn, p2, "core:sodom in beta");
+
+        let mut q = lit("core:sodom");
+        q.project_id = Some(p1);
+        let lits = search(&conn, &q).unwrap();
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].identifier, Some("AAA-1".into()));
+    }
+
+    #[test]
+    fn literal_respects_result_type_filter() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "widget:alpha issue");
+        pages::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(pid),
+                folder_id: None,
+                title: "widget:alpha page".into(),
+                content: String::new(),
+                status: "draft".into(),
+                labels: vec![],
+            },
+        )
+        .unwrap();
+
+        let mut q = lit("widget:alpha");
+        q.result_type = Some("page".into());
+        let lits = search(&conn, &q).unwrap();
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].result_type, "page");
+    }
+
+    #[test]
+    fn literal_comment_resolves_parent_identifier() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Some issue");
+        let uid = seed_user(&conn, "alice");
+        comments::create_comment(
+            &conn,
+            CommentParent::Issue(iid),
+            uid,
+            "the --trace-plans flag is the fix",
+        )
+        .unwrap();
+
+        let lits = search(&conn, &lit("--trace-plans")).unwrap();
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].result_type, "comment");
+        assert_eq!(lits[0].identifier, Some("TST-1".into()));
+        assert!(lits[0].snippet.contains("**--trace-plans**"), "got: {}", lits[0].snippet);
+    }
+
+    #[test]
+    fn literal_invalid_mode_errors() {
+        let pool = test_db();
+        let conn = pool.read().unwrap();
+        let err = search(
+            &conn,
+            &SearchQuery {
+                query: "x".into(),
+                mode: Some("regex".into()),
+                ..Default::default()
+            },
+        );
+        assert!(err.is_err(), "unknown mode must error");
+        assert!(err.unwrap_err().to_string().contains("invalid mode"));
+    }
+
+    #[test]
+    fn literal_empty_query_returns_no_results() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "findable core:sodom");
+
+        for query in ["", "   ", "\t\n"] {
+            let lits = search(
+                &conn,
+                &SearchQuery {
+                    query: query.into(),
+                    mode: Some("literal".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(lits.is_empty(), "empty needle must match nothing: {query:?}");
+        }
+    }
+
+    #[test]
+    fn literal_orders_by_recency() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "core:sodom older"); // TST-1
+        seed_issue(&conn, pid, "core:sodom newer"); // TST-2
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS issues_updated;
+             UPDATE issues SET updated_at = '2026-01-01 00:00:00' WHERE sequence = 1;
+             UPDATE issues SET updated_at = '2026-06-01 00:00:00' WHERE sequence = 2;",
+        )
+        .unwrap();
+
+        let lits = search(&conn, &lit("core:sodom")).unwrap();
+        assert_eq!(lits.len(), 2);
+        assert_eq!(lits[0].identifier, Some("TST-2".into()), "newest first");
+        assert_eq!(lits[1].identifier, Some("TST-1".into()));
     }
 }
