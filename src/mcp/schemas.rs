@@ -160,6 +160,14 @@ pub struct GetBoardInput {
     pub project: String,
     #[schemars(description = "Group by: status, priority, or module (default: status)")]
     pub group_by: Option<String>,
+    #[schemars(
+        description = "Include done and cancelled issues (default false). By default closed columns appear as count-only stubs."
+    )]
+    pub include_closed: Option<bool>,
+    #[schemars(
+        description = "Cap issues rendered per column; a '… +N more (use list_issues)' tail shows the remainder."
+    )]
+    pub max_per_column: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

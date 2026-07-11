@@ -1015,7 +1015,9 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "Get board view of issues grouped by status, priority, or module")]
+    #[tool(
+        description = "Get board view of issues grouped by status, priority, or module. By default done/cancelled issues are omitted (status grouping shows them as count-only stubs; priority/module grouping drops them with a trailing count); pass include_closed=true to render them. Use max_per_column to cap issues rendered per column."
+    )]
     fn get_board(&self, Parameters(input): Parameters<GetBoardInput>) -> String {
         if let Some(nudge) = self.no_projects_nudge() {
             return nudge;
@@ -1045,6 +1047,19 @@ impl LificMcp {
                     issues.truncate(BOARD_CAP as usize);
                 }
                 let group_by = input.group_by.as_deref().unwrap_or("status");
+                let include_closed = input.include_closed.unwrap_or(false);
+                let is_closed = |i: &models::Issue| i.status == "done" || i.status == "cancelled";
+                // For priority/module grouping, closed issues are dropped from
+                // every column entirely (a status column would be meaningless
+                // there); count how many we drop so a trailing note can report
+                // the omission. Status grouping keeps the groups but renders
+                // them as count-only stubs (handled below).
+                let mut closed_omitted = 0i64;
+                if !include_closed && group_by != "status" {
+                    let before = issues.len();
+                    issues.retain(|i| !is_closed(i));
+                    closed_omitted = (before - issues.len()) as i64;
+                }
                 let module_names: std::collections::HashMap<i64, String> = if group_by == "module" {
                     if let Ok(conn) = self.db.read() {
                         queries::list_modules(&conn, pid)
@@ -1099,12 +1114,43 @@ impl LificMcp {
                         "warning: board view capped at {BOARD_CAP} issues — older issues are not shown. Use list_issues with offset for full paging.\n\n"
                     ));
                 }
+                let max_per_column = input.max_per_column.filter(|n| *n >= 0);
                 for (group, items) in ordered {
+                    // Status grouping keeps closed groups as count-only stubs:
+                    // header + stub on ONE line, replacing the item lines. Only
+                    // reached for non-empty groups (empty groups never enter
+                    // `groups`).
+                    if !include_closed
+                        && group_by == "status"
+                        && (group == "done" || group == "cancelled")
+                    {
+                        out.push_str(&format!(
+                            "── {} ({}) ── [omitted — pass include_closed=true]\n\n",
+                            group,
+                            items.len()
+                        ));
+                        continue;
+                    }
                     out.push_str(&format!("── {} ({}) ──\n", group, items.len()));
-                    for i in items {
+                    let shown = match max_per_column {
+                        Some(n) => (n as usize).min(items.len()),
+                        None => items.len(),
+                    };
+                    for i in &items[..shown] {
                         out.push_str(&format!("  {}\n", fmt_issue(i)));
                     }
+                    if shown < items.len() {
+                        out.push_str(&format!(
+                            "  … +{} more (use list_issues)\n",
+                            items.len() - shown
+                        ));
+                    }
                     out.push('\n');
+                }
+                if closed_omitted > 0 {
+                    out.push_str(&format!(
+                        "({closed_omitted} closed issues omitted — pass include_closed=true)\n"
+                    ));
                 }
                 out
             }
@@ -3447,6 +3493,7 @@ mod tests {
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BRD".into(),
             group_by: None,
+            ..Default::default()
         }));
         assert!(result.contains("todo"), "got: {result}");
         assert!(result.contains("active"), "got: {result}");
@@ -3470,9 +3517,14 @@ mod tests {
             }));
         }
 
+        // include_closed so done/cancelled render as full columns (not
+        // count-only stubs); the ordering assertion below still works either
+        // way, but this keeps the test focused on ordering, not omission.
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BRO".into(),
             group_by: None,
+            include_closed: Some(true),
+            ..Default::default()
         }));
 
         let pos = |s: &str| {
@@ -3506,6 +3558,7 @@ mod tests {
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BRP".into(),
             group_by: Some("priority".into()),
+            ..Default::default()
         }));
 
         let pos = |s: &str| {
@@ -3517,6 +3570,135 @@ mod tests {
         assert!(pos("high") < pos("medium"), "got: {result}");
         assert!(pos("medium") < pos("low"), "got: {result}");
         assert!(pos("low") < pos("none"), "got: {result}");
+    }
+
+    // ── board: closed-column omission (LIF-300) ──
+
+    /// Seed a project with a mix of open and closed issues for the LIF-300
+    /// omission tests: one todo, one active, two done, one cancelled.
+    fn seed_board_mix(m: &LificMcp, ident: &str) {
+        seed_project(m, "Closed Board", ident);
+        for (title, status) in [
+            ("open-todo", "todo"),
+            ("open-active", "active"),
+            ("shipped-1", "done"),
+            ("shipped-2", "done"),
+            ("scrapped", "cancelled"),
+        ] {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: ident.into(),
+                title: title.into(),
+                status: Some(status.into()),
+                ..Default::default()
+            }));
+        }
+    }
+
+    #[test]
+    fn board_default_omits_closed_contents_but_shows_counts() {
+        let m = mcp();
+        seed_board_mix(&m, "BCA");
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BCA".into(),
+            ..Default::default()
+        }));
+        // Closed columns keep a header + count but stub out their contents.
+        assert!(
+            result.contains("── done (2) ── [omitted — pass include_closed=true]"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("── cancelled (1) ── [omitted — pass include_closed=true]"),
+            "got: {result}"
+        );
+        // The closed issue titles must NOT appear.
+        assert!(!result.contains("shipped-1"), "got: {result}");
+        assert!(!result.contains("scrapped"), "got: {result}");
+        // Open columns still list their issues.
+        assert!(result.contains("open-todo"), "got: {result}");
+        assert!(result.contains("open-active"), "got: {result}");
+    }
+
+    #[test]
+    fn board_include_closed_shows_closed_issues() {
+        let m = mcp();
+        seed_board_mix(&m, "BCB");
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BCB".into(),
+            include_closed: Some(true),
+            ..Default::default()
+        }));
+        assert!(!result.contains("[omitted"), "got: {result}");
+        assert!(result.contains("shipped-1"), "got: {result}");
+        assert!(result.contains("shipped-2"), "got: {result}");
+        assert!(result.contains("scrapped"), "got: {result}");
+    }
+
+    #[test]
+    fn board_priority_grouping_excludes_closed_with_trailing_note() {
+        let m = mcp();
+        seed_board_mix(&m, "BCC");
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BCC".into(),
+            group_by: Some("priority".into()),
+            ..Default::default()
+        }));
+        // Closed issues dropped entirely; a trailing note reports the count.
+        assert!(!result.contains("shipped-1"), "got: {result}");
+        assert!(!result.contains("scrapped"), "got: {result}");
+        assert!(
+            result.contains("(3 closed issues omitted — pass include_closed=true)"),
+            "got: {result}"
+        );
+        // No status stub in priority grouping.
+        assert!(!result.contains("[omitted — pass include_closed=true]"), "got: {result}");
+    }
+
+    #[test]
+    fn board_max_per_column_truncates_with_tail() {
+        let m = mcp();
+        seed_project(&m, "Capped Board", "BCD");
+        for i in 0..4 {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "BCD".into(),
+                title: format!("todo-{i}"),
+                status: Some("todo".into()),
+                ..Default::default()
+            }));
+        }
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BCD".into(),
+            max_per_column: Some(2),
+            ..Default::default()
+        }));
+        assert!(result.contains("── todo (4) ──"), "got: {result}");
+        assert!(
+            result.contains("… +2 more (use list_issues)"),
+            "got: {result}"
+        );
+        // Exactly two issue lines rendered.
+        let rendered = result.matches("| todo | ").count();
+        assert_eq!(rendered, 2, "got: {result}");
+    }
+
+    #[test]
+    fn board_empty_done_group_produces_no_stub() {
+        let m = mcp();
+        seed_project(&m, "No Done", "BCE");
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "BCE".into(),
+            title: "just-todo".into(),
+            status: Some("todo".into()),
+            ..Default::default()
+        }));
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "BCE".into(),
+            ..Default::default()
+        }));
+        // No done/cancelled issues exist → no stub line at all.
+        assert!(!result.contains("done"), "got: {result}");
+        assert!(!result.contains("cancelled"), "got: {result}");
+        assert!(!result.contains("[omitted"), "got: {result}");
     }
 
     // ── pages ──
