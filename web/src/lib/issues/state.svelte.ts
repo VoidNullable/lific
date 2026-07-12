@@ -27,8 +27,19 @@ import {
   loadCollapsedColumns,
   saveCollapsedColumns,
 } from "./persistence";
+import { loadSubTab, saveSubTab } from "../subtab";
 import { updateIssue, type Issue, type Module } from "../api";
 import { toast } from "../toast/toast.svelte";
+
+// LIF-308: issue-list content slices are deliberately separate from the
+// persisted filter/sort/group state below. A tab narrows the current result;
+// it must never overwrite the user's underlying view preferences.
+export type IssueSubTab = "all" | "recent" | "open" | "closed";
+export const ISSUE_SUB_TAB_IDS = ["all", "recent", "open", "closed"] as const;
+
+function isIssueSubTab(id: string): id is IssueSubTab {
+  return ISSUE_SUB_TAB_IDS.includes(id as IssueSubTab);
+}
 
 // ── LIF-243: undo layer for status/priority/module mutations ────────────
 //
@@ -205,6 +216,13 @@ export async function bulkUpdateIssuesWithUndo(opts: {
 }
 
 export class IssueListState {
+  // ── LIF-308: issue-list content slice ──
+  issueSubTab = $state<IssueSubTab>("all");
+  /** Numeric project id used by the shared sub-tab localStorage convention.
+   *  Kept separately from the issue-view state key, which predates LIF-308
+   *  and is keyed by project identifier. */
+  private issueSubTabProjectId = $state<string | null>(null);
+
   // ── Filters ──
   filterStatus = $state("");
   filterPriority = $state("");
@@ -410,6 +428,28 @@ export class IssueListState {
     if (this.filterLabel) n++;
     if (this.filterModule) n++;
     return n;
+  }
+
+  // ── LIF-308 sub-tab persistence ──
+  /** Reset while a new project resolves so its previous tab cannot flash. */
+  resetIssueSubTab(): void {
+    this.issueSubTab = "all";
+    this.issueSubTabProjectId = null;
+  }
+
+  /** Load a project's saved content slice without writing a default. */
+  hydrateIssueSubTab(projectId: string): void {
+    this.issueSubTabProjectId = projectId;
+    this.issueSubTab = (loadSubTab("issues", projectId, ISSUE_SUB_TAB_IDS) ?? "all") as IssueSubTab;
+  }
+
+  /** Save only an explicit user selection; hydrate/reset never persist. */
+  selectIssueSubTab(id: string): void {
+    if (!isIssueSubTab(id)) return;
+    this.issueSubTab = id;
+    if (this.issueSubTabProjectId) {
+      saveSubTab("issues", this.issueSubTabProjectId, id);
+    }
   }
 
   // ── Persistence wiring ──

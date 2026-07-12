@@ -16,6 +16,7 @@
     SlidersVertical, Rows3, Layers,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
+  import SubTabs, { type SubTab } from "../SubTabs.svelte";
   import Breadcrumbs from "../Breadcrumbs.svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import Skeleton from "../Skeleton.svelte";
@@ -70,9 +71,32 @@
   // Count of active filters — drives the badge on the Filter button. Derived
   // so the topbar re-renders when filters change without manual subscription.
   let filterCount = $derived(view.activeFilterCount());
+
+  // LIF-308: status counts are server truth (rather than the capped row
+  // fetch), so All/Open/Closed stay accurate even for large projects. While
+  // they load, omit the numbers instead of presenting a misleading zero.
+  let issueSubTabs = $derived.by<SubTab[]>(() => {
+    if (countsLoading) {
+      return [
+        { id: "all", label: "All", count: null },
+        { id: "recent", label: "Recent" },
+        { id: "open", label: "Open", count: null },
+        { id: "closed", label: "Closed", count: null },
+      ];
+    }
+
+    const countFor = (status: string) =>
+      statusCounts.find((entry) => entry.status === status)?.count ?? 0;
+    return [
+      { id: "all", label: "All", count: statusCounts.reduce((sum, entry) => sum + entry.count, 0) },
+      { id: "recent", label: "Recent" },
+      { id: "open", label: "Open", count: countFor("backlog") + countFor("todo") + countFor("active") },
+      { id: "closed", label: "Closed", count: countFor("done") + countFor("cancelled") },
+    ];
+  });
 </script>
 
-<div class="relative flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+<div class="relative flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
 
   <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
   <div class="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
@@ -644,4 +668,16 @@
     </div>
     {/if}
   </div>
+
+  <!-- LIF-308: like Pages' LIF-305 strip, the list's content slices own a
+       full bottom row so the existing issue toolbar remains unchanged. -->
+  {#if layout === "list"}
+    <div class="basis-full">
+      <SubTabs
+        tabs={issueSubTabs}
+        active={view.issueSubTab}
+        onselect={(id) => view.selectIssueSubTab(id)}
+      />
+    </div>
+  {/if}
 </div>

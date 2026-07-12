@@ -165,6 +165,7 @@
   $effect(() => {
     const id = projectIdentifier;
     view.hydrated = false;
+    view.resetIssueSubTab();
     // view.hydrate loads filters/sort/display + collapsed/hidden sets, and
     // flips view.hydrated so the persist effect can start.
     view.hydrate(id);
@@ -220,6 +221,7 @@
     }
     project = found;
     loadProjectRole(found.id); // LIF-234: prime role gating for this project
+    view.hydrateIssueSubTab(String(found.id));
 
     // Load modules, labels, and issues in parallel
     const [modRes, lblRes] = await Promise.all([
@@ -389,17 +391,45 @@
     ),
   );
 
+  // LIF-308: sub-tabs are client-side slices layered after the established
+  // filter/search/sort pipeline. The source fetch is capped at 1000 rows, so
+  // Recent is the newest 20 in that loaded window for exceptionally large
+  // projects; server status tallies remain the authoritative tab counts.
+  // This slice is list-only: Recent intentionally overrides only its rendered
+  // order/grouping, never the user's persisted sort or group preferences.
+  let subTabIssues = $derived.by(() => {
+    switch (view.issueSubTab) {
+      case "recent":
+        return [...sortedIssues]
+          .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+          .slice(0, 20);
+      case "open":
+        return sortedIssues.filter(
+          (issue) =>
+            issue.status === "backlog" || issue.status === "todo" || issue.status === "active",
+        );
+      case "closed":
+        return sortedIssues.filter(
+          (issue) => issue.status === "done" || issue.status === "cancelled",
+        );
+      default:
+        return sortedIssues;
+    }
+  });
+
   // LIF-191: generalized grouping for the list view (logic in
   // lib/issues/grouping.ts). Returns ordered groups for the active
   // `groupBy`, or null when the view should render flat.
   let groups = $derived(
-    buildGroups({
-      sortedIssues,
-      modules,
-      groupBy: view.groupBy,
-      searchQuery: view.searchQuery,
-      filterStatus: view.filterStatus,
-    }),
+    view.issueSubTab === "recent"
+      ? null
+      : buildGroups({
+          sortedIssues: subTabIssues,
+          modules,
+          groupBy: view.groupBy,
+          searchQuery: view.searchQuery,
+          filterStatus: view.filterStatus,
+        }),
   );
 
   // ── LIF-161: topbar tallies ──────────────────────────
@@ -418,11 +448,17 @@
   // is narrowed (filters or search) it becomes "shown of total" so the two
   // numbers can't be mistaken for each other.
   let countLabel = $derived.by(() => {
-    if (!issueCounts) return loading ? "" : String(filteredIssues.length);
+    // The tab strip is list-only, so board's existing count semantics ignore
+    // a saved list sub-tab while the user is on the board.
+    const shown = layout === "list" ? subTabIssues.length : filteredIssues.length;
+    if (!issueCounts) return loading ? "" : String(shown);
     const total = issueCounts.total;
-    const narrowed = view.hasActiveFilters() || !!view.searchQuery.trim();
-    return narrowed && filteredIssues.length !== total
-      ? `${filteredIssues.length} of ${total}`
+    const narrowed =
+      view.hasActiveFilters() ||
+      !!view.searchQuery.trim() ||
+      (layout === "list" && view.issueSubTab !== "all");
+    return narrowed && shown !== total
+      ? `${shown} of ${total}`
       : String(total);
   });
 
@@ -787,7 +823,7 @@
   // Collapsed groups contribute no rows, so they're excluded — keyboard
   // nav and selection indices stay aligned with what's on screen.
   let flatIssues = $derived.by(() => {
-    if (groups) {
+    if (layout === "list" && groups) {
       const flat: Issue[] = [];
       for (const g of groups) {
         if (view.isGroupCollapsed(g.key)) continue;
@@ -795,7 +831,7 @@
       }
       return flat;
     }
-    return sortedIssues;
+    return layout === "list" ? subTabIssues : sortedIssues;
   });
 
   // ── LIF-245: keyboard focus survives a list refetch ──────────────────
@@ -1890,8 +1926,8 @@
           Project overview
         </button>
       </ErrorState>
-    {:else if filteredIssues.length === 0}
-      {#if view.hasActiveFilters() || view.searchQuery}
+    {:else if subTabIssues.length === 0}
+      {#if view.hasActiveFilters() || view.searchQuery || view.issueSubTab !== "all"}
         <!-- Filtered-empty: work exists, it's just hidden behind a
              filter/search, so we keep the recovery affordance. -->
         <div class="flex flex-col items-center justify-center py-20 gap-3">
@@ -1934,19 +1970,17 @@
           {/if}
         </div>
       {/if}
-    {:else if view.searchQuery.trim()}
-      <!-- LIF-119: search-mode flat ranked list. Bypasses grouping —
-           when hunting for an issue by name or content, the status
-           buckets are just noise. Ordering is by relevance score
-           (set up in compareIssues). -->
-      {#if sortedIssues.length === RESULT_CAP}
+    {:else if view.searchQuery.trim() || view.issueSubTab === "recent"}
+      <!-- LIF-119 search and LIF-308 Recent both bypass grouping. Search
+           orders by relevance; Recent orders by most recently updated. -->
+      {#if view.searchQuery.trim() && view.issueSubTab === "all" && subTabIssues.length === RESULT_CAP}
         <div class="text-micro text-[var(--text-faint)] uppercase tracking-widest font-semibold px-6 py-2 border-b border-[var(--border)] bg-[var(--surface)]">
           Top {RESULT_CAP} matches — narrow the query for fewer results
         </div>
       {/if}
-      {#each sortedIssues as issue, i (issue.id)}
+      {#each subTabIssues as issue, i (issue.id)}
         <div animate:flip={{ duration: flipMs() }}>
-          {@render issueRow(issue, i, i === sortedIssues.length - 1)}
+          {@render issueRow(issue, i, i === subTabIssues.length - 1)}
         </div>
       {/each}
     {:else if groups}
@@ -1997,9 +2031,9 @@
     {:else}
       <!-- Flat list (active when a single status filter is applied, so
            grouping is skipped). Honors the same sort as grouped view. -->
-      {#each sortedIssues as issue, i (issue.id)}
+      {#each subTabIssues as issue, i (issue.id)}
         <div animate:flip={{ duration: flipMs() }}>
-          {@render issueRow(issue, i, i === sortedIssues.length - 1)}
+          {@render issueRow(issue, i, i === subTabIssues.length - 1)}
         </div>
       {/each}
     {/if}
@@ -2077,5 +2111,3 @@
     onHoverModuleOption={(mi) => { view.modulePickerIdx = mi; }}
   />
 {/snippet}
-
-
