@@ -117,6 +117,13 @@
   let draggedId = $state<{ type: "page"; id: number } | null>(null);
   let dropTarget = $state<number | "root" | null>(null);
 
+  // LIF-280: touch-friendly alternative to native HTML drag-and-drop for
+  // moving a page between folders. The picker starts at the page's current
+  // location, which Select marks with a check.
+  let movePage = $state<Page | null>(null);
+  let moveFolderId = $state<number | null>(null);
+  let movingPage = $state(false);
+
   // Inline create. `status` (pages only) lets the "New page as …" menu
   // presets seed the lifecycle status the inline row will commit with.
   let createTarget = $state<{
@@ -295,6 +302,11 @@
     ...labels.map((l) => ({ value: l.name, label: l.name, color: l.color })),
   ]);
 
+  let moveFolderOptions = $derived([
+    { value: null, label: "No folder / root" },
+    ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
+  ]);
+
   $effect(() => {
     const id = projectIdentifier;
     loadData(id);
@@ -370,6 +382,7 @@
     return (
       loading ||
       draggedId !== null ||
+      movePage !== null ||
       createTarget !== null ||
       (searchExpanded && document.activeElement === searchInputEl)
     );
@@ -509,6 +522,18 @@
     if (dropTarget !== target) dropTarget = target;
   }
 
+  async function movePageToFolder(page: Page, targetFolderId: number | null) {
+    if ((page.folder_id ?? null) === targetFolderId) return;
+    pages = pages.map((p) =>
+      p.id === page.id ? { ...p, folder_id: targetFolderId } : p
+    );
+    await updatePage(page.id, { folder_id: targetFolderId } as Record<string, unknown>);
+
+    if (targetFolderId && !expandedFolders.has(targetFolderId)) {
+      expandedFolders = new Set([...expandedFolders, targetFolderId]);
+    }
+  }
+
   async function onDrop(e: DragEvent, targetFolderId: number | null) {
     e.preventDefault();
     if (!draggedId) return;
@@ -517,15 +542,22 @@
     dropTarget = null;
 
     const page = pages.find((p) => p.id === dragged.id);
-    if (!page || (page.folder_id ?? null) === targetFolderId) return;
-    pages = pages.map((p) =>
-      p.id === dragged.id ? { ...p, folder_id: targetFolderId } : p
-    );
-    await updatePage(page.id, { folder_id: targetFolderId } as Record<string, unknown>);
+    if (!page) return;
+    await movePageToFolder(page, targetFolderId);
+  }
 
-    if (targetFolderId && !expandedFolders.has(targetFolderId)) {
-      expandedFolders = new Set([...expandedFolders, targetFolderId]);
-    }
+  function openMovePicker(page: Page, e: Event) {
+    e.stopPropagation();
+    movePage = page;
+    moveFolderId = page.folder_id ?? null;
+  }
+
+  async function chooseMoveFolder(folderId: number | null) {
+    if (!movePage || movingPage) return;
+    movingPage = true;
+    await movePageToFolder(movePage, folderId);
+    movingPage = false;
+    movePage = null;
   }
 
   // ── Create ───────────────────────────────────────────
@@ -1339,6 +1371,70 @@
  </div>
 </div>
 
+<!-- LIF-280: selecting a folder from this picker provides the same page
+     re-parenting path as drag-and-drop, without relying on touch-incompatible
+     native HTML5 DnD. -->
+{#if movePage}
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+  <div
+    class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center pt-[14dvh] px-2"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !movingPage) movePage = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === "Escape" && !movingPage) movePage = null;
+    }}
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <div
+      class="w-full max-w-[calc(100vw-1rem)] sm:max-w-[420px] bg-[var(--surface)]
+             border border-[var(--border)] rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Move page to folder"
+      tabindex="-1"
+    >
+      <div class="flex items-center gap-3 px-4 py-3 border-b border-[var(--border)]">
+        <FolderOpen size={16} class="shrink-0 text-[var(--accent)]" />
+        <div class="flex-1 min-w-0">
+          <h2 class="text-body-lg font-semibold text-[var(--text)]">Move to folder</h2>
+          <p class="text-caption text-[var(--text-faint)] truncate">{movePage.title}</p>
+        </div>
+        <button
+          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
+                 hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Close move folder picker"
+          disabled={movingPage}
+          onclick={() => (movePage = null)}
+        >
+          <X size={15} />
+        </button>
+      </div>
+      <div class="px-4 py-4">
+        <p class="mb-2 text-micro uppercase tracking-widest font-semibold text-[var(--text-faint)]">
+          Folder
+        </p>
+        <Select
+          options={moveFolderOptions}
+          bind:value={moveFolderId}
+          onchange={(option) => void chooseMoveFolder(option.value as number | null)}
+        >
+          {#snippet renderOption(option, isSelected)}
+            <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium text-[var(--accent)]' : 'text-[var(--text)]'}">
+              {#if option.value === null}
+                <FileText size={14} class="shrink-0 text-[var(--text-muted)]" />
+              {:else}
+                <FolderClosed size={14} class="shrink-0 {isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'}" />
+              {/if}
+              <span class="truncate">{option.label}</span>
+            </span>
+          {/snippet}
+        </Select>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#snippet flatPageList(pageList: Page[], emptyTitle: string, emptyDescription: string = "")}
   {#if pageList.length === 0}
     <div class="flex flex-col items-center py-16 gap-3 px-6 max-w-[460px] mx-auto text-center">
@@ -1549,6 +1645,22 @@
                    group-hover:text-[var(--text-muted)] transition-colors"
             date={page.updated_at}
           />
+
+          <!-- LIF-280: hidden until hover on desktop, but always reachable
+               on touch devices where native drag-and-drop does not work. -->
+          {#if canEdit}
+            <span
+              class="shrink-0 text-[var(--text-faint)] opacity-0 group-hover:opacity-100
+                     pointer-coarse:opacity-100 hover:text-[var(--accent)] transition"
+              role="button"
+              tabindex="0"
+              title="Move to folder…"
+              onclick={(e) => openMovePicker(page, e)}
+              onkeydown={(e) => { if (e.key === "Enter") openMovePicker(page, e); }}
+            >
+              <FolderOpen size={13} />
+            </span>
+          {/if}
 
           <!-- LIF-183: pin toggle. Always visible (accent) when pinned;
                otherwise revealed on hover. LIF-234: for a viewer, a pinned
