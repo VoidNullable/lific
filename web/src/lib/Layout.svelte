@@ -22,7 +22,7 @@
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
   import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle } from "lucide-svelte";
-  import { setContext } from "svelte";
+  import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import { contextMenuState } from "./contextMenuState.svelte";
@@ -32,6 +32,14 @@
   import { isTypingContext } from "./shortcuts";
   import { loadProjectRole } from "./projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "./autoRefresh.svelte";
+  import {
+    clampSidebarWidth,
+    loadSidebarWidth,
+    saveSidebarWidth,
+    SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MAX_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+  } from "./sidebarWidth";
 
   // Ref to the command palette so the sidebar's "Jump to…" affordance can
   // summon it (LIF-192).
@@ -43,6 +51,96 @@
   function closeDrawer() {
     drawerOpen = false;
   }
+
+  // LIF-309: only the md+ docked sidebar is resizable; the mobile drawer
+  // always remains 230px. Width changes stay in memory until a drag ends.
+  let sidebarWidth = $state(loadSidebarWidth());
+  let sidebarResizing = $state(false);
+  let sidebarPointerId: number | null = null;
+  let sidebarDragStartX = 0;
+  let sidebarDragStartWidth = SIDEBAR_DEFAULT_WIDTH;
+  let previousBodyCursor = "";
+  let previousBodyUserSelect = "";
+  let sidebarBodyStylesApplied = false;
+
+  function restoreSidebarResizeStyles() {
+    if (!sidebarBodyStylesApplied || typeof document === "undefined") return;
+    document.body.style.cursor = previousBodyCursor;
+    document.body.style.userSelect = previousBodyUserSelect;
+    sidebarBodyStylesApplied = false;
+  }
+
+  function handleSidebarPointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
+
+    sidebarResizing = true;
+    sidebarPointerId = event.pointerId;
+    sidebarDragStartX = event.clientX;
+    sidebarDragStartWidth = sidebarWidth;
+    previousBodyCursor = document.body.style.cursor;
+    previousBodyUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    sidebarBodyStylesApplied = true;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function handleSidebarPointerMove(event: PointerEvent) {
+    if (!sidebarResizing || event.pointerId !== sidebarPointerId) return;
+    sidebarWidth = clampSidebarWidth(
+      sidebarDragStartWidth + event.clientX - sidebarDragStartX,
+    );
+  }
+
+  function finishSidebarResize(event: PointerEvent) {
+    if (!sidebarResizing || event.pointerId !== sidebarPointerId) return;
+
+    const handle = event.currentTarget as HTMLElement;
+    if (handle.hasPointerCapture(event.pointerId)) {
+      handle.releasePointerCapture(event.pointerId);
+    }
+    sidebarResizing = false;
+    sidebarPointerId = null;
+    restoreSidebarResizeStyles();
+    saveSidebarWidth(sidebarWidth);
+  }
+
+  function resetSidebarWidth() {
+    sidebarWidth = SIDEBAR_DEFAULT_WIDTH;
+    saveSidebarWidth(sidebarWidth);
+  }
+
+  function handleSidebarResizeKeydown(event: KeyboardEvent) {
+    const delta = event.key === "ArrowLeft" ? -10 : event.key === "ArrowRight" ? 10 : 0;
+    if (delta === 0) return;
+
+    event.preventDefault();
+    sidebarWidth = clampSidebarWidth(sidebarWidth + delta);
+    saveSidebarWidth(sidebarWidth);
+  }
+
+  function sidebarResizeHandle(node: HTMLElement) {
+    node.addEventListener("pointerdown", handleSidebarPointerDown);
+    node.addEventListener("pointermove", handleSidebarPointerMove);
+    node.addEventListener("pointerup", finishSidebarResize);
+    node.addEventListener("pointercancel", finishSidebarResize);
+    node.addEventListener("dblclick", resetSidebarWidth);
+    node.addEventListener("keydown", handleSidebarResizeKeydown);
+
+    return {
+      destroy() {
+        node.removeEventListener("pointerdown", handleSidebarPointerDown);
+        node.removeEventListener("pointermove", handleSidebarPointerMove);
+        node.removeEventListener("pointerup", finishSidebarResize);
+        node.removeEventListener("pointercancel", finishSidebarResize);
+        node.removeEventListener("dblclick", resetSidebarWidth);
+        node.removeEventListener("keydown", handleSidebarResizeKeydown);
+      },
+    };
+  }
+
+  onDestroy(restoreSidebarResizeStyles);
 
   // LIF-272: while the drawer is open, project taps expand/collapse sub-navs
   // in place instead of navigating (navigation would close the drawer and
@@ -413,10 +511,11 @@
          backdrop; at md+ it docks statically into the flex row as before
          (LIF-223). -->
     <aside
-      class="w-[230px] shrink-0 flex flex-col bg-[var(--chrome)] select-none
-             fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
-             {drawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
-             md:static md:z-auto md:translate-x-0 md:shadow-none md:transition-none"
+      class="relative w-[230px] md:w-[var(--sidebar-w)] shrink-0 flex flex-col bg-[var(--chrome)] select-none
+              fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
+              {drawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
+              md:static md:z-auto md:translate-x-0 md:shadow-none md:transition-none"
+      style={`--sidebar-w: ${sidebarWidth}px`}
     >
       <!-- Brand header -->
       <div class="px-3 pt-3 pb-2 flex items-center gap-1.5">
@@ -707,6 +806,27 @@
         >
           <HelpCircle size={15} />
         </button>
+      </div>
+      <!-- LIF-309: an 8px hit area keeps the 3px resize indicator easy to grab. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div
+        class="group absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none md:block focus:outline-none"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidth}
+        tabindex="0"
+        use:sidebarResizeHandle
+      >
+        <span
+          class="pointer-events-none absolute inset-y-0 left-1/2 w-[3px] -translate-x-1/2
+                 opacity-40 transition-[background-color,opacity]
+                 {sidebarResizing
+            ? 'bg-[var(--accent)] opacity-60'
+            : 'bg-transparent group-hover:bg-[var(--border)] group-focus-visible:bg-[var(--accent)]'}"
+        ></span>
       </div>
     </aside>
 
