@@ -511,10 +511,10 @@
          backdrop; at md+ it docks statically into the flex row as before
          (LIF-223). -->
     <aside
-      class="relative w-[230px] md:w-[var(--sidebar-w)] shrink-0 flex flex-col bg-[var(--chrome)] select-none
+      class="w-[230px] md:w-[var(--sidebar-w)] shrink-0 flex flex-col bg-[var(--chrome)] select-none
               fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
               {drawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
-              md:static md:z-auto md:translate-x-0 md:shadow-none md:transition-none"
+              md:relative md:z-auto md:translate-x-0 md:shadow-none md:transition-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
       <!-- Brand header -->
