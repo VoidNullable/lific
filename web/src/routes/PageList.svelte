@@ -124,6 +124,7 @@
   let movePage = $state<Page | null>(null);
   let moveFolderId = $state<number | null>(null);
   let movingPageIds = $state<Set<number>>(new Set());
+  let pageMutationGeneration = $state(0);
   let movingPage = $derived(movePage !== null && movingPageIds.has(movePage.id));
 
   // Inline create. `status` (pages only) lets the "New page as …" menu
@@ -348,12 +349,17 @@
 
   async function reloadPages() {
     if (!project) return;
+    const mutationGeneration = pageMutationGeneration;
     const [pagesRes, foldersRes, labelsRes] = await Promise.all([
       listPages(project.id),
       listFolders(project.id),
       listLabels(project.id),
     ]);
-    if (pagesRes.ok) pages = pagesRes.data;
+    if (
+      pagesRes.ok &&
+      mutationGeneration === pageMutationGeneration &&
+      movingPageIds.size === 0
+    ) pages = pagesRes.data;
     if (foldersRes.ok) {
       const previousFolderIds = new Set(folders.map((folder) => folder.id));
       const nextFolderIds = new Set(foldersRes.data.map((folder) => folder.id));
@@ -385,6 +391,7 @@
       loading ||
       draggedId !== null ||
       movePage !== null ||
+      movingPageIds.size > 0 ||
       createTarget !== null ||
       (searchExpanded && document.activeElement === searchInputEl)
     );
@@ -530,6 +537,7 @@
     const previousFolderId = page.folder_id ?? null;
     if (previousFolderId === targetFolderId) return true;
 
+    pageMutationGeneration += 1;
     movingPageIds = new Set([...movingPageIds, page.id]);
     pages = pages.map((p) =>
       p.id === page.id ? { ...p, folder_id: targetFolderId } : p
@@ -544,6 +552,7 @@
         return false;
       }
 
+      pages = pages.map((p) => (p.id === page.id ? res.data : p));
       if (targetFolderId && !expandedFolders.has(targetFolderId)) {
         expandedFolders = new Set([...expandedFolders, targetFolderId]);
       }
