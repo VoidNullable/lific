@@ -238,7 +238,7 @@ jobs:
             echo "$out"
           else
             echo "$out"
-            if echo "$out" | grep -qi "already uploaded\|already exists"; then
+            if printf '%s\n' "$out" | grep -qiE 'crate version .* is already uploaded'; then
               echo "::notice::Version already on crates.io; treating as success."
             else
               echo "::error::cargo publish failed."
