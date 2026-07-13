@@ -46,6 +46,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { loadSubTab, saveSubTab } from "../lib/subtab";
+  import { toast } from "../lib/toast/toast.svelte";
 
   // LIF-234: pages are content — create/edit/delete + folder management are
   // maintainer-gated. A viewer browses the tree read-only.
@@ -522,16 +523,25 @@
     if (dropTarget !== target) dropTarget = target;
   }
 
-  async function movePageToFolder(page: Page, targetFolderId: number | null) {
-    if ((page.folder_id ?? null) === targetFolderId) return;
+  async function movePageToFolder(page: Page, targetFolderId: number | null): Promise<boolean> {
+    const previousFolderId = page.folder_id ?? null;
+    if (previousFolderId === targetFolderId) return true;
     pages = pages.map((p) =>
       p.id === page.id ? { ...p, folder_id: targetFolderId } : p
     );
-    await updatePage(page.id, { folder_id: targetFolderId } as Record<string, unknown>);
+    const res = await updatePage(page.id, { folder_id: targetFolderId });
+    if (!res.ok) {
+      pages = pages.map((p) =>
+        p.id === page.id ? { ...p, folder_id: previousFolderId } : p
+      );
+      toast(`Couldn't move ${page.identifier}: ${res.error}`, { kind: "error" });
+      return false;
+    }
 
     if (targetFolderId && !expandedFolders.has(targetFolderId)) {
       expandedFolders = new Set([...expandedFolders, targetFolderId]);
     }
+    return true;
   }
 
   async function onDrop(e: DragEvent, targetFolderId: number | null) {
@@ -555,9 +565,11 @@
   async function chooseMoveFolder(folderId: number | null) {
     if (!movePage || movingPage) return;
     movingPage = true;
-    await movePageToFolder(movePage, folderId);
-    movingPage = false;
-    movePage = null;
+    try {
+      if (await movePageToFolder(movePage, folderId)) movePage = null;
+    } finally {
+      movingPage = false;
+    }
   }
 
   // ── Create ───────────────────────────────────────────
