@@ -432,8 +432,33 @@ pub fn count_issues_by_status(
     Ok(counts)
 }
 
+/// Reject assigning a module owned by a different project. An unknown module is
+/// deliberately left to the issue write so its existing foreign-key error is
+/// preserved.
+fn validate_module_project(
+    conn: &Connection,
+    project_id: i64,
+    module_id: i64,
+) -> Result<(), LificError> {
+    match conn.query_row(
+        "SELECT project_id FROM modules WHERE id = ?1",
+        params![module_id],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(module_project_id) if module_project_id != project_id => Err(LificError::BadRequest(
+            format!("module {module_id} does not belong to project {project_id}"),
+        )),
+        Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Create a new issue with auto-incremented sequence.
 pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, LificError> {
+    if let Some(module_id) = input.module_id {
+        validate_module_project(conn, input.project_id, module_id)?;
+    }
+
     let next_seq: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM issues WHERE project_id = ?1",
@@ -473,7 +498,11 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
 }
 
 pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<Issue, LificError> {
-    get_issue(conn, id)?;
+    let issue = get_issue(conn, id)?;
+
+    if let Some(Some(module_id)) = input.module_id {
+        validate_module_project(conn, issue.project_id, module_id)?;
+    }
 
     super::savepoint(conn, "update_issue", || {
         if let Some(ref title) = input.title {
@@ -722,6 +751,49 @@ mod tests {
         assert_eq!(issue.labels.len(), 2);
         assert!(issue.labels.contains(&"bug".to_string()));
         assert!(issue.labels.contains(&"feature".to_string()));
+    }
+
+    #[test]
+    fn create_issue_rejects_module_from_another_project() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let issue_project_id = seed_project(&conn, "ISS");
+        let module_project_id = seed_project(&conn, "MOD");
+        let module_id = seed_module(&conn, module_project_id, "Other project");
+
+        let err = create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: issue_project_id,
+                title: "Wrong module".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: Some(module_id),
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+                source: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LificError::BadRequest(message)
+                if message == format!(
+                    "module {module_id} does not belong to project {issue_project_id}"
+                )
+        ));
+        assert!(list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(issue_project_id),
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .is_empty());
     }
 
     // LIF-130: the issue INSERT and its label attaches are one atomic unit.
@@ -1262,6 +1334,85 @@ mod tests {
         assert_eq!(updated.title, "Original");
         assert_eq!(updated.status, "active");
         assert_eq!(updated.priority, "urgent");
+    }
+
+    #[test]
+    fn update_issue_rejects_module_from_another_project() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let issue_project_id = seed_project(&conn, "ISS");
+        let module_project_id = seed_project(&conn, "MOD");
+        let module_id = seed_module(&conn, module_project_id, "Other project");
+        let issue = quick_issue(&conn, issue_project_id, "Wrong module", "backlog", "none");
+
+        let err = update_issue(
+            &conn,
+            issue.id,
+            &UpdateIssue {
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                module_id: Some(Some(module_id)),
+                sort_order: None,
+                start_date: None,
+                target_date: None,
+                labels: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LificError::BadRequest(message)
+                if message == format!(
+                    "module {module_id} does not belong to project {issue_project_id}"
+                )
+        ));
+        assert_eq!(get_issue(&conn, issue.id).unwrap().module_id, None);
+    }
+
+    #[test]
+    fn update_issue_can_clear_its_module() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project_id = seed_project(&conn, "TST");
+        let module_id = seed_module(&conn, project_id, "Assigned");
+        let issue = create_issue(
+            &conn,
+            &CreateIssue {
+                project_id,
+                title: "Assigned issue".into(),
+                description: String::new(),
+                status: "backlog".into(),
+                priority: "none".into(),
+                module_id: Some(module_id),
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+                source: None,
+            },
+        )
+        .unwrap();
+
+        let updated = update_issue(
+            &conn,
+            issue.id,
+            &UpdateIssue {
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                module_id: Some(None),
+                sort_order: None,
+                start_date: None,
+                target_date: None,
+                labels: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.module_id, None);
     }
 
     #[test]
