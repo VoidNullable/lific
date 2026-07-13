@@ -123,7 +123,8 @@
   // location, which Select marks with a check.
   let movePage = $state<Page | null>(null);
   let moveFolderId = $state<number | null>(null);
-  let movingPage = $state(false);
+  let movingPageIds = $state<Set<number>>(new Set());
+  let movingPage = $derived(movePage !== null && movingPageIds.has(movePage.id));
 
   // Inline create. `status` (pages only) lets the "New page as …" menu
   // presets seed the lifecycle status the inline row will commit with.
@@ -524,24 +525,34 @@
   }
 
   async function movePageToFolder(page: Page, targetFolderId: number | null): Promise<boolean> {
+    if (movingPageIds.has(page.id)) return false;
+
     const previousFolderId = page.folder_id ?? null;
     if (previousFolderId === targetFolderId) return true;
+
+    movingPageIds = new Set([...movingPageIds, page.id]);
     pages = pages.map((p) =>
       p.id === page.id ? { ...p, folder_id: targetFolderId } : p
     );
-    const res = await updatePage(page.id, { folder_id: targetFolderId });
-    if (!res.ok) {
-      pages = pages.map((p) =>
-        p.id === page.id ? { ...p, folder_id: previousFolderId } : p
-      );
-      toast(`Couldn't move ${page.identifier}: ${res.error}`, { kind: "error" });
-      return false;
-    }
+    try {
+      const res = await updatePage(page.id, { folder_id: targetFolderId });
+      if (!res.ok) {
+        pages = pages.map((p) =>
+          p.id === page.id ? { ...p, folder_id: previousFolderId } : p
+        );
+        toast(`Couldn't move ${page.identifier}: ${res.error}`, { kind: "error" });
+        return false;
+      }
 
-    if (targetFolderId && !expandedFolders.has(targetFolderId)) {
-      expandedFolders = new Set([...expandedFolders, targetFolderId]);
+      if (targetFolderId && !expandedFolders.has(targetFolderId)) {
+        expandedFolders = new Set([...expandedFolders, targetFolderId]);
+      }
+      return true;
+    } finally {
+      const next = new Set(movingPageIds);
+      next.delete(page.id);
+      movingPageIds = next;
     }
-    return true;
   }
 
   async function onDrop(e: DragEvent, targetFolderId: number | null) {
@@ -563,13 +574,8 @@
   }
 
   async function chooseMoveFolder(folderId: number | null) {
-    if (!movePage || movingPage) return;
-    movingPage = true;
-    try {
-      if (await movePageToFolder(movePage, folderId)) movePage = null;
-    } finally {
-      movingPage = false;
-    }
+    if (!movePage) return;
+    if (await movePageToFolder(movePage, folderId)) movePage = null;
   }
 
   // ── Create ───────────────────────────────────────────
