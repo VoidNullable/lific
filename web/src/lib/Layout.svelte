@@ -410,10 +410,12 @@
         ),
       );
       if (requestId !== recentRequest) return;
-      recentPages = results
-        .flatMap((res) => (res.ok ? res.data : []))
-        .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id)
-        .slice(0, 5);
+      recentPages = results.every((res) => res.ok)
+        ? results
+            .flatMap((res) => (res.ok ? res.data : []))
+            .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id)
+            .slice(0, 5)
+        : [];
     } else {
       // Over-fetch so filtering archived plans out can still yield 5 rows.
       const res = await listPlans(projectId, undefined, 10);
