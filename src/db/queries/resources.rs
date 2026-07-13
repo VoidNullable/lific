@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -380,6 +380,23 @@ pub fn list_folders(conn: &Connection, project_id: i64) -> Result<Vec<Folder>, L
 }
 
 pub fn create_folder(conn: &Connection, input: &CreateFolder) -> Result<Folder, LificError> {
+    if let Some(parent_id) = input.parent_id {
+        let parent_project_id: Option<i64> = conn
+            .query_row(
+                "SELECT project_id FROM folders WHERE id = ?1",
+                params![parent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(parent_project_id) = parent_project_id
+            && parent_project_id != input.project_id
+        {
+            return Err(LificError::BadRequest(format!(
+                "parent folder {parent_id} belongs to project {parent_project_id}, not project {}",
+                input.project_id
+            )));
+        }
+    }
     conn.execute(
         "INSERT INTO folders (project_id, parent_id, name) VALUES (?1, ?2, ?3)",
         params![input.project_id, input.parent_id, input.name],
@@ -799,6 +816,49 @@ mod tests {
 
         delete_folder(&conn, folder.id).unwrap();
         assert_eq!(list_folders(&conn, pid).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn create_folder_rejects_parent_from_another_project() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project_id = seed_project(&conn);
+        let other_project_id = projects::create_project(
+            &conn,
+            &CreateProject {
+                name: "Other".into(),
+                identifier: "OTH".into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: None,
+            },
+        )
+        .unwrap()
+        .id;
+        let parent = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id: other_project_id,
+                parent_id: None,
+                name: "Other docs".into(),
+            },
+        )
+        .unwrap();
+
+        let err = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id,
+                parent_id: Some(parent.id),
+                name: "Invalid child".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, LificError::BadRequest(message) if message.contains("belongs to project"))
+        );
+        assert!(list_folders(&conn, project_id).unwrap().is_empty());
     }
 
     #[test]
