@@ -108,7 +108,7 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
      Conventions: when you finish work on an issue, mark it done (status='done'). \
      Organize issues into modules; keep each issue a self-contained work item. \
      Prefer edit_issue/edit_page (exact string replacement) over update_issue/update_page for small changes. \
-     Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. \
+      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(type='plan', project='X'), then get_plan to see where you left off. \
      Use pages for documentation and design notes.";
 
 #[derive(Clone)]
@@ -516,6 +516,9 @@ mod tests {
         assert!(instructions.contains("edit_page"));
         assert!(instructions.contains("modules"));
         assert!(instructions.contains("create_plan"));
+        assert!(instructions.contains("check for existing plans"));
+        assert!(instructions.contains("list_resources(type='plan', project='X')"));
+        assert!(instructions.contains("then get_plan to see where you left off"));
         assert!(instructions.contains("pages for documentation"));
     }
 

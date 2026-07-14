@@ -547,10 +547,11 @@ async fn search(
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
+    use axum::extract::connect_info::MockConnectInfo;
     use axum::http::Request;
     use axum::{Extension, Router};
     use http_body_util::BodyExt;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
     use tower::ServiceExt;
 
     use crate::db::DbPool;
@@ -559,6 +560,27 @@ pub(crate) mod test_helpers {
     pub struct RealtimeTestApp {
         pub app: Router,
         pub realtime: crate::realtime::RealtimeHub,
+    }
+
+    /// The loopback peer supplied to test routers. `MockConnectInfo` mirrors
+    /// production's `into_make_service_with_connect_info` path for handlers
+    /// that need the TCP peer, while the matching trusted range keeps explicit
+    /// XFF test headers meaningful.
+    pub fn test_peer() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 4242))
+    }
+
+    /// Add the client-IP dependencies normally supplied by `lific start`.
+    /// Callers can provide an untrusted peer to test spoofing defenses.
+    pub fn with_client_ip_test_layers(router: Router, peer: SocketAddr) -> Router {
+        let trusted_proxies = Arc::<[crate::ratelimit::IpNetwork]>::from(
+            crate::config::ServerConfig::default()
+                .trusted_proxy_ranges()
+                .expect("default trusted proxy ranges must parse"),
+        );
+        router
+            .layer(Extension(trusted_proxies))
+            .layer(MockConnectInfo(peer))
     }
 
     /// A unique tempdir-backed attachment store for a test app, plus the
@@ -624,7 +646,7 @@ pub(crate) mod test_helpers {
             conn.last_insert_rowid()
         };
         let realtime = crate::realtime::RealtimeHub::new();
-        let app = with_attachment_layers(super::router(db, &[]))
+        let app = with_client_ip_test_layers(with_attachment_layers(super::router(db, &[])), test_peer())
             .layer(Extension(realtime.clone()))
             .layer(Extension(crate::config::AuthConfig {
                 allow_signup: true,
@@ -752,7 +774,7 @@ pub(crate) mod test_helpers {
 
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
-        with_attachment_layers(super::router(db, &[]))
+        with_client_ip_test_layers(with_attachment_layers(super::router(db, &[])), test_peer())
             .layer(Extension(crate::realtime::RealtimeHub::new()))
             .layer(Extension(crate::config::AuthConfig {
                 allow_signup: true,

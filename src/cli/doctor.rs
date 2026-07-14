@@ -1148,6 +1148,11 @@ mod tests {
                 100,
                 Duration::from_secs(60),
             )),
+            trusted_proxies: Arc::<[crate::ratelimit::IpNetwork]>::from(
+                crate::config::ServerConfig::default()
+                    .trusted_proxy_ranges()
+                    .expect("default trusted proxy ranges must parse"),
+            ),
         };
 
         authed.merge(crate::oauth::router(oauth_state))

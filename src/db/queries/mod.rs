@@ -13,8 +13,17 @@ pub(crate) mod settings;
 pub(crate) mod users;
 pub(crate) mod views;
 
-/// Unescape literal \n and \t sequences that come through JSON transport.
+/// Repair literal `\n` and `\t` sequences from clients that double-escape JSON.
+///
+/// A real newline or tab indicates that the client sent proper JSON, so preserve
+/// the input unchanged and treat any literal escapes as intentional content. This
+/// still repairs intentional literal escapes in single-line content with no real
+/// control characters, an acceptable tradeoff because the common corruption case
+/// is multi-line code blocks, which contain real newlines.
 pub(crate) fn unescape_text(s: &str) -> String {
+    if s.contains('\n') || s.contains('\t') {
+        return s.to_string();
+    }
     s.replace("\\n", "\n").replace("\\t", "\t")
 }
 
@@ -54,3 +63,27 @@ pub use resources::*;
 pub use search::*;
 // users module is accessed via queries::users:: directly (not wildcard re-exported)
 // to keep the namespace clean — user functions are only used by auth/CLI code.
+
+#[cfg(test)]
+mod tests {
+    use super::unescape_text;
+
+    #[test]
+    fn unescape_text_preserves_literal_newline_escape_in_multiline_content() {
+        let input = "```c\nprintf(\"\\n\");\n```";
+
+        assert_eq!(unescape_text(input), input);
+    }
+
+    #[test]
+    fn unescape_text_preserves_literal_tab_escape_when_input_has_real_tab() {
+        let input = "column\tprintf(\"\\t\");";
+
+        assert_eq!(unescape_text(input), input);
+    }
+
+    #[test]
+    fn unescape_text_repairs_single_line_double_escaped_newline() {
+        assert_eq!(unescape_text("line1\\nline2"), "line1\nline2");
+    }
+}

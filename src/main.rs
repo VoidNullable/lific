@@ -18,7 +18,7 @@ mod ratelimit;
 mod realtime;
 mod storage;
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -791,6 +791,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .init();
 
+            // Parse trusted proxy CIDRs once at startup. Invalid entries must
+            // stop the server rather than quietly disabling the trust boundary
+            // around client-IP rate-limit and audit keys.
+            let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+                cfg.server
+                    .trusted_proxy_ranges()
+                    .map_err(|error| format!("invalid server.trusted_proxies: {error}"))?,
+            );
+
             // LIF-294: guard rails for auth-optional mode. Refuse outright
             // when the instance says it's publicly reachable; shout otherwise
             // (the default bind is 0.0.0.0 — the whole LAN can reach it).
@@ -976,6 +985,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .layer(axum::Extension(realtime.clone()))
                 .layer(axum::Extension(login_limiter))
+                .layer(axum::Extension(trusted_proxies.clone()))
                 .layer(axum::Extension(attachment_store))
                 .layer(axum::Extension(attachment_config))
                 .layer(axum::Extension(attachment_upload_limiter))
@@ -1001,6 +1011,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db: pool.clone(),
                 issuer,
                 register_limiter: oauth_register_limiter,
+                trusted_proxies,
             };
 
             // Optional authless MCP escape hatch at /mcp/<token> (see the
@@ -1088,8 +1099,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!(addr = %addr, "lific server started (REST + MCP + OAuth at /mcp)");
 
             let shutdown_pool = pool.clone();
-            let server =
-                axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(shutdown_pool));
+            let server = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal(shutdown_pool));
             server.await?;
         }
 

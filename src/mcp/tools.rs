@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::db::{DbPool, models, queries};
@@ -58,6 +59,154 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
     );
     fmt_steps(&p.steps, 0, &mut out);
     out
+}
+
+fn relative_age(timestamp: &str, now: DateTime<Utc>) -> Option<String> {
+    let activity_at = match NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") {
+        Ok(timestamp) => timestamp.and_utc(),
+        Err(_) => DateTime::parse_from_rfc3339(timestamp)
+            .ok()?
+            .with_timezone(&Utc),
+    };
+    let minutes = now.signed_duration_since(activity_at).num_minutes().max(0);
+    Some(if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if minutes < 24 * 60 {
+        format!("{}h ago", minutes / 60)
+    } else {
+        format!("{}d ago", minutes / (24 * 60))
+    })
+}
+
+fn fmt_project_agent_stats(
+    stats: &queries::ProjectAgentStats,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if stats.workable > 0 {
+        parts.push(format!("{} workable", stats.workable));
+    }
+    if stats.active_plans > 0 {
+        let noun = if stats.active_plans == 1 {
+            "active plan"
+        } else {
+            "active plans"
+        };
+        parts.push(format!("{} {noun}", stats.active_plans));
+    }
+    if let Some(last_activity) = stats.last_activity.as_deref()
+        && let Some(age) = relative_age(last_activity, now)
+    {
+        parts.push(format!("last activity {age}"));
+    }
+    (!parts.is_empty()).then(|| format!(" ({})", parts.join(", ")))
+}
+
+fn cmp_projects_by_activity(
+    left: &models::Project,
+    right: &models::Project,
+    stats: &std::collections::HashMap<i64, queries::ProjectAgentStats>,
+) -> Ordering {
+    let left_activity = stats
+        .get(&left.id)
+        .and_then(|stats| stats.last_activity.as_deref());
+    let right_activity = stats
+        .get(&right.id)
+        .and_then(|stats| stats.last_activity.as_deref());
+    match (left_activity, right_activity) {
+        (Some(left_activity), Some(right_activity)) => right_activity.cmp(left_activity),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+    .then_with(|| left.sort_order.cmp(&right.sort_order))
+    .then_with(|| left.name.cmp(&right.name))
+}
+
+#[derive(Clone, Copy)]
+enum PlanStepCascadeAction {
+    AutoComplete,
+    Reopen,
+}
+
+impl PlanStepCascadeAction {
+    fn audit_action(self) -> &'static str {
+        match self {
+            Self::AutoComplete => "auto-complete",
+            Self::Reopen => "auto-reopen",
+        }
+    }
+
+    fn response_verb(self) -> &'static str {
+        match self {
+            Self::AutoComplete => "auto-completed",
+            Self::Reopen => "reopened",
+        }
+    }
+}
+
+struct CascadedPlanStep {
+    id: i64,
+    plan_identifier: String,
+}
+
+/// Fetch only plan-step changes made by the issue-status cascade that just
+/// ran. The audit rows are emitted by migration 020 before each step mutation,
+/// which distinguishes an actual cascade from a linked step that was already
+/// in its target state.
+fn issue_status_cascaded_plan_steps(
+    conn: &rusqlite::Connection,
+    audit_checkpoint: i64,
+    issue_id: i64,
+    action: PlanStepCascadeAction,
+) -> Result<Vec<CascadedPlanStep>, crate::error::LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT ps.id, p.identifier || '-PLAN-' || pl.sequence
+           FROM audit_log al
+           JOIN plan_steps ps ON ps.id = al.entity_id
+           JOIN plans pl ON pl.id = ps.plan_id
+           JOIN projects p ON p.id = pl.project_id
+          WHERE al.id > ?1
+            AND al.issue_id = ?2
+            AND al.entity_type = 'plan_step'
+            AND al.action = ?3
+          ORDER BY al.id ASC",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![audit_checkpoint, issue_id, action.audit_action()],
+        |row| {
+            Ok(CascadedPlanStep {
+                id: row.get(0)?,
+                plan_identifier: row.get(1)?,
+            })
+        },
+    )?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn fmt_issue_plan_step_cascade(
+    action: PlanStepCascadeAction,
+    steps: &[CascadedPlanStep],
+) -> Option<String> {
+    match steps {
+        [] => None,
+        [step] => Some(format!(
+            " ({} plan step #{} in {})",
+            action.response_verb(),
+            step.id,
+            step.plan_identifier
+        )),
+        steps => Some(format!(
+            " ({} {} plan steps: {})",
+            action.response_verb(),
+            steps.len(),
+            steps
+                .iter()
+                .map(|step| format!("#{} in {}", step.id, step.plan_identifier))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 fn fmt_steps(nodes: &[models::PlanStepNode], depth: usize, out: &mut String) {
@@ -884,21 +1033,32 @@ impl LificMcp {
             return format!("Error: {e}");
         }
         match self.write(|conn| {
+            // Migration 020's cascades key exclusively on transitions to or
+            // from `done`, not on the broader cancelled/open distinction.
+            // Keep an audit checkpoint before the direct issue update so the
+            // response can name only steps the trigger actually changed.
+            let previous_issue = queries::get_issue(conn, id)?;
+            let audit_checkpoint = if input.status.is_some() {
+                Some(
+                    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM audit_log", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            } else {
+                None
+            };
             // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
             // (unassign module), non-empty = resolve + set.
             let module_id = match &input.module {
                 Some(name) if name.is_empty() => Some(None),
-                Some(name) => {
-                    let issue = queries::get_issue(conn, id)?;
-                    Some(Some(queries::resolve_module_name(
-                        conn,
-                        issue.project_id,
-                        name,
-                    )?))
-                }
+                Some(name) => Some(Some(queries::resolve_module_name(
+                    conn,
+                    previous_issue.project_id,
+                    name,
+                )?)),
                 None => None,
             };
-            queries::update_issue(
+            let issue = queries::update_issue(
                 conn,
                 id,
                 &models::UpdateIssue {
@@ -912,14 +1072,34 @@ impl LificMcp {
                     target_date: input.target_date.clone(),
                     labels: input.labels.clone(),
                 },
-            )
+            )?;
+            let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
+                (previous, "done") if previous != "done" => {
+                    Some(PlanStepCascadeAction::AutoComplete)
+                }
+                ("done", current) if current != "done" => Some(PlanStepCascadeAction::Reopen),
+                _ => None,
+            };
+            let cascaded_steps = match (cascade_action, audit_checkpoint) {
+                (Some(action), Some(checkpoint)) => {
+                    issue_status_cascaded_plan_steps(conn, checkpoint, id, action)?
+                }
+                _ => Vec::new(),
+            };
+            Ok((issue, cascade_action, cascaded_steps))
         }) {
-            Ok(issue) => {
+            Ok((issue, cascade_action, cascaded_steps)) => {
                 self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
                     project_id: issue.project_id,
                     issue_id: issue.id,
                 });
-                format!("Updated {}: {}", issue.identifier, fmt_issue(&issue))
+                let mut output = format!("Updated {}: {}", issue.identifier, fmt_issue(&issue));
+                if let Some(note) = cascade_action
+                    .and_then(|action| fmt_issue_plan_step_cascade(action, &cascaded_steps))
+                {
+                    output.push_str(&note);
+                }
+                output
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1022,9 +1202,9 @@ impl LificMcp {
             let issue = queries::get_issue(conn, id)?;
 
             let field = input.field.as_deref().unwrap_or("description");
-            // Normalize string-field inputs through the same `\n`/`\t`
-            // unescape pass that `update_issue` applies, so an edit
-            // sourced from a double-escaping client matches stored content.
+            // Normalize string-field inputs through the same proper-JSON
+            // heuristic that `update_issue` applies, so an edit sourced from
+            // a double-escaping client matches stored content.
             let (current, old_norm, new_norm) = match field {
                 "description" => (
                     issue.description.clone(),
@@ -1495,7 +1675,7 @@ impl LificMcp {
             let page = queries::get_page(conn, id)?;
 
             let field = input.field.as_deref().unwrap_or("content");
-            // Mirror update_page's `\n`/`\t` unescape on content so an
+            // Mirror update_page's proper-JSON heuristic on content so an
             // edit from a double-escaping client matches stored content.
             let (current, old_norm, new_norm) = match field {
                 "content" => (
@@ -1752,14 +1932,27 @@ impl LificMcp {
                     Ok(v) => v,
                     Err(e) => return format!("Error: {e}"),
                 };
-                match self.read(queries::list_projects) {
-                    Ok(ps) => {
-                        let ps = filter_visible(ps, &visible, |p| Some(p.id));
+                match self.read(|conn| {
+                    Ok((
+                        queries::list_projects(conn)?,
+                        queries::project_agent_stats(conn)?,
+                    ))
+                }) {
+                    Ok((ps, stats)) => {
+                        let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
+                        ps.sort_by(|left, right| cmp_projects_by_activity(left, right, &stats));
                         let mut out = format!("{} projects:\n", ps.len());
+                        let now = Utc::now();
                         for p in &ps {
                             out.push_str(&format!("- {} | {}", p.identifier, p.name));
                             if !p.description.is_empty() {
                                 out.push_str(&format!(" — {}", p.description));
+                            }
+                            if let Some(suffix) = stats
+                                .get(&p.id)
+                                .and_then(|stats| fmt_project_agent_stats(stats, now))
+                            {
+                                out.push_str(&suffix);
                             }
                             out.push('\n');
                         }
@@ -3171,6 +3364,24 @@ mod tests {
         assert!(result.contains("urgent"), "got: {result}");
     }
 
+    #[test]
+    fn update_issue_without_linked_plan_steps_has_plain_response() {
+        let m = mcp();
+        seed_project(&m, "Test", "PLN");
+        seed_issue(&m, "PLN", "Standalone");
+
+        let result = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "PLN-1".into(),
+            status: Some("done".into()),
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            result, "Updated PLN-1: PLN-1 | done | none | Standalone",
+            "unlinked issue must not invent a cascade note"
+        );
+    }
+
     // LIF-144: start_date/target_date are settable through the MCP layer.
 
     #[test]
@@ -4020,6 +4231,58 @@ mod tests {
         assert!(result.contains("2 projects"), "got: {result}");
         assert!(result.contains("AAA"), "got: {result}");
         assert!(result.contains("BBB"), "got: {result}");
+    }
+
+    #[test]
+    fn list_resources_projects_shows_agent_stats_and_recent_work_first() {
+        let m = mcp();
+        seed_project(&m, "Stale", "STA");
+        seed_project(&m, "Recent", "REC");
+        seed_project(&m, "Empty", "EMP");
+
+        let stale_project_id = project_id_for(&m, "STA");
+        m.write(|conn| {
+            conn.execute(
+                "INSERT INTO issues (project_id, sequence, title, status, updated_at)
+                 VALUES (?1, 1, 'Old work', 'todo', '2000-01-01 00:00:00')",
+                rusqlite::params![stale_project_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        seed_issue(&m, "REC", "Current work");
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "REC".into(),
+            title: "Current plan".into(),
+            anchor_issue: None,
+            steps: None,
+        }));
+        assert!(created.starts_with("Created REC-PLAN-1"), "got: {created}");
+
+        let result = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "project".into(),
+            ..Default::default()
+        }));
+        let recent = result
+            .lines()
+            .find(|line| line.starts_with("- REC | Recent"))
+            .expect("recent project line");
+        assert!(
+            recent.starts_with("- REC | Recent (1 workable, 1 active plan, last activity "),
+            "got: {recent}"
+        );
+        assert!(recent.ends_with(" ago)"), "got: {recent}");
+        assert_eq!(
+            result
+                .lines()
+                .find(|line| line.starts_with("- EMP | Empty")),
+            Some("- EMP | Empty"),
+            "fresh empty project must have no stats suffix: {result}"
+        );
+        assert!(
+            result.find("- REC | Recent").unwrap() < result.find("- STA | Stale").unwrap(),
+            "recent work must sort before stale work: {result}"
+        );
     }
 
     // ── LIF-257: zero-projects onboarding nudge ──
@@ -5011,6 +5274,53 @@ mod tests {
         }));
         assert!(detail.contains("The quick red fox"), "got: {detail}");
         assert!(!detail.contains("brown"), "got: {detail}");
+    }
+
+    #[test]
+    fn create_and_edit_issue_preserves_literal_escapes_in_multiline_code() {
+        let m = mcp();
+        seed_project(&m, "Test", "ESC");
+        let description = "Example:\n```c\nprintf(\"\\n\");\n```\n";
+        let created = m.create_issue(Parameters(CreateIssueInput {
+            project: "ESC".into(),
+            title: "Preserve code escapes".into(),
+            description: Some(description.into()),
+            ..Default::default()
+        }));
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let detail = m.get_issue(Parameters(GetIssueInput {
+            identifier: "ESC-1".into(),
+            ..Default::default()
+        }));
+        assert!(detail.contains(description), "get_issue mangled content: {detail}");
+
+        let exported = m.export_issue(Parameters(ExportIssueInput {
+            identifier: "ESC-1".into(),
+        }));
+        assert!(
+            exported.contains(description.trim_end()),
+            "export_issue mangled content: {exported}"
+        );
+
+        let result = m.edit_issue(Parameters(EditIssueInput {
+            identifier: "ESC-1".into(),
+            old_string: "```c\nprintf(\"\\n\");\n```".into(),
+            new_string: "```c\nputs(\"hello\");\n```".into(),
+            field: None,
+            replace_all: None,
+        }));
+        assert!(result.starts_with("Edited"), "got: {result}");
+
+        let updated = m.get_issue(Parameters(GetIssueInput {
+            identifier: "ESC-1".into(),
+            ..Default::default()
+        }));
+        assert!(updated.contains("puts(\"hello\");"), "got: {updated}");
+        assert!(
+            !updated.contains("printf(\"\\n\");"),
+            "literal escape was not replaced: {updated}"
+        );
     }
 
     #[test]
@@ -6942,7 +7252,7 @@ mod tests {
         let m = mcp();
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Mirrored work"); // PLN-1
-        m.create_plan(Parameters(CreatePlanInput {
+        let created = m.create_plan(Parameters(CreatePlanInput {
             project: "PLN".into(),
             title: "Plan".into(),
             anchor_issue: None,
@@ -6952,19 +7262,110 @@ mod tests {
                 ..Default::default()
             }]),
         }));
+        let step_id: i64 = created
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .expect("step id in output");
 
         // Close the issue through the normal issue tool.
-        m.update_issue(Parameters(UpdateIssueInput {
+        let updated = m.update_issue(Parameters(UpdateIssueInput {
             identifier: "PLN-1".into(),
             status: Some("done".into()),
             ..Default::default()
         }));
+        assert!(
+            updated.contains(&format!(
+                "auto-completed plan step #{step_id} in PLN-PLAN-1"
+            )),
+            "issue update must narrate the cascade: {updated}"
+        );
 
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
         }));
         assert!(got.contains("[x]"), "step should be auto-completed: {got}");
         assert!(got.contains("via PLN-1"), "provenance should show: {got}");
+    }
+
+    #[test]
+    fn reopening_issue_narrates_reopened_plan_step() {
+        let m = mcp();
+        seed_project(&m, "Plans", "RPN");
+        seed_issue(&m, "RPN", "Mirrored work"); // RPN-1
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "RPN".into(),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                issue: Some("RPN-1".into()),
+                ..Default::default()
+            }]),
+        }));
+        let step_id: i64 = created
+            .split('#')
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .expect("step id in output");
+
+        m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "RPN-1".into(),
+            status: Some("done".into()),
+            ..Default::default()
+        }));
+        let reopened = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "RPN-1".into(),
+            status: Some("todo".into()),
+            ..Default::default()
+        }));
+
+        assert!(
+            reopened.contains(&format!("reopened plan step #{step_id} in RPN-PLAN-1")),
+            "issue reopen must narrate the cascade: {reopened}"
+        );
+    }
+
+    #[test]
+    fn closing_issue_skips_steps_in_archived_plans_without_note() {
+        let m = mcp();
+        seed_project(&m, "Plans", "ARC");
+        seed_issue(&m, "ARC", "Mirrored work"); // ARC-1
+        m.create_plan(Parameters(CreatePlanInput {
+            project: "ARC".into(),
+            title: "Archived plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                issue: Some("ARC-1".into()),
+                ..Default::default()
+            }]),
+        }));
+        m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "ARC-PLAN-1".into(),
+            status: Some("archived".into()),
+            ..Default::default()
+        }));
+
+        let updated = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "ARC-1".into(),
+            status: Some("done".into()),
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            updated, "Updated ARC-1: ARC-1 | done | none | Mirrored work",
+            "archived-plan steps are frozen and must not produce a note"
+        );
+        let plan = m.get_plan(Parameters(GetPlanInput {
+            plan: "ARC-PLAN-1".into(),
+        }));
+        assert!(
+            plan.contains("- [ ]"),
+            "archived step must remain open: {plan}"
+        );
     }
 
     #[test]

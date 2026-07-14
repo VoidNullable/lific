@@ -1,9 +1,10 @@
 use axum::{
     Extension,
-    extract::{Json, Path, State},
+    extract::{ConnectInfo, Json, Path, State},
     http::HeaderMap,
     response::IntoResponse,
 };
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
@@ -53,6 +54,8 @@ pub(super) struct SignupRequest {
 pub(super) async fn auth_signup(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(trusted_proxies): Extension<Arc<[crate::ratelimit::IpNetwork]>>,
     limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     headers: HeaderMap,
     Json(input): Json<SignupRequest>,
@@ -64,7 +67,10 @@ pub(super) async fn auth_signup(
     // uses) is what actually caps the DoS. `check` records on pass and the
     // `||` short-circuits, so a rejected attempt never double-charges.
     let email_key = format!("signup:{}", input.email.to_lowercase());
-    let ip_key = format!("signup_ip:{}", crate::ratelimit::client_ip(&headers));
+    let ip_key = format!(
+        "signup_ip:{}",
+        crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+    );
     if let Some(Extension(ref rl)) = limiter
         && (!rl.check(&email_key) || !rl.check(&ip_key))
     {
@@ -144,6 +150,8 @@ pub(super) async fn auth_signup(
 pub(super) async fn auth_login(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(trusted_proxies): Extension<Arc<[crate::ratelimit::IpNetwork]>>,
     limiter: Option<Extension<std::sync::Arc<crate::ratelimit::RateLimiter>>>,
     headers: HeaderMap,
     Json(input): Json<LoginRequest>,
@@ -158,7 +166,10 @@ pub(super) async fn auth_login(
     // old code called check() (records on pass) *and* record_failure(),
     // halving the effective limit.
     let id_key = format!("login_id:{}", input.identity.to_lowercase());
-    let ip_key = format!("login_ip:{}", crate::ratelimit::client_ip(&headers));
+    let ip_key = format!(
+        "login_ip:{}",
+        crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+    );
     if let Some(Extension(ref rl)) = limiter
         && (!rl.peek(&id_key) || !rl.peek(&ip_key))
     {
@@ -816,11 +827,13 @@ mod tests {
             )
             .unwrap();
         }
-        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
-            allow_signup: true,
-            required: true,
-            secure_cookies: false,
-        }));
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), test_peer()).layer(
+            axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }),
+        );
 
         let body = serde_json::json!({
             "username": "blocked",
@@ -861,11 +874,13 @@ mod tests {
             )
             .unwrap();
         }
-        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
-            allow_signup: true,
-            required: true,
-            secure_cookies: false,
-        }));
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), test_peer()).layer(
+            axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }),
+        );
 
         let resp = json_get(&app, "/api/instance").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -880,11 +895,13 @@ mod tests {
         // up, then true. This is the brand-new-instance transition the signup
         // page keys its copy off (without ever claiming the account is admin).
         let db = crate::db::open_memory().expect("test db");
-        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
-            allow_signup: true,
-            required: true,
-            secure_cookies: false,
-        }));
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), test_peer()).layer(
+            axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }),
+        );
 
         let before = parse_json(json_get(&app, "/api/instance").await).await;
         assert_eq!(before["has_users"], false);
@@ -1146,11 +1163,13 @@ mod tests {
             )
             .unwrap();
         }
-        let app = crate::api::router(db, &[]).layer(axum::Extension(crate::config::AuthConfig {
-            allow_signup: true,
-            required: true,
-            secure_cookies: false,
-        }));
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), test_peer()).layer(
+            axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }),
+        );
 
         // Disallowed domain is rejected.
         let resp = json_post(
@@ -1379,13 +1398,13 @@ mod tests {
 
     /// Build an app whose login route is guarded by a rate limiter capped
     /// at `max` attempts within a 15-minute window.
-    fn login_app_with_limiter(max: usize) -> axum::Router {
+    fn login_app_with_limiter(max: usize, peer: std::net::SocketAddr) -> axum::Router {
         let db = crate::db::open_memory().expect("test db");
         let limiter = std::sync::Arc::new(crate::ratelimit::RateLimiter::new(
             max,
             std::time::Duration::from_secs(15 * 60),
         ));
-        crate::api::router(db, &[])
+        with_client_ip_test_layers(crate::api::router(db, &[]), peer)
             .layer(axum::Extension(crate::config::AuthConfig {
                 allow_signup: true,
                 required: true,
@@ -1434,7 +1453,7 @@ mod tests {
         // failed attempts must be allowed before the 6th is blocked. The old
         // code (check() records + record_failure() records) only allowed ~3.
         // Distinct IP per attempt so only the per-identity bucket accrues.
-        let app = login_app_with_limiter(5);
+        let app = login_app_with_limiter(5, test_peer());
         for i in 0..5 {
             let (status, body) = login_attempt(&app, "victim", &format!("10.0.0.{i}")).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1457,7 +1476,7 @@ mod tests {
         // Per-IP limiting (new in LIF-75): one host spraying many usernames
         // gets throttled even though each identity is distinct. Previously
         // impossible — the limiter was keyed solely on identity.
-        let app = login_app_with_limiter(5);
+        let app = login_app_with_limiter(5, test_peer());
         for i in 0..5 {
             let (status, body) = login_attempt(&app, &format!("user{i}"), "203.0.113.5").await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1476,12 +1495,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_rate_limit_ignores_spoofed_xff_from_untrusted_peer() {
+        // Regression for LIF-206: a directly connected attacker can rotate
+        // XFF on every request, but must still consume one peer-IP bucket.
+        let peer = std::net::SocketAddr::from(([203, 0, 113, 5], 4242));
+        let app = login_app_with_limiter(2, peer);
+        for (i, spoofed_xff) in ["198.51.100.1", "198.51.100.2"].iter().enumerate() {
+            let (status, body) = login_attempt(&app, &format!("user{i}"), spoofed_xff).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                !is_rate_limited(&body),
+                "attempt {i} should consume, but not exceed, the peer-IP budget: {body}"
+            );
+        }
+
+        let (status, body) = login_attempt(&app, "third-user", "198.51.100.3").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            is_rate_limited(&body),
+            "rotating spoofed XFF must not evade the untrusted peer's bucket: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn login_rate_limit_isolates_distinct_ips() {
         // A victim identity is NOT locked out for an attacker on a different
         // IP, as long as the victim comes from their own IP and the identity
         // budget hasn't been exhausted. Sanity check that buckets are keyed
         // independently and the IP key is actually in play.
-        let app = login_app_with_limiter(3);
+        let app = login_app_with_limiter(3, test_peer());
         // Attacker burns the identity budget would also block victim, so to
         // isolate the IP dimension we use distinct identities here.
         for i in 0..3 {
@@ -1545,7 +1587,7 @@ mod tests {
         // The DoS LIF-138 fixes: an email-only key is bypassed by rotating
         // addresses, each request still paying a full Argon2 hash. Distinct
         // emails from ONE IP must now be throttled by the per-IP bucket.
-        let app = login_app_with_limiter(5);
+        let app = login_app_with_limiter(5, test_peer());
         for i in 0..5 {
             let (status, body) = signup_attempt(&app, i, "203.0.113.9").await;
             assert_eq!(status, StatusCode::OK, "signup {i} should succeed: {body}");
@@ -1567,7 +1609,7 @@ mod tests {
     async fn signup_rate_limit_isolates_distinct_ips() {
         // The per-IP cap must not leak across IPs: a fresh source can still
         // sign up after another IP is capped.
-        let app = login_app_with_limiter(3);
+        let app = login_app_with_limiter(3, test_peer());
         for i in 0..3 {
             let (status, _) = signup_attempt(&app, i, "198.51.100.7").await;
             assert_eq!(status, StatusCode::OK);

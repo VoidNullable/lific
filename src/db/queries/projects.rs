@@ -1,9 +1,22 @@
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection};
 
 use crate::db::models::*;
 use crate::error::LificError;
 
 use super::unescape_text;
+
+/// Per-project workload signals shown only in the MCP project listing.
+///
+/// This deliberately lives beside project queries rather than on `Project`:
+/// REST and web callers keep their existing project payload and ordering.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectAgentStats {
+    pub workable: i64,
+    pub active_plans: i64,
+    pub last_activity: Option<String>,
+}
 
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     let mut stmt = conn.prepare_cached(
@@ -24,6 +37,68 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Fetch workload signals for every project in one SQL statement.
+///
+/// The workable predicate intentionally mirrors `issues::list_issues` exactly:
+/// a blocker is unresolved until its source issue is `done` (a cancelled
+/// blocker therefore continues to block, matching the existing list filter).
+pub fn project_agent_stats(
+    conn: &Connection,
+) -> Result<HashMap<i64, ProjectAgentStats>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "WITH workable AS (
+             SELECT i.project_id, COUNT(*) AS count
+             FROM issues i
+             WHERE i.status NOT IN ('done', 'cancelled')
+               AND NOT EXISTS (
+                   SELECT 1 FROM issue_relations ir
+                   JOIN issues blocker ON blocker.id = ir.source_id
+                   WHERE ir.target_id = i.id
+                     AND ir.relation_type = 'blocks'
+                     AND blocker.status != 'done'
+               )
+             GROUP BY i.project_id
+         ),
+         active_plans AS (
+             SELECT project_id, COUNT(*) AS count
+             FROM plans
+             WHERE status = 'active'
+             GROUP BY project_id
+         ),
+         activity AS (
+             SELECT project_id, updated_at FROM issues
+             UNION ALL
+             SELECT project_id, updated_at FROM pages WHERE project_id IS NOT NULL
+             UNION ALL
+             SELECT project_id, updated_at FROM plans
+         ),
+         last_activity AS (
+             SELECT project_id, MAX(updated_at) AS updated_at
+             FROM activity
+             GROUP BY project_id
+         )
+         SELECT p.id,
+                COALESCE(w.count, 0),
+                COALESCE(ap.count, 0),
+                la.updated_at
+         FROM projects p
+         LEFT JOIN workable w ON w.project_id = p.id
+         LEFT JOIN active_plans ap ON ap.project_id = p.id
+         LEFT JOIN last_activity la ON la.project_id = p.id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            ProjectAgentStats {
+                workable: row.get(1)?,
+                active_plans: row.get(2)?,
+                last_activity: row.get(3)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
 }
 
 pub fn resolve_project_identifier(conn: &Connection, identifier: &str) -> Result<i64, LificError> {
@@ -518,6 +593,58 @@ mod tests {
 
         let projects = list_projects(&conn).unwrap();
         assert_eq!(projects.len(), 3);
+    }
+
+    #[test]
+    fn project_agent_stats_counts_work_and_latest_activity() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project_id = seed_named(&conn, "Signals", "SIG");
+
+        let insert_issue = |sequence, title, status, updated_at| {
+            conn.execute(
+                "INSERT INTO issues (project_id, sequence, title, status, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![project_id, sequence, title, status, updated_at],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let blocker = insert_issue(1, "Blocker", "active", "2026-01-01 00:00:00");
+        insert_issue(2, "Unblocked", "todo", "2026-01-02 00:00:00");
+        let blocked = insert_issue(3, "Blocked", "todo", "2026-01-03 00:00:00");
+        insert_issue(4, "Done", "done", "2026-01-04 00:00:00");
+        conn.execute(
+            "INSERT INTO issue_relations (source_id, target_id, relation_type)
+             VALUES (?1, ?2, 'blocks')",
+            params![blocker, blocked],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO pages (project_id, sequence, title, status, updated_at)
+             VALUES (?1, 1, 'Page activity', 'active', '2026-01-05 00:00:00')",
+            params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO plans (project_id, sequence, title, status, updated_at)
+             VALUES (?1, 1, 'Active plan', 'active', '2026-01-06 00:00:00')",
+            params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO plans (project_id, sequence, title, status, updated_at)
+             VALUES (?1, 2, 'Archived plan', 'archived', '2026-01-04 12:00:00')",
+            params![project_id],
+        )
+        .unwrap();
+
+        let stats = project_agent_stats(&conn).unwrap();
+        let stats = stats.get(&project_id).expect("stats for project");
+        assert_eq!(stats.workable, 2);
+        assert_eq!(stats.active_plans, 1);
+        assert_eq!(stats.last_activity.as_deref(), Some("2026-01-06 00:00:00"));
     }
 
     // ── LIF-233: sidebar ordering ────────────────────────────

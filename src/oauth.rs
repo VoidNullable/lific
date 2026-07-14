@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
-    extract::{Json, Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -103,6 +103,8 @@ pub struct OAuthState {
     /// Per-IP rate limiter for the unauthenticated /oauth/register endpoint.
     /// Prevents anyone from flooding the server with throwaway clients.
     pub register_limiter: Arc<RateLimiter>,
+    /// Trusted reverse-proxy ranges parsed once at server startup.
+    pub trusted_proxies: Arc<[crate::ratelimit::IpNetwork]>,
 }
 
 /// Validate a redirect URI submitted to dynamic client registration.
@@ -238,13 +240,14 @@ struct RegisterRequest {
 
 async fn register_client(
     State(state): State<OAuthState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
     // ── Rate limit per source IP ──
     // /oauth/register is unauthenticated by spec (RFC 7591), so without this
     // anyone on the internet can mint unlimited clients.
-    let ip = crate::ratelimit::client_ip(&headers);
+    let ip = crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies);
     let key = format!("oauth_register:{ip}");
     if !state.register_limiter.check(&key) {
         let retry = state.register_limiter.retry_after(&key);
@@ -608,11 +611,12 @@ struct DeviceAuthRequest {
 /// JSON. Rate-limited per source IP like `/oauth/register`.
 async fn device_authorization(
     State(state): State<OAuthState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     // ── Rate limit per source IP (reuse the register limiter) ──
-    let ip = crate::ratelimit::client_ip(&headers);
+    let ip = crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies);
     let key = format!("oauth_device_authorization:{ip}");
     if !state.register_limiter.check(&key) {
         let retry = state.register_limiter.retry_after(&key);
@@ -1382,6 +1386,7 @@ pub fn oauth_token_user_id(db: &DbPool, token: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1399,8 +1404,16 @@ mod tests {
             db: db.clone(),
             issuer: "https://example.com".into(),
             register_limiter: Arc::new(RateLimiter::new(cap, std::time::Duration::from_secs(3600))),
+            trusted_proxies: Arc::<[crate::ratelimit::IpNetwork]>::from(
+                crate::config::ServerConfig::default()
+                    .trusted_proxy_ranges()
+                    .expect("default trusted proxy ranges must parse"),
+            ),
         };
-        (router(state), db)
+        (
+            router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
+            db,
+        )
     }
 
     /// Register a client, returning the client_id.

@@ -275,6 +275,7 @@ Prefer per-tool **bot identities** (what `lific connect` mints when you have a u
 host = "0.0.0.0"
 port = 3456
 cors_origins = []
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
 
 [database]
 path = "lific.db"
@@ -293,7 +294,7 @@ allow_signup = true
 required = true
 ```
 
-CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs.
+CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs. `server.trusted_proxies` controls which peers may supply `X-Forwarded-For` or `X-Real-IP`; it defaults to loopback for Tailscale Funnel. Add only proxy IPs/CIDRs you operate.
 
 Config is discovered in standard locations, first match wins:
 

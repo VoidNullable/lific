@@ -109,6 +109,11 @@ pub struct ServerConfig {
     /// Allowed CORS origins. If empty, allows all origins (not recommended for production).
     /// Example: ["https://your-app.example.com"]
     pub cors_origins: Vec<String>,
+    /// IP addresses or CIDR ranges allowed to supply client-IP proxy headers.
+    /// Plain IPs are allowed; defaults to loopback so Tailscale Funnel keeps
+    /// working while directly exposed listeners ignore spoofed X-Forwarded-For.
+    /// Example: ["127.0.0.0/8", "::1/128", "10.0.0.0/8"]
+    pub trusted_proxies: Vec<String>,
     /// If set, exposes an authless MCP endpoint at `/mcp/<token>` that skips the
     /// OAuth flow entirely — the path secret itself is the credential. This is an
     /// escape hatch for clients whose OAuth connector flow is broken (notably
@@ -156,9 +161,18 @@ impl Default for ServerConfig {
             port: 3456,
             public_url: None,
             cors_origins: Vec::new(),
+            trusted_proxies: vec!["127.0.0.0/8".into(), "::1/128".into()],
             mcp_path_token: None,
             mcp_path_user: None,
         }
+    }
+}
+
+impl ServerConfig {
+    /// Validate the configured proxy ranges once during startup before request
+    /// handlers use them for rate-limit and audit client-IP keys.
+    pub fn trusted_proxy_ranges(&self) -> Result<Vec<crate::ratelimit::IpNetwork>, String> {
+        crate::ratelimit::parse_trusted_proxies(&self.trusted_proxies)
     }
 }
 
@@ -321,6 +335,10 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 3456);
+        assert_eq!(
+            config.server.trusted_proxies,
+            vec!["127.0.0.0/8", "::1/128"]
+        );
         assert_eq!(config.database.path, PathBuf::from("lific.db"));
         assert!(config.backup.enabled);
         assert_eq!(config.backup.retain, 24);
@@ -477,6 +495,20 @@ enabled = false
         let toml_str = Config::default_toml();
         let parsed: Config = toml::from_str(&toml_str).expect("default toml should parse");
         assert_eq!(parsed.server.port, 3456);
+        assert_eq!(parsed.server.trusted_proxies, vec!["127.0.0.0/8", "::1/128"]);
+    }
+
+    #[test]
+    fn invalid_trusted_proxy_config_is_rejected() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+trusted_proxies = ["not-a-cidr"]
+"#,
+        )
+        .unwrap();
+        let error = config.server.trusted_proxy_ranges().unwrap_err();
+        assert!(error.contains("trusted_proxies[0]"));
     }
 
     // LIF-207: Secure cookie flag is derived from the public_url scheme.

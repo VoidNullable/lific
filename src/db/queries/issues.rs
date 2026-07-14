@@ -276,9 +276,12 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
         Some("sequence") => format!("i.sequence {dir}"),
         Some("created") | Some("created_at") => format!("i.created_at {dir}, i.sequence {dir}"),
         Some("updated") | Some("updated_at") => format!("i.updated_at {dir}, i.sequence {dir}"),
+        Some("priority") => format!(
+            "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END {dir}, i.sequence {dir}"
+        ),
         Some(other) => {
             return Err(LificError::BadRequest(format!(
-                "invalid order_by '{other}'. Use sort_order, sequence, created, or updated."
+                "invalid order_by '{other}'. Use sort_order, sequence, created, updated, or priority."
             )));
         }
     };
@@ -1677,6 +1680,51 @@ mod tests {
     }
 
     #[test]
+    fn list_orders_by_priority_ascending() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for priority in ["none", "low", "urgent", "medium", "high"] {
+            quick_issue(&conn, pid, priority, "todo", priority);
+        }
+
+        let issues = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                order_by: Some("priority".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let priorities: Vec<&str> = issues.iter().map(|issue| issue.priority.as_str()).collect();
+        assert_eq!(priorities, vec!["urgent", "high", "medium", "low", "none"]);
+    }
+
+    #[test]
+    fn list_orders_by_priority_descending() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for priority in ["none", "low", "urgent", "medium", "high"] {
+            quick_issue(&conn, pid, priority, "todo", priority);
+        }
+
+        let issues = list_issues(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                order_by: Some("priority".into()),
+                order: Some("desc".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let priorities: Vec<&str> = issues.iter().map(|issue| issue.priority.as_str()).collect();
+        assert_eq!(priorities, vec!["none", "low", "medium", "high", "urgent"]);
+    }
+
+    #[test]
     fn list_rejects_invalid_order_params() {
         let pool = test_db();
         let conn = pool.write().unwrap();
@@ -1690,7 +1738,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(bad_col.is_err(), "unknown order_by must error, not be interpolated");
+        assert!(matches!(
+            bad_col,
+            Err(LificError::BadRequest(message))
+                if message == "invalid order_by 'priority; DROP TABLE issues'. Use sort_order, sequence, created, updated, or priority."
+        ));
 
         let bad_dir = list_issues(
             &conn,
