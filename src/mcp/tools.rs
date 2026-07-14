@@ -2378,7 +2378,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List comments on an issue or page. Accepts an issue identifier (LIF-42) or a page identifier (LIF-DOC-3 or DOC-3 for workspace pages)."
+        description = "List comments on an issue or page. By default returns only the 5 most recent comments, newest first; set limit/order/offset to override or page into older comments. Accepts an issue identifier (LIF-42) or a page identifier (LIF-DOC-3 or DOC-3 for workspace pages)."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
         let parent = match resolve_comment_parent(self, &input.identifier) {
@@ -2389,34 +2389,63 @@ impl LificMcp {
             return format!("Error: {e}");
         }
 
+        let limit = input.limit.unwrap_or(5).clamp(1, 500);
+        let offset = input.offset.unwrap_or(0).max(0);
+        let order = input.order.as_deref().unwrap_or("desc");
+
         match self.read(|conn| {
-            queries::comments::list_comments(
+            let comments = queries::comments::list_comments_paginated(
                 conn,
                 parent,
                 input.author.as_deref(),
-                input.order.as_deref(),
-            )
+                Some(order),
+                Some(limit + 1),
+                Some(offset),
+            )?;
+            let total = queries::comments::count_comments(
+                conn,
+                parent,
+                input.author.as_deref(),
+            )?;
+            Ok((comments, total))
         }) {
-            Ok(comments) if comments.is_empty() => {
+            Ok((comments, _)) if comments.is_empty() => {
                 format!("No comments on {}.", input.identifier)
             }
-            Ok(comments) => {
-                let total = comments.len();
-                // Clamp the limit floor to 1 (a 0/negative limit is
-                // meaningless) and truncate the already-filtered+ordered list.
-                let shown = match input.limit {
-                    Some(n) => (n.max(1) as usize).min(total),
-                    None => total,
-                };
-                let mut out = if shown < total {
-                    format!("Showing {shown} of {total} comment(s) on {}:\n", input.identifier)
+            Ok((mut comments, total)) => {
+                let has_more = comments.len() as i64 > limit;
+                if has_more {
+                    comments.truncate(limit as usize);
+                }
+                let shown = comments.len() as i64;
+                let mut out = if offset == 0 && shown < total {
+                    let edge = if order == "desc" { "most recent" } else { "oldest" };
+                    format!(
+                        "Showing {shown} {edge} of {total} comment(s) on {}:\n",
+                        input.identifier
+                    )
+                } else if offset > 0 {
+                    format!(
+                        "Showing comments {}-{} of {total} on {} ({} first):\n",
+                        offset + 1,
+                        offset + shown,
+                        input.identifier,
+                        if order == "desc" { "newest" } else { "oldest" }
+                    )
                 } else {
                     format!("{total} comment(s) on {}:\n", input.identifier)
                 };
-                for c in &comments[..shown] {
+                for c in &comments {
                     out.push_str(&format!(
                         "[{}] {} ({}): {}\n",
                         c.created_at, c.author, c.author_display_name, c.content
+                    ));
+                }
+                if has_more {
+                    let next_offset = offset + shown;
+                    let remaining = total.saturating_sub(next_offset);
+                    out.push_str(&format!(
+                        "\n... {remaining} more comment(s) available — call again with offset={next_offset}\n"
                     ));
                 }
                 out
@@ -4575,7 +4604,7 @@ mod tests {
     }
 
     #[test]
-    fn list_comments_limit_truncates_with_header() {
+    fn list_comments_limit_paginates_with_hint() {
         let m = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Limited");
@@ -4588,13 +4617,14 @@ mod tests {
             ..Default::default()
         }));
         assert!(
-            result.starts_with("Showing 3 of 9 comment(s) on PRJ-1:"),
+            result.starts_with("Showing 3 most recent of 9 comment(s) on PRJ-1:"),
             "got: {result}"
         );
-        // Default order is asc, so the first 3 are 1,2,3.
-        assert!(result.contains("comment number 1"), "got: {result}");
-        assert!(result.contains("comment number 3"), "got: {result}");
-        assert!(!result.contains("comment number 4"), "got: {result}");
+        assert!(result.contains("call again with offset=3"), "got: {result}");
+        // Default order is desc, so the first 3 are the newest: 9,8,7.
+        assert!(result.contains("comment number 9"), "got: {result}");
+        assert!(result.contains("comment number 7"), "got: {result}");
+        assert!(!result.contains("comment number 6"), "got: {result}");
     }
 
     #[test]
@@ -4612,7 +4642,7 @@ mod tests {
             ..Default::default()
         }));
         assert!(
-            result.starts_with("Showing 2 of 9 comment(s) on PRJ-1:"),
+            result.starts_with("Showing 2 most recent of 9 comment(s) on PRJ-1:"),
             "got: {result}"
         );
         // desc + limit 2 → the two newest (9, 8), not the oldest.
@@ -4622,19 +4652,52 @@ mod tests {
     }
 
     #[test]
-    fn list_comments_no_limit_keeps_plain_header() {
+    fn list_comments_offset_returns_next_page() {
         let m = mcp();
         seed_project(&m, "Proj", "PRJ");
-        seed_issue(&m, "PRJ", "Unlimited");
+        seed_issue(&m, "PRJ", "Paged");
         let _guard = seed_user(&m);
-        seed_comment_trail(&m, 4);
+        seed_comment_trail(&m, 5);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            limit: Some(2),
+            offset: Some(2),
+            ..Default::default()
+        }));
+        assert!(result.contains("comment number 3"), "got: {result}");
+        assert!(result.contains("comment number 2"), "got: {result}");
+        assert!(!result.contains("comment number 4"), "got: {result}");
+        assert!(!result.contains("comment number 1"), "got: {result}");
+        assert!(result.contains("call again with offset=4"), "got: {result}");
+        assert!(
+            result.starts_with("Showing comments 3-4 of 5 on PRJ-1 (newest first):"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn list_comments_defaults_to_five_most_recent() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Recent comments");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 9);
 
         let result = m.list_comments(Parameters(ListCommentsInput {
             identifier: "PRJ-1".into(),
             ..Default::default()
         }));
-        assert!(result.starts_with("4 comment(s) on PRJ-1:"), "got: {result}");
-        assert!(!result.contains("Showing"), "got: {result}");
+        assert!(
+            result.starts_with("Showing 5 most recent of 9 comment(s) on PRJ-1:"),
+            "got: {result}"
+        );
+        for n in 5..=9 {
+            assert!(result.contains(&format!("comment number {n}")), "got: {result}");
+        }
+        assert!(!result.contains("comment number 4"), "got: {result}");
+        assert!(result.contains("4 more comment(s) available"), "got: {result}");
+        assert!(result.contains("call again with offset=5"), "got: {result}");
     }
 
     #[test]
@@ -6025,6 +6088,7 @@ mod tests {
             author: Some("testuser".into()),
             order: None,
             limit: None,
+            offset: None,
         }));
         assert!(mine.contains("Mine"), "got: {mine}");
 
@@ -6033,6 +6097,7 @@ mod tests {
             author: Some("ghost".into()),
             order: None,
             limit: None,
+            offset: None,
         }));
         assert!(ghost.contains("No comments"), "got: {ghost}");
     }
@@ -6059,6 +6124,7 @@ mod tests {
             author: None,
             order: Some("desc".into()),
             limit: None,
+            offset: None,
         }));
         let second = listing.find("second").unwrap();
         let first = listing.find("first").unwrap();
@@ -6069,6 +6135,7 @@ mod tests {
             author: None,
             order: Some("newest".into()),
             limit: None,
+            offset: None,
         }));
         assert!(bad.contains("Error"), "got: {bad}");
     }

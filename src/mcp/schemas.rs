@@ -357,13 +357,17 @@ pub struct ListCommentsInput {
     #[schemars(description = "Filter to comments by this author username")]
     pub author: Option<String>,
     #[schemars(
-        description = "Sort direction by creation time: asc (default, oldest first) or desc (newest first)"
+        description = "Sort direction by creation time: desc (default, newest first) or asc (oldest first). The default makes an unqualified call return the latest comments."
     )]
     pub order: Option<String>,
     #[schemars(
-        description = "Max comments to return (applied after author filter, in the requested order). Combine with order=desc for the newest N."
+        description = "Max comments to return (default 5, cap 500). With the default order=desc, omitting this returns only the five most recent comments."
     )]
     pub limit: Option<i64>,
+    #[schemars(
+        description = "Zero-indexed offset for paging in the requested order. By default, offset=5 gets the next five older comments. The output appends a paging hint when more comments exist."
+    )]
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
