@@ -361,9 +361,13 @@ pub struct ListCommentsInput {
     )]
     pub order: Option<String>,
     #[schemars(
-        description = "Max comments to return (applied after author filter, in the requested order). Combine with order=desc for the newest N."
+        description = "Optional maximum comments to return (cap 500). Omit to return the full thread."
     )]
     pub limit: Option<i64>,
+    #[schemars(
+        description = "Zero-indexed offset for paging in the requested order. The output appends a paging hint when more comments exist."
+    )]
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

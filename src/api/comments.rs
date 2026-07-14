@@ -1,6 +1,6 @@
 use axum::{
     Extension,
-    extract::{Json, Path, State},
+    extract::{Json, Path, Query, State},
 };
 
 use crate::authz;
@@ -54,20 +54,36 @@ fn require_comment_viewer(
     }
 }
 
+#[derive(Default, serde::Deserialize)]
+pub(super) struct ListCommentsQuery {
+    /// Exact author username (case-insensitive).
+    author: Option<String>,
+    /// Creation-time sort direction: asc (default) or desc.
+    order: Option<String>,
+    /// Maximum comments to return (clamped to 1..=500).
+    limit: Option<i64>,
+    /// Number of matching comments to skip.
+    offset: Option<i64>,
+}
+
 pub(super) async fn list_comments(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(issue_id): Path<i64>,
+    Query(q): Query<ListCommentsQuery>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
     let project_id =
         with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     require_comment_viewer(&db, &auth_user, Some(project_id))?;
+    let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
-        crate::db::queries::comments::list_comments(
+        crate::db::queries::comments::list_comments_paginated(
             conn,
             CommentParent::Issue(issue_id),
-            None,
-            None,
+            q.author.as_deref(),
+            q.order.as_deref(),
+            limit,
+            q.offset,
         )
     })
     .map(Json)
@@ -102,11 +118,20 @@ pub(super) async fn list_page_comments(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
     Path(page_id): Path<i64>,
+    Query(q): Query<ListCommentsQuery>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
     require_comment_viewer(&db, &auth_user, project_id)?;
+    let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
-        crate::db::queries::comments::list_comments(conn, CommentParent::Page(page_id), None, None)
+        crate::db::queries::comments::list_comments_paginated(
+            conn,
+            CommentParent::Page(page_id),
+            q.author.as_deref(),
+            q.order.as_deref(),
+            limit,
+            q.offset,
+        )
     })
     .map(Json)
 }
@@ -371,6 +396,36 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Hello from test");
         assert_eq!(comments[1]["content"], "Second comment");
+    }
+
+    #[tokio::test]
+    async fn issue_comments_support_limit_offset_and_order() {
+        let (app, issue_id, _) = setup_comment_test();
+        for content in ["first", "second", "third"] {
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": content}),
+            )
+            .await;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/issues/{issue_id}/comments?order=desc&limit=1&offset=1"
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let comments = parse_json(resp).await;
+        let comments = comments.as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["content"], "second");
     }
 
     #[tokio::test]
@@ -740,6 +795,36 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Comment on the page");
         assert_eq!(comments[1]["content"], "Another");
+    }
+
+    #[tokio::test]
+    async fn page_comments_support_limit_and_offset() {
+        let (app, page_id, _) = setup_page_comment_test();
+        for content in ["first", "second", "third"] {
+            json_post(
+                &app,
+                &format!("/api/pages/{page_id}/comments"),
+                serde_json::json!({"content": content}),
+            )
+            .await;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/pages/{page_id}/comments?limit=1&offset=2"
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let comments = parse_json(resp).await;
+        let comments = comments.as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["content"], "third");
     }
 
     #[tokio::test]

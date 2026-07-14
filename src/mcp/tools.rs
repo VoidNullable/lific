@@ -2582,34 +2582,71 @@ impl LificMcp {
             return format!("Error: {e}");
         }
 
+        let limit = input.limit.map(|limit| limit.clamp(1, 500));
+        let offset = input.offset.unwrap_or(0).max(0);
+        let order = input.order.as_deref().unwrap_or("asc");
+
         match self.read(|conn| {
-            queries::comments::list_comments(
+            let comments = queries::comments::list_comments_paginated(
                 conn,
                 parent,
                 input.author.as_deref(),
-                input.order.as_deref(),
-            )
+                Some(order),
+                limit.map(|limit| limit + 1),
+                input.offset.map(|offset| offset.max(0)),
+            )?;
+            let total = queries::comments::count_comments(
+                conn,
+                parent,
+                input.author.as_deref(),
+            )?;
+            Ok((comments, total))
         }) {
-            Ok(comments) if comments.is_empty() => {
-                format!("No comments on {}.", input.identifier)
+            Ok((comments, total)) if comments.is_empty() => {
+                if total == 0 {
+                    format!("No comments on {}.", input.identifier)
+                } else {
+                    format!(
+                        "No comments in this range on {} (offset {offset}, {total} total).",
+                        input.identifier
+                    )
+                }
             }
-            Ok(comments) => {
-                let total = comments.len();
-                // Clamp the limit floor to 1 (a 0/negative limit is
-                // meaningless) and truncate the already-filtered+ordered list.
-                let shown = match input.limit {
-                    Some(n) => (n.max(1) as usize).min(total),
-                    None => total,
-                };
-                let mut out = if shown < total {
-                    format!("Showing {shown} of {total} comment(s) on {}:\n", input.identifier)
+            Ok((mut comments, total)) => {
+                let page_limit = limit.filter(|&limit| comments.len() as i64 > limit);
+                let has_more = page_limit.is_some();
+                if let Some(limit) = page_limit {
+                    comments.truncate(limit as usize);
+                }
+                let shown = comments.len() as i64;
+                let mut out = if limit.is_some() && offset == 0 && shown < total {
+                    let edge = if order == "desc" { "most recent" } else { "oldest" };
+                    format!(
+                        "Showing {shown} {edge} of {total} comment(s) on {}:\n",
+                        input.identifier
+                    )
+                } else if offset > 0 {
+                    format!(
+                        "Showing comments {}-{} of {total} on {} ({} first):\n",
+                        offset + 1,
+                        offset + shown,
+                        input.identifier,
+                        if order == "desc" { "newest" } else { "oldest" }
+                    )
                 } else {
                     format!("{total} comment(s) on {}:\n", input.identifier)
                 };
-                for c in &comments[..shown] {
+                for c in &comments {
                     out.push_str(&format!(
                         "[{}] {} ({}): {}\n",
                         c.created_at, c.author, c.author_display_name, c.content
+                    ));
+                }
+                if has_more {
+                    let next_offset = offset + shown;
+                    let remaining = total.saturating_sub(next_offset);
+                    out.push_str(&format!(
+                        "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}\n"
                     ));
                 }
                 out
@@ -4838,7 +4875,7 @@ mod tests {
     }
 
     #[test]
-    fn list_comments_limit_truncates_with_header() {
+    fn list_comments_limit_paginates_with_hint() {
         let m = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Limited");
@@ -4851,10 +4888,14 @@ mod tests {
             ..Default::default()
         }));
         assert!(
-            result.starts_with("Showing 3 of 9 comment(s) on PRJ-1:"),
+            result.starts_with("Showing 3 oldest of 9 comment(s) on PRJ-1:"),
             "got: {result}"
         );
-        // Default order is asc, so the first 3 are 1,2,3.
+        assert!(
+            result.contains("call again with the same author/order/limit and offset=3"),
+            "got: {result}"
+        );
+        // Default order is asc, so the first 3 are the oldest: 1,2,3.
         assert!(result.contains("comment number 1"), "got: {result}");
         assert!(result.contains("comment number 3"), "got: {result}");
         assert!(!result.contains("comment number 4"), "got: {result}");
@@ -4875,7 +4916,7 @@ mod tests {
             ..Default::default()
         }));
         assert!(
-            result.starts_with("Showing 2 of 9 comment(s) on PRJ-1:"),
+            result.starts_with("Showing 2 most recent of 9 comment(s) on PRJ-1:"),
             "got: {result}"
         );
         // desc + limit 2 → the two newest (9, 8), not the oldest.
@@ -4885,23 +4926,100 @@ mod tests {
     }
 
     #[test]
+    fn list_comments_offset_returns_next_page() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Paged");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 5);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            limit: Some(2),
+            offset: Some(2),
+            ..Default::default()
+        }));
+        assert!(result.contains("comment number 3"), "got: {result}");
+        assert!(result.contains("comment number 4"), "got: {result}");
+        assert!(!result.contains("comment number 2"), "got: {result}");
+        assert!(!result.contains("comment number 5"), "got: {result}");
+        assert!(
+            result.contains("call again with the same author/order/limit and offset=4"),
+            "got: {result}"
+        );
+        assert!(
+            result.starts_with("Showing comments 3-4 of 5 on PRJ-1 (oldest first):"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
     fn list_comments_no_limit_keeps_plain_header() {
         let m = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Unlimited");
         let _guard = seed_user(&m);
-        seed_comment_trail(&m, 4);
+        seed_comment_trail(&m, 9);
 
         let result = m.list_comments(Parameters(ListCommentsInput {
             identifier: "PRJ-1".into(),
             ..Default::default()
         }));
-        assert!(result.starts_with("4 comment(s) on PRJ-1:"), "got: {result}");
+        assert!(
+            result.starts_with("9 comment(s) on PRJ-1:"),
+            "got: {result}"
+        );
+        for n in 1..=9 {
+            assert!(result.contains(&format!("comment number {n}")), "got: {result}");
+        }
         assert!(!result.contains("Showing"), "got: {result}");
+        assert!(!result.contains("more comment(s)"), "got: {result}");
     }
 
     #[test]
-    fn list_comments_empty() {
+    fn list_comments_offset_without_limit_returns_unbounded_remainder() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Offset remainder");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 5);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            offset: Some(2),
+            ..Default::default()
+        }));
+        assert!(
+            result.starts_with("Showing comments 3-5 of 5 on PRJ-1 (oldest first):"),
+            "got: {result}"
+        );
+        for n in 3..=5 {
+            assert!(result.contains(&format!("comment number {n}")), "got: {result}");
+        }
+        assert!(!result.contains("comment number 2"), "got: {result}");
+        assert!(!result.contains("more comment(s)"), "got: {result}");
+    }
+
+    #[test]
+    fn list_comments_offset_past_end_reports_total() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Exhausted");
+        let _guard = seed_user(&m);
+        seed_comment_trail(&m, 3);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            limit: Some(2),
+            offset: Some(10),
+            ..Default::default()
+        }));
+        assert!(result.contains("offset 10, 3 total"), "got: {result}");
+        assert!(!result.contains("No comments on"), "got: {result}");
+    }
+
+    #[test]
+    fn list_comments_with_zero_comments_reports_empty_thread() {
         let m = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "No comments");
@@ -4910,7 +5028,7 @@ mod tests {
             identifier: "PRJ-1".into(),
             ..Default::default()
         }));
-        assert!(result.contains("No comments"), "got: {result}");
+        assert_eq!(result, "No comments on PRJ-1.");
     }
 
     #[test]
@@ -6335,6 +6453,7 @@ mod tests {
             author: Some("testuser".into()),
             order: None,
             limit: None,
+            offset: None,
         }));
         assert!(mine.contains("Mine"), "got: {mine}");
 
@@ -6343,6 +6462,7 @@ mod tests {
             author: Some("ghost".into()),
             order: None,
             limit: None,
+            offset: None,
         }));
         assert!(ghost.contains("No comments"), "got: {ghost}");
     }
@@ -6369,6 +6489,7 @@ mod tests {
             author: None,
             order: Some("desc".into()),
             limit: None,
+            offset: None,
         }));
         let second = listing.find("second").unwrap();
         let first = listing.find("first").unwrap();
@@ -6379,6 +6500,7 @@ mod tests {
             author: None,
             order: Some("newest".into()),
             limit: None,
+            offset: None,
         }));
         assert!(bad.contains("Error"), "got: {bad}");
     }

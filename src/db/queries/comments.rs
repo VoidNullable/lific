@@ -102,6 +102,53 @@ pub fn list_comments(
     author: Option<&str>,
     order: Option<&str>,
 ) -> Result<Vec<Comment>, LificError> {
+    list_comments_paginated(conn, parent, author, order, None, None)
+}
+
+/// Count comments for an issue or page after applying the same optional
+/// author filter as `list_comments_paginated`.
+pub fn count_comments(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+) -> Result<i64, LificError> {
+    let (parent_col, id) = match parent {
+        CommentParent::Issue(id) => ("c.issue_id", id),
+        CommentParent::Page(id) => ("c.page_id", id),
+    };
+    if let Some(username) = author {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM comments c
+                 JOIN users u ON u.id = c.user_id
+                 WHERE {parent_col} = ?1 AND u.username = ?2 COLLATE NOCASE"
+            ),
+            params![id, username],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    } else {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM comments c WHERE {parent_col} = ?1"),
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+}
+
+/// List a page of comments for an issue or page. `limit` is clamped to
+/// 1..=501 (the extra row lets transports detect `has_more`) and `offset` to
+/// zero or greater. Passing neither preserves the unbounded behaviour used by
+/// exports and other internal callers.
+pub fn list_comments_paginated(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<Comment>, LificError> {
     let dir = match order {
         None | Some("asc") => "ASC",
         Some("desc") => "DESC",
@@ -132,6 +179,18 @@ pub fn list_comments(
     }
     // `dir` comes from the two-value whitelist above, never raw input.
     sql.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
+
+    if limit.is_some() || offset.is_some() {
+        let limit = limit.map(|n| n.clamp(1, 501)).unwrap_or(-1);
+        let offset = offset.unwrap_or(0).max(0);
+        sql.push_str(&format!(
+            " LIMIT ?{} OFFSET ?{}",
+            param_values.len() + 1,
+            param_values.len() + 2
+        ));
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+    }
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
         param_values.iter().map(|p| p.as_ref()).collect();
@@ -459,7 +518,7 @@ mod tests {
         let other = queries::users::create_user(
             &conn,
             &CreateUser {
-                username: "ada".into(),
+                username: "Ada".into(),
                 email: "ada@test.com".into(),
                 password: "testpassword1".into(),
                 display_name: Some("Ada".into()),
@@ -470,12 +529,20 @@ mod tests {
         .unwrap();
 
         create_comment(&conn, CommentParent::Issue(issue_id), user_id, "from blake").unwrap();
-        create_comment(&conn, CommentParent::Issue(issue_id), other.id, "from ada").unwrap();
+        create_comment(&conn, CommentParent::Issue(issue_id), other.id, "from Ada").unwrap();
 
         let ada_only =
             list_comments(&conn, CommentParent::Issue(issue_id), Some("ada"), None).unwrap();
         assert_eq!(ada_only.len(), 1);
-        assert_eq!(ada_only[0].content, "from ada");
+        assert_eq!(ada_only[0].content, "from Ada");
+        assert_eq!(
+            count_comments(&conn, CommentParent::Issue(issue_id), Some("ada")).unwrap(),
+            1
+        );
+        assert_eq!(
+            count_comments(&conn, CommentParent::Issue(issue_id), None).unwrap(),
+            2
+        );
 
         // Username match is case-insensitive — agents shouldn't have to
         // know the stored casing.
@@ -486,6 +553,54 @@ mod tests {
         let nobody =
             list_comments(&conn, CommentParent::Issue(issue_id), Some("ghost"), None).unwrap();
         assert!(nobody.is_empty());
+    }
+
+    #[test]
+    fn list_comments_paginated_clamps_negative_offset_to_zero() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for content in ["first", "second", "third"] {
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, content).unwrap();
+        }
+
+        let comments = list_comments_paginated(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(2),
+            Some(-10),
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].content, "first");
+        assert_eq!(comments[1].content, "second");
+    }
+
+    #[test]
+    fn list_comments_paginated_clamps_limit_to_501() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for index in 0..502 {
+            create_comment(
+                &conn,
+                CommentParent::Issue(issue_id),
+                user_id,
+                &format!("comment {index}"),
+            )
+            .unwrap();
+        }
+
+        let comments = list_comments_paginated(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(9999),
+            None,
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 501);
     }
 
     #[test]
