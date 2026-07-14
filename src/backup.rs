@@ -69,6 +69,11 @@ fn run_backup(pool: &DbPool, db_path: &Path, backup_dir: &Path, retain: usize) {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("lific");
+
+    // Sweep staging leftovers from a previous crashed/failed run first, so
+    // they get cleaned even if this run's backup fails too (LIF-329).
+    sweep_stale_tmps(backup_dir, db_stem);
+
     let filename = dump::archive_filename(db_stem, &dump::archive_timestamp());
     let backup_path = backup_dir.join(&filename);
 
@@ -103,6 +108,54 @@ fn run_backup(pool: &DbPool, db_path: &Path, backup_dir: &Path, retain: usize) {
     }
 
     rotate_backups(backup_dir, db_stem, retain);
+}
+
+/// How old a dump staging file must be before the sweep considers it stale.
+/// A live dump finishes in seconds; anything an hour old is a crash leftover.
+const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Delete stale dump staging files leaked by a crash mid-backup (LIF-329).
+///
+/// `write_dump` stages `{stem}_<ts>.tar.dbsnapshot.tmp` and
+/// `{stem}_<ts>.tar.archive.tmp` beside the output archive and cleans them
+/// itself on success or error — but a hard crash between staging and cleanup
+/// strands them, and `rotate_backups` only matches `.tar.gz`/`.db`, so they
+/// would otherwise accumulate forever. Age-gated so an in-flight dump's
+/// staging files are never swept.
+fn sweep_stale_tmps(backup_dir: &Path, db_stem: &str) {
+    let prefix = format!("{db_stem}_");
+    let entries = match std::fs::read_dir(backup_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!(error = %e, "failed to read backup directory for tmp sweep");
+            return;
+        }
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix)
+            || !(name.ends_with(".dbsnapshot.tmp") || name.ends_with(".archive.tmp"))
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE_TMP_AGE);
+        if stale {
+            match std::fs::remove_file(&path) {
+                Ok(()) => info!(path = %path.display(), "removed stale backup staging file"),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to remove stale staging file")
+                }
+            }
+        }
+    }
 }
 
 /// Keep only the N most recent backup archives, delete the rest.
@@ -260,6 +313,65 @@ mod tests {
         assert!(!dir.join("lific_20260102_120000.db").exists());
         assert!(dir.join("lific_20260103_120000.tar.gz").exists());
         assert!(dir.join("lific_20260104_120000.tar.gz").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Backdate a file's mtime so the sweep sees it as stale.
+    fn backdate(path: &Path, by: Duration) {
+        let f = fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - by).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_stale_staging_tmps_keeps_fresh_and_unrelated() {
+        // LIF-329: crash leftovers (`*.dbsnapshot.tmp` / `*.archive.tmp`)
+        // older than the stale threshold are swept; fresh staging files (a
+        // possibly in-flight dump) and unrelated files are untouched.
+        let dir = make_temp_dir();
+        let old = STALE_TMP_AGE + Duration::from_secs(60);
+
+        let stale_snap = dir.join("lific_20260101_120000.tar.dbsnapshot.tmp");
+        let stale_arch = dir.join("lific_20260101_120000.tar.archive.tmp");
+        let fresh_arch = dir.join("lific_20260714_120000.tar.archive.tmp");
+        let other_stem = dir.join("other_20260101_120000.tar.archive.tmp");
+        let real_backup = dir.join("lific_20260101_120000.tar.gz");
+        for p in [&stale_snap, &stale_arch, &fresh_arch, &other_stem, &real_backup] {
+            fs::write(p, "x").unwrap();
+        }
+        backdate(&stale_snap, old);
+        backdate(&stale_arch, old);
+        backdate(&other_stem, old);
+        backdate(&real_backup, old);
+
+        sweep_stale_tmps(&dir, "lific");
+
+        assert!(!stale_snap.exists(), "stale snapshot tmp must be swept");
+        assert!(!stale_arch.exists(), "stale archive tmp must be swept");
+        assert!(fresh_arch.exists(), "fresh staging tmp must survive");
+        assert!(other_stem.exists(), "other stems are not ours to sweep");
+        assert!(real_backup.exists(), "real archives are rotation's job, not the sweep's");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_backup_sweeps_stale_tmps_even_when_it_writes_nothing_new() {
+        // The sweep runs at the top of run_backup, so leftovers age out on
+        // the next interval even if that run's dump were to fail.
+        let dir = make_temp_dir();
+        let db_path = dir.join("lific.db");
+        let backup_dir = dir.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let pool = crate::db::open(&db_path).expect("open test db");
+
+        let stale = backup_dir.join("lific_20260101_120000.tar.archive.tmp");
+        fs::write(&stale, "partial").unwrap();
+        backdate(&stale, STALE_TMP_AGE + Duration::from_secs(60));
+
+        run_backup(&pool, &db_path, &backup_dir, 5);
+
+        assert!(!stale.exists(), "run_backup must sweep stale staging files");
 
         fs::remove_dir_all(&dir).ok();
     }

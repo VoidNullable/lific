@@ -116,6 +116,11 @@ pub fn write_dump(pool: &DbPool, db_path: &Path, out_path: &Path) -> Result<Mani
     let tmp_db = out_path.with_extension("dbsnapshot.tmp");
     snapshot_db(pool, &tmp_db)?;
 
+    // Staging path for the archive itself; the closure writes here and
+    // atomically renames into place on success. Declared out here so the
+    // error path below can clean up a partial archive (LIF-329).
+    let tmp_archive = out_path.with_extension("archive.tmp");
+
     // Guard: always clean the temp snapshot even on the error paths below.
     let result = (|| {
         let db_size_bytes = std::fs::metadata(&tmp_db).map(|m| m.len()).unwrap_or(0);
@@ -159,7 +164,6 @@ pub fn write_dump(pool: &DbPool, db_path: &Path, out_path: &Path) -> Result<Mani
 
         // Build the archive into a temp file, then atomically rename into place
         // so a partial write is never observed at the final path.
-        let tmp_archive = out_path.with_extension("archive.tmp");
         {
             let file = std::fs::File::create(&tmp_archive)
                 .map_err(|e| LificError::Internal(format!("create archive: {e}")))?;
@@ -195,6 +199,12 @@ pub fn write_dump(pool: &DbPool, db_path: &Path, out_path: &Path) -> Result<Mani
     })();
 
     let _ = std::fs::remove_file(&tmp_db);
+    if result.is_err() {
+        // A failure after the archive staging file was created would otherwise
+        // strand a partial `*.archive.tmp` that rotation never touches
+        // (LIF-329).
+        let _ = std::fs::remove_file(&tmp_archive);
+    }
     result
 }
 
@@ -657,6 +667,30 @@ mod tests {
         write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
         let mode = fs::metadata(&out).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "archive must be chmod 0600");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_dump_cleans_up_its_staging_files() {
+        // LIF-329: force a failure *after* the staging archive exists by
+        // squatting the final path with a directory (rename onto a directory
+        // fails on every platform). Neither staging file may survive.
+        let (dir, db_path) = seed_data_dir("errclean");
+        let out = dir.join("blocked.tar.gz");
+        fs::create_dir_all(&out).unwrap();
+
+        let result = write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out);
+        assert!(result.is_err(), "rename onto a directory must fail");
+
+        assert!(
+            !out.with_extension("archive.tmp").exists(),
+            "partial archive staging file must be cleaned on error"
+        );
+        assert!(
+            !out.with_extension("dbsnapshot.tmp").exists(),
+            "db snapshot staging file must be cleaned on error"
+        );
+
         fs::remove_dir_all(&dir).ok();
     }
 
