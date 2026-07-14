@@ -1,10 +1,67 @@
 # Changelog
 
-## v2.1.1 (2026-07-06)
+## v2.2.0 (2026-07-14)
 
-Fixes the 2.1.0 field report "auth required false isn't working": REST and MCP honored `[auth] required = false`, but the **web UI still showed a login screen** - the SPA decides signed-in state via `/api/auth/me` (400 for the anonymous operator) and only skips the login form when the instance advertises single-user auto-login.
+The web UI goes realtime, MCP tool output slims down to respect agent context budgets, and a security fix stops clients from spoofing their IP to the rate limiter. This is also the first release with external contributions: realtime invalidation arrived as PR #4 ([@mjc](https://github.com/mjc)) and comments pagination as PR #5 ([@Joshuabaker2](https://github.com/Joshuabaker2)).
 
-Auth-optional now activates that exact rail: `GET /api/instance` advertises auto-login when auth is off (the SPA bootstrap signal only - the admin settings page keeps showing the stored toggle), and `POST /api/auth/auto-login` mints the first-admin session under `required = false` just as it does under `web_auto_login`. The browser goes straight to the dashboard, signed in as the first admin. With zero accounts there is nobody to sign in as, so the signup screen still appears once; the two flags share a threat model (admin for whoever can reach the page), and auth-off already refuses to start with a non-localhost `public_url`.
+### Realtime web invalidation
+
+Two browser tabs - or you and your agent - no longer drift apart. Every write pushes an invalidation event over a WebSocket and open views resync live: issues, pages, plans, comments, attachments, saved views, module/folder structure, plans' cross-project issue effects, and the authz toggle. (PR #4 by [@mjc](https://github.com/mjc), hardened and extended in review.)
+
+- **The socket is a credentialed surface**: sessions are revalidated every 60 seconds (logout or expiry tears the connection down), connections are capped per user, and a no-op write emits no event.
+- **Reconnects behave**: views resync after the socket comes back (nothing missed while offline), an expired session breaks the reconnect loop instead of hammering the server, and navigating away tears the socket down cleanly.
+
+### Security: the rate limiter no longer trusts client-supplied X-Forwarded-For (LIF-206)
+
+Per-IP rate-limit keys came from the leftmost `X-Forwarded-For` entry - which the client controls. A direct attacker could rotate XFF per request for a fresh bucket, spoof a victim's IP, or poison the key space with garbage. Now:
+
+- **New `server.trusted_proxies` config** (CIDR list), defaulting to loopback-only - which preserves real-client-IP behavior behind Tailscale Funnel with zero config change. Invalid entries fail startup loudly. Add only proxy ranges you operate.
+- **The genuine TCP peer is the key** unless that peer is a trusted proxy. For trusted peers, the full XFF chain is walked right-to-left skipping trusted hops and the first untrusted IP wins; malformed or all-trusted chains fail closed to the peer address. `X-Real-IP` is consulted only when XFF is absent, and header values must parse as strict IPs (with IPv4-mapped-IPv6 normalization).
+
+### MCP tool output respects the context window
+
+Agents pay for every token a tool returns, and the chattiest tools were spending that budget on things the agent didn't ask for. The defaults now return the working set, with explicit opt-ins for the full picture:
+
+- **`get_board` omits done/cancelled issues by default** (LIF-300): status grouping shows closed columns as count-only stubs, priority/module grouping drops them with a trailing count. `include_closed=true` restores the old render; `max_per_column` caps each column with a `… +N more` tail.
+- **`get_issue` defaults to the last 3 comments** (LIF-301) with a truncation header; `include_comments='all'` for the whole thread, `'none'` for a stub. `list_comments` gains a `limit`.
+- **`list_comments` paginates** (LIF-326, PR #5 by [@Joshuabaker2](https://github.com/Joshuabaker2)): `limit`/`offset` on MCP and matching query params on REST, with `has_more` continuation hints. Unqualified calls still return the full thread in ascending order, exactly as before.
+- **`update_plan_step` returns a compact receipt** (LIF-302) - side-effect notes plus a one-line progress summary instead of re-rendering the whole tree. `echo_tree=true` restores the old output.
+- **`get_issue` relation lines carry the related issue's status** (LIF-303): `Blocked by: LIF-42 (done)` answers the follow-up before it's asked.
+
+### MCP: search, resume flow, and discoverability
+
+- **Literal search mode** (LIF-304): `mode='literal'` does a case-insensitive substring scan over issues, pages, and comments - finding punctuation-heavy needles like `core:sodom`, `[RequiredSpecs]`, or `--trace-plans` that FTS tokenizes away.
+- **Resume-flow signals**: `update_issue` reports plan-step cascades (auto-completed/reopened steps) fired by closing a linked issue (LIF-324); `list_resources(type='project')` appends workable count, active plan count, and last-activity age, sorted most-recently-active first (LIF-325); the server instructions tell agents to check for an existing plan before creating a duplicate (LIF-322).
+- **`list_issues` can sort by priority** (LIF-323): `order_by=priority` joins the whitelist.
+- **`manage_resource` project updates are discoverable** (LIF-327): the schema now spells out that projects are targeted via `project=<IDENT>`, and `current_name` without `project` returns an instructive error instead of a generic one.
+- **Regression coverage: tool outputs never HTML-escape stored text** (LIF-299).
+
+### Web UI: sub tabs, sidebar, and touch
+
+- **Sub tabs across every list view** (LIF-305, LIF-308): issues get All/Recent/Open/Closed, pages get Browse/Recent/Drafts/Archived (archived pages finally have a first-class home), plans get Active/Done/Archived/All, modules get Active/Backlog/Archive/All. Counts on every tab, per-project persistence.
+- **Sidebar recents** (LIF-307): the five most recent items of the active section, one click away. Archived pages and plans stay out - recents are a jump-back-in affordance.
+- **Drag-resizable sidebar width, persisted** (LIF-309) - including the fix for the Tailwind ordering bug where the resize work broke the mobile drawer.
+- **Page re-parenting works on touch** (LIF-280): a Move-to-folder picker covers what desktop does by drag.
+- **PWA manifest + icons** (LIF-321): add Lific to a phone home screen and it opens like an app.
+- **Command palette results** stack title over snippet and render FTS `**match**` highlights as emphasis instead of raw markers (LIF-328).
+
+### Cross-project integrity and pagination correctness
+
+A field-report sweep hardened the seams between projects and the views that page over data:
+
+- **Cross-project references are rejected everywhere they could sneak in**: an issue can't take another project's module (LIF-310), a page can't move into another project's folder (LIF-311), and a folder can't be parented under a folder from another project (LIF-312).
+- **Page moves are transactional in the UI**: a failed move rolls back visually (LIF-313), concurrent moves are guarded (LIF-318), and a move no longer triggers stale reloads (LIF-320).
+- **Lists page all the way**: plan lists use stable cursor pagination (LIF-316) and load every page (LIF-314); sidebar page recents paginate instead of truncating (LIF-315, LIF-317).
+
+### Auth-optional now reaches the browser (LIF-297)
+
+Fixes the 2.1.0 field report "auth required false isn't working": REST and MCP honored `[auth] required = false`, but the **web UI still showed a login screen** - the SPA decides signed-in state via `/api/auth/me` (400 for the anonymous operator) and only skips the login form when the instance advertises single-user auto-login. `GET /api/instance` now advertises auto-login when auth is off, and `POST /api/auth/auto-login` mints the first-admin session under `required = false` just as it does under `web_auto_login`. The browser goes straight to the dashboard, signed in as the first admin. With zero accounts the signup screen still appears once (there is nobody to sign in as); the two flags share a threat model, and auth-off already refuses to start with a non-localhost `public_url`.
+
+### Everything else
+
+- **Literal `\n`/`\t` in code blocks survive round-trips** (LIF-142): text unescaping now only fires on real control characters, so documentation about escape sequences stops being mangled into actual newlines.
+- **Backup staging files can't accumulate** (LIF-329): a dump that fails mid-write now cleans up its partial `.tmp` archive, and the interval backup task sweeps stale staging leftovers from a crashed run - previously invisible to rotation and stranded forever.
+- **A failed crates.io publish fails the release run** (LIF-288): the publish step swallowed every error, including the 403 that silently skipped v2.0.0's publish. Only the idempotent "version already uploaded" case is tolerated now, and duplicate detection matches narrowly (LIF-319).
 
 ## v2.1.0 (2026-07-06)
 
