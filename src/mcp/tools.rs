@@ -2184,7 +2184,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Create or update a resource (project, module, label, folder). Use the delete tool for deletion."
+        description = "Create or update a resource (project, module, label, folder). Use the delete tool for deletion. To update a project's name/description/identifier: resource_type='project', action='update', project='<IDENT>', plus the new name/description/identifier."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
         match (input.resource_type.as_str(), input.action.as_str()) {
@@ -2235,6 +2235,10 @@ impl LificMcp {
                 }
             }
             ("project", "update") => {
+                if input.current_name.is_some() && input.project.is_none() {
+                    return "Error: project updates must be targeted with project=<identifier>, not current_name"
+                        .into();
+                }
                 let Some(ref proj) = input.project else {
                     return "Error: project identifier required".into();
                 };
@@ -3194,12 +3198,96 @@ mod tests {
             name: Some("New Name".into()),
             identifier: None,
             description: None,
-            current_name: None,
+            current_name: Some("Old".into()),
             status: None,
             color: None,
             emoji: None,
         }));
         assert!(result.contains("New Name"), "got: {result}");
+    }
+
+    #[test]
+    fn manage_update_project_description_persists() {
+        let m = mcp();
+        seed_project(&m, "Project", "DSC");
+        let project_id = project_id_for(&m, "DSC");
+
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("DSC".into()),
+            name: None,
+            identifier: None,
+            description: Some("Updated description".into()),
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+
+        assert!(result.contains("Updated project"), "got: {result}");
+        let project = m
+            .read(|conn| queries::get_project(conn, project_id))
+            .expect("updated project");
+        assert_eq!(project.description, "Updated description");
+    }
+
+    #[test]
+    fn manage_update_project_identifier_persists() {
+        let m = mcp();
+        seed_project(&m, "Project", "OLD");
+        let project_id = project_id_for(&m, "OLD");
+
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("OLD".into()),
+            name: None,
+            identifier: Some("NEW".into()),
+            description: None,
+            current_name: None,
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+
+        assert!(result.contains("Updated project NEW"), "got: {result}");
+        let project = m
+            .read(|conn| queries::get_project(conn, project_id))
+            .expect("updated project");
+        assert_eq!(project.identifier, "NEW");
+        assert_eq!(project_id_for(&m, "NEW"), project_id);
+    }
+
+    #[test]
+    fn manage_update_project_with_current_name_requires_project_identifier() {
+        let m = mcp();
+        seed_project(&m, "Original", "ORG");
+        let project_id = project_id_for(&m, "ORG");
+
+        let result = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: None,
+            name: Some("Changed".into()),
+            identifier: Some("NEW".into()),
+            description: Some("Changed description".into()),
+            current_name: Some("Original".into()),
+            status: None,
+            color: None,
+            emoji: None,
+        }));
+
+        assert_eq!(
+            result,
+            "Error: project updates must be targeted with project=<identifier>, not current_name"
+        );
+        let project = m
+            .read(|conn| queries::get_project(conn, project_id))
+            .expect("unchanged project");
+        assert_eq!(project.name, "Original");
+        assert_eq!(project.identifier, "ORG");
+        assert_eq!(project.description, "");
     }
 
     #[test]

@@ -320,9 +320,13 @@ pub struct ManageResourceInput {
     pub resource_type: String,
     #[schemars(description = "Action: create or update")]
     pub action: String,
-    #[schemars(description = "Resource name (required for update, identifies which to update)")]
+    #[schemars(
+        description = "Current name identifying which module, label, or folder to update. Not used for projects — target those with `project`."
+    )]
     pub current_name: Option<String>,
-    #[schemars(description = "Project identifier (for create, e.g. LIF)")]
+    #[schemars(
+        description = "Project identifier (e.g. LIF). For resource_type=project with action=update, this identifies the project being updated."
+    )]
     pub project: Option<String>,
     #[schemars(description = "Name")]
     pub name: Option<String>,
