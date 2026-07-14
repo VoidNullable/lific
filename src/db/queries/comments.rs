@@ -518,7 +518,7 @@ mod tests {
         let other = queries::users::create_user(
             &conn,
             &CreateUser {
-                username: "ada".into(),
+                username: "Ada".into(),
                 email: "ada@test.com".into(),
                 password: "testpassword1".into(),
                 display_name: Some("Ada".into()),
@@ -529,12 +529,12 @@ mod tests {
         .unwrap();
 
         create_comment(&conn, CommentParent::Issue(issue_id), user_id, "from blake").unwrap();
-        create_comment(&conn, CommentParent::Issue(issue_id), other.id, "from ada").unwrap();
+        create_comment(&conn, CommentParent::Issue(issue_id), other.id, "from Ada").unwrap();
 
         let ada_only =
             list_comments(&conn, CommentParent::Issue(issue_id), Some("ada"), None).unwrap();
         assert_eq!(ada_only.len(), 1);
-        assert_eq!(ada_only[0].content, "from ada");
+        assert_eq!(ada_only[0].content, "from Ada");
         assert_eq!(
             count_comments(&conn, CommentParent::Issue(issue_id), Some("ada")).unwrap(),
             1
@@ -553,6 +553,54 @@ mod tests {
         let nobody =
             list_comments(&conn, CommentParent::Issue(issue_id), Some("ghost"), None).unwrap();
         assert!(nobody.is_empty());
+    }
+
+    #[test]
+    fn list_comments_paginated_clamps_negative_offset_to_zero() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for content in ["first", "second", "third"] {
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, content).unwrap();
+        }
+
+        let comments = list_comments_paginated(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(2),
+            Some(-10),
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].content, "first");
+        assert_eq!(comments[1].content, "second");
+    }
+
+    #[test]
+    fn list_comments_paginated_clamps_limit_to_501() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        for index in 0..502 {
+            create_comment(
+                &conn,
+                CommentParent::Issue(issue_id),
+                user_id,
+                &format!("comment {index}"),
+            )
+            .unwrap();
+        }
+
+        let comments = list_comments_paginated(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(9999),
+            None,
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 501);
     }
 
     #[test]
