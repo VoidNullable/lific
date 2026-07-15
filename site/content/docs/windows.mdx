@@ -1,0 +1,131 @@
+---
+title: Windows
+description: Run Lific on Windows natively with Cargo, or under WSL 2.
+---
+
+Lific runs natively on Windows. The server, web UI, CLI, REST API, MCP server, and backups all work. SQLite is bundled into the binary. Credentials are stored in the Windows Credential Manager.
+
+Two features are not available on native Windows:
+
+- There is no prebuilt Windows binary on GitHub Releases. Install with Cargo instead.
+- There is no Windows service integration. `lific service` commands require systemd or launchd. Use Task Scheduler or a terminal to keep the server running.
+
+There are two setup paths. Native setup runs Lific directly on Windows. WSL 2 runs the Linux binary and adds systemd service support.
+
+## Native setup
+
+### Install the Rust toolchain
+
+Install rustup from [rustup.rs](https://rustup.rs). Use the default MSVC host toolchain (`stable-x86_64-pc-windows-msvc`).
+
+The MSVC toolchain needs the Visual Studio Build Tools. The rustup installer offers to install them. If you skip that step, install the "Desktop development with C++" workload from the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) installer.
+
+Lific requires Rust 1.88 or later.
+
+### Install Lific
+
+```powershell
+cargo install lific
+```
+
+The crates.io package includes the prebuilt web UI. Bun is not required for this step. Compilation takes several minutes.
+
+The binary is installed to `%USERPROFILE%\.cargo\bin\lific.exe`. rustup adds that directory to `PATH`. Confirm the install:
+
+```powershell
+lific --version
+```
+
+### Initialize the instance
+
+```powershell
+lific init --no-service
+```
+
+Use `--no-service` on Windows. Plain `lific init` tries to install a background service, finds no supported service manager, and reports an error for that step. The rest of the initialization still completes.
+
+`lific init` creates these files on Windows:
+
+| File | Path |
+| --- | --- |
+| Configuration | `%APPDATA%\lific\lific.toml` |
+| Database | `%LOCALAPPDATA%\lific\lific.db` |
+
+Use `--here` to create a directory-local instance with `.\lific.toml` and `.\lific.db` instead.
+
+### Run the server
+
+```powershell
+lific start
+```
+
+The default port is `3456`. Open `http://127.0.0.1:3456` in a browser. Press Ctrl+C to stop the server.
+
+The default bind host is `0.0.0.0`, which accepts connections from the local network. Windows Defender Firewall asks for permission the first time the server listens. To restrict the server to the local machine, set the host in `lific.toml`:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+```
+
+From here the [Quickstart](/docs/quickstart) applies unchanged: create an account in the web UI, then promote it from a second terminal with `lific user promote --username <username>`.
+
+### Start automatically (optional)
+
+Lific does not register a Windows service. Task Scheduler can start the server at logon. In PowerShell:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "$env:USERPROFILE\.cargo\bin\lific.exe" -Argument "start"
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "Lific" -Action $action -Trigger $trigger
+```
+
+The task starts the server at the next logon. Start it immediately with `Start-ScheduledTask -TaskName "Lific"`. Remove it with `Unregister-ScheduledTask -TaskName "Lific"`.
+
+A task created this way runs in your session and shows a console window. Closing that window stops the server. To run the server without a window, open Task Scheduler, edit the task, and select "Run whether user is logged on or not". That option requires your account password when saving.
+
+## WSL 2 setup
+
+WSL 2 runs the Linux release binary. This path adds the systemd service integration, so `lific init` can install a service that restarts on failure.
+
+Install a distribution if you do not have one:
+
+```powershell
+wsl --install
+```
+
+Inside the distribution, confirm systemd is enabled. `/etc/wsl.conf` must contain:
+
+```ini
+[boot]
+systemd=true
+```
+
+Recent Ubuntu WSL images ship with this enabled. If you add it manually, run `wsl --shutdown` from Windows and reopen the distribution.
+
+Then follow the Linux instructions from [Installation](/docs/installation): download `lific-linux-x86_64`, make it executable, place it on `PATH`, and run `lific init`. The service install step works because systemd is present.
+
+WSL 2 forwards localhost, so `http://localhost:3456` works from a Windows browser while WSL is running.
+
+One caveat: WSL shuts down its virtual machine when no WSL sessions or processes remain. A server inside WSL is reachable only while WSL is running. Keep a WSL terminal open, or start the distribution before use.
+
+## Build from source (native)
+
+Building from source on Windows requires Rust 1.88 or later. Building the web UI additionally requires [Bun](https://bun.sh), which ships Windows builds.
+
+```powershell
+git clone https://github.com/VoidNullable/lific
+cd lific
+cd web; bun install; bun run build; cd ..
+cargo build --release
+```
+
+The binary is written to `target\release\lific.exe`.
+
+To build without the web UI, create an empty `web\dist` directory instead of running Bun. The binary still provides the CLI, REST API, MCP server, OAuth, and backups.
+
+```powershell
+mkdir web\dist
+cargo build --release
+```

@@ -13,7 +13,7 @@ Create the configuration file and SQLite database.
 lific init --no-service
 ```
 
-Without `--here` or `--config`, `lific init` uses operating system configuration and data directories. On Linux, it writes the configuration file to `~/.config/lific/lific.toml` and the database to `~/.local/share/lific/lific.db`.
+Without `--here` or `--config`, `lific init` uses operating system configuration and data directories. On Linux, it writes the configuration file to `~/.config/lific/lific.toml` and the database to `~/.local/share/lific/lific.db`. On Windows, it writes the configuration file to `%APPDATA%\lific\lific.toml` and the database to `%LOCALAPPDATA%\lific\lific.db`. [Windows](/docs/windows) has a full walkthrough for that platform.
 
 Use `--here` to create a directory-local instance with `./lific.toml` and `./lific.db`.
 

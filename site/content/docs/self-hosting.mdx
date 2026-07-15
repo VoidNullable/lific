@@ -28,6 +28,8 @@ lific service status
 
 On Linux, `lific service install` writes a systemd user unit. On macOS, it writes a LaunchAgent. The Linux service installation attempts to enable user lingering so the service can continue after logout.
 
+On Windows, `lific service` commands report that no supported service manager was found. [Windows](/docs/windows) documents the Task Scheduler and WSL 2 alternatives.
+
 ```shell
 lific service install
 lific service restart
