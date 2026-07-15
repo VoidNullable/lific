@@ -1,10 +1,9 @@
 /* eslint-disable @next/next/no-img-element */
 import type { Metadata } from "next";
 import { CopyButton } from "./components/CopyButton";
-import { StarCount } from "./components/StarCount";
 import { Reveal } from "./components/Reveal";
 import { AutoplayVideo } from "./components/AutoplayVideo";
-import { VersionChip } from "./components/VersionChip";
+import { SiteHeader } from "./components/SiteHeader";
 
 const GITHUB = "https://github.com/VoidNullable/lific";
 const CRATE = "https://crates.io/crates/lific";
@@ -169,72 +168,7 @@ export default function Home() {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSONLD }}
       />
-      {/* Sticky chrome bar, borrowed from the product's brand header
-          (Layout.svelte): logo + font-display wordmark + mono version
-          chip on --chrome. */}
-      <header className="sticky top-3 z-30 mx-auto w-full max-w-5xl px-4 sm:px-6">
-        <div className="flex items-center gap-2.5 rounded-xl border border-border bg-chrome px-3 py-2 shadow-lg">
-          <a
-            href={GITHUB}
-            className="group flex min-w-0 items-center gap-2.5 rounded-lg px-1 py-1 transition-colors hover:bg-bg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            title="View Lific on GitHub"
-          >
-            <img
-              src="/logo.webp"
-              alt=""
-              width={26}
-              height={26}
-              className="shrink-0 rounded-md"
-            />
-            <span className="font-display text-heading leading-none tracking-tight text-text">
-              Lific
-            </span>
-            <VersionChip />
-          </a>
-          <div className="flex-1" />
-          <nav aria-label="Primary" className="flex items-center gap-1">
-            <a
-              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="/docs"
-            >
-              Docs
-            </a>
-            <a
-              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="/compare"
-            >
-              Compare
-            </a>
-            <a
-              className="hidden h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text sm:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href={CRATE}
-            >
-              crates.io
-            </a>
-            <a
-              className="hidden h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text sm:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href={DISCORD}
-            >
-              Discord
-            </a>
-            <a
-              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href={GITHUB}
-            >
-              GitHub
-              <StarCount />
-            </a>
-            {/* Green primary CTA. Indigo is the accent, green is the
-                action color (LIF-DOC-14 §3). */}
-            <a
-              className="ml-1 rounded-md bg-btn-success px-3 py-1.5 text-body-sm font-medium text-btn-success-text transition-colors hover:bg-btn-success-hover motion-safe:active:scale-[0.97] motion-safe:transition-transform focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="#install"
-            >
-              Install
-            </a>
-          </nav>
-        </div>
-      </header>
+      <SiteHeader page="home" />
 
       <main className="mx-auto w-full max-w-5xl px-6">
         {/* Hero */}
@@ -244,7 +178,7 @@ export default function Home() {
               Native MCP · one binary · self-hosted · free &amp; open source
             </SectionLabel>
           </div>
-          <h1 className="animate-reveal delay-100 mx-auto mt-5 font-display text-[clamp(2.75rem,7vw,4.75rem)] font-semibold leading-[1.08] tracking-tight">
+          <h1 className="animate-reveal delay-100 mx-auto mt-5 font-display text-[clamp(2.375rem,7vw,4.75rem)] font-semibold leading-[1.08] tracking-tight md:text-[clamp(2.75rem,7vw,4.75rem)]">
             An issue tracker
             <br />
             <span className="brand-gradient-text">for prolific agents.</span>
@@ -259,8 +193,8 @@ export default function Home() {
             id="install"
             className="animate-reveal delay-300 mx-auto mt-12 max-w-xl scroll-mt-24"
           >
-            <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-surface py-4 pl-6 pr-3 text-left shadow-lg">
-              <code className="overflow-x-auto whitespace-pre font-mono text-[clamp(0.95rem,2vw,1.15rem)] leading-relaxed">
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-surface py-4 pl-6 pr-3 text-left shadow-lg">
+              <code className="min-w-0 max-w-full flex-1 overflow-x-auto whitespace-pre font-mono text-[clamp(0.95rem,2vw,1.15rem)] leading-relaxed">
                 <span className="select-none text-success">$ </span>cargo
                 install lific{"\n"}
                 <span className="select-none text-success">$ </span>lific init
@@ -283,8 +217,8 @@ export default function Home() {
         {/* For agents */}
         <section className="mt-[clamp(8rem,18vh,11rem)]">
           <Reveal>
-            <div className="flex items-end justify-between gap-8">
-              <div className="max-w-4xl">
+            <div className="flex min-w-0 items-end justify-between gap-8">
+              <div className="min-w-0 max-w-4xl">
                 <SectionTitle>agents</SectionTitle>
                 <Body className="mt-8">
                   <Cmd>lific connect</Cmd> detects the AI tools installed on
@@ -304,8 +238,11 @@ export default function Home() {
 
           {/* lific connect, as it actually renders */}
           <Reveal delay={100}>
-            <Window title="~/dev/app" className="mt-9 max-w-4xl">
-              <pre className="overflow-x-auto bg-bg p-6 font-mono text-body-sm leading-loose text-text-muted">
+            <Window
+              title="~/dev/app"
+              className="mt-9 min-w-0 w-full max-w-full md:max-w-4xl"
+            >
+              <pre className="min-w-0 max-w-full overflow-x-auto whitespace-pre bg-bg p-4 font-mono text-body-sm leading-loose text-text-muted sm:p-6">
                 <code>
                   <span className="text-success">$</span>{" "}
                   <span className="text-text">lific connect</span>
@@ -423,8 +360,11 @@ export default function Home() {
             </Body>
           </Reveal>
 
-          <Reveal delay={100} className="mt-9 lg:-ml-16">
-            <Window title="APP-PLAN-2 · Ship offline sync">
+          <Reveal delay={100} className="mt-9 min-w-0 lg:-ml-16">
+            <Window
+              title="APP-PLAN-2 · Ship offline sync"
+              className="min-w-0 w-full max-w-full"
+            >
               <AutoplayVideo
                 src="/plan-sync.mp4"
                 poster="/plan-poster.webp"
@@ -489,9 +429,9 @@ export default function Home() {
               an account.
             </Body>
           </Reveal>
-          <Reveal delay={100}>
-            <Window title="~" className="mt-9 max-w-4xl">
-              <pre className="overflow-x-auto bg-bg p-6 font-mono text-body-sm leading-loose text-text">
+          <Reveal delay={100} className="mt-9 min-w-0">
+            <Window title="~" className="w-full min-w-0 max-w-full md:max-w-4xl">
+              <pre className="max-w-full overflow-x-auto whitespace-pre bg-bg p-4 font-mono text-body-sm leading-loose text-text sm:p-6">
                 <code>
                   <span className="text-success">$</span> cargo install lific
                   {"\n"}
@@ -526,14 +466,14 @@ export default function Home() {
                 Issue trackers should be simple,{" "}
                 <span className="brand-gradient-text">right?</span>
               </p>
-              <div className="mt-8 flex flex-wrap items-center gap-4">
+              <div className="mt-8 flex w-full flex-col items-stretch gap-4 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
                 <a
                   href={GITHUB}
-                  className="rounded-md bg-btn-success px-4 py-2.5 text-body-lg font-medium text-btn-success-text transition-colors hover:bg-btn-success-hover motion-safe:active:scale-[0.97] motion-safe:transition-transform"
+                  className="w-full rounded-md bg-btn-success px-4 py-2.5 text-center text-body-lg font-medium text-btn-success-text transition-colors hover:bg-btn-success-hover motion-safe:active:scale-[0.97] motion-safe:transition-transform sm:w-auto"
                 >
                   Star on GitHub
                 </a>
-                <code className="rounded-md border border-border px-3 py-2 font-mono text-body-sm text-text-muted">
+                <code className="w-full max-w-full overflow-x-auto whitespace-nowrap rounded-md border border-border px-3 py-2 font-mono text-body-sm text-text-muted sm:w-auto sm:max-w-none sm:overflow-visible">
                   <span className="select-none text-success">$ </span>cargo
                   install lific
                 </code>
@@ -544,28 +484,28 @@ export default function Home() {
       </main>
 
       <footer>
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 px-6 py-8 font-mono text-caption text-text-faint">
-          <span className="flex items-center gap-2">
+        <div className="mx-auto flex w-full max-w-5xl flex-col items-start gap-5 px-6 py-8 font-mono text-caption text-text-faint sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
+          <span className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
             <img
               src="/logo.webp"
               alt=""
               width={16}
               height={16}
-              className="rounded"
+              className="shrink-0 rounded"
             />
-            © 2026 · Apache-2.0 · no telemetry
+            © 2026{"\u00a0·\u00a0"}Apache-2.0{"\u00a0·\u00a0"}no telemetry
           </span>
-          <div className="flex gap-5">
-            <a className="transition-colors hover:text-text" href="/compare">
+          <div className="flex w-full flex-wrap items-center gap-x-5 gap-y-1 sm:w-auto sm:gap-y-0">
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href="/compare">
               compare
             </a>
-            <a className="transition-colors hover:text-text" href={GITHUB}>
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={GITHUB}>
               github
             </a>
-            <a className="transition-colors hover:text-text" href={CRATE}>
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={CRATE}>
               crates.io
             </a>
-            <a className="transition-colors hover:text-text" href={DISCORD}>
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={DISCORD}>
               discord
             </a>
           </div>

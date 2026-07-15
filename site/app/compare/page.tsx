@@ -1,7 +1,6 @@
 /* eslint-disable @next/next/no-img-element */
 import type { Metadata } from "next";
-import { StarCount } from "../components/StarCount";
-import { VersionChip } from "../components/VersionChip";
+import { SiteHeader } from "../components/SiteHeader";
 
 const GITHUB = "https://github.com/VoidNullable/lific";
 const CRATE = "https://crates.io/crates/lific";
@@ -152,7 +151,7 @@ function ComparisonTable({
   rows: { name: string; lific?: boolean; cells: React.ReactNode[] }[];
 }) {
   return (
-    <div className="mt-8 overflow-x-auto rounded-xl border border-border bg-bg-subtle/40">
+    <div className="mt-8 w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-border bg-bg-subtle/40">
       <table className="w-full min-w-[820px] border-collapse">
         <caption className="sr-only">{caption}</caption>
         <thead>
@@ -244,7 +243,7 @@ const GLANCE_NOTES = [
 function GlanceTable() {
   return (
     <>
-      <div className="mt-8 overflow-x-auto rounded-xl border border-border bg-bg-subtle/40">
+      <div className="mt-8 w-full min-w-0 max-w-full overflow-x-auto rounded-xl border border-border bg-bg-subtle/40">
         <table className="w-full min-w-[720px] border-collapse">
           <caption className="sr-only">
             Feature support across issue trackers with MCP: Lific, beads,
@@ -344,14 +343,18 @@ function FactList({
   items: { head: React.ReactNode; body: React.ReactNode }[];
 }) {
   return (
-    <ul className="mt-8 max-w-4xl">
+    <ul className="mt-8 min-w-0 max-w-4xl">
       {items.map(({ head, body }, i) => (
         <li
           key={i}
-          className="border-t border-border/60 py-4 text-body leading-relaxed last:border-b"
+          className="min-w-0 border-t border-border/60 py-4 text-body leading-relaxed last:border-b"
         >
-          <p className="font-medium text-text">{head}</p>
-          <p className="mt-0.5 max-w-[75ch] text-text-faint">{body}</p>
+          <p className="min-w-0 [overflow-wrap:anywhere] font-medium text-text">
+            {head}
+          </p>
+          <p className="mt-0.5 min-w-0 max-w-[75ch] [overflow-wrap:anywhere] text-text-faint [&_code]:max-w-full [&_code]:whitespace-normal [&_code]:[overflow-wrap:anywhere] sm:[&_code]:whitespace-nowrap">
+            {body}
+          </p>
         </li>
       ))}
     </ul>
@@ -368,11 +371,14 @@ function AltSection({
   children: React.ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-24 border-t border-border/60 py-6">
-      <h3 className="font-display text-title font-semibold tracking-tight">
+    <section
+      id={id}
+      className="min-w-0 scroll-mt-24 border-t border-border/60 py-6"
+    >
+      <h3 className="min-w-0 font-display text-title font-semibold tracking-tight [overflow-wrap:anywhere] sm:[overflow-wrap:normal]">
         {title}
       </h3>
-      <p className="mt-2 max-w-[75ch] text-body leading-relaxed text-text-muted">
+      <p className="mt-2 min-w-0 max-w-[75ch] text-body leading-relaxed text-text-muted [overflow-wrap:anywhere] sm:[overflow-wrap:normal]">
         {children}
       </p>
     </section>
@@ -381,83 +387,27 @@ function AltSection({
 
 export default function Compare() {
   return (
-    <div className="flex-1">
+    <div className="min-w-0 flex-1">
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSONLD }}
       />
 
-      {/* Same sticky chrome bar as the homepage. */}
-      <header className="sticky top-3 z-30 mx-auto w-full max-w-5xl px-4 sm:px-6">
-        <div className="flex items-center gap-2.5 rounded-xl border border-border bg-chrome px-3 py-2 shadow-lg">
-          <a
-            href="/"
-            className="group flex min-w-0 items-center gap-2.5 rounded-lg px-1 py-1 transition-colors hover:bg-bg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            title="Lific home"
-          >
-            <img
-              src="/logo.webp"
-              alt=""
-              width={26}
-              height={26}
-              className="shrink-0 rounded-md"
-            />
-            <span className="font-display text-heading leading-none tracking-tight text-text">
-              Lific
-            </span>
-            <VersionChip />
-          </a>
-          <div className="flex-1" />
-          <nav aria-label="Primary" className="flex items-center gap-1">
-            <a
-              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="/docs"
-            >
-              Docs
-            </a>
-            <a
-              className="flex h-7 items-center rounded-md bg-bg-subtle px-2 text-caption font-medium text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="/compare"
-              aria-current="page"
-            >
-              Compare
-            </a>
-            <a
-              className="hidden h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text sm:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href={DISCORD}
-            >
-              Discord
-            </a>
-            <a
-              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href={GITHUB}
-            >
-              GitHub
-              <StarCount />
-            </a>
-            <a
-              className="ml-1 rounded-md bg-btn-success px-3 py-1.5 text-body-sm font-medium text-btn-success-text transition-colors hover:bg-btn-success-hover motion-safe:active:scale-[0.97] motion-safe:transition-transform focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              href="/#install"
-            >
-              Install
-            </a>
-          </nav>
-        </div>
-      </header>
+      <SiteHeader page="compare" />
 
-      <main className="mx-auto w-full max-w-5xl px-6 pb-24">
+      <main className="mx-auto w-full min-w-0 max-w-5xl px-6 pb-24">
         {/* Title */}
         <section className="pt-[clamp(3.5rem,10vh,6rem)]">
           <p className="text-micro font-semibold uppercase tracking-widest text-text-faint">
             Comparison
           </p>
-          <h1 className="mt-5 max-w-[22ch] font-display text-[clamp(2.25rem,5.5vw,3.75rem)] font-semibold leading-[1.08] tracking-tight">
+          <h1 className="mt-5 max-w-[22ch] break-words font-display text-[clamp(2rem,5.5vw,3.75rem)] font-semibold leading-[1.08] tracking-tight">
             Issue trackers with MCP support,{" "}
             <span className="brand-gradient-text">compared.</span>
           </h1>
           {/* Article-style byline. This is the disclosure: the reader sees
               who wrote the comparison before any table cell. */}
-          <p className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-body-lg text-text-muted">
+          <p className="mt-6 flex flex-col items-start gap-1 text-body-lg text-text-muted sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-1">
             <span>
               Written by{" "}
               <a
@@ -467,7 +417,7 @@ export default function Compare() {
                 Lific.dev
               </a>
             </span>
-            <span aria-hidden className="text-text-faint">
+            <span aria-hidden className="hidden text-text-faint sm:inline">
               ·
             </span>
             <span>Accurate at time of writing, {STAMP}</span>
@@ -1031,7 +981,7 @@ export default function Compare() {
         </section>
 
         {/* The literal 'use something else' section. */}
-        <section className="band mt-[clamp(4.5rem,10vh,7rem)] py-[clamp(3rem,7vh,4.5rem)]">
+        <section className="band min-w-0 mt-[clamp(4.5rem,10vh,7rem)] py-[clamp(3rem,7vh,4.5rem)]">
           <H2 id="something-else">When to use something else</H2>
           <Body className="mb-8">
             These are honest defaults, not straw men. If one of these fits,
@@ -1126,18 +1076,18 @@ export default function Compare() {
 
         {/* FAQ: rendered from the same FAQS array as the FAQPage JSON-LD,
             so the structured data can never drift from the visible text. */}
-        <section className="mt-[clamp(4.5rem,10vh,7rem)]">
+        <section className="mt-[clamp(4.5rem,10vh,7rem)] min-w-0">
           <H2 id="faq">Questions people actually ask</H2>
-          <div className="mt-8 max-w-4xl">
+          <div className="mt-8 min-w-0 max-w-4xl">
             {FAQS.map(({ q, a }) => (
               <section
                 key={q}
-                className="border-t border-border/60 py-5 last:border-b"
+                className="min-w-0 border-t border-border/60 py-5 last:border-b"
               >
-                <h3 className="font-display text-title font-semibold tracking-tight">
+                <h3 className="min-w-0 break-words font-display text-title font-semibold tracking-tight md:break-normal">
                   {q}
                 </h3>
-                <p className="mt-2 max-w-[75ch] text-body leading-relaxed text-text-muted">
+                <p className="mt-2 min-w-0 max-w-[75ch] break-words text-body leading-relaxed text-text-muted md:break-normal">
                   {a}
                 </p>
               </section>
@@ -1146,8 +1096,8 @@ export default function Compare() {
         </section>
 
         {/* Corrections */}
-        <section className="mt-[clamp(3.5rem,8vh,5rem)]">
-          <p className="max-w-[68ch] text-body leading-relaxed text-text-faint">
+        <section className="mt-[clamp(3.5rem,8vh,5rem)] min-w-0">
+          <p className="min-w-0 max-w-[68ch] break-words text-body leading-relaxed text-text-faint md:break-normal">
             This page is a snapshot: every claim above was checked against the
             linked sources on {STAMP}, and products ship faster than pages
             update. If a cell is wrong or has gone stale,{" "}
@@ -1158,25 +1108,25 @@ export default function Compare() {
       </main>
 
       <footer>
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-4 px-6 py-8 font-mono text-caption text-text-faint">
-          <span className="flex items-center gap-2">
+        <div className="mx-auto flex w-full max-w-5xl flex-col items-start gap-5 px-6 py-8 font-mono text-caption text-text-faint sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
+          <span className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
             <img
               src="/logo.webp"
               alt=""
               width={16}
               height={16}
-              className="rounded"
+              className="shrink-0 rounded"
             />
-            © 2026 · Apache-2.0 · no telemetry
+            © 2026{"\u00a0·\u00a0"}Apache-2.0{"\u00a0·\u00a0"}no telemetry
           </span>
-          <div className="flex gap-5">
-            <a className="transition-colors hover:text-text" href={GITHUB}>
+          <div className="flex w-full flex-wrap items-center gap-x-5 gap-y-1 sm:w-auto sm:gap-y-0">
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={GITHUB}>
               github
             </a>
-            <a className="transition-colors hover:text-text" href={CRATE}>
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={CRATE}>
               crates.io
             </a>
-            <a className="transition-colors hover:text-text" href={DISCORD}>
+            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={DISCORD}>
               discord
             </a>
           </div>
