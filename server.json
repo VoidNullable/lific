@@ -3,7 +3,7 @@
   "name": "io.github.VoidNullable/lific",
   "title": "Lific",
   "description": "Local-first, lightweight issue tracker. Single binary, SQLite-backed, MCP-native.",
-  "websiteUrl": "https://github.com/VoidNullable/lific",
+  "websiteUrl": "https://lific.dev",
   "repository": {
     "url": "https://github.com/VoidNullable/lific",
     "source": "github"

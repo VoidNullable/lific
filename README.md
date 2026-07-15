@@ -21,7 +21,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **29 MCP tools in 6,081 tokens.** That's the measured size of the full `tools/list` response at v2.0.0 (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
+- **27 MCP tools in 5,641 tokens.** That's the measured size of the full `tools/list` response at v2.2.1 (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -61,7 +61,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 - **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
-- **Take everything with you.** `export_issue`, `export_page`, `export_project`: portable markdown, no lock-in.
+- **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
 
 ## Every tool gets its own identity, and that's the point
 
@@ -187,7 +187,7 @@ lific search "authentication" --project APP
 
 ## MCP tools
 
-All 29, in 6,081 tokens:
+All 27, in 5,641 tokens:
 
 | Family | Tools |
 |--------|-------|
@@ -198,7 +198,7 @@ All 29, in 6,081 tokens:
 | Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
 | Search & history | `search` · `get_activity` |
 | Structure | `list_resources` · `manage_resource` · `delete` |
-| Export | `export_issue` · `export_page` · `export_project` |
+| Export | `export` (issue, page, or whole project by ID) |
 
 Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`). The behaviors worth knowing about are covered in "What your agent can now do" above; for exact schemas, connect a client and read `tools/list`.
 
