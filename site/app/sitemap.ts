@@ -12,6 +12,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
       url: "https://lific.dev/",
       changeFrequency: "weekly",
     },
+    {
+      url: "https://lific.dev/compare",
+      changeFrequency: "monthly",
+    },
     ...source.getPages().map((page) => ({
       url: `https://lific.dev${page.url}`,
       changeFrequency: "weekly" as const,

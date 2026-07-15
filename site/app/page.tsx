@@ -26,6 +26,8 @@ const JSONLD = JSON.stringify([
     description:
       "A free, self-hosted issue tracker built for coding agents. Single binary, native MCP.",
     applicationCategory: "DeveloperApplication",
+    // Native Windows is supported via `cargo install` (docs/windows);
+    // prebuilt release binaries are Linux + macOS only.
     operatingSystem: "Linux, macOS, Windows",
     license: "https://www.apache.org/licenses/LICENSE-2.0",
     offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
@@ -196,6 +198,12 @@ export default function Home() {
               href="/docs"
             >
               Docs
+            </a>
+            <a
+              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              href="/compare"
+            >
+              Compare
             </a>
             <a
               className="hidden h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text sm:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
