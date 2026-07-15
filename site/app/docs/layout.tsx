@@ -1,9 +1,11 @@
 import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import { RootProvider } from "fumadocs-ui/provider/next";
+import { SiDiscord } from "@icons-pack/react-simple-icons";
 import { source } from "@/lib/source";
 import type { ReactNode } from "react";
 
 const GITHUB = "https://github.com/VoidNullable/lific";
+const DISCORD = "https://discord.gg/uWvaFC4f7D";
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
@@ -17,6 +19,15 @@ export default function Layout({ children }: { children: ReactNode }) {
       <DocsLayout
         tree={source.pageTree}
         githubUrl={GITHUB}
+        links={[
+          {
+            type: "icon",
+            label: "Discord",
+            text: "Discord",
+            url: DISCORD,
+            icon: <SiDiscord />,
+          },
+        ]}
         nav={{
           title: (
             <span className="flex items-center gap-2">

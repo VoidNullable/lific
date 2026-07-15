@@ -1,0 +1,97 @@
+---
+title: Connect agents
+description: lific connect detects installed AI tools and writes MCP configuration for them.
+---
+
+`lific connect` configures AI coding tools to use your Lific server over MCP. It detects the clients installed on your machine, writes a `lific` server entry into each client's MCP configuration, and mints an API key for each client.
+
+```bash
+lific connect
+```
+
+In a terminal, the command shows an arrow-key multiselect of supported clients. Detected clients are preselected. Detection checks for the client's configuration file or its marker directory.
+
+`lific connect` requires an initialized instance. It refuses to run without a database and recommends `lific init`. It does not require the HTTP server to be running while it writes configuration.
+
+## Supported clients
+
+| Client | Id | Global configuration | Project configuration |
+| --- | --- | --- | --- |
+| OpenCode | `opencode` | `~/.config/opencode/opencode.json` | `./opencode.json` |
+| Claude Code | `claude-code` | `~/.claude.json` | `./.mcp.json` |
+| Claude Desktop | `claude-desktop` | per OS, see below | none |
+| Cursor | `cursor` | `~/.cursor/mcp.json` | `./.cursor/mcp.json` |
+| VS Code | `vscode` | per OS, see below | `./.vscode/mcp.json` |
+| Codex | `codex` | `~/.codex/config.toml` | `./.codex/config.toml` |
+| Zed | `zed` | `~/.config/zed/settings.json` | none |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` | `./.gemini/settings.json` |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | none |
+| Goose | `goose` | `~/.config/goose/config.yaml` | none |
+| Crush | `crush` | `~/.config/crush/crush.json` | `./crush.json` |
+
+Claude Desktop global paths: `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `~/.config/Claude/claude_desktop_config.json` on Linux, `%APPDATA%\Claude\claude_desktop_config.json` on Windows.
+
+VS Code global paths: `~/Library/Application Support/Code/User/mcp.json` on macOS, `~/.config/Code/User/mcp.json` on Linux, `%APPDATA%\Code\User\mcp.json` on Windows.
+
+## What gets written
+
+Every entry is named `lific`. The shape follows each client's own configuration format. In the default remote mode, most clients receive the MCP URL plus an `Authorization: Bearer` header. Two clients differ:
+
+- Codex uses TOML and references the key through `bearer_token_env_var = "LIFIC_API_KEY"`. The key is never written into the file.
+- Claude Desktop does not support remote MCP servers natively. Its entry launches `npx -y mcp-remote <url>` with the bearer header as an argument.
+
+Writes are merge-preserving. Unrelated keys and sibling MCP server entries remain in place. Only the `lific` entry is inserted or replaced. If an existing configuration file fails to parse, `lific connect` leaves the file unchanged and reports the failure with the entry contents for manual editing.
+
+Re-running `lific connect` is safe. It replaces the `lific` entry with current values and rotates the API key for that client.
+
+## Non-interactive use
+
+Pass `--client` (repeatable) and `--yes` to skip all prompts. This is the form for scripts and agents.
+
+```bash
+lific connect --client claude-code --client opencode --yes
+```
+
+Without a terminal, `--client` is required. `--json` switches the output to JSON.
+
+`--dry-run` prints the full merged contents of every file that would change, without writing anything.
+
+## API keys
+
+Without `--key`, `lific connect` mints one API key per selected client. The plaintext key is embedded in the written configuration and is not otherwise persisted by connect. On a server with human accounts, minted keys belong to bot users named `{tool}-{owner}`. Use `--user <username>` to select the owner when more than one account exists. Re-running rotates existing active keys with the same tool name.
+
+Use `--key <key>` to reuse an existing key verbatim instead of minting new ones.
+
+## Server URL
+
+The default URL is `server.public_url` from `lific.toml` plus `/mcp`. Without a configured public URL, it falls back to `http://127.0.0.1:<port>/mcp`.
+
+Use `--url` to point clients at a remote server:
+
+```bash
+lific connect --url https://your-server.example/mcp --client opencode --yes
+```
+
+## Modes
+
+`lific connect` writes one of three entry forms:
+
+- Remote HTTP with a bearer key. This is the default.
+- `--stdio` writes a local command form, `lific --db <absolute-db-path> mcp`. The client launches Lific as a subprocess. No API key is needed. This suits a single-user machine where the client and the database live together.
+- `--oauth` writes the URL with no credentials. An OAuth-capable client completes the [OAuth 2.1 flow](/docs/mcp) on first connection. `--oauth` conflicts with `--stdio` and `--key`.
+
+## Scopes
+
+`--scope global` is the default. It writes to the user-level configuration paths in the table above. `--scope project` writes to the repository-local paths instead. Clients without a project configuration path support only the global scope.
+
+## AGENTS.md
+
+In project scope, or when the current directory contains `.git`, `lific connect` offers to write a marker-delimited Lific block into `./AGENTS.md`. The block tells agents working in the repository that Lific is available. Re-runs replace the block in place and leave the rest of the file untouched. Consent follows the run mode: an interactive terminal asks, `--yes` writes it, and a non-interactive run without `--yes` skips it. `--skip-agents` opts out entirely.
+
+## Verifying the result
+
+`lific doctor` checks the configuration, database, and server state. It accepts `--key` or the `LIFIC_API_KEY` environment variable and exits nonzero when something is broken.
+
+```bash
+lific doctor
+```
