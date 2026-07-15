@@ -150,19 +150,39 @@ Response: an object with `role` (string or null), `enforced` (boolean), and `is_
 
 Lists saved views owned by the caller for one project. Path parameter: `id` (integer project ID). It has no query parameters or request body.
 
-Response: an array of objects with `id` (integer), `project_id` (integer), `user_id` (integer), `name` (string), `config` (string containing JSON), `is_default` (boolean), `created_at` (string), and `updated_at` (string).
+Response: an array of objects with `id` (integer), `project_id` (integer), `user_id` (integer), `name` (string), `config` (string containing JSON), `is_default` (boolean), `created_at` (string), and `updated_at` (string). Views are returned only for the authenticated caller.
 
 ### POST `/api/projects/{id}/views`
 
 Creates a saved view owned by the caller. Path parameter: `id` (integer project ID). It has no query parameters.
 
-Request body fields are `name` (string), `config` (string containing valid JSON), and `is_default` (boolean, optional). Response: a saved view object.
+Request body fields are `name` (string), `config` (string containing valid JSON, at most 8 KiB), and `is_default` (boolean, optional). Response: a saved view object. The server treats `config` as opaque JSON; the web client currently uses the shape below and tolerates missing fields when applying older views.
+
+```json
+{
+  "version": 1,
+  "layout": "list",
+  "filterStatus": "",
+  "filterPriority": "",
+  "filterLabel": "",
+  "filterModule": "",
+  "searchQuery": "",
+  "sortField": "updated",
+  "sortDir": "desc",
+  "groupBy": "status",
+  "density": "comfortable",
+  "laneBy": "status",
+  "hiddenStatuses": []
+}
+```
+
+The recognized client fields are `version`, `layout` (`list` or `board`), filters, `searchQuery`, sorting, `groupBy`, `density`, `laneBy`, and `hiddenStatuses`. Clients may evolve this object without a database migration; invalid JSON is rejected, while unknown or missing fields are tolerated by the web client.
 
 ### PATCH `/api/projects/{id}/views/{view_id}`
 
 Updates a caller-owned saved view. Path parameters are `id` (integer project ID) and `view_id` (integer saved view ID). It has no query parameters.
 
-Request body fields are `name` (string, optional), `config` (string containing valid JSON, optional), and `is_default` (boolean, optional). Response: a saved view object.
+Request body fields are `name` (string, optional), `config` (string containing valid JSON, at most 8 KiB, optional), and `is_default` (boolean, optional). Response: a saved view object. The caller must own the view.
 
 ### DELETE `/api/projects/{id}/views/{view_id}`
 
