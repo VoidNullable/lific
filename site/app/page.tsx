@@ -481,9 +481,9 @@ export default function Home() {
         <section className="band band-finale">
           <div className="flex flex-col items-start gap-8 py-[clamp(3rem,7vh,4.5rem)] sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="max-w-[24ch] font-display text-[clamp(1.75rem,4vw,2.75rem)] font-semibold leading-tight tracking-tight">
-                Runs on{" "}
-                <span className="brand-gradient-text">your hardware.</span>
+              <p className="max-w-[28ch] font-display text-[clamp(1.75rem,4vw,2.75rem)] font-semibold leading-tight tracking-tight">
+                Issue trackers should be simple,{" "}
+                <span className="brand-gradient-text">right?</span>
               </p>
               <div className="mt-8 flex flex-wrap items-center gap-4">
                 <a
@@ -498,13 +498,6 @@ export default function Home() {
                 </code>
               </div>
             </div>
-            <img
-              src="/LizzyWriting.png"
-              alt="Lizzy, the Lific mascot, taking notes"
-              width={190}
-              height={190}
-              className="shrink-0 sm:-mt-12 lg:-mt-24"
-            />
           </div>
         </section>
       </main>
