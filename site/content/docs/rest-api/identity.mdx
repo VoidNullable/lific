@@ -1,0 +1,203 @@
+---
+title: Identity and instance
+description: Instance settings, browser sessions, API keys, connected tools, and users.
+---
+
+## Instance
+
+### GET `/api/instance`
+
+Returns public instance metadata for an authentication screen. This endpoint has no path or query parameters. It has no request body.
+
+Response: an object with `allow_signup` (boolean), `has_users` (boolean), `instance_name` (string), `login_message` (string), and `web_auto_login` (boolean).
+
+```bash
+curl https://your-server.example/api/instance
+```
+
+```json
+{
+  "allow_signup": true,
+  "has_users": true,
+  "instance_name": "Lific",
+  "login_message": "",
+  "web_auto_login": false
+}
+```
+
+### GET `/api/instance/settings`
+
+Returns the complete instance settings object. Requires an administrator. This endpoint has no path or query parameters. It has no request body.
+
+Response: an object with `allow_signup` (boolean), `instance_name` (string), `signup_email_domains` (string array), `session_lifetime_days` (integer), `login_message` (string), `web_auto_login` (boolean), and `authz_enforced` (boolean).
+
+### PATCH `/api/instance/settings`
+
+Updates supplied instance settings. Requires an administrator. It has no path or query parameters.
+
+Request body fields are `allow_signup` (boolean), `instance_name` (string), `signup_email_domains` (string array), `session_lifetime_days` (integer), `login_message` (string), `web_auto_login` (boolean), and `authz_enforced` (boolean). Every field is optional.
+
+Response: the complete instance settings object.
+
+```bash
+curl -X PATCH https://your-server.example/api/instance/settings \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"instance_name":"Lific"}'
+```
+
+```json
+{
+  "allow_signup": true,
+  "instance_name": "Lific",
+  "signup_email_domains": [],
+  "session_lifetime_days": 30,
+  "login_message": "",
+  "web_auto_login": false,
+  "authz_enforced": false
+}
+```
+
+## Sessions and profiles
+
+### POST `/api/auth/signup`
+
+Creates a non-admin user and a session. This endpoint has no path or query parameters.
+
+Request body fields are `username` (string), `email` (string), `password` (string), and `display_name` (string, optional).
+
+Response: an authentication result with `user` and `token` fields. `user` contains `id` (integer), `username` (string), `email` (string), `display_name` (string), and `is_admin` (boolean). `token` and `expires_at` are strings.
+
+### POST `/api/auth/login`
+
+Authenticates a user by username or email and creates a session. This endpoint has no path or query parameters.
+
+Request body fields are `identity` (string) and `password` (string).
+
+Response: the same authentication result as signup.
+
+```bash
+curl -X POST https://your-server.example/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"identity":"alex","password":"example-password"}'
+```
+
+```json
+{
+  "user": {
+    "id": 1,
+    "username": "alex",
+    "email": "alex@example.com",
+    "display_name": "alex",
+    "is_admin": false
+  },
+  "token": "lific_sess_example",
+  "expires_at": "2026-08-13T12:00:00Z"
+}
+```
+
+### POST `/api/auth/auto-login`
+
+Creates a session for the first admin when single-user auto-login is enabled. This endpoint has no path or query parameters. It has no request body.
+
+Response: an authentication result. The `user` object has `id` (integer), `username` (string), `display_name` (string), and `is_admin` (boolean).
+
+### POST `/api/auth/logout`
+
+Deletes the session named by the Bearer header when the token is a session token. It clears the browser session cookie.
+
+This endpoint has no path or query parameters. It has no request body. Response: `{ "logged_out": true }`.
+
+### GET `/api/auth/me`
+
+Returns the user associated with the Bearer credential. This endpoint has no path or query parameters. It has no request body.
+
+Response: an object with `id` (integer), `username` (string), `email` (string), `display_name` (string), and `is_admin` (boolean).
+
+### PATCH `/api/auth/me`
+
+Updates the authenticated user's profile. This endpoint has no path or query parameters.
+
+Request body fields are `display_name` (string, optional) and `email` (string, optional). Response: the same user object as `GET /api/auth/me`.
+
+### POST `/api/auth/me/password`
+
+Verifies the current password, changes it, invalidates the user's existing sessions, and creates a new session. This endpoint has no path or query parameters.
+
+Request body fields are `current_password` (string) and `new_password` (string). Response: an object with `ok` (boolean), `token` (string), and `expires_at` (string).
+
+### DELETE `/api/auth/me/sessions`
+
+Deletes every session for the authenticated user and clears the browser session cookie. This endpoint has no path or query parameters. It has no request body.
+
+Response: `{ "revoked": true }`.
+
+## API keys
+
+### GET `/api/auth/keys`
+
+Lists API keys owned by the authenticated user. This endpoint has no path or query parameters. It has no request body.
+
+Response: an array of objects with `id` (integer), `name` (string), `created_at` (string), `expires_at` (string or null), and `revoked` (boolean).
+
+### POST `/api/auth/keys`
+
+Creates an API key and assigns it to the authenticated user. This endpoint has no path or query parameters.
+
+Request body field: `name` (string). Response: an object with `name` (string) and `key` (string). The response is the only response that includes the plaintext key.
+
+```bash
+curl -X POST https://your-server.example/api/auth/keys \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"documentation-client"}'
+```
+
+```json
+{
+  "name": "documentation-client",
+  "key": "lific_sk-live-example"
+}
+```
+
+### DELETE `/api/auth/keys/{id}`
+
+Revokes an API key. Path parameter: `id` (integer key ID). It has no query parameters or request body.
+
+Response: `{ "revoked": true }`.
+
+## Connected tools
+
+### GET `/api/auth/bots`
+
+Lists connected tool bots owned by the authenticated user. This endpoint has no path or query parameters. It has no request body.
+
+Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `owner_id` (integer or null), `created_at` (string), and `has_active_key` (boolean).
+
+### POST `/api/auth/bots`
+
+Creates or reconnects a bot for a supported tool. This endpoint has no path or query parameters.
+
+Request body field: `tool` (string). Supported values are `opencode`, `cursor`, `claude-code`, `claude`, `codex`, `pi`, `vscode`, and `zed`.
+
+Response: an object with `bot` and `key`. `bot` has `id` (integer), `username` (string), and `display_name` (string). `key` and `tool` are strings.
+
+### POST `/api/auth/bots/{id}/disconnect`
+
+Revokes active keys for a connected bot. Path parameter: `id` (integer bot user ID). It has no query parameters or request body.
+
+Response: `{ "disconnected": true }`.
+
+### DELETE `/api/auth/bots/{id}`
+
+Deletes a connected bot. Path parameter: `id` (integer bot user ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+## Users
+
+### GET `/api/users`
+
+Lists non-bot users for selection controls. This endpoint has no path or query parameters. It has no request body.
+
+Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `is_admin` (boolean), and `created_at` (string).

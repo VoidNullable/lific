@@ -1,0 +1,45 @@
+---
+title: Projects
+description: Projects, identifiers, membership, and project visibility.
+---
+
+A project is the scope for issues, modules, labels, folders, pages, plans, and membership.
+
+## Project fields
+
+A project has a name, identifier, description, optional icon, optional primary lead, creation time, and update time.
+
+The identifier is unique. It is used to construct issue, page, and plan identifiers.
+
+Project identifiers follow these rules:
+
+- They contain one to five characters.
+- The first character is an uppercase ASCII letter.
+- Remaining characters are uppercase ASCII letters or digits.
+- `DOC` is reserved for workspace page identifiers.
+
+For example, a project with identifier `LIF` can have issue `LIF-42`, page `LIF-DOC-3`, and plan `LIF-PLAN-2`.
+
+## Members and roles
+
+Project membership connects one user to one project role. The roles are ordered from lowest to highest access.
+
+| Role | Permission level |
+| --- | --- |
+| `viewer` | Read-level access |
+| `maintainer` | Maintainer-level access |
+| `lead` | Lead-level access |
+
+A project can have a primary lead. Setting a primary lead also creates or updates that user's `lead` membership. A project can have more than one member with the `lead` role.
+
+The system prevents removal or demotion of the last `lead` member. Another member must become a lead first.
+
+## Visibility and authorization
+
+Project-scoped authorization is controlled by the instance setting `authz_enforced`.
+
+When enforcement is enabled, a user must be a project member with a sufficient role to access project content. Viewer access is used for reads. Maintainer access is used for content mutations. Lead access is used for lead-level actions. Administrators pass project access checks.
+
+When enforcement is disabled, membership rows do not create default-deny visibility. Interfaces retain their legacy permission behavior.
+
+Connected tool accounts use the access of their owning user.

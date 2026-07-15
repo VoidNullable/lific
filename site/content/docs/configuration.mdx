@@ -1,0 +1,149 @@
+---
+title: Configuration
+description: Reference for lific.toml discovery, sections, values, defaults, and command line overrides.
+---
+
+Lific reads TOML configuration from `lific.toml`. Every section and key is optional. Missing values use built-in defaults.
+
+## File discovery
+
+Lific uses the first readable and valid configuration file in this order.
+
+1. The path passed with `--config <PATH>`. This path is used alone. Lific does not search other locations.
+2. `./lific.toml` in the current directory.
+3. The user configuration directory.
+4. The system configuration directory.
+
+User and system paths vary by platform.
+
+| Platform | User path | System path |
+| --- | --- | --- |
+| Linux | `~/.config/lific/lific.toml`, respecting `XDG_CONFIG_HOME` | `/etc/lific/lific.toml` |
+| macOS | `~/Library/Application Support/lific/lific.toml` | `/Library/Application Support/Lific/lific.toml` |
+| Windows | `%APPDATA%\lific\lific.toml` | `%ProgramData%\lific\lific.toml` |
+
+If a discovered file cannot be read or parsed, Lific writes a warning and continues to the next location. If no valid file is found, Lific uses its built-in defaults.
+
+Relative `database.path` values resolve relative to the directory containing the selected configuration file. A relative backup directory then resolves relative to the database directory.
+
+## Command line overrides
+
+The following command line flags override configuration values.
+
+| Flag | Effect |
+| --- | --- |
+| `--config <PATH>` | Selects the configuration file and disables automatic discovery. |
+| `--db <PATH>` | Overrides `database.path` for the command. |
+| `lific start --host <HOST>` | Overrides `server.host` for that server process. |
+| `lific start --port <PORT>` | Overrides `server.port` for that server process. |
+
+`src/config.rs` does not define environment variable overrides for `lific.toml` keys. Other commands use environment variables for their own inputs. For example, `lific doctor --key` can use `LIFIC_API_KEY`, and import commands can use source-specific credentials.
+
+## Default configuration
+
+This is the built-in default configuration. Optional server keys are omitted because their default is unset.
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 3456
+cors_origins = []
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+[database]
+path = "lific.db"
+
+[backup]
+enabled = true
+dir = "backups"
+interval_minutes = 60
+retain = 24
+
+[log]
+level = "info"
+
+[auth]
+allow_signup = true
+required = true
+```
+
+## `[server]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `host` | string | `"0.0.0.0"` | Address used by `lific start` for the TCP listener. |
+| `port` | unsigned 16-bit integer | `3456` | TCP port used by `lific start`. |
+| `public_url` | optional string | unset | Public base URL. Lific uses it as the OAuth issuer. `lific connect` uses it to derive the remote MCP URL. |
+| `cors_origins` | array of strings | `[]` | Allowed browser CORS origins. An empty array allows any origin. |
+| `trusted_proxies` | array of strings | `["127.0.0.0/8", "::1/128"]` | IP addresses or CIDR ranges trusted to supply client IP proxy headers. Invalid values stop server startup. |
+| `mcp_path_token` | optional string | unset | Enables an unauthenticated MCP endpoint at `/mcp/<token>`. The path token is the credential. |
+| `mcp_path_user` | optional string | unset | Selects the username attributed to requests through `mcp_path_token`. When unset, Lific uses the first administrator if one exists. |
+
+Use an HTTPS URL for `public_url` when Lific is exposed through a public HTTPS endpoint. The server includes the configured hostname in its MCP host allowlist for reverse proxy requests.
+
+`mcp_path_token` bypasses API key and OAuth authentication. Anyone who knows the resulting URL can use the endpoint. Use a long random token and HTTPS when this key is configured.
+
+## `[database]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `path` | path string | `"lific.db"` | Path to the SQLite database file. Relative paths resolve beside the selected configuration file. |
+
+The attachment directory is named `attachments` and is stored beside the database file.
+
+## `[backup]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Enables automatic backup archives when the HTTP server starts. |
+| `dir` | path string | `"backups"` | Backup directory. An absolute path is used directly. A relative path resolves beside the database file. |
+| `interval_minutes` | unsigned integer | `60` | Interval between automatic backups, in minutes. |
+| `retain` | unsigned integer | `24` | Maximum number of backup artifacts to retain. The oldest matching artifacts are removed first. |
+
+Automatic backups use the same archive format as `lific dump`.
+
+## `[log]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `level` | string | `"info"` | Lific log level. The documented levels are `trace`, `debug`, `info`, `warn`, and `error`. |
+
+## `[auth]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allow_signup` | boolean | `true` | Initial self-service signup setting. Lific seeds the database-backed instance setting from this value when it first creates the setting. Later changes through instance settings are stored in the database. |
+| `required` | boolean | `true` | Requires a bearer credential on REST and MCP requests. |
+
+When `required = false`, a request with no credential is treated as an operator request. A request with an invalid credential still fails authentication. Lific refuses to start with `required = false` when `server.public_url` is not a localhost URL.
+
+The runtime `secure_cookies` value is not a TOML key. Lific derives it at startup. It is false only when `server.public_url` explicitly begins with `http://`. It is true for HTTPS and for an unset public URL.
+
+## Example public configuration
+
+This example sets an external HTTPS URL and restricts browser CORS requests to one origin. Replace the example values with values for the deployment.
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+public_url = "https://lific.example.com"
+cors_origins = ["https://lific.example.com"]
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+[database]
+path = "/var/lib/lific/lific.db"
+
+[backup]
+enabled = true
+dir = "/var/backups/lific"
+interval_minutes = 60
+retain = 24
+
+[log]
+level = "info"
+
+[auth]
+allow_signup = true
+required = true
+```

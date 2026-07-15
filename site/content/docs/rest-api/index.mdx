@@ -1,0 +1,130 @@
+---
+title: REST API
+description: Base URL, authentication, common response formats, and shared data shapes.
+---
+
+## Base URL
+
+All REST paths are relative to the Lific server URL.
+
+```text
+https://your-server.example/api
+```
+
+The examples use `https://your-server.example` and the project identifier `LIF`.
+
+## Authentication
+
+Most endpoints require an `Authorization` header with the `Bearer` scheme.
+
+```bash
+curl https://your-server.example/api/projects \
+  -H "Authorization: Bearer <API_KEY>"
+```
+
+API keys use the `lific_sk` prefix. Session tokens use the `lific_sess_` prefix. OAuth access tokens use the `lific_at_` prefix. All three are accepted in a Bearer header by the REST authentication middleware.
+
+`GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/auto-login` do not pass through the Bearer middleware. `POST /api/auth/logout` passes through the middleware and requires a valid Bearer credential. A session token deletes that session; any valid credential clears the browser session cookie and returns a successful logout response.
+
+`GET /api/events/ws` is not Bearer authenticated. It requires a valid `lific_token` cookie containing a session token. `GET /api/attachments/{id}` also accepts that session cookie for browser downloads. Other attachment requests require a Bearer header.
+
+## Content types
+
+JSON request bodies use `Content-Type: application/json`.
+
+```bash
+curl -X POST https://your-server.example/api/issues \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id":1,"title":"Document the REST API"}'
+```
+
+`POST /api/attachments` uses `multipart/form-data`. Export and attachment download endpoints return file bytes instead of JSON.
+
+## Errors
+
+Handlers return JSON errors with an `error` string.
+
+```json
+{
+  "error": "issue 999 not found"
+}
+```
+
+The common error statuses are `400` for invalid requests, `403` for forbidden requests, `404` for missing resources, `409` for conflicts, and `500` for internal failures. Authentication middleware can return `401` as plain text with a `WWW-Authenticate` header.
+
+## Pagination and lists
+
+Most collection endpoints return JSON arrays. Activity endpoints return an object with `items` and `has_more`; board, insights, and count endpoints return objects with their documented fields. Array responses do not include total counts or cursor metadata.
+
+`issues`, `plans`, and `search` default to `limit=50`, `limit=50`, and `limit=20` respectively. Their limits are clamped to `1..=500`. Activity feeds default to `limit=50` and clamp to `1..=200`; they return `has_more`. Comment limits are clamped to `1..=500`. Page lists apply pagination when `limit` or `offset` is supplied, with a maximum limit of `500`.
+
+`GET /api/plans` supports keyset paging only when `order_by=id`. Pass `before_id` with that ordering. Other paginated endpoints use `limit` and `offset`.
+
+## Shared response shapes
+
+### Project
+
+`Project` fields are `id` (integer), `name` (string), `identifier` (string), `description` (string), `emoji` (string or null), `lead_user_id` (integer or null), `sort_order` (integer), `created_at` (string), and `updated_at` (string).
+
+```json
+{
+  "id": 1,
+  "name": "Lific",
+  "identifier": "LIF",
+  "description": "",
+  "emoji": null,
+  "lead_user_id": 1,
+  "sort_order": 0,
+  "created_at": "2026-07-14 12:00:00",
+  "updated_at": "2026-07-14 12:00:00"
+}
+```
+
+### Issue
+
+`Issue` fields are `id` (integer), `project_id` (integer), `sequence` (integer), `identifier` (string), `title` (string), `description` (string), `status` (string), `priority` (string), `module_id` (integer or null), `sort_order` (number), `start_date` (string or null), `target_date` (string or null), `created_at` (string), `updated_at` (string), and `labels` (string array). When set, `source` appears on create, update, and single-issue responses. Issue list responses omit `source`. `GET /api/issues/{id}` and `GET /api/issues/resolve/{identifier}` populate relation arrays: `blocks`, `blocked_by`, `relates_to`, `duplicates`, and `duplicated_by`.
+
+```json
+{
+  "id": 1,
+  "project_id": 1,
+  "sequence": 1,
+  "identifier": "LIF-1",
+  "title": "Document the REST API",
+  "description": "",
+  "status": "backlog",
+  "priority": "none",
+  "module_id": null,
+  "sort_order": 0,
+  "start_date": null,
+  "target_date": null,
+  "created_at": "2026-07-14 12:00:00",
+  "updated_at": "2026-07-14 12:00:00",
+  "labels": []
+}
+```
+
+### Page and comment
+
+`Page` fields are `id` (integer), `project_id` (integer or null), `sequence` (integer or null), `identifier` (string), `folder_id` (integer or null), `title` (string), `content` (string), `sort_order` (number), `status` (string), `pinned` (boolean), `created_at` (string), `updated_at` (string), and `labels` (string array).
+
+`Comment` fields are `id` (integer), `issue_id` (integer or null), `page_id` (integer or null), `user_id` (integer), `author` (string), `author_display_name` (string), `content` (string), `created_at` (string), and `updated_at` (string).
+
+### Project resources
+
+`Module` fields are `id` (integer), `project_id` (integer), `name` (string), `description` (string), `status` (string), `emoji` (string or null), `created_at` (string), and `updated_at` (string).
+
+`Label` fields are `id` (integer), `project_id` (integer), `name` (string), and `color` (string).
+
+`Folder` fields are `id` (integer), `project_id` (integer), `parent_id` (integer or null), `name` (string), and `sort_order` (number).
+
+### Delete responses
+
+Endpoints that delete a resource return this JSON shape unless the endpoint reference states otherwise.
+
+```json
+{
+  "deleted": true
+}
+```

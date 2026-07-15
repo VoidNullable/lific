@@ -1,0 +1,37 @@
+---
+title: Modules and labels
+description: Project-scoped modules and labels.
+---
+
+Modules and labels are project-scoped resources. An issue can only use a module or label from its own project.
+
+## Modules
+
+A module groups issues within one project. A module has a name, description, optional icon, status, and timestamps.
+
+An issue can have one module or no module. Deleting a module removes that module assignment from its issues.
+
+Module statuses are:
+
+| Status | Description |
+| --- | --- |
+| `backlog` | A module status. |
+| `planned` | A module status. |
+| `active` | The default module status. |
+| `paused` | A module status. |
+| `done` | A module status. |
+| `cancelled` | A module status. |
+
+## Labels
+
+A label has a name and color. Label names are unique within a project. The default color is `#6B7280`.
+
+Labels can be attached to issues and project pages. A label can be attached to many issues and pages.
+
+When a label is supplied by name, Lific attaches the matching label from the current project. Names that do not match an existing project label are ignored.
+
+Supplying labels during an issue or page update replaces the complete label set. Supplying an empty list clears all labels. Omitting labels leaves the current set unchanged.
+
+Deleting a label removes its attachments from issues and pages.
+
+Workspace-level pages do not support labels because labels are project-scoped.

@@ -159,6 +159,12 @@ export default function Home() {
           <div className="flex-1" />
           <nav aria-label="Primary" className="flex items-center gap-1">
             <a
+              className="flex h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              href="/docs"
+            >
+              Docs
+            </a>
+            <a
               className="hidden h-7 items-center rounded-md px-2 text-caption font-medium text-text-muted transition-colors hover:bg-bg-subtle hover:text-text sm:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               href={CRATE}
             >

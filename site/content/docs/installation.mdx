@@ -1,0 +1,62 @@
+---
+title: Installation
+description: Install Lific from a GitHub release, crates.io, or source.
+---
+
+The Cargo package is named `lific`. This source tree declares version `2.2.0`.
+
+## GitHub release binaries
+
+Release binaries are published on [GitHub Releases](https://github.com/VoidNullable/lific/releases). Each release includes `sha256sums.txt` for checksum verification.
+
+| Platform | Release file |
+| --- | --- |
+| Linux x86_64 | `lific-linux-x86_64` |
+| Linux aarch64 | `lific-linux-aarch64` |
+| macOS x86_64 | `lific-macos-x86_64` |
+| macOS aarch64 | `lific-macos-aarch64` |
+
+Download the file for your platform. Compare it with the matching entry in `sha256sums.txt`. On Unix systems, make the downloaded file executable and place it in a directory on your `PATH`.
+
+```bash
+chmod +x lific-linux-x86_64
+./lific-linux-x86_64 --help
+```
+
+## Install with Cargo
+
+Install the crate from crates.io with Cargo.
+
+```bash
+cargo install lific
+```
+
+Confirm that the binary is available.
+
+```bash
+lific --version
+```
+
+## Build from source
+
+Lific requires Rust 1.88 or later. SQLite is bundled with the Rust build.
+
+For a build without the web UI, create the frontend output directory before compiling. The binary still provides the CLI, REST API, MCP server, OAuth, and backup features. Requests for the web UI report that the frontend has not been built.
+
+```bash
+git clone https://github.com/VoidNullable/lific
+cd lific
+mkdir -p web/dist
+cargo build --release
+```
+
+For a build with the embedded web UI, install Bun and build the frontend before compiling the Rust binary.
+
+```bash
+git clone https://github.com/VoidNullable/lific
+cd lific
+cd web && bun install && bun run build && cd ..
+cargo build --release
+```
+
+The release binary is written to `target/release/lific`.

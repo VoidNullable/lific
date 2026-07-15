@@ -1,0 +1,41 @@
+---
+title: Pages
+description: Markdown pages, folders, workspace pages, statuses, and pins.
+---
+
+Pages store Markdown content. A page can belong to a project or to the workspace.
+
+## Identifiers
+
+Project pages use identifiers in the form `PROJECT-DOC-SEQUENCE`. For example, the third page in project `LIF` is `LIF-DOC-3`.
+
+Workspace-level pages use identifiers in the form `DOC-SEQUENCE`. For example, the third workspace page is `DOC-3`.
+
+Project pages and workspace pages each use their own sequence scope.
+
+## Folders
+
+Folders organize project pages. A folder belongs to one project and can have a parent folder in the same project.
+
+A page can be placed in a project folder or at the project root. A workspace-level page cannot have a folder.
+
+Deleting a folder deletes its child folders. Pages in a deleted folder are moved to the project root.
+
+## Statuses
+
+Pages use one of these lifecycle statuses.
+
+| Status | Description |
+| --- | --- |
+| `draft` | The default page status. |
+| `active` | A page lifecycle status. |
+| `complete` | A page lifecycle status. |
+| `archived` | A page lifecycle status. |
+
+## Labels and pinning
+
+Project pages can have labels from their project. Workspace-level pages do not support labels.
+
+Supplying labels during a page update replaces the page's complete label set. Omitting labels leaves the current labels unchanged.
+
+Each page has a pinned value. The web page list shows pinned pages in a separate section above the folder tree. Pinning does not change the page's folder or status.

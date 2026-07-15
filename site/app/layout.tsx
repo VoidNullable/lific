@@ -57,7 +57,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${spaceGrotesk.variable} ${dmSans.variable} h-full antialiased`}
+      // `dark` is permanent: the site has one (dark) theme, and the
+      // fumadocs styles on /docs key their dark palette off this class.
+      className={`${spaceGrotesk.variable} ${dmSans.variable} dark h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
         {/* Reveal gates content behind JS; without it, show everything. */}

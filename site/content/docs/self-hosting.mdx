@@ -1,0 +1,149 @@
+---
+title: Self-hosting
+description: Run Lific as a service, manage backups, and expose an authenticated HTTPS endpoint.
+---
+
+Lific runs as one process. The process opens the configured SQLite database and stores attachment blobs in an `attachments` directory beside that database.
+
+## Run in the foreground
+
+Use `lific start` to run the HTTP server in the foreground.
+
+```shell
+lific start --config /etc/lific/lific.toml
+```
+
+The server provides the REST API, the `/mcp` endpoint, OAuth routes, and the embedded web UI when web assets were included at build time.
+
+The process user needs read and write access to the database directory. It also needs write access to the backup directory when automatic backups are enabled.
+
+## Use the built-in service command
+
+`lific init` installs and starts a supported user service unless `--no-service` is passed.
+
+```shell
+lific init
+lific service status
+```
+
+On Linux, `lific service install` writes a systemd user unit. On macOS, it writes a LaunchAgent. The Linux service installation attempts to enable user lingering so the service can continue after logout.
+
+```shell
+lific service install
+lific service restart
+lific service stop
+lific service uninstall
+```
+
+The built-in service command uses the current Lific binary and the selected configuration file. Its working directory is the directory containing that configuration file.
+
+## Generic systemd system service
+
+The following example is for an operator-managed system service. It uses a dedicated `lific` user and a configuration file outside a user home directory.
+
+```ini
+[Unit]
+Description=Lific issue tracker
+After=network.target
+
+[Service]
+User=lific
+Group=lific
+ExecStart=/usr/local/bin/lific start --config /etc/lific/lific.toml
+WorkingDirectory=/var/lib/lific
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save the unit as `lific.service` in the systemd system unit directory. Reload systemd after saving it. Enable and start the unit through the system service manager.
+
+The configured database and backup directories must be writable by the `lific` user. The configuration file must be readable by that user.
+
+## Authentication
+
+REST and MCP requests use bearer credentials by default. Lific supports API keys and OAuth access tokens.
+
+Create an API key from the host running Lific.
+
+```shell
+lific key create --name automation
+```
+
+The plaintext key is shown once. Use it in an `Authorization: Bearer <key>` request header.
+
+Lific also exposes OAuth authorization, token, registration, revocation, and device authorization routes when it runs with `lific start`. Set `server.public_url` to the public base URL so OAuth metadata advertises the URL clients use.
+
+`[auth] required` defaults to `true`. Do not set it to `false` for a public deployment. Lific refuses to start when authentication is disabled and `server.public_url` does not point to localhost.
+
+## Automatic backups
+
+Automatic backups are enabled by default.
+
+```toml
+[backup]
+enabled = true
+dir = "backups"
+interval_minutes = 60
+retain = 24
+```
+
+The backup directory is `backups` beside the database by default. An absolute `backup.dir` is used directly. A relative `backup.dir` resolves beside the database file.
+
+After startup, the backup task waits five seconds and creates a backup. It then runs at `backup.interval_minutes`. The task creates the backup directory when needed.
+
+Each backup is a timestamped gzip-compressed tar archive. The name uses the database file stem and the form `<stem>_YYYYMMDD_HHMMSS.tar.gz`.
+
+Each archive contains these entries.
+
+- `lific.db`, a consistent SQLite snapshot created with `VACUUM INTO`.
+- `attachments/`, containing each completed attachment blob.
+- `manifest.json`, containing Lific version, schema version, timestamp, and size metadata.
+
+On Unix, completed archives use owner-only `0600` permissions. The backup task retains the newest `backup.retain` matching archives and removes older matching archives. It also counts legacy `.db` backup artifacts during rotation.
+
+## Manual backup and restore
+
+`lific dump` writes the same archive format as the automatic backup task. It can run while the server is running because the database snapshot uses `VACUUM INTO`.
+
+```shell
+lific dump
+lific dump --out /var/backups/lific
+lific dump --out /var/backups/lific/manual.tar.gz
+```
+
+The `--out` value may be a target file or an existing directory. Without `--out`, Lific writes the archive to the current directory.
+
+Stop the Lific server before restoring an archive.
+
+```shell
+lific restore /var/backups/lific/lific_20260101_120000.tar.gz
+lific restore /var/backups/lific/lific_20260101_120000.tar.gz --force
+```
+
+Without `--force`, restore refuses to overwrite an existing database. With `--force`, Lific checkpoints the existing database when possible and moves it to a timestamped `.pre-restore-<timestamp>` path. Restore validates the archive before extraction. It refuses archives with a schema newer than the running Lific binary. It stages extraction before replacing the database and attachment directory.
+
+An external backup system can copy the automatic backup directory. It can also call `lific dump` before copying the resulting archive.
+
+## Expose Lific through HTTPS
+
+Lific listens directly on `server.host` and `server.port`. A reverse proxy can terminate HTTPS and forward requests to this listener. Tailscale Serve or Tailscale Funnel can also provide an HTTPS entry point.
+
+Set `server.public_url` to the URL that browsers and MCP clients use. This value is the OAuth issuer. `lific connect` derives its remote MCP URL from this value.
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+public_url = "https://lific.example.com"
+cors_origins = ["https://lific.example.com"]
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+```
+
+When a proxy supplies client IP headers, add only that proxy's addresses or CIDR ranges to `server.trusted_proxies`. Lific validates this configuration at startup. The default trusts loopback proxy addresses only.
+
+`server.cors_origins = []` allows every browser origin. Set explicit origins when the deployment requires a browser origin allowlist.
+
+Keep API key and OAuth authentication enabled for an exposed instance. If `server.mcp_path_token` is configured, its `/mcp/<token>` endpoint bypasses normal authentication. Treat that path token as a bearer secret and expose it only through HTTPS.

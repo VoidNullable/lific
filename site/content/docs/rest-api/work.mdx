@@ -1,0 +1,434 @@
+---
+title: Work items and resources
+description: Issues, pages, plans, comments, attachments, exports, search, and realtime events.
+---
+
+## Issues
+
+### GET `/api/issues`
+
+Lists issues. Query parameters are `project_id` (integer), `status` (string), `priority` (string), `module_id` (integer), `label` (string), `workable` (boolean), `blocked` (boolean), `created_since` (string), `created_until` (string), `updated_since` (string), `updated_until` (string), `order_by` (string), `order` (string), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+
+`order_by` accepts `sort_order`, `sequence`, `created`, `created_at`, `updated`, `updated_at`, or `priority`. `order` accepts `asc` or `desc`. The `since` bounds are inclusive. The `until` bounds are exclusive.
+
+It has no request body. Response: an `Issue` array.
+
+### POST `/api/issues`
+
+Creates an issue. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer), `title` (string), `description` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `backlog`), `priority` (string, optional, defaults to `none`), `module_id` (integer or null, optional), `start_date` (string or null, optional), `target_date` (string or null, optional), `labels` (string array, optional), and `source` (string or null, optional).
+
+Response: an `Issue` object.
+
+```bash
+curl -X POST https://your-server.example/api/issues \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id":1,"title":"Document the REST API"}'
+```
+
+```json
+{
+  "id": 1,
+  "project_id": 1,
+  "sequence": 1,
+  "identifier": "LIF-1",
+  "title": "Document the REST API",
+  "description": "",
+  "status": "backlog",
+  "priority": "none",
+  "module_id": null,
+  "sort_order": 0,
+  "start_date": null,
+  "target_date": null,
+  "created_at": "2026-07-14 12:00:00",
+  "updated_at": "2026-07-14 12:00:00",
+  "labels": []
+}
+```
+
+### GET `/api/issues/{id}`
+
+Returns an issue with labels and relations. Path parameter: `id` (integer issue ID). It has no query parameters or request body.
+
+Response: an `Issue` object.
+
+### PUT `/api/issues/{id}`
+
+Updates supplied issue fields. Path parameter: `id` (integer issue ID). It has no query parameters.
+
+Request body fields are `title` (string, optional), `description` (string, optional), `status` (string, optional), `priority` (string, optional), `module_id` (integer, null, or omitted), `sort_order` (number, optional), `start_date` (string or null, optional), `target_date` (string or null, optional), and `labels` (string array, optional). An omitted `module_id` is unchanged. A null `module_id` clears the assignment. Supplied `labels` replace the issue label set.
+
+Response: an `Issue` object.
+
+### DELETE `/api/issues/{id}`
+
+Deletes an issue. Path parameter: `id` (integer issue ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+### GET `/api/issues/resolve/{identifier}`
+
+Resolves an issue identifier such as `LIF-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
+
+Response: an `Issue` object.
+
+```bash
+curl https://your-server.example/api/issues/resolve/LIF-1 \
+  -H "Authorization: Bearer <API_KEY>"
+```
+
+```json
+{
+  "id": 1,
+  "identifier": "LIF-1",
+  "title": "Document the REST API",
+  "status": "backlog",
+  "priority": "none",
+  "labels": [],
+  "blocks": [],
+  "blocked_by": [],
+  "relates_to": [],
+  "duplicates": [],
+  "duplicated_by": []
+}
+```
+
+### POST `/api/issues/link`
+
+Links two issues by identifier. This endpoint has no path or query parameters.
+
+Request body fields are `source` (string issue identifier), `target` (string issue identifier), and `relation_type` (string). `relation_type` must be `blocks`, `relates_to`, or `duplicate`. Response: `{ "linked": true }`.
+
+### POST `/api/issues/unlink`
+
+Removes the relation between two issues. This endpoint has no path or query parameters.
+
+Request body fields are `source` (string issue identifier) and `target` (string issue identifier). Response: `{ "unlinked": true }`.
+
+### GET `/api/issues/{id}/activity`
+
+Returns activity for an issue. Path parameter: `id` (integer issue ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
+
+It has no request body. Response: an activity feed with the shape documented for project activity.
+
+## Comments
+
+### GET `/api/issues/{issue_id}/comments`
+
+Lists comments on an issue. Path parameter: `issue_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+
+It has no request body. Response: a `Comment` array.
+
+### POST `/api/issues/{issue_id}/comments`
+
+Creates a comment on an issue. Path parameter: `issue_id` (integer). It has no query parameters.
+
+Request body field: `content` (string). Response: a `Comment` object.
+
+### GET `/api/pages/{page_id}/comments`
+
+Lists comments on a page. Path parameter: `page_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+
+It has no request body. Response: a `Comment` array.
+
+### POST `/api/pages/{page_id}/comments`
+
+Creates a comment on a page. Path parameter: `page_id` (integer). It has no query parameters.
+
+Request body field: `content` (string). Response: a `Comment` object.
+
+### PUT `/api/comments/{id}`
+
+Updates a comment. Path parameter: `id` (integer comment ID). It has no query parameters. Only the comment author or an administrator can update it.
+
+Request body field: `content` (string). Response: a `Comment` object.
+
+### DELETE `/api/comments/{id}`
+
+Deletes a comment. Path parameter: `id` (integer comment ID). It has no query parameters or request body. Only the comment author or an administrator can delete it.
+
+Response: the standard delete response.
+
+## Modules, labels, and folders
+
+### GET `/api/modules`
+
+Lists modules for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
+
+Response: a `Module` array.
+
+### POST `/api/modules`
+
+Creates a module. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer), `name` (string), `description` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `active`), and `emoji` (string or null, optional). Response: a `Module` object.
+
+### GET `/api/modules/{id}`
+
+Returns a module. Path parameter: `id` (integer module ID). It has no query parameters or request body.
+
+Response: a `Module` object.
+
+### PUT `/api/modules/{id}`
+
+Updates supplied module fields. Path parameter: `id` (integer module ID). It has no query parameters.
+
+Request body fields are `name` (string, optional), `description` (string, optional), `status` (string, optional), and `emoji` (string, null, or omitted). Response: a `Module` object.
+
+### DELETE `/api/modules/{id}`
+
+Deletes a module. Path parameter: `id` (integer module ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+### GET `/api/labels`
+
+Lists labels for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
+
+Response: a `Label` array.
+
+### POST `/api/labels`
+
+Creates a label. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer), `name` (string), and `color` (string, optional, defaults to `#6B7280`). Response: a `Label` object.
+
+### PUT `/api/labels/{id}`
+
+Updates supplied label fields. Path parameter: `id` (integer label ID). It has no query parameters.
+
+Request body fields are `name` (string, optional) and `color` (string, optional). Response: a `Label` object.
+
+### DELETE `/api/labels/{id}`
+
+Deletes a label. Path parameter: `id` (integer label ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+### POST `/api/labels/{id}/merge`
+
+Moves source label associations to a target label in the same project. Path parameter: `id` (integer source label ID). It has no query parameters.
+
+Request body field: `into` (integer target label ID). Response: the surviving `Label` object.
+
+### GET `/api/folders`
+
+Lists folders for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
+
+Response: a `Folder` array.
+
+### POST `/api/folders`
+
+Creates a folder. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer), `parent_id` (integer or null, optional), and `name` (string). Response: a `Folder` object.
+
+### DELETE `/api/folders/{id}`
+
+Deletes a folder. Path parameter: `id` (integer folder ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+## Pages
+
+### GET `/api/pages`
+
+Lists pages. Query parameters are `project_id` (integer), `folder_id` (integer), `label` (string), `status` (string), `order_by` (string), `order` (string), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+
+When `project_id` is omitted, this endpoint lists workspace pages. `order_by` accepts `sort_order`, `title`, `status`, `created`, `created_at`, `updated`, or `updated_at`. `order` accepts `asc` or `desc`.
+
+It has no request body. Response: a `Page` array.
+
+### POST `/api/pages`
+
+Creates a page. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer or null, optional), `folder_id` (integer or null, optional), `title` (string), `content` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `draft`), and `labels` (string array, optional). Response: a `Page` object.
+
+### GET `/api/pages/{id}`
+
+Returns a page. Path parameter: `id` (integer page ID). It has no query parameters or request body.
+
+Response: a `Page` object.
+
+### PUT `/api/pages/{id}`
+
+Updates supplied page fields. Path parameter: `id` (integer page ID). It has no query parameters.
+
+Request body fields are `title` (string, optional), `content` (string, optional), `folder_id` (integer, null, or omitted), `sort_order` (number, optional), `status` (string, optional), `pinned` (boolean, optional), and `labels` (string array, optional). Supplied `labels` replace the page label set.
+
+Response: a `Page` object.
+
+### DELETE `/api/pages/{id}`
+
+Deletes a page. Path parameter: `id` (integer page ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+### GET `/api/pages/{id}/activity`
+
+Returns activity for a page. Path parameter: `id` (integer page ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
+
+It has no request body. Response: an activity feed with the shape documented for project activity.
+
+## Plans
+
+### GET `/api/plans`
+
+Lists plans without their nested step trees. Query parameters are `project_id` (integer), `status` (string), `limit` (integer), `offset` (integer), `order_by` (string), and `before_id` (integer). Every query parameter is optional.
+
+`order_by` accepts `updated` or `id`. `before_id` requires `order_by=id`. It has no request body. Response: a plan array. Each list item has `id`, `project_id`, `sequence`, `identifier`, `issue_id`, `anchor_identifier`, `title`, `status`, `created_at`, `updated_at`, `steps` (empty array), `step_count` (integer), and `done_count` (integer).
+
+### POST `/api/plans`
+
+Creates a plan and an optional nested step tree. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer), `title` (string), `issue_id` (integer or null, optional), and `steps` (array, optional). Each step has `title` (string), `description` (string, optional), `issue_id` (integer or null, optional), `done` (boolean, optional), and `steps` (step array, optional).
+
+Response: a plan object with the nested `steps` tree. Each step node has `id` (integer), `plan_id` (integer), `parent_step_id` (integer or null), `position` (integer), `title` (string), `description` (string), `issue_id` (integer or null), `issue_identifier` (string or null), `issue_status` (string or null), `done` (boolean), `reopened_via_issue_at` (string or null), `created_at` (string), `edited_at` (string or null), and `children` (step array).
+
+### GET `/api/plans/{id}`
+
+Returns a plan with its nested steps. Path parameter: `id` (integer plan ID). It has no query parameters or request body.
+
+Response: a plan object with the full step tree.
+
+### PUT `/api/plans/{id}`
+
+Updates supplied plan fields. Path parameter: `id` (integer plan ID). It has no query parameters.
+
+Request body fields are `title` (string, optional), `status` (string, optional), and `issue_id` (integer, null, or omitted). Valid plan statuses are `active`, `done`, and `archived`. Response: a plan object with the full step tree.
+
+### DELETE `/api/plans/{id}`
+
+Deletes a plan. Path parameter: `id` (integer plan ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+### GET `/api/plans/resolve/{identifier}`
+
+Resolves a plan identifier such as `LIF-PLAN-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
+
+Response: a plan object with the full step tree.
+
+### GET `/api/plans/{id}/activity`
+
+Returns activity for a plan and its steps. Path parameter: `id` (integer plan ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
+
+It has no request body. Response: an activity feed with the shape documented for project activity.
+
+### POST `/api/plans/{id}/steps`
+
+Adds a step to a plan. Path parameter: `id` (integer plan ID). It has no query parameters.
+
+Request body fields are `parent_step_id` (integer or null, optional), `title` (string), `description` (string, optional, defaults to an empty string), and `issue_id` (integer or null, optional). Response: a plan object with the full step tree.
+
+### PUT `/api/plans/{plan_id}/steps/{step_id}`
+
+Updates, moves, links, or completes a plan step. Path parameters are `plan_id` (integer) and `step_id` (integer). It has no query parameters.
+
+Request body fields are `title` (string, optional), `description` (string, optional), `done` (boolean, optional), `issue_id` (integer, null, or omitted), `move_parent_step_id` (integer, optional), `move_to_root` (boolean, optional), and `move_position` (integer, optional).
+
+Response: an object with `plan` (a plan object with the full step tree). When the request supplies `done`, the response also includes `effect`, an object with `step_id` (integer), `done` (boolean), `issue_identifier` (string or null), `issue_status_changed` (boolean), and `issue_new_status` (string or null). Otherwise, `effect` is omitted.
+
+### DELETE `/api/plans/{plan_id}/steps/{step_id}`
+
+Deletes a plan step. Path parameters are `plan_id` (integer) and `step_id` (integer). It has no query parameters or request body.
+
+Response: a plan object with the full step tree.
+
+## Attachments
+
+### GET `/api/attachments`
+
+Lists attachments linked to one entity. Query parameters are `entity_type` (string, required) and `entity_id` (integer, required). `entity_type` accepts `issue`, `page`, or `comment`.
+
+It has no path parameters or request body. Response: an attachment array. Each attachment has `id` (integer), `filename` (string), `mime` (string), `size_bytes` (integer), `uploader_id` (integer or null), and `created_at` (string).
+
+### POST `/api/attachments`
+
+Uploads a `file` part in a multipart request. Optional `entity_type` and `entity_id` form fields immediately link the attachment to an issue, page, or comment.
+
+Form fields are `file` (file, required), `entity_type` (string, optional), and `entity_id` (integer, optional). Response: an object with `id` (integer), `url` (string), `filename` (string), `mime` (string), and `size` (integer).
+
+```bash
+curl -X POST https://your-server.example/api/attachments \
+  -H "Authorization: Bearer <API_KEY>" \
+  -F "file=@diagram.png" \
+  -F "entity_type=issue" \
+  -F "entity_id=1"
+```
+
+```json
+{
+  "id": 1,
+  "url": "/api/attachments/1",
+  "filename": "diagram.png",
+  "mime": "image/png",
+  "size": 1024
+}
+```
+
+### GET `/api/attachments/{id}`
+
+Downloads attachment bytes. Path parameter: `id` (integer attachment ID). It has no query parameters or request body.
+
+Response: file bytes. The response sets `Content-Type` to the stored MIME type. It sets `Content-Disposition` to `inline` for images and `attachment` for non-image files.
+
+### DELETE `/api/attachments/{id}`
+
+Deletes an attachment metadata row and its links. Path parameter: `id` (integer attachment ID). It has no query parameters or request body.
+
+Response: the standard delete response.
+
+## Exports
+
+### GET `/api/export/issues/{identifier}`
+
+Exports an issue as a Markdown attachment. Path parameter: `identifier` (string such as `LIF-1`). It has no query parameters or request body.
+
+Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8`.
+
+### GET `/api/export/pages/{identifier}`
+
+Exports a page as a Markdown attachment. Path parameter: `identifier` (string such as `LIF-DOC-1` or `DOC-1`). It has no query parameters or request body.
+
+Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8`.
+
+### GET `/api/export/projects/{identifier}`
+
+Exports a project. Path parameter: `identifier` (string such as `LIF`). Query parameter: `format` (string, optional). `format` accepts `zip` by default or `json`.
+
+It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`, the response is an export bundle JSON object. The bundle structure is defined by the export implementation and is not a REST request schema.
+
+## Search, health, and realtime
+
+### GET `/api/search`
+
+Searches indexed issues, pages, and comments. Query parameters are `query` (string, required), `project_id` (integer, optional), `result_type` (string, optional), `sort` (string, optional), `mode` (string, optional), `limit` (integer, optional), and `offset` (integer, optional).
+
+`result_type` accepts `issue`, `page`, or `comment`. `sort` accepts `relevance` or `recent`. `mode` accepts `fts` or `literal`. It has no request body.
+
+Response: an array of objects with `result_type` (string), `id` (integer), `identifier` (string or null), `title` (string), `snippet` (string), and `project_id` (integer or null).
+
+### GET `/api/health`
+
+Returns the health marker. This endpoint has no path or query parameters. It has no request body.
+
+Response: plain text `ok`.
+
+### GET `/api/events/ws`
+
+Upgrades the request to a WebSocket that receives project and issue update events. It has no path or query parameters. It has no request body.
+
+The request requires a `lific_token` cookie containing a valid session token. Response: a WebSocket connection. Event JSON uses a `type` field. Event types are `resync.required`, `project.created`, `project.updated`, `project.deleted`, `projects.reordered`, `issue.created`, `issue.updated`, `issue.deleted`, `issue.linked`, and `issue.unlinked`.
+
+```json
+{
+  "type": "issue.updated",
+  "project_id": 1,
+  "issue_id": 1
+}
+```

@@ -1,0 +1,1188 @@
+---
+title: CLI reference
+description: Commands, arguments, flags, and behavior for the Lific command line interface.
+---
+
+The CLI reads the configured SQLite database. Commands for issues, projects, pages, exports, search, comments, modules, labels, and folders do not require a running HTTP server.
+
+## Global options
+
+```shell
+lific [--config <PATH>] [--db <PATH>] [--json] <COMMAND>
+```
+
+- `--config <PATH>` selects a configuration file. It replaces automatic configuration discovery.
+- `--db <PATH>` overrides `database.path` for the command.
+- `--json` writes JSON output. Data commands also select JSON output when standard output is not a terminal.
+
+Clap also provides `--help` and `--version`.
+
+## Server and setup
+
+### start
+
+Starts the HTTP server. The server provides the REST API, the `/mcp` endpoint, OAuth routes, and the embedded web UI when web assets are present.
+
+```shell
+lific start [--port <PORT>] [--host <HOST>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --port <PORT>` overrides `server.port`.
+- `--host <HOST>` overrides `server.host`.
+
+### mcp
+
+Runs the MCP server over standard input and standard output. Logs are written to standard error.
+
+```shell
+lific mcp
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### init
+
+Creates a configuration file when one is missing. It creates and migrates the database. It creates an initial API key when no API key exists. It installs and starts a supported background service unless `--no-service` is passed.
+
+Without `--config` or `--here`, the command uses the platform configuration and data directories. If `./lific.toml` already exists, it uses that file. `--here` uses `./lific.toml` and the default `./lific.db` layout.
+
+```shell
+lific init [--no-service] [--here]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--no-service` creates the configuration and database without installing or starting a background service.
+- `--here` creates or uses the instance in the current directory. It conflicts with `--config`.
+
+### service install
+
+Installs and starts the background service for the selected configuration. On Linux, Lific supports a systemd user unit. On macOS, it supports a LaunchAgent.
+
+```shell
+lific service install
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### service uninstall
+
+Stops the background service and removes its service definition.
+
+```shell
+lific service uninstall
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### service status
+
+Reports whether the supported background service is installed and active. It exits with a nonzero status when the service is missing or inactive.
+
+```shell
+lific service status
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### service stop
+
+Stops the background service without removing its definition.
+
+```shell
+lific service stop
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### service restart
+
+Restarts the background service. It starts an installed service when it is stopped.
+
+```shell
+lific service restart
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### doctor
+
+Checks the configuration, database, backups, local server, OAuth discovery, and MCP initialization. When `server.public_url` is set, it also checks its OAuth discovery endpoint. It exits with a nonzero status when any check fails.
+
+```shell
+lific doctor [--key <API_KEY>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--key <API_KEY>` performs an authorized MCP check. It falls back to `LIFIC_API_KEY` when the flag is omitted.
+
+## Authentication and client connection
+
+### login
+
+Starts an OAuth device authorization flow. At an interactive terminal, it prints a verification URL and code, then polls until approval. Without a terminal or with `--non-interactive`, it writes the device details as JSON and exits. Use `--complete` to resume polling for an existing device code.
+
+The server URL comes from `--url`, then `server.public_url`, then `http://127.0.0.1:<port>`.
+
+```shell
+lific login [--url <URL>] [--non-interactive] [--complete <DEVICE_CODE>] [--label <LABEL>] [--no-store]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--url <URL>` sets the server base URL.
+- `--non-interactive` prints device authorization JSON and does not poll.
+- `--complete <DEVICE_CODE>` polls an existing device code until it is approved, denied, or expired.
+- `--label <LABEL>` sends a human-readable label for the approval page.
+- `--no-store` prints an approved token instead of storing it.
+
+### logout
+
+Deletes the stored OAuth credential for a server. It attempts token revocation before deletion. A revocation failure does not stop credential deletion.
+
+```shell
+lific logout [--url <URL>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--url <URL>` sets the server base URL. The default URL resolution matches `lific login`.
+
+### connect
+
+Writes MCP connection settings into selected AI client configuration files. The command requires an existing Lific database. With no `--client` at an interactive terminal, it offers a client picker. A non-interactive invocation must name one or more clients and pass `--yes`.
+
+Known client identifiers are `opencode`, `claude-code`, `claude-desktop`, `cursor`, `vscode`, `codex`, `zed`, `gemini`, `windsurf`, `goose`, and `crush`.
+
+```shell
+lific connect [--client <CLIENT>]... [--scope <SCOPE>] [--stdio] [--oauth] [--url <URL>] [--key <API_KEY>] [--user <USERNAME>] [--yes] [--dry-run] [--skip-agents]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--client <CLIENT>` selects a client. Repeat the flag to select multiple clients.
+- `--scope <SCOPE>` selects `global` or `project`. The default is `global`.
+- `--stdio` writes a local MCP configuration that runs `lific --db <PATH> mcp`.
+- `--oauth` writes a remote configuration without an authorization header. The client performs its own OAuth flow. It conflicts with `--stdio` and `--key`.
+- `--url <URL>` overrides the remote MCP URL. The default uses `server.public_url` with `/mcp`, or `http://127.0.0.1:<port>/mcp`.
+- `--key <API_KEY>` writes this API key instead of creating connection keys.
+- `--user <USERNAME>` selects the owner for created connection identities.
+- `--yes` skips interactive confirmation prompts.
+- `--dry-run` prints the planned configuration changes without writing files or creating keys.
+- `--skip-agents` does not write or update `./AGENTS.md`.
+
+### agents-md
+
+Creates or updates the marker-delimited Lific section in an AGENTS.md file. Repeating the command replaces the existing Lific section and preserves surrounding content.
+
+```shell
+lific agents-md [--path <PATH>] [--project <PROJECT>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--path <PATH>` selects the AGENTS.md file. The default is `./AGENTS.md`.
+- `--project <PROJECT>` inserts a project identifier into generated CLI examples.
+
+### key create
+
+Creates an API key. The plaintext key is displayed once.
+
+```shell
+lific key create --name <NAME> [--user <USERNAME>] [--expires <DATE_OR_DATETIME>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-n, --name <NAME>` sets the API key name.
+- `-u, --user <USERNAME>` assigns the key to a user.
+- `-e, --expires <DATE_OR_DATETIME>` sets an ISO 8601 expiry date or datetime. Omit it for no expiry.
+
+### key assign
+
+Assigns an existing API key to a user.
+
+```shell
+lific key assign --name <NAME> --user <USERNAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-n, --name <NAME>` selects the API key.
+- `-u, --user <USERNAME>` selects the user.
+
+### key list
+
+Lists API key metadata. It does not display key values.
+
+```shell
+lific key list
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### key revoke
+
+Revokes an active API key by name.
+
+```shell
+lific key revoke --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-n, --name <NAME>` selects the API key.
+
+### key rotate
+
+Replaces an API key with a new key of the same name. The old key is removed. The new plaintext key is displayed once.
+
+```shell
+lific key rotate --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-n, --name <NAME>` selects the API key.
+
+## Instance and user administration
+
+### instance info
+
+Prints instance settings, configured server details, and user counts.
+
+```shell
+lific instance info
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### instance set
+
+Updates only the instance settings named by passed flags.
+
+```shell
+lific instance set [--name <NAME>] [--signups <BOOLEAN>] [--signup-domains <DOMAINS>] [--session-days <DAYS>] [--login-message <MESSAGE>] [--auto-login <BOOLEAN>] [--authz-enforced <BOOLEAN>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--name <NAME>` sets the instance name. Pass an empty string to clear it.
+- `--signups <BOOLEAN>` opens or closes self-service signup.
+- `--signup-domains <DOMAINS>` sets comma-separated email domains permitted for self-registration. Pass an empty string to allow any domain.
+- `--session-days <DAYS>` sets login session lifetime in days. The accepted range is 1 through 365.
+- `--login-message <MESSAGE>` sets the message on the authentication screen. Pass an empty string to clear it.
+- `--auto-login <BOOLEAN>` enables or disables browser-only automatic admin login.
+- `--authz-enforced <BOOLEAN>` enables or disables project-scoped authorization enforcement.
+
+### user create
+
+Creates a user account. If no password flag is present, the command prompts for a password at a terminal or reads one line from standard input.
+
+```shell
+lific user create --username <USERNAME> --email <EMAIL> [--password <PASSWORD>] [--admin] [--bot]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-u, --username <USERNAME>` sets the unique, case-insensitive username.
+- `-e, --email <EMAIL>` sets the unique email address.
+- `-p, --password <PASSWORD>` sets the password.
+- `--admin` grants administrator privileges.
+- `--bot` marks the account as a bot.
+
+### user list
+
+Lists user accounts.
+
+```shell
+lific user list
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### user set-password
+
+Sets a user's password and clears that user's sessions. Password input follows the same prompt behavior as `user create`.
+
+```shell
+lific user set-password --username <USERNAME> [--password <PASSWORD>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-u, --username <USERNAME>` selects the user.
+- `-p, --password <PASSWORD>` sets the new password.
+
+### user promote
+
+Promotes a user to administrator.
+
+```shell
+lific user promote --username <USERNAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-u, --username <USERNAME>` selects the user.
+
+### user demote
+
+Demotes an administrator to a regular user.
+
+```shell
+lific user demote --username <USERNAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-u, --username <USERNAME>` selects the user.
+
+### member list
+
+Lists project members and roles.
+
+```shell
+lific member list --project <PROJECT>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+
+### member add
+
+Grants a user access to one project or every existing project.
+
+```shell
+lific member add (--project <PROJECT> | --all) --user <USERNAME> [--role <ROLE>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects one project. It conflicts with `--all`.
+- `-u, --user <USERNAME>` selects the user.
+- `-r, --role <ROLE>` sets `viewer`, `maintainer`, or `lead`. The default is `viewer`.
+- `--all` grants access to every existing project. It conflicts with `--project`.
+
+### member role
+
+Changes a member's role in a project.
+
+```shell
+lific member role --project <PROJECT> --user <USERNAME> --role <ROLE>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-u, --user <USERNAME>` selects the member.
+- `-r, --role <ROLE>` sets `viewer`, `maintainer`, or `lead`.
+
+### member remove
+
+Removes a user's project membership.
+
+```shell
+lific member remove --project <PROJECT> --user <USERNAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-u, --user <USERNAME>` selects the member.
+
+## Issue commands
+
+### issue list
+
+Lists issues in a project. Filters are combined when multiple filters are passed.
+
+```shell
+lific issue list --project <PROJECT> [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--label <LABEL>] [--workable] [--limit <LIMIT>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-s, --status <STATUS>` filters by `backlog`, `todo`, `active`, `done`, or `cancelled`.
+- `--priority <PRIORITY>` filters by `urgent`, `high`, `medium`, `low`, or `none`.
+- `-m, --module <MODULE>` filters by module name.
+- `-l, --label <LABEL>` filters by label name.
+- `-w, --workable` includes only issues without unresolved blockers.
+- `--limit <LIMIT>` limits results. The default is 50.
+
+### issue get
+
+Prints one issue, including its description and issue relations.
+
+```shell
+lific issue get <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is an issue identifier such as `LIF-42`.
+
+**Flags**
+
+- None.
+
+### issue create
+
+Creates an issue in a project.
+
+```shell
+lific issue create --project <PROJECT> --title <TITLE> [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-t, --title <TITLE>` sets the issue title.
+- `-d, --description <MARKDOWN>` sets the Markdown description. The default is empty.
+- `-s, --status <STATUS>` sets `backlog`, `todo`, `active`, `done`, or `cancelled`. The default is `backlog`.
+- `--priority <PRIORITY>` sets `urgent`, `high`, `medium`, `low`, or `none`. The default is `none`.
+- `-m, --module <MODULE>` assigns a module by name.
+- `-l, --labels <LABELS>` attaches comma-separated labels.
+
+### issue update
+
+Updates the fields named by passed flags. `--labels` replaces all issue labels.
+
+```shell
+lific issue update <IDENTIFIER> [--title <TITLE>] [--description <MARKDOWN>] [--status <STATUS>] [--priority <PRIORITY>] [--module <MODULE>] [--labels <LABELS>]
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is an issue identifier such as `LIF-42`.
+
+**Flags**
+
+- `-t, --title <TITLE>` sets the title.
+- `-d, --description <MARKDOWN>` sets the description.
+- `-s, --status <STATUS>` sets the status.
+- `--priority <PRIORITY>` sets the priority.
+- `-m, --module <MODULE>` assigns a module by name.
+- `-l, --labels <LABELS>` replaces labels with a comma-separated list.
+
+## Project commands
+
+### project list
+
+Lists projects.
+
+```shell
+lific project list
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- None.
+
+### project get
+
+Prints one project.
+
+```shell
+lific project get <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is the project identifier.
+
+**Flags**
+
+- None.
+
+### project create
+
+Creates a project.
+
+```shell
+lific project create --name <NAME> --identifier <IDENTIFIER> [--description <DESCRIPTION>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-n, --name <NAME>` sets the project name.
+- `-i, --identifier <IDENTIFIER>` sets the project identifier. It is limited to five characters.
+- `-d, --description <DESCRIPTION>` sets the description. The default is empty.
+
+### project update
+
+Updates the project fields named by passed flags.
+
+```shell
+lific project update <IDENTIFIER> [--name <NAME>] [--description <DESCRIPTION>]
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is the project identifier.
+
+**Flags**
+
+- `-n, --name <NAME>` sets the name.
+- `-d, --description <DESCRIPTION>` sets the description.
+
+## Page and folder commands
+
+### page list
+
+Lists pages in one project. Omitting `--project` lists workspace pages.
+
+```shell
+lific page list [--project <PROJECT>] [--folder <FOLDER>] [--label <LABEL>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` filters to a project.
+- `-f, --folder <FOLDER>` filters by folder name.
+- `-l, --label <LABEL>` filters by label name.
+
+### page get
+
+Prints one page.
+
+```shell
+lific page get <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is a page identifier such as `LIF-DOC-1` or `DOC-1`.
+
+**Flags**
+
+- None.
+
+### page create
+
+Creates a project page or workspace page. Labels are ignored for workspace pages.
+
+```shell
+lific page create --title <TITLE> [--project <PROJECT>] [--folder <FOLDER>] [--content <MARKDOWN>] [--labels <LABELS>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-t, --title <TITLE>` sets the page title.
+- `-p, --project <PROJECT>` assigns the page to a project. Omit it for a workspace page.
+- `-f, --folder <FOLDER>` assigns a folder by name.
+- `-c, --content <MARKDOWN>` sets the Markdown content. The default is empty.
+- `-l, --labels <LABELS>` attaches comma-separated labels to a project page.
+
+### page update
+
+Updates the fields named by passed flags. `--labels` replaces all labels. Folder and label changes are not available for workspace pages.
+
+```shell
+lific page update <IDENTIFIER> [--title <TITLE>] [--content <MARKDOWN>] [--folder <FOLDER>] [--labels <LABELS>]
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is a page identifier such as `LIF-DOC-1`.
+
+**Flags**
+
+- `-t, --title <TITLE>` sets the title.
+- `-c, --content <MARKDOWN>` sets the content.
+- `-f, --folder <FOLDER>` moves the page to a folder by name.
+- `-l, --labels <LABELS>` replaces labels with a comma-separated list.
+
+### folder list
+
+Lists folders in a project.
+
+```shell
+lific folder list --project <PROJECT>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+
+### folder create
+
+Creates a folder in a project.
+
+```shell
+lific folder create --project <PROJECT> --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` sets the folder name.
+
+### folder update
+
+Renames a folder.
+
+```shell
+lific folder update --project <PROJECT> --name <NAME> --new-name <NEW_NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the current folder name.
+- `--new-name <NEW_NAME>` sets the new folder name.
+
+### folder delete
+
+Deletes a folder.
+
+```shell
+lific folder delete --project <PROJECT> --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the folder.
+
+## Module and label commands
+
+### module list
+
+Lists modules in a project.
+
+```shell
+lific module list --project <PROJECT>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+
+### module create
+
+Creates a module in a project.
+
+```shell
+lific module create --project <PROJECT> --name <NAME> [--description <DESCRIPTION>] [--status <STATUS>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` sets the module name.
+- `-d, --description <DESCRIPTION>` sets the description. The default is empty.
+- `-s, --status <STATUS>` sets `backlog`, `planned`, `active`, `paused`, `done`, or `cancelled`. The default is `active`.
+
+### module update
+
+Updates the module fields named by passed flags.
+
+```shell
+lific module update --project <PROJECT> --name <NAME> [--new-name <NEW_NAME>] [--description <DESCRIPTION>] [--status <STATUS>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the current module name.
+- `--new-name <NEW_NAME>` sets the new module name.
+- `-d, --description <DESCRIPTION>` sets the description.
+- `-s, --status <STATUS>` sets the status.
+
+### module delete
+
+Deletes a module.
+
+```shell
+lific module delete --project <PROJECT> --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the module.
+
+### label list
+
+Lists labels in a project.
+
+```shell
+lific label list --project <PROJECT>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+
+### label create
+
+Creates a label in a project.
+
+```shell
+lific label create --project <PROJECT> --name <NAME> [--color <HEX>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` sets the label name.
+- `-c, --color <HEX>` sets the color as a hexadecimal value. The default is `#6B7280`.
+
+### label update
+
+Updates the label fields named by passed flags.
+
+```shell
+lific label update --project <PROJECT> --name <NAME> [--new-name <NEW_NAME>] [--color <HEX>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the current label name.
+- `--new-name <NEW_NAME>` sets the new label name.
+- `-c, --color <HEX>` sets the color as a hexadecimal value.
+
+### label delete
+
+Deletes a label.
+
+```shell
+lific label delete --project <PROJECT> --name <NAME>
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `-p, --project <PROJECT>` selects the project.
+- `-n, --name <NAME>` selects the label.
+
+## Comments, search, and export
+
+### comment list
+
+Lists comments on an issue.
+
+```shell
+lific comment list <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is an issue identifier such as `LIF-42`.
+
+**Flags**
+
+- None.
+
+### comment add
+
+Adds a Markdown comment to an issue. If `--user` is omitted, the command uses the first administrator, then the first user.
+
+```shell
+lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>]
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is an issue identifier such as `LIF-42`.
+
+**Flags**
+
+- `-c, --content <MARKDOWN>` sets the comment content.
+- `-u, --user <USERNAME>` sets the comment author.
+
+### search
+
+Searches issues and pages. It can be limited to one project.
+
+```shell
+lific search <QUERY> [--project <PROJECT>] [--limit <LIMIT>]
+```
+
+**Arguments**
+
+- `<QUERY>` is the search text.
+
+**Flags**
+
+- `-p, --project <PROJECT>` limits results to a project.
+- `-l, --limit <LIMIT>` limits results. The default is 20.
+
+### export issue
+
+Exports one issue as Markdown files in an output directory.
+
+```shell
+lific export issue <IDENTIFIER> --output <DIRECTORY>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is an issue identifier such as `LIF-42`.
+
+**Flags**
+
+- `-o, --output <DIRECTORY>` selects the output directory.
+
+### export page
+
+Exports one page as Markdown files in an output directory.
+
+```shell
+lific export page <IDENTIFIER> --output <DIRECTORY>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>` is a page identifier such as `LIF-DOC-1`.
+
+**Flags**
+
+- `-o, --output <DIRECTORY>` selects the output directory.
+
+### export project
+
+Exports a project as Markdown files in an output directory.
+
+```shell
+lific export project <PROJECT> --output <DIRECTORY>
+```
+
+**Arguments**
+
+- `<PROJECT>` is the project identifier.
+
+**Flags**
+
+- `-o, --output <DIRECTORY>` selects the output directory.
+
+## Backup and restore
+
+### dump
+
+Writes a self-contained backup archive. The archive contains a consistent database snapshot, attachment blobs, and `manifest.json`.
+
+```shell
+lific dump [--out <PATH>]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--out <PATH>` selects a file or existing directory. The default writes the timestamped archive to the current directory.
+
+### restore
+
+Restores a data set from an archive created by `lific dump`. Stop the server before using this command. Without `--force`, it refuses to overwrite an existing database. With `--force`, it moves the existing database aside before restoring.
+
+```shell
+lific restore <ARCHIVE> [--force]
+```
+
+**Arguments**
+
+- `<ARCHIVE>` is the path to a `.tar.gz` archive created by `lific dump`.
+
+**Flags**
+
+- `--force` permits replacement of an existing database.
+
+## Import commands
+
+### import github
+
+Imports GitHub issues from a repository. Pull requests are excluded. Repeated imports skip issues that were already imported from the same source.
+
+```shell
+lific import github --repo <OWNER/REPOSITORY> --project <PROJECT> [--state <STATE>] [--token <TOKEN>] [--map-open <STATUS>] [--map-closed <STATUS>] [--user <USERNAME>] [--dry-run]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--repo <OWNER/REPOSITORY>` selects the source repository.
+- `--project <PROJECT>` selects the destination Lific project.
+- `--state <STATE>` selects `open`, `closed`, or `all`. The default is `all`.
+- `--token <TOKEN>` sets the GitHub token. It falls back to `GITHUB_TOKEN`.
+- `--map-open <STATUS>` maps open GitHub issues to a Lific status. The default is `backlog`.
+- `--map-closed <STATUS>` maps closed GitHub issues to a Lific status. The default is `done`.
+- `--user <USERNAME>` selects the owner of the import bot.
+- `--dry-run` reports planned changes without writing data.
+
+### import linear
+
+Imports issues from a Linear team. Repeated imports skip issues that were already imported from the same source.
+
+```shell
+lific import linear --team <TEAM> --project <PROJECT> [--token <TOKEN>] [--user <USERNAME>] [--dry-run]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--team <TEAM>` selects the Linear team key.
+- `--project <PROJECT>` selects the destination Lific project.
+- `--token <TOKEN>` sets the Linear personal API key. It falls back to `LINEAR_API_KEY` and is required.
+- `--user <USERNAME>` selects the owner of the import bot.
+- `--dry-run` reports planned changes without writing data.
+
+### import jira
+
+Imports issues from a Jira Cloud project. Repeated imports skip issues that were already imported from the same source.
+
+```shell
+lific import jira --site <SITE> --jira-project <JIRA_PROJECT> --project <PROJECT> [--email <EMAIL>] [--token <TOKEN>] [--user <USERNAME>] [--dry-run]
+```
+
+**Arguments**
+
+- None.
+
+**Flags**
+
+- `--site <SITE>` selects the Jira site subdomain.
+- `--jira-project <JIRA_PROJECT>` selects the Jira project key.
+- `--project <PROJECT>` selects the destination Lific project.
+- `--email <EMAIL>` sets the Jira account email. It falls back to `JIRA_EMAIL` and is required.
+- `--token <TOKEN>` sets the Jira API token. It falls back to `JIRA_API_TOKEN` and is required.
+- `--user <USERNAME>` selects the owner of the import bot.
+- `--dry-run` reports planned changes without writing data.
+
+## Shell completion
+
+### completion
+
+Writes completion definitions for one supported shell.
+
+```shell
+lific completion <SHELL>
+```
+
+**Arguments**
+
+- `<SHELL>` is one of `bash`, `zsh`, `fish`, `powershell`, or `elvish`.
+
+**Flags**
+
+- None.

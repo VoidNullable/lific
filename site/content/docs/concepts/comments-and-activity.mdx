@@ -1,0 +1,30 @@
+---
+title: Comments and activity
+description: Comments, mentions, and the audit activity log.
+---
+
+Comments belong to exactly one issue or one page. A comment stores its author, Markdown content, creation time, and update time.
+
+Comments on issues and pages have separate threads. Deleting an issue or page also deletes its comments.
+
+## Mentions
+
+Comment text can include `@username` mentions. A mention token begins with `@` and can contain ASCII letters, digits, underscores, and hyphens.
+
+Lific resolves mention tokens when a comment is created or edited. Matching is case-insensitive. Repeated mentions of the same user resolve once.
+
+Unmatched mention tokens remain in the comment text. They do not create a resolved mention record.
+
+When project-scoped authorization is enforced, resolved mentions are limited to the project's non-bot members. When it is not enforced, any non-bot user can be a mention candidate.
+
+## Activity log
+
+The activity log is an append-only record of mutations. It covers changes made through the web UI, MCP server, REST API, CLI, and system operations.
+
+An activity entry records a timestamp, actor information when available, transport, resource type, action, and changed values. Update operations record one entry for each changed field.
+
+Issue activity includes issue changes, comments, label attachments and removals, and issue relationship changes. Page activity includes page changes, comments, and label attachments and removals. Plan activity includes plan and plan-step changes.
+
+Activity can be read for an issue, page, project, or plan. Entries are returned newest first.
+
+If an actor account is later deleted, existing activity entries remain. The actor identity fields can be unavailable on those entries.

@@ -1,0 +1,31 @@
+---
+title: Concepts
+description: An overview of the Lific data model.
+---
+
+Lific organizes work around projects. A project contains issues, modules, labels, folders, pages, plans, and project members.
+
+Issues record individual work items. Pages store Markdown documentation. Plans store nested step trees. A plan can reference issues without turning them into sub-issues.
+
+## Identifiers
+
+Lific uses human-readable identifiers for issues, pages, and plans.
+
+| Resource | Example identifier |
+| --- | --- |
+| Issue | `LIF-42` |
+| Project page | `LIF-DOC-3` |
+| Workspace page | `DOC-3` |
+| Plan | `LIF-PLAN-2` |
+
+The project identifier supplies the prefix for project-scoped resources. The number is a sequence within the relevant project or workspace scope.
+
+## Shared structure
+
+Modules and labels are project-scoped. Issues can belong to one module and can have multiple labels. Project pages can also have multiple labels.
+
+Folders organize pages inside a project. Folders can contain child folders. Workspace-level pages do not belong to a project and cannot be placed in folders.
+
+Comments belong to exactly one issue or one page. Comments can contain `@username` mentions.
+
+Lific records mutations in an activity log. Activity entries preserve the affected resource, the action, the timestamp, and available actor information.

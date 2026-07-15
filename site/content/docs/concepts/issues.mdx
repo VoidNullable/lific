@@ -1,0 +1,72 @@
+---
+title: Issues
+description: Issue fields, workflow values, labels, dates, and relationships.
+---
+
+An issue is a project-scoped work item. It has a title, Markdown description, status, priority, optional module, optional start and target dates, labels, and timestamps.
+
+## Identifiers and sequence numbers
+
+Each issue has a sequence number that is unique within its project. Its identifier combines the project identifier and sequence number.
+
+For example, the forty-second issue in project `LIF` is `LIF-42`.
+
+## Statuses
+
+Issues use one of these status values.
+
+| Status | Description |
+| --- | --- |
+| `backlog` | The default status for a new issue. |
+| `todo` | An open workflow status. |
+| `active` | An open workflow status. |
+| `done` | A completed workflow status. |
+| `cancelled` | A closed workflow status. |
+
+## Priorities
+
+Issues use one of these priority values.
+
+| Priority | Description |
+| --- | --- |
+| `urgent` | Highest priority value. |
+| `high` | High priority value. |
+| `medium` | Medium priority value. |
+| `low` | Low priority value. |
+| `none` | The default priority value. |
+
+When issues are sorted by priority, the order is `urgent`, `high`, `medium`, `low`, then `none`.
+
+## Modules, labels, and dates
+
+An issue can be assigned to one module in the same project. It can have any number of labels defined by that project.
+
+Supplying labels during an update replaces the issue's complete label set. Omitting labels from an update leaves the current labels unchanged.
+
+Issues can store optional `start_date` and `target_date` values. The MCP interface accepts ISO 8601 dates for these fields.
+
+Each issue also stores `created_at` and `updated_at` timestamps. Issue activity from comments and label changes updates the issue's `updated_at` value.
+
+## Relationships
+
+Issue relationships use one of three types.
+
+| Type | Meaning |
+| --- | --- |
+| `blocks` | The source issue blocks the target issue. |
+| `relates_to` | The issues are shown as related on both issue records. |
+| `duplicate` | The source issue duplicates the target issue. |
+
+A `blocks` relation is directional. If `LIF-1` blocks `LIF-2`, `LIF-1` lists `LIF-2` under blocks. `LIF-2` lists `LIF-1` under blocked by.
+
+A `duplicate` relation is also directional. If `LIF-1` duplicates `LIF-2`, `LIF-1` lists `LIF-2` under duplicates. `LIF-2` lists `LIF-1` under duplicated by.
+
+Relationships can connect issues in different projects. An issue cannot be linked to itself.
+
+## Workable and blocked issues
+
+An issue is workable when it is not `done` or `cancelled` and has no unresolved blockers.
+
+A blocker is unresolved until its status is `done`. A blocker with status `cancelled` still counts as unresolved.
+
+The blocked filter returns issues with at least one unresolved incoming `blocks` relationship. The workable filter excludes those issues.

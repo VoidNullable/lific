@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
 
 /*
  * Tokens copied verbatim from the product's dark theme —
@@ -61,6 +63,39 @@
   -webkit-text-fill-color: var(--accent);
   color: var(--accent);
   background: var(--accent-subtle);
+}
+
+/* ── Fumadocs theme mapping ─────────────────────────────
+   The docs UI (/docs, fumadocs-ui) reads --color-fd-* tokens. Map them
+   onto the product palette above so docs pages share the sage dark
+   theme. The site is dark-only: <html> carries a permanent `dark`
+   class (fumadocs' shiki + sidebar styles key on it) and next-themes
+   is disabled in the docs RootProvider. */
+:root,
+.dark {
+  --color-fd-background: var(--bg);
+  --color-fd-foreground: var(--text);
+  --color-fd-muted: var(--bg-subtle);
+  --color-fd-muted-foreground: var(--text-muted);
+  --color-fd-popover: var(--chrome);
+  --color-fd-popover-foreground: var(--text);
+  --color-fd-card: var(--bg-subtle);
+  --color-fd-card-foreground: var(--text);
+  --color-fd-border: var(--border);
+  --color-fd-primary: var(--accent);
+  --color-fd-primary-foreground: var(--accent-text);
+  --color-fd-secondary: var(--surface);
+  --color-fd-secondary-foreground: var(--text);
+  --color-fd-accent: var(--surface);
+  --color-fd-accent-foreground: var(--text);
+  --color-fd-ring: var(--accent);
+}
+
+/* neutral.css re-tints the sidebar with flat grays; restore sage. */
+.dark #nd-sidebar {
+  --color-fd-muted: var(--bg-subtle);
+  --color-fd-secondary: var(--surface);
+  --color-fd-muted-foreground: var(--text-muted);
 }
 
 @theme inline {

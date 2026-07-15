@@ -1,0 +1,45 @@
+---
+title: Plans
+description: Project plans, nested steps, issue mirroring, and anchor issues.
+---
+
+A plan is a project-scoped tree of steps. Plans keep hierarchy separate from issues, which remain flat work items.
+
+## Identifiers and statuses
+
+Plans use identifiers in the form `PROJECT-PLAN-SEQUENCE`. For example, the second plan in project `LIF` is `LIF-PLAN-2`.
+
+Each plan has one of these statuses.
+
+| Status | Description |
+| --- | --- |
+| `active` | The default plan status. |
+| `done` | A completed plan status. |
+| `archived` | An archived plan status. |
+
+Plan listings include the total step count and the count of completed steps.
+
+## Nested steps
+
+A plan has root steps and child steps. Steps can be nested to any depth.
+
+Each step has a title, description, completion state, sibling position, and optional linked issue. Steps can be moved, reordered, reparented, or deleted. Deleting a step also deletes its child subtree.
+
+## Issue mirroring
+
+A step can link to an issue. The link provides one-way and issue-driven completion behavior.
+
+- Marking a linked step done marks its linked issue `done` when the issue is not already done.
+- Marking a linked issue `done` marks every step that references it done in active plans.
+- Changing a linked issue from `done` to another status reopens its referencing steps in active plans.
+- Reopening a step does not reopen its linked issue.
+
+Issue-driven step updates apply only to active plans. Done and archived plans do not receive these cascades.
+
+When an issue reopens a plan step, Lific records the time of that issue-driven reopening on the step.
+
+## Anchor issues
+
+A plan can have an optional anchor issue. The anchor identifies the issue that the plan decomposes.
+
+When an anchor issue changes to `done`, its active plan is archived. Marking a plan `done` does not change the anchor issue.

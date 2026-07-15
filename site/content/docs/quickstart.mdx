@@ -1,0 +1,66 @@
+---
+title: Quickstart
+description: Initialize a local Lific instance and create a first issue.
+---
+
+This guide initializes an instance without a background service. It then runs the server in the current terminal.
+
+## Initialize the instance
+
+Create the configuration file and SQLite database.
+
+```bash
+lific init --no-service
+```
+
+Without `--here` or `--config`, `lific init` uses operating system configuration and data directories. On Linux, it writes the configuration file to `~/.config/lific/lific.toml` and the database to `~/.local/share/lific/lific.db`.
+
+Use `--here` to create a directory-local instance with `./lific.toml` and `./lific.db`.
+
+```bash
+lific init --here --no-service
+```
+
+## Start the server
+
+Start the HTTP server.
+
+```bash
+lific start
+```
+
+The default port is `3456`. The default bind host is `0.0.0.0`. Open `http://127.0.0.1:3456` in a browser to use the web UI.
+
+## Create an account
+
+Use the signup screen in the web UI to create an account with a username, email address, and password. Signup creates a regular user account and a session. It cannot create an administrator account.
+
+Promote the account from another terminal. Replace `<username>` with the username you created.
+
+```bash
+lific user promote --username <username>
+```
+
+## Create a project and issue
+
+The project and issue commands operate directly on the configured SQLite database. They do not require the HTTP server.
+
+Create a project. Project identifiers are short identifiers used in issue IDs.
+
+```bash
+lific project create --name "Example project" --identifier EX
+```
+
+Create an issue in that project.
+
+```bash
+lific issue create --project EX --title "First issue"
+```
+
+List the project's issues.
+
+```bash
+lific issue list --project EX
+```
+
+The first issue has an identifier based on the project identifier, such as `EX-1`.

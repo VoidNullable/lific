@@ -1,0 +1,49 @@
+---
+title: MCP
+description: Connect an MCP client to a Lific server over Streamable HTTP.
+---
+
+Lific exposes MCP tools for issues, projects, resources, pages, plans, comments, search, and activity history. The server is part of the Lific binary. Lific stores its data in SQLite.
+
+## HTTP endpoint
+
+The MCP endpoint is:
+
+```text
+https://your-server.example/mcp
+```
+
+The endpoint uses Streamable HTTP. The server is configured for JSON responses. It is not a standalone SSE endpoint.
+
+## API key authentication
+
+HTTP clients authenticate with a bearer API key in the `Authorization` header. Create a key on the server with the `lific key create <name>` command. Lific returns the plaintext key once when it creates the key.
+
+Use a configuration shaped like the following. Client-specific field names can differ.
+
+```json
+{
+  "mcpServers": {
+    "lific": {
+      "url": "https://your-server.example/mcp",
+      "headers": {
+        "Authorization": "Bearer lific_sk-live-your-api-key"
+      }
+    }
+  }
+}
+```
+
+## OAuth 2.1 authentication
+
+Lific supports OAuth 2.1 for the MCP endpoint. The protected-resource metadata is available at `/.well-known/oauth-protected-resource/mcp`. Authorization-server metadata is available at `/.well-known/oauth-authorization-server`.
+
+OAuth-capable MCP clients can connect to the endpoint URL and complete the authorization flow without a manually created API key. Lific supports authorization-code flow with S256 PKCE. It also supports device authorization.
+
+Lific implements dynamic client registration at `/oauth/register`. Clients can register a redirect URI before starting authorization. Registered redirect URIs must be absolute HTTP or HTTPS URLs.
+
+## MCP Registry manifest and stdio
+
+The repository includes an MCP Registry manifest in `server.json`. The manifest declares the Cargo package `lific` and a stdio launch command of `lific mcp`. This manifest describes the stdio package transport. It does not configure the HTTP endpoint.
+
+Registry publication is controlled by the registry that consumes the manifest.

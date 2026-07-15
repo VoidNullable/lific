@@ -1,0 +1,13 @@
+{
+  "pages": [
+    "index",
+    "installation",
+    "quickstart",
+    "concepts",
+    "cli",
+    "configuration",
+    "self-hosting",
+    "rest-api",
+    "mcp"
+  ]
+}
