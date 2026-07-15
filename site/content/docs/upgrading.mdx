@@ -1,0 +1,80 @@
+---
+title: Upgrade from 2.0 to 2.2
+description: Back up, upgrade, verify, and adopt the v2.1 and v2.2 changes from an existing Lific 2.0 installation.
+---
+
+This guide covers upgrades from Lific 2.0 through 2.2. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
+
+## Before upgrading
+
+1. Record the selected configuration and database paths with `lific instance info` and your service status command.
+2. Make a complete backup while the service is stopped or quiesced:
+
+   ```shell
+   lific dump --out ./lific-before-2.2.tar.gz
+   ```
+
+   The archive includes a consistent database snapshot, attachments, and `manifest.json`.
+3. Record how clients connect: browser URL, API-key users, OAuth clients, and MCP configuration files. Keep one known-good operator key available for recovery.
+4. If the instance is behind a reverse proxy, review `server.trusted_proxies` before starting 2.2. Add only proxy networks you operate; the default trusts loopback proxies.
+
+Stop the background service before replacing the binary or restoring a backup. Keep the same `lific.toml`, database path, attachments directory, and public URL unless you are intentionally relocating the instance.
+
+## Changes to account for
+
+### v2.1
+
+- `lific member` manages project membership and roles from the CLI.
+- `lific user set-password` provides an operator password reset and invalidates the user's sessions.
+- `--config` is honored by `init` and service installation, and configuration/database discovery follows standard OS directories.
+- Private instances may set `[auth] required = false`; this is a shell-controlled operator setting and must remain local or firewalled.
+
+### v2.2
+
+- Browser views use credentialed realtime invalidation. Sessions are revalidated, connections are capped per user, and reconnects trigger a resync.
+- `server.trusted_proxies` controls when forwarded client-IP headers are trusted for rate limiting.
+- MCP output is compact by default. Use the documented opt-in fields such as `include_closed`, `include_comments`, or `echo_tree` when an agent needs the full view.
+- MCP search supports literal mode, comments are searchable, and list/comment operations expose pagination hints.
+- The web UI adds list sub-tabs, sidebar recents, touch page movement, PWA install metadata, and improved command-palette results.
+- Auth-optional mode now reaches the browser through the instance auto-login flow; with no accounts, the signup screen still appears.
+
+### v2.2.1
+
+- The three export MCP tools are now one `export` tool. It dispatches by identifier: `PRO-42` for an issue, `PRO-DOC-3` for a page, and bare `PRO` for a project.
+- The MCP surface is 27 tools. Clients that assumed the older 29-tool count or the removed export tool names must refresh their discovery data.
+
+## Upgrade and verify
+
+1. Install the v2.2 binary and restart the existing service.
+2. Run `lific doctor` with the operator credential. Resolve configuration, database, backup, server, OAuth, and MCP failures before opening the instance to users.
+3. Check `lific instance info` and confirm the expected database, public URL, signup policy, and `authz_enforced` state.
+4. Review membership and operator keys:
+
+   ```shell
+   lific key list
+   lific member list --project <PROJECT>
+   ```
+
+   Unbound API keys are operator-trusted/admin-equivalent because they can only be minted with shell access. Audit or rotate any key that is no longer needed. Use user-owned bot keys when an agent should inherit project membership.
+5. Test the browser login and one representative project workflow. Confirm issue, page, plan, comment, attachment, and saved-view data before testing writes.
+6. Test one API and one MCP client. For MCP, refresh tool discovery and replace calls to `export_issue`, `export_page`, or `export_project` with `export`.
+7. If the instance uses a proxy, confirm the server logs the expected client IP and that rate limits do not trust arbitrary forwarded headers.
+8. Keep the pre-upgrade archive until the browser, API, MCP, backups, and service restart have all been verified.
+
+## Authorization rollout
+
+An existing 2.0 instance keeps its persisted authorization setting during the upgrade. Inspect it before changing anything. With enforcement on, viewers can read and comment, maintainers can mutate project content and structure, and leads manage settings, membership, and deletion. Cross-project relations and plan-step links require the appropriate role in every project involved.
+
+To change the setting deliberately:
+
+```shell
+lific instance set --authz-enforced true
+```
+
+Before enabling it, ensure every human and bot that needs access has a project membership, and keep an operator-trusted key available for recovery. To roll back the setting on a private instance, use `--authz-enforced false` and then investigate the missing membership or role rather than distributing a broader key.
+
+For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe on a public URL; Lific refuses that combination at startup. Treat both settings as operator changes that require shell access and a verification step.
+
+## If the upgrade fails
+
+Stop the service, preserve its logs and the failed database state, and do not repeatedly rerun migrations against the only copy. Restore the pre-upgrade archive to a separate data directory or use `lific restore <ARCHIVE> --force` only after confirming the archive and intended target. Re-run `lific doctor`, then compare the restored instance's configuration and client credentials before switching traffic back.
