@@ -119,6 +119,128 @@ function ComparisonTable({
   );
 }
 
+/*
+ * The at-a-glance boolean matrix. Same rules as the prose tables: real
+ * <table> markup, real scoped headers. Cells are strictly yes/no; the
+ * footnotes carry the only nuance. Marks get aria-labels so screen
+ * readers hear "Yes"/"No" instead of glyph names.
+ */
+function Mark({ yes, note }: { yes: boolean; note?: number }) {
+  return (
+    <span className="whitespace-nowrap">
+      <span
+        role="img"
+        aria-label={yes ? "Yes" : "No"}
+        className={
+          yes ? "font-semibold text-success" : "text-text-faint/70"
+        }
+      >
+        {yes ? "\u2713" : "\u2717"}
+      </span>
+      {note !== undefined && (
+        <sup>
+          <a
+            href={`#glance-note-${note}`}
+            aria-label={`Footnote ${note}`}
+            className="ml-0.5 text-micro text-text-faint hover:text-accent"
+          >
+            {note}
+          </a>
+        </sup>
+      )}
+    </span>
+  );
+}
+
+const TRACKERS = ["Lific", "beads", "Vikunja", "Gitea", "Plane", "Linear"];
+
+// Each row: [feature label, then one cell per tracker in TRACKERS order].
+// A cell is boolean, or [boolean, footnoteNumber].
+type GlanceCell = boolean | [boolean, number];
+const GLANCE_ROWS: [string, ...GlanceCell[]][] = [
+  ["First-party MCP server", true, true, [false, 1], true, true, true],
+  ["Tracker and MCP server are one process", true, false, false, false, false, false],
+  ["Built for coding agents first", true, true, false, false, false, false],
+  ["Ready-work query (unblocked issues, one call)", true, true, false, false, false, false],
+  ["Web UI for humans included", true, false, true, true, true, true],
+  ["Self-host with a single binary", true, [true, 2], true, true, false, false],
+  ["Free and open source", true, true, true, true, true, false],
+  ["Repo-local mode (tracker lives in your repo)", false, true, false, false, false, false],
+  ["Hosted cloud option", false, false, true, true, true, true],
+];
+
+const GLANCE_NOTES = [
+  "Community-maintained MCP servers for Vikunja exist; none are first-party.",
+  "beads goes further: it has no server at all, just a CLI with an embedded database.",
+];
+
+function GlanceTable() {
+  return (
+    <>
+      <div className="mt-8 overflow-x-auto rounded-xl border border-border bg-bg-subtle/40">
+        <table className="w-full min-w-[720px] border-collapse">
+          <caption className="sr-only">
+            Feature support across issue trackers with MCP: Lific, beads,
+            Vikunja, Gitea, Plane, and Linear
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col" className={`${th} w-[38%]`}>
+                <span className="sr-only">Feature</span>
+              </th>
+              {TRACKERS.map((t) => (
+                <th
+                  scope="col"
+                  key={t}
+                  className={`${th} text-center ${
+                    t === "Lific" ? "bg-accent-subtle/40" : ""
+                  }`}
+                >
+                  {t}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {GLANCE_ROWS.map(([feature, ...cells]) => (
+              <tr key={feature}>
+                <th
+                  scope="row"
+                  className="border-b border-border/60 px-4 py-3 text-left align-middle text-body-sm font-medium leading-snug text-text"
+                >
+                  {feature}
+                </th>
+                {cells.map((cell, i) => {
+                  const [yes, note] = Array.isArray(cell)
+                    ? cell
+                    : ([cell, undefined] as const);
+                  return (
+                    <td
+                      key={TRACKERS[i]}
+                      className={`border-b border-border/60 px-4 py-3 text-center align-middle text-body ${
+                        i === 0 ? "bg-accent-subtle/40" : ""
+                      }`}
+                    >
+                      <Mark yes={yes} note={note} />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ol className="mt-3 max-w-[75ch] text-caption leading-relaxed text-text-faint">
+        {GLANCE_NOTES.map((note, i) => (
+          <li key={i} id={`glance-note-${i + 1}`} className="scroll-mt-24">
+            {i + 1}. {note}
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
 function H2({ id, children }: { id?: string; children: React.ReactNode }) {
   return (
     <h2
@@ -301,6 +423,20 @@ export default function Compare() {
           </Body>
         </section>
 
+
+        {/* At a glance: the boolean matrix. This is the row-level truth of
+            the prose tables below, compressed to yes/no so the shape of the
+            comparison is visible before any reading happens. Keep cells
+            strictly boolean; nuance lives in the footnotes and the sections
+            underneath. */}
+        <section className="mt-[clamp(4rem,9vh,6rem)]">
+          <H2 id="at-a-glance">At a glance</H2>
+          <Body>
+            The details, transports, and sources for every row are in the
+            sections below.
+          </Body>
+          <GlanceTable />
+        </section>
 
         {/* Table 1: the MCP story */}
         <section className="mt-[clamp(4.5rem,10vh,7rem)]">
