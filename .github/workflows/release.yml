@@ -2,7 +2,8 @@ name: Release
 
 # Triggered by pushing a version tag (e.g. v1.4.0).
 #
-# The tag MUST originate on magi (origin) so the magi→github push mirror
+# The tag MUST originate on the maintainer-only `magi` remote (origin in that
+# checkout) so the magi→github push mirror
 # replicates it. Do NOT have this workflow create the tag on the github side:
 # the mirror runs `git push --mirror`, which prunes any github ref that isn't
 # on magi. A github-only tag therefore gets deleted on the next mirror sync,
@@ -10,8 +11,9 @@ name: Release
 # stranded every release v1.2.0–v1.3.1 (LIF-120). Because the tag now comes
 # from magi, the mirror keeps it and the release stays published.
 #
-# Release ritual (see AGENTS.md "Releasing a new version"):
-#   1. bump Cargo.toml, commit, `git push`            (no release yet)
+# Release ritual (maintainer-only mirror details are not required in public
+# clones):
+#   1. bump Cargo.toml, commit, and push the version change (no release yet)
 #   2. `git tag vX.Y.Z && git push origin vX.Y.Z`     (fires this workflow)
 on:
   push:

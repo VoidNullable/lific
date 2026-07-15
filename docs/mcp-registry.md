@@ -164,11 +164,13 @@ will fail the release if you forget.
    the top-level `version` and the `packages[0].version`. They must always
    equal `Cargo.toml`'s version and the release tag — the `verify` job asserts
    this and fails fast on drift.
-3. Cut the release as normal (see `AGENTS.md` → "Releasing a new version":
-   commit, `git push` to magi, then `git tag vX.Y.Z && git push origin vX.Y.Z`).
-   That fires `release.yml`, which builds binaries, runs `cargo publish` to
-   crates.io, and then (in `publish-registry`) publishes `server.json` to the
-   MCP Registry automatically.
+3. Cut the release using `.github/workflows/release.yml`: update the version,
+   commit it, and push the release tag. The `magi` mirror mentioned in the
+   workflow is maintainer-only infrastructure and may not exist in a public
+   checkout; do not add or invent that remote. The release workflow builds
+   binaries, runs `cargo publish` to crates.io, and then (in
+   `publish-registry`) publishes `server.json` to the MCP Registry
+   automatically.
 4. **Only if `publish-registry` failed** (it's `continue-on-error`, so check the
    run): re-run the manual `mcp-publisher publish` from the repo root, per
    "Every publish" above.
