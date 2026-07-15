@@ -38,13 +38,13 @@ Gets an issue and its details.
 | `identifier` | `string` | Yes | Issue identifier like PRO-42 or ADA-7 |
 | `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all`, or `none`. |
 
-### `export_issue`
+### `export`
 
-Exports one issue as Markdown.
+Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return the markdown content; projects return the exported file paths.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier like PRO-42 |
+| `identifier` | `string` | Yes | Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO) |
 
 ### `create_issue`
 
@@ -180,27 +180,11 @@ Deletes a resource selected by type and identifier.
 | `identifier` | `string` | Yes | Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF for projects, or name for modules/labels/folders) |
 | `project` | `string` | No | Project identifier (required for deleting module/label/folder by name) |
 
-### `export_project`
-
-Exports a project as Markdown files.
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-
 ## Pages
 
 ### `get_page`
 
 Gets a page and its content.
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Page identifier like LIF-DOC-1 |
-
-### `export_page`
-
-Exports one page as Markdown.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |

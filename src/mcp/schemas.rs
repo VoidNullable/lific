@@ -28,7 +28,7 @@ pub struct SearchInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListIssuesInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
+    #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
     #[schemars(description = "Filter by status: backlog, todo, active, done, cancelled")]
     pub status: Option<String>,
@@ -40,24 +40,18 @@ pub struct ListIssuesInput {
     pub label: Option<String>,
     #[schemars(description = "Only return issues with no unresolved blockers")]
     pub workable: Option<bool>,
-    #[schemars(
-        description = "Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7."
-    )]
+    #[schemars(description = "Return issues with at least one blocker.")]
     pub blocked: Option<bool>,
-    #[schemars(
-        description = "Only issues created at/after this ISO date or datetime (e.g. 2026-06-01)"
-    )]
+    #[schemars(description = "Created at/after ISO date or datetime (e.g. 2026-06-01)")]
     pub created_since: Option<String>,
-    #[schemars(description = "Only issues created before this ISO date or datetime (exclusive)")]
+    #[schemars(description = "Created before ISO date or datetime (exclusive)")]
     pub created_until: Option<String>,
-    #[schemars(
-        description = "Only issues updated at/after this ISO date or datetime. Handy for 'what changed recently'."
-    )]
+    #[schemars(description = "Updated at/after ISO date or datetime.")]
     pub updated_since: Option<String>,
-    #[schemars(description = "Only issues updated before this ISO date or datetime (exclusive)")]
+    #[schemars(description = "Updated before ISO date or datetime (exclusive)")]
     pub updated_until: Option<String>,
     #[schemars(
-        description = "Sort column: sort_order (default), sequence, created, updated, or priority"
+        description = "Sort Order: sort_order (default), sequence, created, updated, priority"
     )]
     pub order_by: Option<String>,
     #[schemars(description = "Sort direction: asc (default) or desc")]
@@ -72,18 +66,16 @@ pub struct ListIssuesInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetIssueInput {
-    #[schemars(description = "Issue identifier like PRO-42 or ADA-7")]
+    #[schemars(description = "Issue ID like PRO-42 or ADA-7")]
     pub identifier: String,
-    #[schemars(
-        description = "Comment trail: 'recent' (default, last 3), 'all', or 'none'."
-    )]
+    #[schemars(description = "Comment trail: 'recent' (default, last 3), 'all', or 'none'.")]
     pub include_comments: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetActivityInput {
     #[schemars(
-        description = "What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed"
+        description = "What to read history for: an issue ID (PRO-42), a page ID (PRO-DOC-3 or DOC-3), or a bare project ID (PRO) for the whole project's feed"
     )]
     pub identifier: String,
     #[schemars(description = "Max entries (default 30, cap 200)")]
@@ -96,7 +88,7 @@ pub struct GetActivityInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreateIssueInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
+    #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
     #[schemars(description = "Issue title")]
     pub title: String,
@@ -118,7 +110,7 @@ pub struct CreateIssueInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UpdateIssueInput {
-    #[schemars(description = "Issue identifier like PRO-42")]
+    #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
     #[schemars(description = "New title")]
     pub title: Option<String>,
@@ -142,12 +134,16 @@ pub struct UpdateIssueInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct BulkUpdateInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
+    #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
     // ── Filter (which issues to change; mirrors list_issues) ──
-    #[schemars(description = "Only affect issues with this status: backlog, todo, active, done, cancelled")]
+    #[schemars(
+        description = "Only affect issues with this status: backlog, todo, active, done, cancelled"
+    )]
     pub filter_status: Option<String>,
-    #[schemars(description = "Only affect issues with this priority: urgent, high, medium, low, none")]
+    #[schemars(
+        description = "Only affect issues with this priority: urgent, high, medium, low, none"
+    )]
     pub filter_priority: Option<String>,
     #[schemars(description = "Only affect issues in this module (by name)")]
     pub filter_module: Option<String>,
@@ -164,7 +160,7 @@ pub struct BulkUpdateInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetBoardInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
+    #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
     #[schemars(description = "Group by: status, priority, or module (default: status)")]
     pub group_by: Option<String>,
@@ -180,9 +176,9 @@ pub struct GetBoardInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct LinkIssuesInput {
-    #[schemars(description = "Source issue identifier (e.g. PRO-1)")]
+    #[schemars(description = "Source issue ID (e.g. PRO-1)")]
     pub source: String,
-    #[schemars(description = "Target issue identifier (e.g. PRO-2)")]
+    #[schemars(description = "Target issue ID (e.g. PRO-2)")]
     pub target: String,
     #[schemars(description = "Relation type: blocks, relates_to, or duplicate")]
     pub relation_type: String,
@@ -190,21 +186,21 @@ pub struct LinkIssuesInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UnlinkIssuesInput {
-    #[schemars(description = "First issue identifier")]
+    #[schemars(description = "First issue ID")]
     pub source: String,
-    #[schemars(description = "Second issue identifier")]
+    #[schemars(description = "Second issue ID")]
     pub target: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetPageInput {
-    #[schemars(description = "Page identifier like LIF-DOC-1")]
+    #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreatePageInput {
-    #[schemars(description = "Project identifier (e.g. LIF). Omit for workspace-level page.")]
+    #[schemars(description = "Project ID (e.g. LIF). Omit for workspace-level page.")]
     pub project: Option<String>,
     #[schemars(description = "Page title")]
     pub title: String,
@@ -222,7 +218,7 @@ pub struct CreatePageInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UpdatePageInput {
-    #[schemars(description = "Page identifier like LIF-DOC-1")]
+    #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
     #[schemars(description = "New title")]
     pub title: Option<String>,
@@ -244,7 +240,7 @@ pub struct UpdatePageInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EditIssueInput {
-    #[schemars(description = "Issue identifier like PRO-42")]
+    #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
     pub old_string: String,
@@ -258,7 +254,7 @@ pub struct EditIssueInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EditPageInput {
-    #[schemars(description = "Page identifier like LIF-DOC-1")]
+    #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
     pub old_string: String,
@@ -277,12 +273,10 @@ pub struct DeleteInput {
     )]
     pub resource_type: String,
     #[schemars(
-        description = "Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF for projects, or name for modules/labels/folders)"
+        description = "ID or name (e.g. LIF-1, LIF-DOC-1, LIF for projects, or name for modules/labels/folders)"
     )]
     pub identifier: String,
-    #[schemars(
-        description = "Project identifier (required for deleting module/label/folder by name)"
-    )]
+    #[schemars(description = "Project ID (required for deleting module/label/folder by name)")]
     pub project: Option<String>,
 }
 
@@ -290,11 +284,11 @@ pub struct DeleteInput {
 pub struct ListResourcesInput {
     #[schemars(description = "Resource type: project, module, label, folder, page, or issue")]
     pub resource_type: String,
-    #[schemars(description = "Project identifier (required for most types)")]
+    #[schemars(description = "Project ID (required for most types)")]
     pub project: Option<String>,
-    #[schemars(description = "Folder name (for page filtering)")]
+    #[schemars(description = "Folder name (for pages)")]
     pub folder: Option<String>,
-    #[schemars(description = "Label name (for issue or page filtering — LIF-105)")]
+    #[schemars(description = "Label name (for issues or pages)")]
     pub label: Option<String>,
     #[schemars(
         description = "Status filter (for page lists): draft, active, complete, or archived"
@@ -306,10 +300,10 @@ pub struct ListResourcesInput {
     pub order_by: Option<String>,
     #[schemars(description = "Sort direction (for page lists): asc (default) or desc")]
     pub order: Option<String>,
-    #[schemars(description = "Max results (applies to issue/page lists; default 100 for issues)")]
+    #[schemars(description = "Max results (applies to most lists; default 100 for issues)")]
     pub limit: Option<i64>,
     #[schemars(
-        description = "Zero-indexed offset for paging (applies to issue/page lists). Output appends a hint when more results exist."
+        description = "Zero-indexed offset for paging (applies to most lists). Output hints when more results exist."
     )]
     pub offset: Option<i64>,
 }
@@ -325,12 +319,12 @@ pub struct ManageResourceInput {
     )]
     pub current_name: Option<String>,
     #[schemars(
-        description = "Project identifier (e.g. LIF). For resource_type=project with action=update, this identifies the project being updated."
+        description = "Project ID (e.g. LIF). For resource_type=project with action=update, this identifies the project being updated."
     )]
     pub project: Option<String>,
     #[schemars(description = "Name")]
     pub name: Option<String>,
-    #[schemars(description = "Identifier (for project create, e.g. PRO)")]
+    #[schemars(description = "ID (for project create, e.g. PRO)")]
     pub identifier: Option<String>,
     #[schemars(description = "Description")]
     pub description: Option<String>,
@@ -348,7 +342,7 @@ pub struct ManageResourceInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AddCommentInput {
-    #[schemars(description = "Issue identifier (e.g. LIF-1)")]
+    #[schemars(description = "Issue ID (e.g. LIF-1)")]
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
@@ -356,7 +350,7 @@ pub struct AddCommentInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListCommentsInput {
-    #[schemars(description = "Issue identifier (e.g. LIF-1)")]
+    #[schemars(description = "Issue ID (e.g. LIF-1)")]
     pub identifier: String,
     #[schemars(description = "Filter to comments by this author username")]
     pub author: Option<String>,
@@ -401,7 +395,7 @@ pub struct PlanStepInput {
     #[schemars(description = "Optional longer notes/description for this step")]
     pub description: Option<String>,
     #[schemars(
-        description = "Issue identifier this step mirrors (e.g. LIF-42). When set, the step auto-completes when the issue is closed, and marking the step done closes the issue."
+        description = "Issue ID this step mirrors (e.g. LIF-42). The step mirrors the issue's done/closed state and vice versa."
     )]
     pub issue: Option<String>,
     #[schemars(description = "Pre-mark this step done (default false)")]
@@ -412,29 +406,29 @@ pub struct PlanStepInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreatePlanInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
+    #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
-    #[schemars(description = "Plan title — what this plan accomplishes")]
+    #[schemars(description = "Plan title")]
     pub title: String,
     #[schemars(
-        description = "Optional anchor issue this plan decomposes (e.g. LIF-42). Closing it auto-archives the plan."
+        description = "Optional anchor issue (e.g. LIF-42). Closing it auto-archives the plan."
     )]
     pub anchor_issue: Option<String>,
     #[schemars(
-        description = "The full nested step tree, authored in one call. Each step: {title, description?, issue?, done?, steps?[]}."
+        description = "Full nested step tree, authored in one call. Each step: {title, description?, issue?, done?, steps?[]}."
     )]
     pub steps: Option<Vec<PlanStepInput>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetPlanInput {
-    #[schemars(description = "Plan identifier like LIF-PLAN-3")]
+    #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EditPlanStepInput {
-    #[schemars(description = "Plan identifier like LIF-PLAN-3")]
+    #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
     #[schemars(description = "Numeric step id (the #N shown by get_plan)")]
     pub step_id: i64,
@@ -450,35 +444,35 @@ pub struct EditPlanStepInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct UpdatePlanStepInput {
-    #[schemars(description = "Plan identifier like LIF-PLAN-3")]
+    #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
     #[schemars(
-        description = "Numeric step id to operate on (the #N from get_plan). OMIT to operate on the plan itself (status/title/anchor)."
+        description = "Step ID to operate on (#N from get_plan). OMIT operates on the plan itself."
     )]
     pub step_id: Option<i64>,
-    #[schemars(description = "New title for the targeted step or plan")]
+    #[schemars(description = "New title for the target")]
     pub title: Option<String>,
     // ── Plan-level (step_id omitted) ──
-    #[schemars(description = "Plan status: active, done, or archived (plan-level; omit step_id)")]
+    #[schemars(description = "Plan status: active done or archived")]
     pub status: Option<String>,
-    #[schemars(description = "Set the plan's anchor issue (plan-level; omit step_id)")]
+    #[schemars(description = "Set the plan's anchor issue")]
     pub anchor_issue: Option<String>,
-    #[schemars(description = "Clear the plan's anchor issue (plan-level; omit step_id)")]
+    #[schemars(description = "Clear the plan's anchor issue")]
     pub clear_anchor: Option<bool>,
     // ── Step-level (step_id set) ──
     #[schemars(
-        description = "Mark the step done/undone. Marking done also closes a linked issue; the result text reports the side effect."
+        description = "Set the step's done status. Status mirrors a linked issue; the result reports side effects."
     )]
     pub done: Option<bool>,
     #[schemars(description = "Attach an issue (e.g. LIF-42) to the step")]
     pub attach_issue: Option<String>,
     #[schemars(description = "Detach the step's issue reference")]
     pub detach_issue: Option<bool>,
-    #[schemars(description = "Add a child step with this title under the targeted step")]
+    #[schemars(description = "Add a child step with this title under the target step")]
     pub add_child_title: Option<String>,
     #[schemars(description = "Description for the added child step")]
     pub add_child_description: Option<String>,
-    #[schemars(description = "Issue identifier for the added child step")]
+    #[schemars(description = "Issue ID for the added child step")]
     pub add_child_issue: Option<String>,
     #[schemars(description = "Reparent the step under this step id")]
     pub move_parent_step_id: Option<i64>,
@@ -486,28 +480,18 @@ pub struct UpdatePlanStepInput {
     pub move_to_root: Option<bool>,
     #[schemars(description = "New position among siblings (0-based)")]
     pub move_position: Option<i64>,
-    #[schemars(description = "Delete the step and its whole subtree")]
+    #[schemars(description = "Delete the step and its subtree")]
     pub delete: Option<bool>,
     #[schemars(
-        description = "Echo the full re-rendered plan tree after the mutation (default false — mutations return a compact receipt; use get_plan to rehydrate)."
+        description = "Return the re-rendered plan tree after the mutation. Defaults to false which only shows delta."
     )]
     pub echo_tree: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct ExportIssueInput {
-    #[schemars(description = "Issue identifier like PRO-42")]
+pub struct ExportInput {
+    #[schemars(
+        description = "What to export: an issue ID (PRO-42), a page ID (PRO-DOC-3), or a bare project ID (PRO) for the whole project"
+    )]
     pub identifier: String,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct ExportPageInput {
-    #[schemars(description = "Page identifier like LIF-DOC-1")]
-    pub identifier: String,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct ExportProjectInput {
-    #[schemars(description = "Project identifier (e.g. LIF)")]
-    pub project: String,
 }

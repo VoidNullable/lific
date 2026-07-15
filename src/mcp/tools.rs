@@ -766,7 +766,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List issues for a project. Use workable=true for issues with no unresolved blockers, or blocked=true for issues with at least one unresolved blocker."
+        description = "List issues for a project. workable=true gives issues with no blockers, blocked=true for issues with at least one blocker."
     )]
     fn list_issues(&self, Parameters(input): Parameters<ListIssuesInput>) -> String {
         if let Some(nudge) = self.no_projects_nudge() {
@@ -829,7 +829,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Get a single issue by identifier (e.g. LIF-1). Returns full details with relations. The comment trail defaults to the last 3 (include_comments='recent'); use 'all' for the whole thread or 'none' to suppress it."
+        description = "Get a single issue by identifier (e.g. LIF-1). Returns full details, last 3 comments. include_comments determines which comments to attach."
     )]
     fn get_issue(&self, Parameters(input): Parameters<GetIssueInput>) -> String {
         // Validate the comment-trail mode up front so a typo errors instead of
@@ -897,7 +897,10 @@ impl LificMcp {
                     out.push_str(&format!("Duplicates: {}\n", rels.duplicates.join(", ")));
                 }
                 if !rels.duplicated_by.is_empty() {
-                    out.push_str(&format!("Duplicated by: {}\n", rels.duplicated_by.join(", ")));
+                    out.push_str(&format!(
+                        "Duplicated by: {}\n",
+                        rels.duplicated_by.join(", ")
+                    ));
                 }
                 if !issue.description.is_empty() {
                     out.push_str(&format!("\n{}\n", issue.description));
@@ -950,26 +953,72 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "Export a single issue as markdown. Returns the markdown content.")]
-    fn export_issue(&self, Parameters(input): Parameters<ExportIssueInput>) -> String {
-        let project_id = match self.read(|conn| {
-            let id = queries::resolve_identifier(conn, &input.identifier)?;
+    #[tool(
+        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). Issues and pages return the markdown; projects return the exported file paths."
+    )]
+    fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
+        let ident = input.identifier.trim();
+        // Same identifier-shape dispatch as get_activity: pages are
+        // unambiguous (DOC segment); issue resolution requires a numeric
+        // tail, so a bare project identifier falls through cleanly.
+        if looks_like_page_identifier(ident) {
+            let project_id = match self.read(|conn| {
+                let id = queries::resolve_page_identifier(conn, ident)?;
+                Ok(queries::get_page(conn, id)?.project_id)
+            }) {
+                Ok(pid) => pid,
+                Err(e) => return format!("Error: {e}"),
+            };
+            if let Err(e) = require_page_role_mcp(&self.db, project_id, models::Role::Viewer) {
+                return format!("Error: {e}");
+            }
+            match self.read(|conn| crate::export::export_page(conn, ident)) {
+                Ok(bundle) => bundle
+                    .files
+                    .into_iter()
+                    .next()
+                    .map(|file| file.content)
+                    .unwrap_or_else(|| "Error: page export produced no files".into()),
+                Err(e) => format!("Error: {e}"),
+            }
+        } else if let Ok(project_id) = self.read(|conn| {
+            let id = queries::resolve_identifier(conn, ident)?;
             Ok(queries::get_issue(conn, id)?.project_id)
         }) {
-            Ok(pid) => pid,
-            Err(e) => return format!("Error: {e}"),
-        };
-        if let Err(e) = require_role_mcp(&self.db, project_id, models::Role::Viewer) {
-            return format!("Error: {e}");
-        }
-        match self.read(|conn| crate::export::export_issue(conn, &input.identifier)) {
-            Ok(bundle) => bundle
-                .files
-                .into_iter()
-                .next()
-                .map(|file| file.content)
-                .unwrap_or_else(|| "Error: issue export produced no files".into()),
-            Err(e) => format!("Error: {e}"),
+            if let Err(e) = require_role_mcp(&self.db, project_id, models::Role::Viewer) {
+                return format!("Error: {e}");
+            }
+            match self.read(|conn| crate::export::export_issue(conn, ident)) {
+                Ok(bundle) => bundle
+                    .files
+                    .into_iter()
+                    .next()
+                    .map(|file| file.content)
+                    .unwrap_or_else(|| "Error: issue export produced no files".into()),
+                Err(e) => format!("Error: {e}"),
+            }
+        } else {
+            let pid = match resolve_project(&self.db, ident) {
+                Ok(id) => id,
+                Err(_) => {
+                    return format!(
+                        "Error: '{ident}' is not a known issue, page, or project identifier"
+                    );
+                }
+            };
+            if let Err(e) = require_role_mcp(&self.db, pid, models::Role::Viewer) {
+                return format!("Error: {e}");
+            }
+            match self.read(|conn| crate::export::export_project(conn, ident)) {
+                Ok(bundle) => {
+                    let mut out = format!("{} exported file(s):\n", bundle.files.len());
+                    for file in bundle.files {
+                        out.push_str(&format!("- {}\n", file.path));
+                    }
+                    out
+                }
+                Err(e) => format!("Error: {e}"),
+            }
         }
     }
 
@@ -1151,20 +1200,20 @@ impl LificMcp {
             issues
                 .iter()
                 .map(|issue| {
-                queries::update_issue(
-                    conn,
-                    issue.id,
-                    &models::UpdateIssue {
-                        title: None,
-                        description: None,
-                        status: input.set_status.clone(),
-                        priority: input.set_priority.clone(),
-                        module_id: set_module_id.map(Some),
-                        sort_order: None,
-                        start_date: None,
-                        target_date: None,
-                        labels: None,
-                    },
+                    queries::update_issue(
+                        conn,
+                        issue.id,
+                        &models::UpdateIssue {
+                            title: None,
+                            description: None,
+                            status: input.set_status.clone(),
+                            priority: input.set_priority.clone(),
+                            module_id: set_module_id.map(Some),
+                            sort_order: None,
+                            start_date: None,
+                            target_date: None,
+                            labels: None,
+                        },
                     )
                     .map(|issue| (issue.project_id, issue.id))
                 })
@@ -1516,50 +1565,6 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "Export a single page as markdown. Returns the markdown content.")]
-    fn export_page(&self, Parameters(input): Parameters<ExportPageInput>) -> String {
-        let project_id = match self.read(|conn| {
-            let id = queries::resolve_page_identifier(conn, &input.identifier)?;
-            Ok(queries::get_page(conn, id)?.project_id)
-        }) {
-            Ok(pid) => pid,
-            Err(e) => return format!("Error: {e}"),
-        };
-        if let Err(e) = require_page_role_mcp(&self.db, project_id, models::Role::Viewer) {
-            return format!("Error: {e}");
-        }
-        match self.read(|conn| crate::export::export_page(conn, &input.identifier)) {
-            Ok(bundle) => bundle
-                .files
-                .into_iter()
-                .next()
-                .map(|file| file.content)
-                .unwrap_or_else(|| "Error: page export produced no files".into()),
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    #[tool(description = "Export an entire project as markdown. Returns exported file paths.")]
-    fn export_project(&self, Parameters(input): Parameters<ExportProjectInput>) -> String {
-        let pid = match resolve_project(&self.db, &input.project) {
-            Ok(id) => id,
-            Err(e) => return format!("Error: {e}"),
-        };
-        if let Err(e) = require_role_mcp(&self.db, pid, models::Role::Viewer) {
-            return format!("Error: {e}");
-        }
-        match self.read(|conn| crate::export::export_project(conn, &input.project)) {
-            Ok(bundle) => {
-                let mut out = format!("{} exported file(s):\n", bundle.files.len());
-                for file in bundle.files {
-                    out.push_str(&format!("- {}\n", file.path));
-                }
-                out
-            }
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
     #[tool(description = "Create a new page in a project")]
     fn create_page(&self, Parameters(input): Parameters<CreatePageInput>) -> String {
         let project_id = match &input.project {
@@ -1795,7 +1800,9 @@ impl LificMcp {
                 match self.write(|conn| queries::delete_page(conn, id)) {
                     Ok(()) => {
                         if let Some(project_id) = project_id {
-                            self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+                            self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                                project_id,
+                            });
                         }
                         format!("Deleted page {}", input.identifier)
                     }
@@ -2507,11 +2514,11 @@ impl LificMcp {
         let user_id = match super::current_auth_user() {
             Some(u) => u.id,
             None => match self.read(queries::users::first_admin) {
-                    Ok(Some(admin)) => admin.id,
-                    Ok(None) => {
-                        return "Error: no admin user exists to attribute comments to.".into();
-                    }
-                    Err(e) => return format!("Error: {e}"),
+                Ok(Some(admin)) => admin.id,
+                Ok(None) => {
+                    return "Error: no admin user exists to attribute comments to.".into();
+                }
+                Err(e) => return format!("Error: {e}"),
             },
         };
 
@@ -2566,8 +2573,8 @@ impl LificMcp {
                     self.emit(event);
                 }
                 format!(
-                "Comment #{} added to {} by {} at {}",
-                c.id, input.identifier, c.author, c.created_at
+                    "Comment #{} added to {} by {} at {}",
+                    c.id, input.identifier, c.author, c.created_at
                 )
             }
             Err(e) => format!("Error: {e}"),
@@ -2599,11 +2606,7 @@ impl LificMcp {
                 limit.map(|limit| limit + 1),
                 input.offset.map(|offset| offset.max(0)),
             )?;
-            let total = queries::comments::count_comments(
-                conn,
-                parent,
-                input.author.as_deref(),
-            )?;
+            let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
             Ok((comments, total))
         }) {
             Ok((comments, total)) if comments.is_empty() => {
@@ -2624,7 +2627,11 @@ impl LificMcp {
                 }
                 let shown = comments.len() as i64;
                 let mut out = if limit.is_some() && offset == 0 && shown < total {
-                    let edge = if order == "desc" { "most recent" } else { "oldest" };
+                    let edge = if order == "desc" {
+                        "most recent"
+                    } else {
+                        "oldest"
+                    };
                     format!(
                         "Showing {shown} {edge} of {total} comment(s) on {}:\n",
                         input.identifier
@@ -2675,9 +2682,9 @@ impl LificMcp {
         // api::comments::update_comment_handler).
         let existing =
             match self.read(|conn| queries::comments::get_comment(conn, input.comment_id)) {
-            Ok(c) => c,
-            Err(e) => return format!("Error: {e}"),
-        };
+                Ok(c) => c,
+                Err(e) => return format!("Error: {e}"),
+            };
         if existing.user_id != user_id && !is_admin {
             return "Error: you can only edit your own comments".into();
         }
@@ -2731,9 +2738,9 @@ impl LificMcp {
         // api::comments::delete_comment_handler).
         let existing =
             match self.read(|conn| queries::comments::get_comment(conn, input.comment_id)) {
-            Ok(c) => c,
-            Err(e) => return format!("Error: {e}"),
-        };
+                Ok(c) => c,
+                Err(e) => return format!("Error: {e}"),
+            };
         if existing.user_id != user_id && !is_admin {
             return "Error: you can only delete your own comments".into();
         }
@@ -2760,7 +2767,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Persist a step-by-step plan that survives across sessions and context compaction. Use it to break a goal or issue into an ordered, nestable tree of steps the next session can resume. Steps can mirror issues (set `issue`): closing the issue auto-completes the step, and marking the step done closes the issue. Author the whole nested tree in one call via `steps`."
+        description = "Create step-by-step plans that survive outside context windows. Break issues into ordered steps, or create an epic that covers multiple issues. Plans are fully nestable. Steps can mirror issues using 'issue'. Closing the issue sets the step as done and vice versa."
     )]
     fn create_plan(&self, Parameters(input): Parameters<CreatePlanInput>) -> String {
         let pid = match resolve_project(&self.db, &input.project) {
@@ -2871,7 +2878,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Mutate a plan or one of its steps. With `step_id`: toggle done (marking done closes a linked issue — the result reports it), attach/detach an issue, rename, add a child step, move/reorder, or delete. WITHOUT step_id: update the plan itself (status active/done/archived, title, anchor issue). Marking a plan done never closes its anchor issue. Returns a compact receipt by default (side-effect notes + a one-line progress summary); pass echo_tree=true to also re-render the full plan tree."
+        description = "Mutate plans or their steps. step_id will target a step for CRUD, toggling, or attaching/detaching issues (attached issues update state from their step). No step_id will update the plan itself. Marking a plan done never closes its anchor issue that's step only. By default returns delta. echo_tree=true re-renders the full tree."
     )]
     fn update_plan_step(&self, Parameters(input): Parameters<UpdatePlanStepInput>) -> String {
         // LIF-198: Maintainer on the plan's own project gates every mutation
@@ -3604,7 +3611,7 @@ mod tests {
         for id in ["BLK-1", "BLK-2"] {
             let got = m.get_issue(Parameters(GetIssueInput {
                 identifier: id.into(),
-            ..Default::default()
+                ..Default::default()
             }));
             assert!(got.contains("Status: done"), "{id} not done: {got}");
         }
@@ -4125,7 +4132,10 @@ mod tests {
             "got: {result}"
         );
         // No status stub in priority grouping.
-        assert!(!result.contains("[omitted — pass include_closed=true]"), "got: {result}");
+        assert!(
+            !result.contains("[omitted — pass include_closed=true]"),
+            "got: {result}"
+        );
     }
 
     #[test]
@@ -4731,11 +4741,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) =
             Some(models::AuthUser {
-            id: user.id,
-            username: user.username.clone(),
-            display_name: user.display_name,
-            is_admin: user.is_admin,
-        });
+                id: user.id,
+                username: user.username.clone(),
+                display_name: user.display_name,
+                is_admin: user.is_admin,
+            });
         guard
     }
 
@@ -4910,7 +4920,10 @@ mod tests {
         }));
         assert!(result.contains("--- Comments (5) ---"), "got: {result}");
         for i in 1..=5 {
-            assert!(result.contains(&format!("comment number {i}")), "got: {result}");
+            assert!(
+                result.contains(&format!("comment number {i}")),
+                "got: {result}"
+            );
         }
     }
 
@@ -5058,7 +5071,10 @@ mod tests {
             "got: {result}"
         );
         for n in 1..=9 {
-            assert!(result.contains(&format!("comment number {n}")), "got: {result}");
+            assert!(
+                result.contains(&format!("comment number {n}")),
+                "got: {result}"
+            );
         }
         assert!(!result.contains("Showing"), "got: {result}");
         assert!(!result.contains("more comment(s)"), "got: {result}");
@@ -5082,7 +5098,10 @@ mod tests {
             "got: {result}"
         );
         for n in 3..=5 {
-            assert!(result.contains(&format!("comment number {n}")), "got: {result}");
+            assert!(
+                result.contains(&format!("comment number {n}")),
+                "got: {result}"
+            );
         }
         assert!(!result.contains("comment number 2"), "got: {result}");
         assert!(!result.contains("more comment(s)"), "got: {result}");
@@ -5420,6 +5439,47 @@ mod tests {
     }
 
     #[test]
+    fn export_dispatches_on_identifier_shape() {
+        let m = mcp();
+        seed_project(&m, "Test", "EXP");
+        seed_issue_with_description(&m, "EXP", "Ship it", "issue body here");
+        let created = m.create_page(Parameters(CreatePageInput {
+            project: Some("EXP".into()),
+            title: "Design notes".into(),
+            content: Some("page body here".into()),
+            ..Default::default()
+        }));
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        // Issue shape (EXP-1) returns the issue markdown.
+        let issue = m.export(Parameters(ExportInput {
+            identifier: "EXP-1".into(),
+        }));
+        assert!(issue.contains("issue body here"), "got: {issue}");
+
+        // Page shape (EXP-DOC-1) returns the page markdown.
+        let page = m.export(Parameters(ExportInput {
+            identifier: "EXP-DOC-1".into(),
+        }));
+        assert!(page.contains("page body here"), "got: {page}");
+
+        // Bare project shape (EXP) returns the exported file listing.
+        let project = m.export(Parameters(ExportInput {
+            identifier: "EXP".into(),
+        }));
+        assert!(project.contains("exported file(s)"), "got: {project}");
+
+        // Unknown identifiers name all three shapes in the error.
+        let err = m.export(Parameters(ExportInput {
+            identifier: "NOPE-999".into(),
+        }));
+        assert!(
+            err.contains("not a known issue, page, or project"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn create_and_edit_issue_preserves_literal_escapes_in_multiline_code() {
         let m = mcp();
         seed_project(&m, "Test", "ESC");
@@ -5436,14 +5496,17 @@ mod tests {
             identifier: "ESC-1".into(),
             ..Default::default()
         }));
-        assert!(detail.contains(description), "get_issue mangled content: {detail}");
+        assert!(
+            detail.contains(description),
+            "get_issue mangled content: {detail}"
+        );
 
-        let exported = m.export_issue(Parameters(ExportIssueInput {
+        let exported = m.export(Parameters(ExportInput {
             identifier: "ESC-1".into(),
         }));
         assert!(
             exported.contains(description.trim_end()),
-            "export_issue mangled content: {exported}"
+            "export mangled content: {exported}"
         );
 
         let result = m.edit_issue(Parameters(EditIssueInput {
@@ -5950,10 +6013,6 @@ mod tests {
         assert!(!detail.contains("design"), "got: {detail}");
     }
 
-    // ── LIF-145: sentinel clearing (module / folder / emoji) ──
-
-    /// Assign an issue to a module, then clear it via the empty-string
-    /// sentinel and confirm it is unassigned (module_id = NULL).
     #[test]
     fn mcp_update_issue_clears_module_with_empty_string() {
         let m = mcp();
@@ -6123,8 +6182,6 @@ mod tests {
         assert_eq!(queries::get_project(&conn, pid).unwrap().emoji, None);
     }
 
-    /// Set a module emoji on update via manage_resource (LIF-145 threads
-    /// emoji through the module arms too).
     #[test]
     fn mcp_manage_resource_sets_module_emoji() {
         let m = mcp();
@@ -7185,7 +7242,10 @@ mod tests {
             "receipt must carry progress counts: {out}"
         );
         // No step-tree lines (the "- [x] #N" render fmt_plan would emit).
-        assert!(!out.contains("- [x]"), "receipt must omit step lines: {out}");
+        assert!(
+            !out.contains("- [x]"),
+            "receipt must omit step lines: {out}"
+        );
 
         // The issue is actually closed.
         let issue = m.get_issue(Parameters(GetIssueInput {
@@ -7232,7 +7292,10 @@ mod tests {
         // The full tree renders both step titles and step-line markers.
         assert!(out.contains("first step"), "got: {out}");
         assert!(out.contains("second step"), "got: {out}");
-        assert!(out.contains("- ["), "echo_tree must render step lines: {out}");
+        assert!(
+            out.contains("- ["),
+            "echo_tree must render step lines: {out}"
+        );
     }
 
     // LIF-302: a plan-level update (no step_id) also returns the compact
@@ -7262,7 +7325,10 @@ mod tests {
             "plan-level receipt must carry status + progress: {out}"
         );
         // No step tree — the only step's title must not appear.
-        assert!(!out.contains("only step"), "receipt must omit the tree: {out}");
+        assert!(
+            !out.contains("only step"),
+            "receipt must omit the tree: {out}"
+        );
     }
 
     #[test]
@@ -7768,7 +7834,7 @@ mod authz_gating_tests {
         let denied = as_user(&non_member, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
-            ..Default::default()
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied), "non-member get_issue: {denied}");
@@ -7776,7 +7842,7 @@ mod authz_gating_tests {
         let allowed = as_user(&viewer, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
-            ..Default::default()
+                ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed), "viewer get_issue: {allowed}");
@@ -8442,7 +8508,7 @@ mod authz_gating_tests {
             let conn = m.db.write().unwrap();
             let bot =
                 crate::db::queries::users::create_bot_user(&conn, maintainer.id, "bot1", "bot1")
-            .unwrap();
+                    .unwrap();
             models::AuthUser {
                 id: bot.id,
                 username: bot.username,
@@ -8471,7 +8537,7 @@ mod authz_gating_tests {
         let read = as_user(&bot, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
-            ..Default::default()
+                ..Default::default()
             }))
         });
         assert!(
@@ -8503,7 +8569,7 @@ mod authz_gating_tests {
         let read = as_user(&non_member, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
-            ..Default::default()
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&read), "read: {read}");
@@ -8556,7 +8622,7 @@ mod authz_gating_tests {
         let read = as_user(&admin, || {
             m.get_issue(Parameters(GetIssueInput {
                 identifier: "MEM-1".into(),
-            ..Default::default()
+                ..Default::default()
             }))
         });
         assert!(

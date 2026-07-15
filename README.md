@@ -209,7 +209,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
 | **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
 | **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 29 tools, human-readable identifiers, compact schema, session instructions |
+| **MCP interface** | 27 tools, human-readable identifiers, compact schema, session instructions |
 | **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
 | **REST API** | Full CRUD for all resources, search, board view |
 | **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
