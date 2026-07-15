@@ -700,12 +700,9 @@ export default function Compare() {
             Linear also revises its tool set regularly.
           </Body>
           <Body>
-            And since we audited everyone else&apos;s schemas, the same knife
-            for our own: Lific&apos;s 5.6k fits the budget, but per tool it is
-            still the second wordiest on this page, after Plane. The audit
-            had consequences here too: v2.2.1 merged three export tools into
-            one verb and cut the prose that repeated what tool outputs
-            already say. The numbers above are the after.
+            Lific&apos;s own 5.6k fits the budget, but not gracefully: per
+            tool, its schemas are the second wordiest on this page, after
+            Plane.
           </Body>
           <p className="mt-4 max-w-[75ch] text-caption leading-relaxed text-text-faint">
             Methodology: each server was launched over stdio on {STAMP},
