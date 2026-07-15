@@ -460,7 +460,7 @@ export default function Compare() {
                   </>,
                   <>
                     27 tools: issues, nestable plans, pages, comments, search,
-                    audit history. The whole surface costs about 6.2k tokens
+                    audit history. The whole surface costs about 5.6k tokens
                     of context (measured below).
                   </>,
                 ],
@@ -602,8 +602,8 @@ export default function Compare() {
                     Built in: <Cmd>lific mcp</Cmd> (v2.3.0)
                   </>,
                   <>27</>,
-                  <>6,192 tokens</>,
-                  <>3.1%</>,
+                  <>5,641 tokens</>,
+                  <>2.8%</>,
                 ],
               },
               {
@@ -701,7 +701,7 @@ export default function Compare() {
           </Body>
           <Body>
             And since we audited everyone else&apos;s schemas, the same knife
-            for our own: Lific&apos;s 6.2k fits the budget, but per tool our
+            for our own: Lific&apos;s 5.6k fits the budget, but per tool our
             descriptions are wordier than everyone here except Plane. The
             audit already cost us something: it found three export tools
             doing one verb&apos;s job, so v2.3.0 merged them into one and the
@@ -832,7 +832,7 @@ export default function Compare() {
                 head: "A small context bill.",
                 body: (
                   <>
-                    About 6.2k tokens for the full 27-tool surface, roughly
+                    About 5.6k tokens for the full 27-tool surface, roughly
                     one long file read, so connecting the tracker doesn&apos;t
                     crowd out the actual work.
                   </>
