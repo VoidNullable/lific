@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **27 MCP tools in 5,641 tokens.** That's the measured size of the full `tools/list` response at v2.2.1 (o200k tokenizer). Your entire tracker costs about as much context as one long file read. Bloated MCP servers are a real tax; this one isn't.
+- **27 MCP tools in 5,641 tokens.** That's the measured size of the full `tools/list` response at v2.2.1 (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -231,7 +231,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 
 Honesty is cheaper than churn:
 
-- **You need enterprise team features.** No SSO/SAML, no sprints, no estimates, no roadmap gantt charts. If you're coordinating forty humans, use Linear or Plane.
+- **You need enterprise team features.** SSO/SAML isn't here, and neither is the sprint-estimate-gantt layer of project management. If you're coordinating forty humans, use Linear or Plane.
 - **You want issues as files in the repo.** Lific is a database with an API, not markdown-in-git. If you want `git diff` on your task list, a markdown-native tracker fits better.
 - **You need distributed multi-writer sync.** One Lific instance is one SQLite file: a single source of truth that's trivially backed up, not a CRDT. Multiple agents talk to one server; the server doesn't merge with other servers.
 
