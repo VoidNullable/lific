@@ -3,7 +3,7 @@ title: Introduction
 description: An overview of Lific and its documentation.
 ---
 
-Lific is a local-first issue tracker. It runs as a single Rust binary. It stores data in SQLite.
+Lific is a local-first issue tracker: it runs on your machine, stores its data locally in SQLite and the attachments directory, and requires no hosted Lific service. A Lific instance is one authoritative source of truth; separate instances do not synchronize or merge. It runs as a single Rust binary.
 
 The binary provides an embedded Svelte web UI, a command-line interface, a REST API, and an MCP server. The web UI assets are embedded from the frontend build output.
 
@@ -13,6 +13,8 @@ The binary provides an embedded Svelte web UI, a command-line interface, a REST 
 - [Quickstart](/docs/quickstart) covers initializing an instance and creating a first issue.
 - [Connect agents](/docs/connect) covers `lific connect`, which writes MCP configuration for installed AI tools.
 - [Windows](/docs/windows) covers native Windows setup and WSL 2.
+- [Web UI guide](/docs/web-ui) covers dashboard, issue views, pages, plans, accounts, and mobile workflows.
+- [Upgrade from 2.0 to 2.2](/docs/upgrading) covers backups, version-specific changes, authorization, and verification.
 - [Concepts](/docs/concepts) describes Lific resources and identifiers.
 - [CLI](/docs/cli) documents command-line operations.
 - [Configuration](/docs/configuration) documents `lific.toml` and command-line overrides.

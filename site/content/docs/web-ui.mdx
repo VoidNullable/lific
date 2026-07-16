@@ -1,0 +1,62 @@
+---
+title: Web UI guide
+description: Task-oriented guide to Lific's dashboard, issue views, pages, plans, and account settings.
+---
+
+The web UI is the browser workspace for Lific. Use it for visual triage, Markdown editing, project navigation, and account administration; use the [CLI](/docs/cli), [REST API](/docs/rest-api), or [MCP](/docs/mcp) when you need scripts or agents.
+
+## Start with My Work
+
+The home dashboard groups active issues by project and provides recently viewed items, pinned pages, an activity digest, and quick actions. Use it as the jump-off point for work that spans several projects.
+
+## Navigate project work
+
+Each project keeps its own navigation state. Issue tabs are All, Recent, Open, and Closed; page tabs are Browse, Recent, Drafts, and Archived; plan tabs are Active, Done, Archived, and All; and module tabs are Active, Backlog, Archive, and All. Count badges show the current totals, and the selected tab persists per project and resource area.
+
+The sidebar shows recent items for the active section and deliberately excludes transient search results and items from unrelated sections. Its width is resizable and persists in the browser.
+
+## Triage issues
+
+Open a project's issue list to:
+
+- switch between All, Recent, Open, and Closed sub-tabs;
+- filter by status, priority, module, or label;
+- search, sort, group, and choose list density;
+- save a named view for your own filters, grouping, sorting, layout, swimlanes, and hidden statuses; and
+- switch between list and board layouts.
+
+Board views support status or priority swimlanes, collapsible columns, and hidden columns. On small screens, the board snaps to a usable column at a time. Select an issue to open its peek panel without losing your place in the list.
+
+## Edit an issue
+
+The issue editor supports Markdown preview, a formatting toolbar, issue-reference autocomplete, Mermaid diagrams, code-block copy, labels, modules, dates, relations, comments, and attachments. Use the keyboard shortcut help or command palette when you do not remember a shortcut.
+
+Changes can be undone from the UI. Deletes use a deferred undo window, so confirm the item and use Undo immediately if the deletion was accidental.
+
+## Work with pages and plans
+
+Pages can be project-scoped or workspace-scoped. Browse, Recent, Drafts, and Archived page sub-tabs provide stable homes for each lifecycle state. Move project pages into folders with drag-and-drop on desktop or the Move-to-folder picker on touch devices; a page and its folder must belong to the same project.
+
+Plans organize nested steps. Link a step to an issue when the step should follow that issue's lifecycle. Plan lists provide Active, Done, Archived, and All sub-tabs. Comments and activity are available on issues and pages, while plan activity records plan and step changes.
+
+Labels and modules are managed from the project structure controls. Labels are project-scoped and can be attached to issues and pages; workspace pages do not use project labels.
+
+## Navigate and personalize
+
+The command palette searches actions and content and highlights matching result text. Deep links let you share or bookmark an issue, page, or plan directly.
+
+Appearance settings include accent color, density, font scale, and reduced motion. The interface also provides a dark/light theme choice where supported by the current release. Keyboard shortcuts are listed in the shortcut help panel.
+
+## Accounts and administration
+
+From account settings, manage your profile, password, active sessions, and connected tools. Instance settings control signups, browser auto-login, authorization enforcement, and login messaging. Project settings manage members and their viewer, maintainer, or lead roles; the last lead cannot be removed or demoted.
+
+Use the connected-tools and API-key controls to review which agents can access the instance. Prefer user-owned bot identities for agents that should follow project membership. See [self-hosting](/docs/self-hosting) and the [REST authorization notes](/docs/rest-api) for operator-level access rules.
+
+The browser's Connected Tools page is a smaller manual-configuration subset: OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code, and Zed. The CLI [connect](/docs/connect) flow supports those clients plus Gemini CLI, Windsurf, Goose, and Crush, with detection and per-client file writes.
+
+## Mobile and realtime behavior
+
+Lific includes a PWA manifest and icons, so supported browsers can add the site to a phone or desktop home screen and open it in a standalone window. Installation does not provide offline editing or replica synchronization; the app still connects to the Lific server for data.
+
+Open views update through realtime invalidation. If a second browser tab or an agent changes data, the current view refetches the affected state. After a reconnect or resync, wait for the view to refresh before continuing an edit.
