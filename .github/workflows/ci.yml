@@ -31,3 +31,22 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install documentation site dependencies
+        run: bun install --frozen-lockfile
+        working-directory: site
+      - name: Build documentation site
+        run: bun run build
+        working-directory: site
+      - name: Check documented surfaces and local links
+        # The documentation PRs are intentionally independent slices. The
+        # full parity check compares against the current release baseline and
+        # therefore runs after those slices land on master; PRs still build
+        # the site so MDX/TypeScript errors are caught before merge.
+        if: github.event_name == 'push'
+        run: bun scripts/check-docs.mjs
