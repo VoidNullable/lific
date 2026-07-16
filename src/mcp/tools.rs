@@ -1155,7 +1155,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Apply field changes to every issue matching the filter_* params, in one call. Returns the number of issues updated."
+        description = "Apply field changes to matching issues in one call. At most 500 matching issues are selected; narrow filters when more matches exist. Returns the number of issues updated."
     )]
     fn bulk_update(&self, Parameters(input): Parameters<BulkUpdateInput>) -> String {
         let pid = match resolve_project(&self.db, &input.project) {
@@ -1873,7 +1873,7 @@ impl LificMcp {
                 }
             }
             other => format!(
-                "Unknown type '{other}'. Use issue, page, project, module, label, or folder."
+                "Unknown type '{other}'. Use issue, page, plan, project, module, label, or folder."
             ),
         }
     }
@@ -2185,13 +2185,13 @@ impl LificMcp {
                 }
             }
             other => format!(
-                "Unknown type '{other}'. Use project, module, label, folder, page, or issue."
+                "Unknown type '{other}'. Use project, module, label, folder, page, issue, or plan."
             ),
         }
     }
 
     #[tool(
-        description = "Create or update a resource (project, module, label, folder). Use the delete tool for deletion. To update a project's name/description/identifier: resource_type='project', action='update', project='<IDENT>', plus the new name/description/identifier."
+        description = "Create or update a project, module, label, or folder. Create project requires name and identifier; project update requires project=<IDENT>; module/label/folder create requires project and name; module/label/folder update requires project and current_name. Use delete for deletion."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
         match (input.resource_type.as_str(), input.action.as_str()) {

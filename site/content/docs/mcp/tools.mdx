@@ -38,6 +38,8 @@ Gets an issue and its details.
 | `identifier` | `string` | Yes | Issue identifier like PRO-42 or ADA-7 |
 | `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all`, or `none`. |
 
+Relation lines include the related issue's current status, for example `Blocked by: LIF-42 (done)`.
+
 ### `export`
 
 Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return the markdown content; projects return the exported file paths.
@@ -78,9 +80,11 @@ Updates the provided fields of an issue.
 | `start_date` | `string` | No | New start date (ISO 8601 date, e.g. 2026-06-01) |
 | `target_date` | `string` | No | New target/due date (ISO 8601 date, e.g. 2026-06-15) |
 
+When a status change automatically completes or reopens linked plan steps, the response reports those step side effects.
+
 ### `bulk_update`
 
-Updates fields on every issue in a project that matches the supplied filters.
+Updates fields on matching issues in a project. At most 500 matching issues are selected; use narrower filters when more issues match.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -143,32 +147,43 @@ Lists resources of a selected type.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `resource_type` | `string` | Yes | Resource type: project, module, label, folder, page, or issue |
-| `project` | `string` | No | Project identifier (required for most types) |
+| `resource_type` | `string` | Yes | Resource type: project, module, label, folder, page, issue, or plan |
+| `project` | `string` | No | Project identifier (required for issues, plans, modules, labels, and folders; optional for pages and projects) |
 | `folder` | `string` | No | Folder name (for page filtering) |
 | `label` | `string` | No | Label name (for issue or page filtering) |
-| `status` | `string` | No | Status filter (for page lists): draft, active, complete, or archived |
+| `status` | `string` | No | Status filter for pages (`draft`, `active`, `complete`, `archived`) or plans |
 | `order_by` | `string` | No | Sort column (for page lists): sort_order (default), title, status, created, or updated |
 | `order` | `string` | No | Sort direction (for page lists): asc (default) or desc |
-| `limit` | `integer` | No | Max results (applies to issue/page lists; default 100 for issues) |
-| `offset` | `integer` | No | Zero-indexed offset for paging (applies to issue/page lists). Output appends a hint when more results exist. |
+| `limit` | `integer` | No | Max results. Plans default to 50 and cap at 500; issues and pages default to 100. |
+| `offset` | `integer` | No | Zero-indexed offset for issue, page, or plan paging. Output appends a hint when more results exist. |
+
+For `resource_type=project`, results include workable-issue count, active-plan count, and last-activity age, and are sorted by recent activity.
 
 ### `manage_resource`
 
-Creates or updates a project, module, label, or folder.
+Creates or updates a project, module, label, or folder. Required fields depend on the action and resource type.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `resource_type` | `string` | Yes | Resource type: project, module, label, or folder |
 | `action` | `string` | Yes | Action: create or update |
-| `current_name` | `string` | No | Current name identifying which module, label, or folder to update. Not used for projects. Target projects with `project`. |
-| `project` | `string` | No | Project identifier (e.g. LIF). For resource_type=project with action=update, this identifies the project being updated. |
-| `name` | `string` | No | Name |
-| `identifier` | `string` | No | Identifier (for project create, e.g. PRO) |
+| `current_name` | `string` | Conditional | Required for module, label, or folder updates; not used for project updates. |
+| `project` | `string` | Conditional | Required for module/label/folder operations and for project updates; identifies the project (e.g. LIF). |
+| `name` | `string` | Conditional | Required when creating a project, module, label, or folder. |
+| `identifier` | `string` | Conditional | Required when creating a project (e.g. PRO). |
 | `description` | `string` | No | Description |
 | `status` | `string` | No | Status (for module: backlog, planned, active, paused, done, cancelled) |
 | `color` | `string` | No | Color hex (for label, e.g. #EF4444) |
 | `emoji` | `string` | No | Icon for project or module: `lucide:<Name>` or a literal emoji. Omit to leave unchanged. Pass an empty string `""` to clear it back to none. |
+
+Required-field matrix:
+
+| Resource/action | Required fields | Notes |
+| --- | --- | --- |
+| project/create | `name`, `identifier` | `description` and `emoji` are optional. |
+| project/update | `project` | Supply only the fields to change; do not use `current_name`. |
+| module/label/folder/create | `project`, `name` | Resource-specific optional fields are applied when supplied. |
+| module/label/folder/update | `project`, `current_name` | `name`, `description`, `status`, `color`, or `emoji` are applied according to resource type. |
 
 ### `delete`
 
@@ -176,8 +191,8 @@ Deletes a resource selected by type and identifier.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `resource_type` | `string` | Yes | Type of thing to delete: issue, page, project, module, label, or folder |
-| `identifier` | `string` | Yes | Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF for projects, or name for modules/labels/folders) |
+| `resource_type` | `string` | Yes | Type of thing to delete: issue, page, plan, project, module, label, or folder |
+| `identifier` | `string` | Yes | Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF-PLAN-2, LIF for projects, or name for modules/labels/folders) |
 | `project` | `string` | No | Project identifier (required for deleting module/label/folder by name) |
 
 ## Pages

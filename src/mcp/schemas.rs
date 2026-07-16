@@ -257,7 +257,7 @@ pub struct EditPageInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct DeleteInput {
     #[schemars(
-        description = "Type of thing to delete: issue, page, project, module, label, or folder"
+        description = "Type of thing to delete: issue, page, plan, project, module, label, or folder"
     )]
     pub resource_type: String,
     #[schemars(
@@ -270,16 +270,16 @@ pub struct DeleteInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListResourcesInput {
-    #[schemars(description = "Resource type: project, module, label, folder, page, or issue")]
+    #[schemars(description = "Resource type: project, module, label, folder, page, issue, or plan")]
     pub resource_type: String,
-    #[schemars(description = "Project ID (required for most types)")]
+    #[schemars(description = "Project ID (required for issues, plans, modules, labels, and folders; optional for pages and projects)")]
     pub project: Option<String>,
     #[schemars(description = "Folder name (for pages)")]
     pub folder: Option<String>,
     #[schemars(description = "Label name (for issues or pages)")]
     pub label: Option<String>,
     #[schemars(
-        description = "Status filter (for page lists): draft, active, complete, or archived"
+        description = "Status filter for pages (draft, active, complete, archived) or plans"
     )]
     pub status: Option<String>,
     #[schemars(
@@ -288,9 +288,9 @@ pub struct ListResourcesInput {
     pub order_by: Option<String>,
     #[schemars(description = "Sort direction (for page lists): asc (default) or desc")]
     pub order: Option<String>,
-    #[schemars(description = "Max results (applies to most lists; default 100 for issues)")]
+    #[schemars(description = "Max results (plans default to 50 and cap at 500; issues and pages default to 100; other lists ignore this field)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Zero-indexed offset for paging")]
+    #[schemars(description = "Zero-indexed offset for issue, page, or plan paging")]
     pub offset: Option<i64>,
 }
 
@@ -301,16 +301,16 @@ pub struct ManageResourceInput {
     #[schemars(description = "Action: create or update")]
     pub action: String,
     #[schemars(
-        description = "Name of the module, label, or folder to update (projects use `project` instead)"
+        description = "Required for module, label, or folder updates; projects use `project` instead"
     )]
     pub current_name: Option<String>,
     #[schemars(
-        description = "Project ID (e.g. LIF). For resource_type=project with action=update, this identifies the project being updated."
+        description = "Project ID (e.g. LIF), required for module/label/folder operations and for project updates"
     )]
     pub project: Option<String>,
-    #[schemars(description = "Name")]
+    #[schemars(description = "Name (required when creating a project, module, label, or folder)")]
     pub name: Option<String>,
-    #[schemars(description = "ID (for project create, e.g. PRO)")]
+    #[schemars(description = "Identifier (required for project create, e.g. PRO)")]
     pub identifier: Option<String>,
     #[schemars(description = "Description")]
     pub description: Option<String>,
@@ -328,7 +328,7 @@ pub struct ManageResourceInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AddCommentInput {
-    #[schemars(description = "Issue ID (e.g. LIF-1)")]
+    #[schemars(description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)")]
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
@@ -336,7 +336,7 @@ pub struct AddCommentInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListCommentsInput {
-    #[schemars(description = "Issue ID (e.g. LIF-1)")]
+    #[schemars(description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)")]
     pub identifier: String,
     #[schemars(description = "Filter to comments by this author username")]
     pub author: Option<String>,
