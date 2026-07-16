@@ -81,6 +81,8 @@ required = true
 
 Use an HTTPS URL for `public_url` when Lific is exposed through a public HTTPS endpoint. The server includes the configured hostname in its MCP host allowlist for reverse proxy requests.
 
+`trusted_proxies` identifies proxy hops, not trusted clients. Forwarding headers are ignored unless the immediate TCP peer is in this list. For a trusted peer, Lific walks `X-Forwarded-For` from right to left, skips configured proxy addresses, and uses the first untrusted address as the client IP. It uses `X-Real-IP` only when `X-Forwarded-For` is absent. Malformed or entirely trusted chains fall back to the TCP peer, and IPv4-mapped IPv6 addresses are normalized. List every proxy layer you operate; do not add client networks merely because they appear in a header.
+
 `mcp_path_token` bypasses API key and OAuth authentication. Anyone who knows the resulting URL can use the endpoint. Use a long random token and HTTPS when this key is configured.
 
 ## `[database]`
@@ -115,7 +117,9 @@ Automatic backups use the same archive format as `lific dump`.
 | `allow_signup` | boolean | `true` | Initial self-service signup setting. Lific seeds the database-backed instance setting from this value when it first creates the setting. Later changes through instance settings are stored in the database. |
 | `required` | boolean | `true` | Requires a bearer credential on REST and MCP requests. |
 
-When `required = false`, a request with no credential is treated as an operator request. A request with an invalid credential still fails authentication. Lific refuses to start with `required = false` when `server.public_url` is not a localhost URL.
+When `required = false`, a request with no credential is treated as an operator request. In the web UI, the browser automatically signs in as the first administrator; a new instance with no accounts shows signup once so an attribution identity can be created. A request with an invalid credential still fails authentication. Lific refuses to start with `required = false` when `server.public_url` is not a localhost URL.
+
+The `public_url` guard does not restrict the listener. Because the default `host` is `0.0.0.0`, an auth-disabled instance may still be reachable from the LAN. Bind it to `127.0.0.1` or protect it with a firewall.
 
 The runtime `secure_cookies` value is not a TOML key. Lific derives it at startup. It is false only when `server.public_url` explicitly begins with `http://`. It is true for HTTPS and for an unset public URL.
 

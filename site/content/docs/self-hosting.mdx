@@ -106,6 +106,8 @@ Each archive contains these entries.
 
 On Unix, completed archives use owner-only `0600` permissions. The backup task retains the newest `backup.retain` matching archives and removes older matching archives. It also counts legacy `.db` backup artifacts during rotation.
 
+Failed backup staging files are cleaned immediately, and the automatic backup task removes stale staging artifacts left by interrupted runs.
+
 ## Manual backup and restore
 
 `lific dump` writes the same archive format as the automatic backup task. It can run while the server is running because the database snapshot uses `VACUUM INTO`.
@@ -145,6 +147,10 @@ trusted_proxies = ["127.0.0.0/8", "::1/128"]
 ```
 
 When a proxy supplies client IP headers, add only that proxy's addresses or CIDR ranges to `server.trusted_proxies`. Lific validates this configuration at startup. The default trusts loopback proxy addresses only.
+
+The proxy must forward `/api/events/ws` as a WebSocket connection, including the `Upgrade` and `Connection` headers, and must allow an idle timeout long enough for the session to remain connected. If ordinary page actions and REST requests work but changes in other tabs or agent writes do not appear live, test the WebSocket Upgrade path and proxy timeout before debugging the application.
+
+Lific trusts the proxy, not the header: it accepts client-IP forwarding only from a configured immediate peer, walks `X-Forwarded-For` right-to-left, skips trusted proxy hops, and chooses the first untrusted address. `X-Real-IP` is used only without XFF; malformed or all-trusted chains fall back to the TCP peer.
 
 `server.cors_origins = []` allows every browser origin. Set explicit origins when the deployment requires a browser origin allowlist.
 

@@ -26,9 +26,10 @@ Project membership connects one user to one project role. The roles are ordered 
 
 | Role | Permission level |
 | --- | --- |
-| `viewer` | Read-level access |
-| `maintainer` | Maintainer-level access |
-| `lead` | Lead-level access |
+| `viewer` | Read project resources and create/read comments. |
+| `maintainer` | Viewer access plus issue/page/plan content mutations, issue relations and plan-step links, and project structure mutations such as modules, labels, and folders. |
+| `lead` | Maintainer access plus project settings, membership/role management, and project deletion. |
+| administrator | Bypasses project membership checks. Workspace-level administrative actions still require administrator access. |
 
 A project can have a primary lead. Setting a primary lead also creates or updates that user's `lead` membership. A project can have more than one member with the `lead` role.
 
@@ -38,7 +39,9 @@ The system prevents removal or demotion of the last `lead` member. Another membe
 
 Project-scoped authorization is controlled by the instance setting `authz_enforced`.
 
-When enforcement is enabled, a user must be a project member with a sufficient role to access project content. Viewer access is used for reads. Maintainer access is used for content mutations. Lead access is used for lead-level actions. Administrators pass project access checks.
+When enforcement is enabled, a user must be a project member with a sufficient role to access project content. Viewer access is used for reads. Maintainer access is used for content, structure, relation, and plan-step mutations. Lead access is used for project settings, membership, and deletion. Administrators pass project access checks. Workspace-level page mutations require an administrator; project-page mutations use the containing project's role.
+
+Operations that touch two projects, such as linking issues or attaching an issue to a plan step, require the required role in both projects. API clients can inspect their effective role with `GET /api/projects/{id}/my-role`.
 
 When enforcement is disabled, membership rows do not create default-deny visibility. Interfaces retain their legacy permission behavior.
 

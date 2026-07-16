@@ -349,9 +349,11 @@ It has no path parameters or request body. Response: an attachment array. Each a
 
 ### POST `/api/attachments`
 
-Uploads a `file` part in a multipart request. Optional `entity_type` and `entity_id` form fields immediately link the attachment to an issue, page, or comment.
+Uploads a `file` part in a multipart request. Uploads require authentication. The production default maximum is 10 MiB per file and the per-user rate limit is 30 uploads per 10 minutes. Optional `entity_type` and `entity_id` form fields immediately link the attachment to an issue, page, or comment; otherwise the attachment remains unlinked until content is saved and rescanned.
 
 Form fields are `file` (file, required), `entity_type` (string, optional), and `entity_id` (integer, optional). Response: an object with `id` (integer), `url` (string), `filename` (string), `mime` (string), and `size` (integer).
+
+Allowed content types are PNG, JPEG, GIF, WebP, SVG, PDF, plain text, and ZIP. Lific validates magic bytes where available, rejects empty files and executable-looking content, normalizes the stored MIME, and does not trust the client-declared type alone. The maximum can be configured per instance. Unlinked attachments are swept by the hourly orphan collector after their grace period; content-addressed blobs are removed only when no attachment row still references them.
 
 ```bash
 curl -X POST https://your-server.example/api/attachments \
@@ -401,7 +403,16 @@ Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8`.
 
 Exports a project. Path parameter: `identifier` (string such as `LIF`). Query parameter: `format` (string, optional). `format` accepts `zip` by default or `json`.
 
-It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`, the response is an export bundle JSON object. The bundle structure is defined by the export implementation and is not a REST request schema.
+It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`, the response is an export bundle with `root` (string) and `files` (array). Each `files` item has `path` (string) and `content` (string). The JSON form is a serialization of the ZIP file list; paths and content are not a versioned request schema, so consumers should tolerate new files and avoid assuming a fixed complete list.
+
+```json
+{
+  "root": "LIF",
+  "files": [
+    { "path": "LIF/issues/lif-1-example.md", "content": "# Example\n" }
+  ]
+}
+```
 
 ## Search, health, and realtime
 
@@ -424,6 +435,10 @@ Response: plain text `ok`.
 Upgrades the request to a WebSocket that receives project and issue update events. It has no path or query parameters. It has no request body.
 
 The request requires a `lific_token` cookie containing a valid session token. Response: a WebSocket connection. Event JSON uses a `type` field. Event types are `resync.required`, `project.created`, `project.updated`, `project.deleted`, `projects.reordered`, `issue.created`, `issue.updated`, `issue.deleted`, `issue.linked`, and `issue.unlinked`.
+
+Events are invalidation signals, not complete resource snapshots. `project.updated` covers changes to non-issue project resources such as pages, plans, comments, labels, folders, and modules; clients should refetch the affected view. On `resync.required`, refetch visible projects and the current resource state before resuming incremental updates. The server filters events by the caller's visible projects, revalidates the session about once per minute, and closes the connection when the session becomes invalid. A user may have at most 16 concurrent event sockets.
+
+These events cover writes routed through the running HTTP/MCP server. CLI data commands and stdio MCP access SQLite directly and cannot publish into another Lific process's in-memory hub; clients should refresh or rely on normal revalidation after such direct database changes.
 
 ```json
 {

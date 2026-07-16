@@ -28,6 +28,24 @@ API keys use the `lific_sk` prefix. Session tokens use the `lific_sess_` prefix.
 
 `GET /api/events/ws` is not Bearer authenticated. It requires a valid `lific_token` cookie containing a session token. `GET /api/attachments/{id}` also accepts that session cookie for browser downloads. Other attachment requests require a Bearer header.
 
+## Authorization by endpoint family
+
+When `authz_enforced` is enabled, REST handlers use the following minimum roles. Administrators bypass project membership checks.
+
+| Operation family | Minimum access |
+| --- | --- |
+| Project content reads, issue/page/plan reads, search, and activity | `viewer` on the relevant project |
+| Issue/page/plan/comment content mutations, relations, plan-step links, modules, labels, and folders | `maintainer` on the relevant project; cross-project operations require it in both projects |
+| Project settings, membership/role changes, and project deletion | `lead` on the project |
+| Workspace-level page reads/mutations | Workspace rules; mutations require an administrator |
+| Attachment upload | Any authenticated user; the resulting attachment is private until linked or otherwise authorized |
+| Linked attachment list/download | `viewer` on an owning project; an unlinked attachment is readable only by its uploader or an administrator |
+| Attachment deletion | The uploader, a project `maintainer` on an owning project, or an administrator |
+
+Saved views are additionally caller-owned: a member can list or modify only their own views, and every saved-view request requires an authenticated user.
+
+This matrix applies to project-scoped requests made by users and bot identities. Instance administrators and operator-trusted credentials intentionally bypass project membership checks; auth-disabled requests are operator-equivalent, and instance-scoped endpoints have their own authentication rules.
+
 ## Content types
 
 JSON request bodies use `Content-Type: application/json`.
