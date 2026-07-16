@@ -299,10 +299,10 @@ export default function Home() {
             </Body>
             <Body>
               Agents without MCP support get the same verbs through the CLI.
-              Every command <Em>prints JSON</Em> whenever stdout leaves the
-              terminal, and <Cmd>lific doctor</Cmd> exits nonzero when the setup
-              is broken. The tracker fits into scripts and CI as comfortably as
-              into conversations.
+              Data commands automatically <Em>emit JSON</Em> when stdout is not
+              a terminal, and <Cmd>lific doctor</Cmd> exits nonzero when the
+              setup is broken. The tracker fits into scripts and CI as
+              comfortably as into conversations.
             </Body>
             <ul className="mt-8 max-w-4xl">
               {agentFacts.map(({ key, head, body }) => (
@@ -384,9 +384,11 @@ export default function Home() {
               <li className="border-t border-border/60 py-4 text-body leading-relaxed">
                 <p className="font-medium text-text">Project-scoped roles</p>
                 <p className="mt-0.5 text-text-faint">
-                  Viewer, maintainer, and lead memberships checked on every REST
-                  and MCP call, reads included. Fresh installs enforce this out
-                  of the box.
+                  Viewer, maintainer, and lead memberships checked on every
+                  project-scoped REST and MCP call, reads included. Instance
+                  administrators and operator-trusted credentials intentionally
+                  bypass project membership checks. Fresh installs enforce this
+                  out of the box.
                 </p>
               </li>
               <li className="border-t border-border/60 py-4 text-body leading-relaxed">

@@ -619,7 +619,7 @@ impl LificMcp {
 
 #[tool_router]
 impl LificMcp {
-    #[tool(description = "Search across all issues and pages by text")]
+    #[tool(description = "Search across all issues, pages, and comments by text")]
     fn search(&self, Parameters(input): Parameters<SearchInput>) -> String {
         let project_id = match &input.project {
             Some(p) => match resolve_project(&self.db, p) {

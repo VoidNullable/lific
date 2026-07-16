@@ -315,7 +315,7 @@ pub enum Command {
         action: ExportAction,
     },
 
-    /// Search issues and pages
+    /// Search issues, pages, and comments
     Search {
         /// Search query text
         query: String,

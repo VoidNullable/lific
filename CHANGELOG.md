@@ -18,7 +18,9 @@ The web UI goes realtime, MCP tool output slims down to respect agent context bu
 
 ### Realtime web invalidation
 
-Two browser tabs - or you and your agent - no longer drift apart. Every write pushes an invalidation event over a WebSocket and open views resync live: issues, pages, plans, comments, attachments, saved views, module/folder structure, plans' cross-project issue effects, and the authz toggle. (PR #4 by [@mjc](https://github.com/mjc), hardened and extended in review.)
+Two browser tabs - or you and your agent - no longer drift apart. Every state-changing write routed through the running HTTP/MCP server pushes an invalidation event over a WebSocket and open views resync live: issues, pages, plans, comments, attachments, saved views, module/folder structure, plans' cross-project issue effects, and the authz toggle. (PR #4 by [@mjc](https://github.com/mjc), hardened and extended in review.)
+
+CLI data commands and stdio MCP access SQLite directly. They do not publish into another running Lific process's in-memory realtime hub, so refresh the browser or wait for its normal revalidation after direct database changes.
 
 - **The socket is a credentialed surface**: sessions are revalidated every 60 seconds (logout or expiry tears the connection down), connections are capped per user, and a no-op write emits no event.
 - **Reconnects behave**: views resync after the socket comes back (nothing missed while offline), an expired session breaks the reconnect loop instead of hammering the server, and navigating away tears the socket down cleanly.
@@ -36,7 +38,7 @@ Agents pay for every token a tool returns, and the chattiest tools were spending
 
 - **`get_board` omits done/cancelled issues by default** (LIF-300): status grouping shows closed columns as count-only stubs, priority/module grouping drops them with a trailing count. `include_closed=true` restores the old render; `max_per_column` caps each column with a `… +N more` tail.
 - **`get_issue` defaults to the last 3 comments** (LIF-301) with a truncation header; `include_comments='all'` for the whole thread, `'none'` for a stub. `list_comments` gains a `limit`.
-- **`list_comments` paginates** (LIF-326, PR #5 by [@Joshuabaker2](https://github.com/Joshuabaker2)): `limit`/`offset` on MCP and matching query params on REST, with `has_more` continuation hints. Unqualified calls still return the full thread in ascending order, exactly as before.
+- **`list_comments` paginates** (LIF-326, PR #5 by [@Joshuabaker2](https://github.com/Joshuabaker2)): MCP and REST accept `limit`/`offset`. MCP output includes a continuation hint when more comments remain; REST returns the requested comment array without paging metadata. Unqualified calls still return the full thread in ascending order, exactly as before.
 - **`update_plan_step` returns a compact receipt** (LIF-302) - side-effect notes plus a one-line progress summary instead of re-rendering the whole tree. `echo_tree=true` restores the old output.
 - **`get_issue` relation lines carry the related issue's status** (LIF-303): `Blocked by: LIF-42 (done)` answers the follow-up before it's asked.
 

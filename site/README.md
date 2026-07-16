@@ -1,6 +1,6 @@
 # lific.dev
 
-Marketing/landing page for Lific, eventually hosted at https://lific.dev.
+Marketing/landing page for Lific, hosted at https://lific.dev.
 
 Next.js 16 (App Router) + Tailwind v4, managed with Bun. Fully static — no
 server-side anything.

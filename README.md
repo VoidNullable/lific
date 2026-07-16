@@ -219,12 +219,12 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
 | **MCP interface** | 27 tools, human-readable identifiers, compact schema, session instructions |
 | **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
-| **REST API** | Full CRUD for all resources, search, board view |
+| **REST API** | Resource endpoints, search, board view, and relationship/planning operations |
 | **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
 | **User accounts** | Individual auth, per-tool bot identities, project membership and roles |
 | **Auth** | OAuth 2.1 (PKCE, dynamic client registration, RFC 9728 discovery), RFC 8628 device flow, API keys, token revocation |
 | **Backups** | `lific dump` / `lific restore` single-archive backups, plus automatic interval archives with retention |
-| **CLI** | Full CRUD, TTY-aware JSON output, works with no server running |
+| **CLI** | Scriptable issue/project/page/plan commands, TTY-aware JSON output, works with no server running |
 | **Single binary** | No runtime dependencies, embedded SQLite, ~25 MB |
 
 ## When Lific is the wrong tool
@@ -239,7 +239,7 @@ For one human directing several agents across personal projects (the thing it's 
 
 ## Authorization
 
-Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership enforced on every REST and MCP call, including reads. **Fresh installs (created on 2.0+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in - nothing changes under you on upgrade. Toggle it at runtime:
+Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership is enforced on project-scoped REST and MCP calls, including reads. Instance administrators and operator-trusted credentials intentionally bypass project membership checks, while instance-scoped endpoints have their own rules. **Fresh installs (created on 2.0+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in - nothing changes under you on upgrade. Toggle it at runtime:
 
 ```bash
 lific instance set --authz-enforced true    # or false

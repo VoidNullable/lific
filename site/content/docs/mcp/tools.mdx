@@ -3,7 +3,7 @@ title: MCP tools
 description: Reference for the MCP tools exposed by Lific.
 ---
 
-Lific exposes 29 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
+Lific exposes 27 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
 ## Issues
 
@@ -301,20 +301,20 @@ Updates a plan or one of its steps.
 
 ### `add_comment`
 
-Adds a comment to an issue or page.
+Adds a comment to an issue, project page, or workspace page.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1) |
+| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
 | `content` | `string` | Yes | Comment content (markdown) |
 
 ### `list_comments`
 
-Lists comments on an issue or page.
+Lists comments on an issue, project page, or workspace page.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1) |
+| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
 | `author` | `string` | No | Filter to comments by this author username |
 | `order` | `string` | No | Sort direction by creation time: asc (default, oldest first) or desc (newest first) |
 | `limit` | `integer` | No | Optional maximum comments to return (cap 500). Omit to return the full thread. |

@@ -51,7 +51,7 @@ export function VersionChip() {
         version === null ? "opacity-0" : "opacity-100"
       }`}
     >
-      v{version ?? "0.0.0"}
+      {version === null ? null : `v${version}`}
     </span>
   );
 }
