@@ -1,0 +1,14 @@
+# Keep the build context to what the image actually needs.
+.git
+target
+web/node_modules
+web/dist
+site
+promo
+docs
+backups
+*.db
+*.db-wal
+*.db-shm
+AGENTS.md
+deploy.sh

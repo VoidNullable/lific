@@ -371,6 +371,15 @@ cargo build --release
 
 The frontend is a Svelte 5 SPA built with Vite. `bun run build` outputs static files to `web/dist/`, which `cargo build` embeds into the binary. The final binary is fully self-contained with no runtime dependencies.
 
+### Docker (optional)
+
+You don't need Docker to run Lific; it's one binary. The `Dockerfile` in the repo exists mainly so MCP directory indexers can build and verify the server, but it produces a working image (full web UI, distroless runtime) if a container fits your setup:
+
+```bash
+docker build -t lific .
+docker run -p 3456:3456 -v lific-data:/data lific
+```
+
 ## Community
 
 Questions, feedback, or a setup worth showing off? Join the [Lific Discord](https://discord.gg/uWvaFC4f7D). Release announcements land there too, and support questions get answered fastest in #support.
