@@ -5,9 +5,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Where the dev server proxies /api to. Override with VITE_API_TARGET, e.g.
-//   VITE_API_TARGET=https://magi.tailb93ac8.ts.net bun run dev
-// to develop the UI against magi's canonical Lific instance from any machine
-// on the tailnet. Defaults to a local lific binary on 127.0.0.1:3456.
+//   VITE_API_TARGET=https://lific.example.com bun run dev
+// to develop the UI against a remote Lific instance from another machine.
+// Defaults to a local lific binary on 127.0.0.1:3456.
 const API_TARGET = process.env.VITE_API_TARGET ?? "http://127.0.0.1:3456";
 const PROXY_SECURE = process.env.VITE_API_INSECURE !== "1";
 
@@ -34,14 +34,13 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // Bind on all interfaces so other machines on the tailnet (e.g. unit-03)
-    // can reach the dev server running on unit-02. Without this vite only
-    // listens on 127.0.0.1.
+    // Bind on all interfaces so other machines on your LAN/VPN can reach the
+    // dev server. Without this vite only listens on 127.0.0.1.
     host: true,
-    // Vite rejects Host headers it doesn't recognize (SSRF guard). Allow the
-    // tailnet MagicDNS domain so any node (unit-02, magi, ...) can be hit by
-    // its <host>.tailb93ac8.ts.net name. Leading dot = match all subdomains.
-    allowedHosts: [".tailb93ac8.ts.net"],
+    // Vite rejects Host headers it doesn't recognize (SSRF guard). Opt extra
+    // hostnames in via VITE_ALLOWED_HOSTS (comma-separated; a leading dot
+    // matches all subdomains, e.g. ".your-tailnet.ts.net").
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(",") ?? [],
     // If 5173 is taken, fail fast instead of switching ports (avoids "module load failed"
     // when the browser tab still points at the old URL).
     port: 5173,

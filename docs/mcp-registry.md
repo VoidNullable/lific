@@ -165,7 +165,7 @@ will fail the release if you forget.
    equal `Cargo.toml`'s version and the release tag — the `verify` job asserts
    this and fails fast on drift.
 3. Cut the release using `.github/workflows/release.yml`: update the version,
-   commit it, and push the release tag. The `magi` mirror mentioned in the
+   commit it, and push the release tag. The private mirror mentioned in the
    workflow is maintainer-only infrastructure and may not exist in a public
    checkout; do not add or invent that remote. The release workflow builds
    binaries, runs `cargo publish` to crates.io, and then (in

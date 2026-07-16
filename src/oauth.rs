@@ -99,7 +99,7 @@ fn session_credential(headers: &HeaderMap) -> String {
 #[derive(Clone)]
 pub struct OAuthState {
     pub db: DbPool,
-    pub issuer: String, // e.g. https://fedora.tailb93ac8.ts.net/lific
+    pub issuer: String, // e.g. https://lific.example.com/lific
     /// Per-IP rate limiter for the unauthenticated /oauth/register endpoint.
     /// Prevents anyone from flooding the server with throwaway clients.
     pub register_limiter: Arc<RateLimiter>,

@@ -559,7 +559,7 @@ trusted_proxies = ["not-a-cidr"]
             assert!(is_localhost_url(url), "{url} should count as localhost");
         }
         for url in [
-            "https://magi.tailb93ac8.ts.net",
+            "https://lific.tail1234.ts.net",
             "http://192.168.1.10:3456",
             "http://127.evil.com",       // DNS name, not a loopback IP
             "https://localhost.example", // ditto

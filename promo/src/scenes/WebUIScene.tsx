@@ -154,7 +154,7 @@ const DETAIL: IssueDetailData = {
       author: "Lizzy",
       initials: "LI",
       time: "1h ago",
-      body: "Confirmed on magi — only shows up above ~200 writes/s. Backups otherwise fine.",
+      body: "Confirmed on the prod box, only shows up above ~200 writes/s. Backups otherwise fine.",
     },
     {
       author: "opencode",

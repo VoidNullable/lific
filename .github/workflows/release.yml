@@ -2,14 +2,14 @@ name: Release
 
 # Triggered by pushing a version tag (e.g. v1.4.0).
 #
-# The tag MUST originate on the maintainer-only `magi` remote (origin in that
-# checkout) so the magi→github push mirror
-# replicates it. Do NOT have this workflow create the tag on the github side:
-# the mirror runs `git push --mirror`, which prunes any github ref that isn't
-# on magi. A github-only tag therefore gets deleted on the next mirror sync,
+# The tag MUST originate on the maintainer's private origin (this github repo
+# is a push mirror of it) so the mirror replicates the tag here. Do NOT have
+# this workflow create the tag on the github side: the mirror runs
+# `git push --mirror`, which prunes any github ref that isn't on the mirror
+# source. A github-only tag therefore gets deleted on the next mirror sync,
 # and github silently demotes the now-tagless release to a *draft*. That
-# stranded every release v1.2.0–v1.3.1 (LIF-120). Because the tag now comes
-# from magi, the mirror keeps it and the release stays published.
+# stranded every release v1.2.0-v1.3.1 (LIF-120). Because the tag now comes
+# from the private origin, the mirror keeps it and the release stays published.
 #
 # Release ritual (maintainer-only mirror details are not required in public
 # clones):
@@ -203,7 +203,7 @@ jobs:
             binaries/sha256sums.txt
 
       # Belt-and-suspenders against gh's occasional draft-fallback at create
-      # time. The real fix for the LIF-120 strandings is the magi-origin tag
+      # time. The real fix for the LIF-120 strandings is the mirror-origin tag
       # above; this just re-asserts the published state and is idempotent.
       - name: Publish release (force non-draft)
         env:
