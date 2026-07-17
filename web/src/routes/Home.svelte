@@ -62,9 +62,13 @@
   let {
     navigate,
     realtimeActivityCounts,
+    realtimeActivityReady,
+    realtimeActivityRevision,
   }: {
     navigate: (path: string) => void;
     realtimeActivityCounts: ActivityCountsReader;
+    realtimeActivityReady: boolean;
+    realtimeActivityRevision: number;
   } = $props();
 
   let user = $state<AuthUser | null>(null);
@@ -82,9 +86,8 @@
   // wherever the user has been most active rather than an arbitrary project.
   let digestProjectIds = $state<number[]>([]);
 
-  // Cadence uses a one-second window, so it needs a finer-grained clock than
-  // the shared 30-second relative-time heartbeat. Keep this timer local to
-  // Home so other timestamp displays do not rerender every second.
+  // The shortest displayed window is one second, so the shared 30-second
+  // relative-time clock is too coarse. Keep the finer timer local to Home.
   $effect(() => {
     const interval = setInterval(() => {
       activityNow = Date.now();
@@ -265,7 +268,10 @@
     return a.actor_display_name || a.actor_username || "system";
   }
 
-  let activityRate = $derived(selectActivityRate(realtimeActivityCounts(activityNow)));
+  let activityRate = $derived.by(() => {
+    realtimeActivityRevision;
+    return selectActivityRate(realtimeActivityCounts(activityNow));
+  });
 
   function activityDest(a: Activity): string | null {
     const ident = projectIdent(a.project_id);
@@ -645,23 +651,25 @@
                       Recent activity
                     </h2>
                   </div>
-                  <span
-                    class="text-micro text-[var(--text-faint)] tabular-nums text-right"
-                    title="Live websocket activity observed this session; counts use 1-second, 1-minute, 1-hour, or 1-day windows"
-                  >
-                    {activityRate.value} {activityRate.unit}
-                  </span>
+                  {#if realtimeActivityReady}
+                    <span
+                      class="text-micro text-[var(--text-faint)] tabular-nums text-right"
+                      title="Websocket activity rate; the day fallback includes the last 24 hours"
+                    >
+                      {activityRate.value} {activityRate.unit}
+                    </span>
+                  {/if}
                 </div>
                 <div class="flex flex-col gap-0.5">
                   {#each activityItems as a (a.id)}
                     {@const dest = activityDest(a)}
                     {@const ident = projectIdent(a.project_id)}
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <div
+                    <button
+                      type="button"
+                      disabled={!dest}
                       class="flex items-start gap-2 px-2.5 py-1.5 rounded-md text-body-sm leading-snug
-                             {dest ? 'cursor-pointer hover:bg-[var(--bg-subtle)]' : ''} transition-colors"
-                      role={dest ? "button" : undefined}
-                      tabindex={dest ? 0 : undefined}
+                             {dest ? 'hover:bg-[var(--bg-subtle)]' : ''}
+                             transition-colors disabled:cursor-default"
                       onclick={() => dest && navigate(dest)}
                     >
                       <span class="flex-1 min-w-0 text-[var(--text-muted)]">
@@ -673,7 +681,7 @@
                           </span>
                         {/if}
                       </span>
-                    </div>
+                    </button>
                   {/each}
                 </div>
               </section>

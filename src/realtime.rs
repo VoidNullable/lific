@@ -115,6 +115,13 @@ pub struct RealtimeMessage {
     audience: RealtimeAudience,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RealtimeRequest {
+    #[serde(rename = "activity.baseline.request")]
+    ActivityBaselineRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RealtimeEvent {
@@ -149,6 +156,8 @@ pub enum RealtimeEvent {
     IssueLinked { project_id: i64, issue_id: i64 },
     #[serde(rename = "issue.unlinked")]
     IssueUnlinked { project_id: i64, issue_id: i64 },
+    #[serde(rename = "activity.baseline")]
+    ActivityBaseline { day_count: i64 },
 }
 
 pub async fn serve_socket(
@@ -191,7 +200,9 @@ pub async fn serve_socket(
             flow
         },
         event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
-        message = socket.recv() => handle_client_message(&mut socket, message).await,
+        message = socket.recv() => {
+            handle_client_message(&mut socket, &db, &auth_user, message).await
+        },
     } {}
 }
 
@@ -284,6 +295,8 @@ async fn forward_event(
 
 async fn handle_client_message(
     socket: &mut WebSocket,
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
     match message {
@@ -291,8 +304,34 @@ async fn handle_client_message(
             SocketFlow::from_send(socket.send(Message::Pong(payload)).await)
         }
         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => SocketFlow::Close,
+        Some(Ok(Message::Text(text))) => {
+            if matches!(
+                serde_json::from_str::<RealtimeRequest>(&text),
+                Ok(RealtimeRequest::ActivityBaselineRequest)
+            ) {
+                match activity_baseline(db, auth_user) {
+                    Ok(event) => send_event(socket, &event).await,
+                    Err(error) => {
+                        warn!(error = %error, "failed to load websocket activity baseline");
+                        SocketFlow::Open
+                    }
+                }
+            } else {
+                SocketFlow::Open
+            }
+        }
         Some(Ok(Message::Pong(_))) | Some(Ok(_)) => SocketFlow::Open,
     }
+}
+
+fn activity_baseline(
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
+) -> Result<RealtimeEvent, crate::error::LificError> {
+    let visible_projects = crate::authz::visible_project_ids(db, &Some(auth_user.clone()))?;
+    let conn = db.read()?;
+    let day_count = crate::db::queries::activity::activity_count(&conn, visible_projects.as_ref())?;
+    Ok(RealtimeEvent::ActivityBaseline { day_count })
 }
 
 async fn send_event(socket: &mut WebSocket, event: &RealtimeEvent) -> SocketFlow {
@@ -416,7 +455,10 @@ impl RealtimeEvent {
             | Self::IssueDeleted { project_id, .. }
             | Self::IssueLinked { project_id, .. }
             | Self::IssueUnlinked { project_id, .. } => Some(*project_id),
-            Self::ResyncRequired | Self::ProjectsReordered | Self::ProjectGroupsChanged => None,
+            Self::ResyncRequired
+            | Self::ProjectsReordered
+            | Self::ProjectGroupsChanged
+            | Self::ActivityBaseline { .. } => None,
         }
     }
 }
