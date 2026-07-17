@@ -21,6 +21,10 @@
     type Activity,
   } from "../lib/api";
   import { getRecents, type RecentEntry } from "../lib/home/recents";
+  import {
+    selectActivityRate,
+    type ActivityCountsReader,
+  } from "../lib/activityRate";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
@@ -55,13 +59,20 @@
     return () => topbarCtx?.set(undefined);
   });
 
-  let { navigate }: { navigate: (path: string) => void } = $props();
+  let {
+    navigate,
+    realtimeActivityCounts,
+  }: {
+    navigate: (path: string) => void;
+    realtimeActivityCounts: ActivityCountsReader;
+  } = $props();
 
   let user = $state<AuthUser | null>(null);
   let projects = $state<Project[]>([]);
   let myIssues = $state<Issue[]>([]);
   let allPages = $state<Page[]>([]);
   let activityItems = $state<Activity[]>([]);
+  let activityNow = $state(Date.now());
   let recents = $state<RecentEntry[]>([]);
   let loading = $state(true);
   let error = $state("");
@@ -70,6 +81,16 @@
   // reused as the destination for the "New issue" quick action so it lands
   // wherever the user has been most active rather than an arbitrary project.
   let digestProjectIds = $state<number[]>([]);
+
+  // Cadence uses a one-second window, so it needs a finer-grained clock than
+  // the shared 30-second relative-time heartbeat. Keep this timer local to
+  // Home so other timestamp displays do not rerender every second.
+  $effect(() => {
+    const interval = setInterval(() => {
+      activityNow = Date.now();
+    }, 1_000);
+    return () => clearInterval(interval);
+  });
 
   $effect(() => {
     loadData();
@@ -243,6 +264,8 @@
   function activityActor(a: Activity): string {
     return a.actor_display_name || a.actor_username || "system";
   }
+
+  let activityRate = $derived(selectActivityRate(realtimeActivityCounts(activityNow)));
 
   function activityDest(a: Activity): string | null {
     const ident = projectIdent(a.project_id);
@@ -616,12 +639,18 @@
             {#if activityItems.length > 0}
               <section>
                 <div class="flex items-center justify-between mb-3">
-                  <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
                     <ArrowUpRight size={12} class="text-[var(--text-faint)]" />
                     <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
                       Recent activity
                     </h2>
                   </div>
+                  <span
+                    class="text-micro text-[var(--text-faint)] tabular-nums text-right"
+                    title="Live websocket activity observed this session; counts use 1-second, 1-minute, 1-hour, or 1-day windows"
+                  >
+                    {activityRate.value} {activityRate.unit}
+                  </span>
                 </div>
                 <div class="flex flex-col gap-0.5">
                   {#each activityItems as a (a.id)}
