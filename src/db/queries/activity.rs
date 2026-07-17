@@ -271,6 +271,57 @@ mod tests {
             .items
     }
 
+    #[test]
+    fn activity_count_filters_to_last_day_and_visible_projects() {
+        let pool = crate::db::open_memory().expect("test db");
+        let (first_project, second_project) = {
+            let conn = pool.write().unwrap();
+            let first = queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "First".into(),
+                    identifier: "FIRST".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            let second = queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "Second".into(),
+                    identifier: "SECND".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+
+            // Exclude setup activity so the fresh issue rows below are the
+            // only events inside the rolling 24-hour window.
+            conn.execute("UPDATE audit_log SET ts = datetime('now', '-25 hours')", [])
+                .unwrap();
+            queries::create_issue(&conn, &new_issue(first.id, "Fresh first")).unwrap();
+            queries::create_issue(&conn, &new_issue(second.id, "Fresh second one")).unwrap();
+            queries::create_issue(&conn, &new_issue(second.id, "Fresh second two")).unwrap();
+            (first.id, second.id)
+        };
+
+        let conn = pool.read().unwrap();
+        assert_eq!(activity_count(&conn, None).unwrap(), 3);
+        assert_eq!(
+            activity_count(&conn, Some(&HashSet::from([first_project]))).unwrap(),
+            1
+        );
+        assert_eq!(
+            activity_count(&conn, Some(&HashSet::from([second_project]))).unwrap(),
+            2
+        );
+        assert_eq!(activity_count(&conn, Some(&HashSet::new())).unwrap(), 0);
+    }
+
     // ── Capture: per-field diffs ─────────────────────────
 
     #[test]
