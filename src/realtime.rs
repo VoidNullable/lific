@@ -479,6 +479,56 @@ mod tests {
         assert_eq!(json["issue_id"], 42);
     }
 
+    #[test]
+    fn activity_baseline_serializes_with_day_count() {
+        let event = RealtimeEvent::ActivityBaseline { day_count: 123 };
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(json["type"], "activity.baseline");
+        assert_eq!(json["day_count"], 123);
+    }
+
+    #[test]
+    fn activity_baseline_rechecks_current_project_visibility() {
+        let (db, auth_user, project_id, _) = visibility_fixture(true);
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE audit_log SET ts = datetime('now', '-25 hours')", [])
+                .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id,
+                    title: "Visible activity".into(),
+                    description: String::new(),
+                    status: "backlog".into(),
+                    priority: "none".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                    source: None,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            activity_baseline(&db, &auth_user).unwrap(),
+            RealtimeEvent::ActivityBaseline { day_count: 1 }
+        );
+
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::remove_member(&conn, project_id, auth_user.id).unwrap();
+        }
+
+        assert_eq!(
+            activity_baseline(&db, &auth_user).unwrap(),
+            RealtimeEvent::ActivityBaseline { day_count: 0 }
+        );
+    }
+
     #[tokio::test]
     async fn lagged_receiver_requests_resync() {
         let hub = RealtimeHub::with_capacity(1);
