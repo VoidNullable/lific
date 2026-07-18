@@ -100,11 +100,74 @@ fn session_credential(headers: &HeaderMap) -> String {
 pub struct OAuthState {
     pub db: DbPool,
     pub issuer: String, // e.g. https://lific.example.com/lific
+    /// True when the issuer comes from an explicit `server.public_url`.
+    /// An explicit issuer is advertised as-is; request-derived fallback
+    /// (LIF-287) only applies when this is false.
+    pub issuer_is_explicit: bool,
+    /// Hostnames this server considers its own (the same allowlist the MCP
+    /// DNS-rebinding check uses). Used to gate Host-derived issuer fallback.
+    pub allowed_hosts: Arc<[String]>,
     /// Per-IP rate limiter for the unauthenticated /oauth/register endpoint.
     /// Prevents anyone from flooding the server with throwaway clients.
     pub register_limiter: Arc<RateLimiter>,
     /// Trusted reverse-proxy ranges parsed once at server startup.
     pub trusted_proxies: Arc<[crate::ratelimit::IpNetwork]>,
+}
+
+/// Resolve the issuer to advertise for this request (LIF-287).
+///
+/// When `server.public_url` is set, it always wins: metadata is static and
+/// spoofed headers can't move the advertised endpoints. When it is unset, the
+/// bind-derived issuer (e.g. `http://127.0.0.1:3456`) can mismatch the URL the
+/// client actually dialed (`http://localhost:3456`), which fails the RFC 8707
+/// audience check. In that case we derive the issuer from the request `Host`,
+/// but ONLY when its hostname is in the same allowlist the MCP DNS-rebinding
+/// check uses. Anything else falls back to the static issuer with a loud
+/// warning, because an unrecognized Host means a proxied deployment that needs
+/// `server.public_url` configured.
+///
+/// `X-Forwarded-Proto` / `X-Forwarded-Host` are deliberately ignored: these
+/// are unauthenticated endpoints, and trusting forwarded headers here would
+/// let any direct client control the advertised authorization/token endpoint
+/// URLs (issuer spoofing).
+fn effective_issuer(state: &OAuthState, headers: &HeaderMap) -> String {
+    if state.issuer_is_explicit {
+        return state.issuer.clone();
+    }
+    let Some(host_header) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    else {
+        return state.issuer.clone();
+    };
+    match host_header.parse::<axum::http::uri::Authority>() {
+        Ok(authority) if authority.as_str() == host_header => {
+            // Authority.host() keeps IPv6 brackets ("[::1]"); the allowlist
+            // stores bare addresses ("::1").
+            let host = authority.host().trim_start_matches('[').trim_end_matches(']');
+            if state
+                .allowed_hosts
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
+            {
+                // Allowlisted hosts are loopback names (a proxy host only
+                // enters the allowlist via public_url, which makes the issuer
+                // explicit), so plain http matches what the client dialed.
+                format!("http://{host_header}")
+            } else {
+                warn!(
+                    host = %host_header,
+                    issuer = %state.issuer,
+                    "request Host does not match the advertised OAuth issuer; \
+                     set server.public_url for proxied deployments"
+                );
+                state.issuer.clone()
+            }
+        }
+        _ => state.issuer.clone(),
+    }
 }
 
 /// Validate a redirect URI submitted to dynamic client registration.
@@ -187,7 +250,11 @@ pub fn router(state: OAuthState) -> Router {
 
 // ── Discovery ────────────────────────────────────────────────────────────
 
-async fn protected_resource_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
+async fn protected_resource_metadata(
+    State(state): State<OAuthState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let issuer = effective_issuer(&state, &headers);
     // RFC 9728 / Claude connector requirement: the `resource` field MUST match
     // the MCP server URL the user enters in Claude *including the path component*
     // (`/mcp`). Claude derives the RFC 8707 audience from the URL it was given
@@ -195,23 +262,27 @@ async fn protected_resource_metadata(State(state): State<OAuthState>) -> Json<se
     // metadata advertises a different resource (e.g. the bare origin). Returning
     // the bare issuer here is what surfaced as "Authorization with the MCP server
     // failed" on claude.ai web even though the token exchange succeeded.
-    let resource = format!("{}/mcp", state.issuer.trim_end_matches('/'));
+    let resource = format!("{}/mcp", issuer.trim_end_matches('/'));
     Json(serde_json::json!({
         "resource": resource,
-        "authorization_servers": [state.issuer],
+        "authorization_servers": [issuer],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"]
     }))
 }
 
-async fn authorization_server_metadata(State(state): State<OAuthState>) -> Json<serde_json::Value> {
+async fn authorization_server_metadata(
+    State(state): State<OAuthState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let issuer = effective_issuer(&state, &headers);
     Json(serde_json::json!({
-        "issuer": state.issuer,
-        "authorization_endpoint": format!("{}/oauth/authorize", state.issuer),
-        "token_endpoint": format!("{}/oauth/token", state.issuer),
-        "registration_endpoint": format!("{}/oauth/register", state.issuer),
-        "revocation_endpoint": format!("{}/oauth/revoke", state.issuer),
-        "device_authorization_endpoint": format!("{}/oauth/device_authorization", state.issuer),
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/oauth/authorize"),
+        "token_endpoint": format!("{issuer}/oauth/token"),
+        "registration_endpoint": format!("{issuer}/oauth/register"),
+        "revocation_endpoint": format!("{issuer}/oauth/revoke"),
+        "device_authorization_endpoint": format!("{issuer}/oauth/device_authorization"),
         "scopes_supported": ["mcp"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
@@ -697,7 +768,10 @@ async fn device_authorization(
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
-    let verification_uri = format!("{}/oauth/device", state.issuer.trim_end_matches('/'));
+    let verification_uri = format!(
+        "{}/oauth/device",
+        effective_issuer(&state, &headers).trim_end_matches('/')
+    );
     let verification_uri_complete = format!(
         "{verification_uri}?user_code={}",
         urlencoding::encode(&user_code)
@@ -1403,17 +1477,51 @@ mod tests {
         let state = OAuthState {
             db: db.clone(),
             issuer: "https://example.com".into(),
+            issuer_is_explicit: true,
+            allowed_hosts: test_allowed_hosts(),
             register_limiter: Arc::new(RateLimiter::new(cap, std::time::Duration::from_secs(3600))),
-            trusted_proxies: Arc::<[crate::ratelimit::IpNetwork]>::from(
-                crate::config::ServerConfig::default()
-                    .trusted_proxy_ranges()
-                    .expect("default trusted proxy ranges must parse"),
-            ),
+            trusted_proxies: default_trusted_proxies(),
         };
         (
             router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242)))),
             db,
         )
+    }
+
+    fn test_allowed_hosts() -> Arc<[String]> {
+        vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+        ]
+        .into()
+    }
+
+    fn default_trusted_proxies() -> Arc<[crate::ratelimit::IpNetwork]> {
+        Arc::<[crate::ratelimit::IpNetwork]>::from(
+            crate::config::ServerConfig::default()
+                .trusted_proxy_ranges()
+                .expect("default trusted proxy ranges must parse"),
+        )
+    }
+
+    /// Build a test OAuth router the way `lific start` does when
+    /// `server.public_url` is UNSET: bind-derived issuer, not explicit.
+    /// Exercises the LIF-287 Host-derived issuer fallback.
+    fn test_oauth_app_implicit_issuer() -> Router {
+        let db = crate::db::open_memory().expect("test db");
+        let state = OAuthState {
+            db,
+            issuer: "http://127.0.0.1:3456".into(),
+            issuer_is_explicit: false,
+            allowed_hosts: test_allowed_hosts(),
+            register_limiter: Arc::new(RateLimiter::new(
+                1000,
+                std::time::Duration::from_secs(3600),
+            )),
+            trusted_proxies: default_trusted_proxies(),
+        };
+        router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242))))
     }
 
     /// Register a client, returning the client_id.
@@ -1794,6 +1902,126 @@ mod tests {
                 val["authorization_servers"][0], "https://example.com",
                 "path {path}"
             );
+        }
+    }
+
+    // ── LIF-287: Host-derived issuer fallback ────────────────
+    // When public_url is unset the advertised issuer may be replaced by the
+    // request Host, but only for allowlisted (loopback) hosts. An explicit
+    // public_url is never overridden, and forwarded headers are ignored.
+
+    /// GET a metadata path and parse the JSON body.
+    async fn get_metadata(
+        app: &Router,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        let mut builder = Request::builder().uri(path);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let resp = app
+            .clone()
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "path {path}");
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn metadata_derives_issuer_from_allowlisted_host() {
+        let app = test_oauth_app_implicit_issuer();
+
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-authorization-server",
+            &[("host", "localhost:3456")],
+        )
+        .await;
+        assert_eq!(val["issuer"], "http://localhost:3456");
+        assert_eq!(
+            val["token_endpoint"],
+            "http://localhost:3456/oauth/token"
+        );
+
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-protected-resource",
+            &[("host", "localhost:3456")],
+        )
+        .await;
+        assert_eq!(val["resource"], "http://localhost:3456/mcp");
+        assert_eq!(val["authorization_servers"][0], "http://localhost:3456");
+    }
+
+    #[tokio::test]
+    async fn metadata_derives_issuer_from_ipv6_loopback_host() {
+        let app = test_oauth_app_implicit_issuer();
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-authorization-server",
+            &[("host", "[::1]:3456")],
+        )
+        .await;
+        assert_eq!(val["issuer"], "http://[::1]:3456");
+    }
+
+    #[tokio::test]
+    async fn metadata_falls_back_to_static_issuer_for_unallowlisted_host() {
+        let app = test_oauth_app_implicit_issuer();
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-authorization-server",
+            &[("host", "evil.example.com")],
+        )
+        .await;
+        assert_eq!(
+            val["issuer"], "http://127.0.0.1:3456",
+            "unallowlisted Host must not control the advertised issuer"
+        );
+
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-protected-resource",
+            &[("host", "evil.example.com")],
+        )
+        .await;
+        assert_eq!(val["resource"], "http://127.0.0.1:3456/mcp");
+    }
+
+    #[tokio::test]
+    async fn metadata_ignores_forwarded_headers() {
+        let app = test_oauth_app_implicit_issuer();
+        let val = get_metadata(
+            &app,
+            "/.well-known/oauth-authorization-server",
+            &[
+                ("host", "localhost:3456"),
+                ("x-forwarded-host", "evil.example.com"),
+                ("x-forwarded-proto", "https"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            val["issuer"], "http://localhost:3456",
+            "X-Forwarded-* must never influence the advertised issuer"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_public_url_issuer_is_never_overridden_by_host() {
+        // test_oauth_app() marks the issuer explicit (public_url set).
+        let (app, _) = test_oauth_app();
+        for host in ["localhost:3456", "evil.example.com"] {
+            let val = get_metadata(
+                &app,
+                "/.well-known/oauth-authorization-server",
+                &[("host", host)],
+            )
+            .await;
+            assert_eq!(val["issuer"], "https://example.com", "host {host}");
         }
     }
 

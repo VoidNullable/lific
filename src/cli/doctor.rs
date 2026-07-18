@@ -1144,6 +1144,13 @@ mod tests {
         let oauth_state = crate::oauth::OAuthState {
             db: pool,
             issuer: issuer.to_string(),
+            issuer_is_explicit: true,
+            allowed_hosts: vec![
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+            ]
+            .into(),
             register_limiter: Arc::new(crate::ratelimit::RateLimiter::new(
                 100,
                 Duration::from_secs(60),

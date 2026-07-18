@@ -1010,6 +1010,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let oauth_state = oauth::OAuthState {
                 db: pool.clone(),
                 issuer,
+                // LIF-287: an explicit public_url is advertised as-is; only a
+                // bind-derived issuer may be replaced per-request by an
+                // allowlisted Host header.
+                issuer_is_explicit: cfg.server.public_url.is_some(),
+                allowed_hosts: mcp_allowed_hosts.clone().into(),
                 register_limiter: oauth_register_limiter,
                 trusted_proxies,
             };
