@@ -227,6 +227,24 @@ pub(super) async fn delete_folder_handler(
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
+pub(super) async fn update_folder(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Path(id): Path<i64>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Json(input): Json<UpdateFolder>,
+) -> Result<Json<Folder>, LificError> {
+    let project_id = with_read(&db, |conn| {
+        crate::db::queries::get_resource_project_id(conn, "folders", id)
+    })?;
+    require_structure_role(&db, &auth_user, project_id)?;
+    let folder = with_write(&db, |conn| {
+        crate::db::queries::update_folder(conn, id, &input)
+    })?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(folder))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api::test_helpers::*;
@@ -319,6 +337,100 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn lead_can_update_folder_and_regular_cannot() {
+        let (db, _, lead, regular, project_id) = setup_lead_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        let created = parse_json(
+            json_post(
+                &lead_app,
+                "/api/folders",
+                serde_json::json!({ "project_id": project_id, "name": "Docs" }),
+            )
+            .await,
+        )
+        .await;
+        let folder_id = created["id"].as_i64().unwrap();
+
+        let updated = parse_json(
+            json_put(
+                &lead_app,
+                &format!("/api/folders/{folder_id}"),
+                serde_json::json!({ "name": "Documentation" }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(updated["name"], "Documentation");
+
+        let regular_app = app_as_user(db, &regular);
+        let response = json_put(
+            &regular_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Nope" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn folder_update_allows_maintainer_and_denies_viewer_and_non_member_when_enforced() {
+        let (db, _admin, _lead, maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+        let maintainer_app = app_as_user(db.clone(), &maintainer);
+        let folder = parse_json(
+            json_post(
+                &maintainer_app,
+                "/api/folders",
+                serde_json::json!({ "project_id": project_id, "name": "Docs" }),
+            )
+            .await,
+        )
+        .await;
+        let folder_id = folder["id"].as_i64().unwrap();
+
+        let response = json_put(
+            &maintainer_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Documentation" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(parse_json(response).await["name"], "Documentation");
+
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        let response = json_put(
+            &viewer_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Nope" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let non_member_app = app_as_user(db, &non_member);
+        let response = json_put(
+            &non_member_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Still nope" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn regular_cannot_create_folder() {
+        let (db, _, _lead, regular, project_id) = setup_lead_test();
+        let regular_app = app_as_user(db, &regular);
+        let response = json_post(
+            &regular_app,
+            "/api/folders",
+            serde_json::json!({ "project_id": project_id, "name": "Docs" }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

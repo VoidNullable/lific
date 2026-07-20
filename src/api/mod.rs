@@ -173,6 +173,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/pages",
             get(pages::list_pages_handler).post(pages::create_page),
         )
+        .route("/api/pages/resolve/{identifier}", get(pages::resolve_page))
         .route(
             "/api/pages/{id}",
             get(pages::get_page)
@@ -204,7 +205,8 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         .route(
             "/api/folders/{id}",
-            delete(resources::delete_folder_handler),
+            put(resources::update_folder)
+                .delete(resources::delete_folder_handler),
         )
         // Users (for dropdowns)
         .route("/api/users", get(auth::list_users))

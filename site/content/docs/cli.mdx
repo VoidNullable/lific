@@ -3,17 +3,31 @@ title: CLI reference
 description: Commands, arguments, flags, and behavior for the Lific command line interface.
 ---
 
-The CLI reads the configured SQLite database. Commands for issues, projects, pages, exports, search, comments, modules, labels, and folders do not require a running HTTP server.
+The CLI uses the configured SQLite database by default. Data commands can also use a running Lific server, so the same issue, project, page, export, search, comment, module, label, and folder commands work remotely.
 
 ## Global options
 
 ```shell
-lific [--config <PATH>] [--db <PATH>] [--json] <COMMAND>
+lific [--config <PATH>] [--db <PATH>] [--json] [--backend sql|http] [--url <URL>] [--api-key <KEY>] <COMMAND>
 ```
 
 - `--config <PATH>` selects a configuration file. It replaces automatic configuration discovery.
 - `--db <PATH>` overrides `database.path` for the command.
 - `--json` writes JSON output. Data commands also select JSON output when standard output is not a terminal.
+- `--backend sql|http` selects the direct SQLite backend (the default) or the HTTP server backend.
+- `--url <URL>` sets the HTTP server base URL. It can also be supplied as `LIFIC_URL`; when omitted, the configured `server.public_url` or local bind address is used.
+- `--api-key <KEY>` sends a bearer API key to the HTTP server. It can also be supplied as `LIFIC_API_KEY`. When omitted, HTTP mode uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file).
+
+For example, run the same command against a remote server with:
+
+```shell
+lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue list --project APP
+lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue update APP-42 --status done
+```
+
+HTTP mode uses the authenticated server identity for mutations. In particular, `comment add --user` is only available with the direct SQL backend.
+
+HTTP mode currently uses pretty-printed JSON for human-readable output. Remote project export downloads one archive file from the server into the output directory rather than writing individual Markdown files.
 
 Clap also provides `--help` and `--version`.
 
@@ -1054,7 +1068,7 @@ lific export page <IDENTIFIER> --output <DIRECTORY>
 
 ### export project
 
-Exports a project as Markdown files in an output directory.
+Exports a project to an output directory. In HTTP mode, this downloads one ZIP archive from the server.
 
 ```shell
 lific export project <PROJECT> --output <DIRECTORY>

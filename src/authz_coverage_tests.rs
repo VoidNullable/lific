@@ -311,10 +311,12 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/labels/{id}/merge"), Gated(StructureRole)),
         (("GET", "/api/folders"), Gated(Viewer)),
         (("POST", "/api/folders"), Gated(StructureRole)),
+        (("PUT", "/api/folders/{id}"), Gated(StructureRole)),
         (("DELETE", "/api/folders/{id}"), Gated(StructureRole)),
         // ── Pages ──
         (("GET", "/api/pages"), Filtered),
         (("POST", "/api/pages"), Gated(Maintainer)),
+        (("GET", "/api/pages/resolve/{identifier}"), Gated(Viewer)),
         (("GET", "/api/pages/{id}"), Gated(Viewer)),
         (("PUT", "/api/pages/{id}"), Gated(Maintainer)),
         (("DELETE", "/api/pages/{id}"), Gated(Maintainer)),

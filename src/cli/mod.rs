@@ -3,14 +3,60 @@ pub mod connect;
 pub mod credentials;
 pub mod doctor;
 pub mod exec;
+pub mod http;
 pub mod import;
 pub mod login;
 pub mod service;
 pub mod term;
 pub mod ui;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("--api-key was provided but empty")]
+pub(super) struct EmptyHttpCredential;
+
+#[must_use = "iterate over the non-empty CSV values"]
+pub(super) fn split_csv(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+#[must_use = "use the parsed label values"]
+pub(super) fn borrowed_labels(value: Option<&str>) -> Option<Vec<&str>> {
+    value.map(|value| split_csv(value).collect())
+}
+
+#[must_use = "use the resolved HTTP credential"]
+pub(super) fn resolve_http_credential(
+    explicit: Option<&str>,
+    stored: impl FnOnce() -> Option<String>,
+) -> Result<Option<String>, EmptyHttpCredential> {
+    match explicit {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Err(EmptyHttpCredential)
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        }
+        None => Ok(stored()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())),
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BackendKind {
+    /// Execute commands against the configured SQLite database.
+    Sql,
+    /// Execute commands against a Lific HTTP server.
+    Http,
+}
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +76,19 @@ pub struct Cli {
     /// Output as JSON (for scripting/agent consumption)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Backend for data commands (defaults to the local SQLite database).
+    #[arg(long, global = true, value_enum, default_value_t = BackendKind::Sql)]
+    pub backend: BackendKind,
+
+    /// Base URL for the HTTP backend (also read from LIFIC_URL).
+    #[arg(long, global = true, env = "LIFIC_URL")]
+    pub url: Option<String>,
+
+    /// API key for the HTTP backend (also read from LIFIC_API_KEY; login
+    /// credentials are used when this is omitted).
+    #[arg(long = "api-key", global = true, env = "LIFIC_API_KEY")]
+    pub api_key: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -1148,6 +1207,101 @@ pub enum UserAction {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn borrowed_labels_preserve_values_without_owning_strings() {
+        assert_eq!(
+            borrowed_labels(Some(" bug, ,urgent ")),
+            Some(vec!["bug", "urgent"])
+        );
+        assert_eq!(borrowed_labels(None), None);
+    }
+
+    #[test]
+    fn http_credential_prefers_explicit_and_ignores_blank_stored_values() {
+        assert_eq!(
+            resolve_http_credential(Some(" explicit "), || Some("stored".into())),
+            Ok(Some("explicit".into()))
+        );
+        assert_eq!(
+            resolve_http_credential(None, || Some(" stored ".into())),
+            Ok(Some("stored".into()))
+        );
+        assert_eq!(resolve_http_credential(None, || Some("  ".into())), Ok(None));
+    }
+
+    #[test]
+    fn http_credential_rejects_blank_explicit_value() {
+        let error = resolve_http_credential(Some("  "), || Some("stored".into())).unwrap_err();
+        assert_eq!(error.to_string(), "--api-key was provided but empty");
+    }
+
+    #[test]
+    fn http_credential_skips_stored_lookup_when_explicit_is_present() {
+        let mut loaded = false;
+        let credential = resolve_http_credential(Some("explicit"), || {
+            loaded = true;
+            Some("stored".into())
+        });
+
+        assert_eq!(credential.unwrap(), Some("explicit".into()));
+        assert!(!loaded);
+    }
+
+    #[test]
+    fn parses_http_backend_connection_options() {
+        let cli = Cli::try_parse_from([
+            "lific",
+            "--backend",
+            "http",
+            "--url",
+            "https://tracker.example.test",
+            "--api-key",
+            "key-123",
+            "issue",
+            "list",
+            "--project",
+            "LIF",
+        ])
+        .expect("HTTP backend options should parse");
+
+        assert_eq!(cli.backend, BackendKind::Http);
+        assert_eq!(cli.url.as_deref(), Some("https://tracker.example.test"));
+        assert_eq!(cli.api_key.as_deref(), Some("key-123"));
+    }
+
+    #[test]
+    fn defaults_to_sql_backend_without_remote_options() {
+        let cli = Cli::try_parse_from(["lific", "project", "list"])
+            .expect("default backend options should parse");
+
+        assert_eq!(cli.backend, BackendKind::Sql);
+        assert!(cli.url.is_none());
+        assert!(cli.api_key.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_backend_values() {
+        assert!(
+            Cli::try_parse_from(["lific", "--backend", "remote", "project", "list"]).is_err()
+        );
+    }
+
+    #[test]
+    fn parses_json_output_alongside_http_backend() {
+        let cli = Cli::try_parse_from([
+            "lific",
+            "--backend",
+            "http",
+            "--json",
+            "project",
+            "list",
+        ])
+        .expect("JSON output should be transport independent");
+
+        assert_eq!(cli.backend, BackendKind::Http);
+        assert!(cli.json);
+    }
 
     #[test]
     fn parse_start_defaults() {

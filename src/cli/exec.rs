@@ -1,6 +1,6 @@
+use crate::db::DbPool;
 use crate::db::models::*;
 use crate::db::queries;
-use crate::db::DbPool;
 use crate::error::LificError;
 
 use super::*;
@@ -62,6 +62,22 @@ fn print_json<T: serde::Serialize>(val: &T) {
     println!("{}", serde_json::to_string_pretty(val).unwrap());
 }
 
+fn owned_labels(value: Option<&str>) -> Option<Vec<String>> {
+    value.map(|value| super::split_csv(value).map(str::to_owned).collect())
+}
+
+fn page_folder_id(
+    conn: &rusqlite::Connection,
+    page_id: i64,
+    name: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let page = queries::get_page(conn, page_id)?;
+    page.project_id
+        .map(|project_id| queries::resolve_folder_name(conn, project_id, name))
+        .transpose()?
+        .ok_or_else(|| "cannot set folder on workspace page".into())
+}
+
 /// Format a priority with visual indicator for human output.
 fn fmt_priority(p: &str) -> &str {
     match p {
@@ -105,11 +121,10 @@ fn issue(
             let conn = pool.read()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
 
-            let module_id = if let Some(name) = module {
-                Some(queries::resolve_module_name(&conn, project_id, name)?)
-            } else {
-                None
-            };
+            let module_id = module
+                .as_deref()
+                .map(|name| queries::resolve_module_name(&conn, project_id, name))
+                .transpose()?;
 
             let issues = queries::list_issues(
                 &conn,
@@ -173,9 +188,10 @@ fn issue(
                     println!("  Labels:   {}", issue.labels.join(", "));
                 }
                 if let Some(mid) = issue.module_id
-                    && let Ok(name) = queries::get_module_name(&conn, mid) {
-                        println!("  Module:   {name}");
-                    }
+                    && let Ok(name) = queries::get_module_name(&conn, mid)
+                {
+                    println!("  Module:   {name}");
+                }
                 if !issue.blocks.is_empty() {
                     println!("  Blocks:   {}", issue.blocks.join(", "));
                 }
@@ -210,21 +226,12 @@ fn issue(
             let conn = pool.write()?;
             let project_id = queries::resolve_project_identifier(&conn, project)?;
 
-            let module_id = if let Some(name) = module {
-                Some(queries::resolve_module_name(&conn, project_id, name)?)
-            } else {
-                None
-            };
-
-            let label_list: Vec<String> = labels
+            let module_id = module
                 .as_deref()
-                .map(|s| {
-                    s.split(',')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
+                .map(|name| queries::resolve_module_name(&conn, project_id, name))
+                .transpose()?;
+
+            let label_list = owned_labels(labels.as_deref()).unwrap_or_default();
 
             let issue = queries::create_issue(
                 &conn,
@@ -269,12 +276,7 @@ fn issue(
                 None
             };
 
-            let label_list = labels.as_deref().map(|s| {
-                s.split(',')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            });
+            let label_list = owned_labels(labels.as_deref());
 
             let issue = queries::update_issue(
                 &conn,
@@ -414,20 +416,27 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             label,
         } => {
             let conn = pool.read()?;
-            let project_id = if let Some(ident) = project {
-                Some(queries::resolve_project_identifier(&conn, ident)?)
-            } else {
-                None
-            };
+            let project_id = project
+                .as_deref()
+                .map(|ident| queries::resolve_project_identifier(&conn, ident))
+                .transpose()?;
 
-            let folder_id = if let (Some(pid), Some(fname)) = (project_id, folder) {
-                Some(queries::resolve_folder_name(&conn, pid, fname)?)
-            } else {
-                None
-            };
+            let folder_id = project_id
+                .zip(folder.as_deref())
+                .map(|(project_id, name)| queries::resolve_folder_name(&conn, project_id, name))
+                .transpose()?;
 
-            let pages =
-                queries::list_pages(&conn, project_id, folder_id, label.as_deref(), None, None, None, None, None)?;
+            let pages = queries::list_pages(
+                &conn,
+                project_id,
+                folder_id,
+                label.as_deref(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )?;
 
             if json {
                 print_json(&pages);
@@ -451,10 +460,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     } else {
                         format!(" [{}]", p.labels.join(", "))
                     };
-                    println!(
-                        "  {:<12} {} - {}{}",
-                        p.identifier, p.title, preview, labels
-                    );
+                    println!("  {:<12} {} - {}{}", p.identifier, p.title, preview, labels);
                 }
             }
         }
@@ -486,29 +492,19 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             labels,
         } => {
             let conn = pool.write()?;
-            let project_id = if let Some(ident) = project {
-                Some(queries::resolve_project_identifier(&conn, ident)?)
-            } else {
-                None
-            };
+            let project_id = project
+                .as_deref()
+                .map(|ident| queries::resolve_project_identifier(&conn, ident))
+                .transpose()?;
 
-            let folder_id = if let (Some(pid), Some(fname)) = (project_id, folder) {
-                Some(queries::resolve_folder_name(&conn, pid, fname)?)
-            } else {
-                None
-            };
+            let folder_id = project_id
+                .zip(folder.as_deref())
+                .map(|(project_id, name)| queries::resolve_folder_name(&conn, project_id, name))
+                .transpose()?;
 
             // Same comma-split shape `issue create` uses, so users get
             // one mental model across both CLIs.
-            let label_list: Vec<String> = labels
-                .as_deref()
-                .map(|s| {
-                    s.split(',')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let label_list = owned_labels(labels.as_deref()).unwrap_or_default();
 
             let page = queries::create_page(
                 &conn,
@@ -539,23 +535,13 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             let conn = pool.write()?;
             let id = queries::resolve_page_identifier(&conn, identifier)?;
 
-            let folder_id = if let Some(fname) = folder {
-                let page = queries::get_page(&conn, id)?;
-                if let Some(pid) = page.project_id {
-                    Some(Some(queries::resolve_folder_name(&conn, pid, fname)?))
-                } else {
-                    return Err("cannot set folder on workspace page".into());
-                }
-            } else {
-                None
-            };
+            let folder_id = folder
+                .as_deref()
+                .map(|name| page_folder_id(&conn, id, name))
+                .transpose()?
+                .map(Some);
 
-            let label_list = labels.as_deref().map(|s| {
-                s.split(',')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            });
+            let label_list = owned_labels(labels.as_deref());
 
             let page = queries::update_page(
                 &conn,
@@ -591,11 +577,9 @@ fn search(
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.read()?;
-    let project_id = if let Some(ident) = project {
-        Some(queries::resolve_project_identifier(&conn, ident)?)
-    } else {
-        None
-    };
+    let project_id = project
+        .map(|ident| queries::resolve_project_identifier(&conn, ident))
+        .transpose()?;
 
     let results = queries::search(
         &conn,
@@ -1069,6 +1053,15 @@ mod tests {
     }
 
     #[test]
+    fn shared_label_parser_trims_and_discards_empty_values() {
+        assert_eq!(
+            owned_labels(Some(" bug, ,urgent ,")),
+            Some(vec!["bug".to_owned(), "urgent".to_owned()])
+        );
+        assert_eq!(owned_labels(None), None);
+    }
+
+    #[test]
     fn exec_project_list_json() {
         let pool = test_pool();
         seed_project(&pool, "LIF");
@@ -1223,6 +1216,42 @@ mod tests {
             },
         };
         run(&pool, &cmd, false).unwrap();
+    }
+
+    #[test]
+    fn exec_workspace_page_folder_update_returns_clear_error() {
+        let pool = test_pool();
+        run(
+            &pool,
+            &Command::Page {
+                action: PageAction::Create {
+                    title: "Workspace doc".into(),
+                    project: None,
+                    folder: None,
+                    content: String::new(),
+                    labels: None,
+                },
+            },
+            true,
+        )
+        .unwrap();
+
+        let error = run(
+            &pool,
+            &Command::Page {
+                action: PageAction::Update {
+                    identifier: "DOC-1".into(),
+                    title: None,
+                    content: None,
+                    folder: Some("folder".into()),
+                    labels: None,
+                },
+            },
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "cannot set folder on workspace page");
     }
 
     #[test]

@@ -100,6 +100,19 @@ pub(super) async fn get_page(
     Ok(Json(page))
 }
 
+pub(super) async fn resolve_page(
+    State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
+    Path(identifier): Path<String>,
+) -> Result<Json<Page>, LificError> {
+    let page = with_read(&db, |conn| {
+        let id = crate::db::queries::resolve_page_identifier(conn, &identifier)?;
+        crate::db::queries::get_page(conn, id)
+    })?;
+    require_page_role(&db, &auth_user, page.project_id, Role::Viewer)?;
+    Ok(Json(page))
+}
+
 pub(super) async fn create_page(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
@@ -417,5 +430,123 @@ mod tests {
         let page = parse_json(resp).await;
         let labels = page["labels"].as_array().unwrap();
         assert_eq!(labels.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_page_by_project_identifier_returns_full_page() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let created = parse_json(
+            json_post(
+                &app,
+                "/api/pages",
+                serde_json::json!({ "project_id": project_id, "title": "Project spec" }),
+            )
+            .await,
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pages/resolve/TST-DOC-1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = parse_json(response).await;
+        assert_eq!(page["id"], created["id"]);
+        assert_eq!(page["identifier"], "TST-DOC-1");
+        assert_eq!(page["title"], "Project spec");
+    }
+
+    #[tokio::test]
+    async fn resolve_page_by_workspace_identifier_returns_full_page() {
+        let app = test_app();
+        let created = parse_json(
+            json_post(
+                &app,
+                "/api/pages",
+                serde_json::json!({ "title": "Workspace guide" }),
+            )
+            .await,
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pages/resolve/DOC-1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = parse_json(response).await;
+        assert_eq!(page["id"], created["id"]);
+        assert_eq!(page["identifier"], "DOC-1");
+        assert!(page["project_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn resolve_page_returns_not_found_for_unknown_identifier() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pages/resolve/TST-DOC-999")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_page_allows_viewer_and_denies_non_member_when_enforced() {
+        let (db, _admin, lead, _maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        let page = parse_json(
+            json_post(
+                &lead_app,
+                "/api/pages",
+                serde_json::json!({ "project_id": project_id, "title": "Members only" }),
+            )
+            .await,
+        )
+        .await;
+        let identifier = page["identifier"].as_str().unwrap();
+
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        let response = viewer_app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/pages/resolve/{identifier}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let non_member_app = app_as_user(db, &non_member);
+        let response = non_member_app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/pages/resolve/{identifier}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
