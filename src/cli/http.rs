@@ -166,7 +166,7 @@ struct HttpBackend {
 
 impl HttpBackend {
     fn new(base_url: &str, api_key: Option<&str>) -> Result<Self> {
-        let base_url = base_url.trim_end_matches('/');
+        let base_url = base_url.trim().trim_end_matches('/');
         if base_url.is_empty() {
             bail!("HTTP backend requires a non-empty server URL (use --url or LIFIC_URL)");
         }
@@ -927,6 +927,12 @@ mod tests {
     #[test]
     fn trims_trailing_backend_url_slashes() {
         let backend = HttpBackend::new("https://tracker.invalid///", None).unwrap();
+        assert_eq!(backend.base_url, "https://tracker.invalid");
+    }
+
+    #[test]
+    fn trims_backend_url_whitespace_before_trailing_slashes() {
+        let backend = HttpBackend::new("  https://tracker.invalid///  ", None).unwrap();
         assert_eq!(backend.base_url, "https://tracker.invalid");
     }
 
