@@ -27,6 +27,8 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 HTTP mode uses the authenticated server identity for mutations. In particular, `comment add --user` is only available with the direct SQL backend.
 
+HTTP mode currently uses pretty-printed JSON for human-readable output. Remote project export downloads one archive file from the server into the output directory rather than writing individual Markdown files.
+
 Clap also provides `--help` and `--version`.
 
 ## Server and setup
@@ -1066,7 +1068,7 @@ lific export page <IDENTIFIER> --output <DIRECTORY>
 
 ### export project
 
-Exports a project as Markdown files in an output directory.
+Exports a project to an output directory. In HTTP mode, this downloads one ZIP archive from the server.
 
 ```shell
 lific export project <PROJECT> --output <DIRECTORY>

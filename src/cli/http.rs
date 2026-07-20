@@ -4,7 +4,7 @@
 //! command parsing and output selection stay transport-independent while each
 //! backend owns only identifier resolution and I/O.
 
-use std::{borrow::Cow, fs, path::Path, time::Duration};
+use std::{borrow::Cow, fs, io::Write, net::IpAddr, path::Path, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
@@ -20,6 +20,7 @@ use super::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
 type QueryParam<'a> = (&'a str, Cow<'a, str>);
 
 #[derive(Serialize)]
@@ -175,8 +176,21 @@ impl HttpBackend {
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             bail!("HTTP backend URL must use http:// or https://");
         }
+        if parsed.scheme() == "http"
+            && parsed
+                .host_str()
+                .is_some_and(|host| !is_loopback_host(host))
+        {
+            eprintln!(
+                "warning: sending credentials over unencrypted http to {}",
+                parsed.host_str().unwrap_or_default()
+            );
+        }
         Ok(Self {
-            client: Client::builder().timeout(REQUEST_TIMEOUT).build()?,
+            client: Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             base_url: base_url.to_owned(),
             api_key: api_key.map(str::to_owned),
         })
@@ -631,12 +645,15 @@ impl HttpBackend {
                 (format!("/api/export/projects/{}", segment(project)), output)
             }
         };
-        let response = self.send(self.request_builder(Method::GET, &path)).await?;
+        let mut response = self.send(self.request_builder(Method::GET, &path)).await?;
         let filename = export_filename(response.headers()).unwrap_or_else(|| "export.bin".into());
         fs::create_dir_all(output)?;
         let path = output.join(&filename);
-        fs::write(&path, response.bytes().await?)?;
-        Ok(json!({"files": [path.display().to_string()]}))
+        let mut file = fs::File::create(&path)?;
+        while let Some(chunk) = response.chunk().await? {
+            file.write_all(&chunk)?;
+        }
+        Ok(json!([path.display().to_string()]))
     }
 
     async fn project_id(&self, identifier: &str) -> Result<i64> {
@@ -674,8 +691,10 @@ impl HttpBackend {
     }
 
     async fn page_id(&self, identifier: &str) -> Result<i64> {
-        self.resolve_id("/api/pages", "identifier", identifier, "page", &[])
-            .await
+        self.get_json(&format!("/api/pages/resolve/{}", segment(identifier)), &[])
+            .await?["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("page '{identifier}' response had no id"))
     }
 
     async fn module_id(&self, project_id: i64, name: &str) -> Result<i64> {
@@ -750,10 +769,10 @@ impl HttpBackend {
             return Ok(response);
         }
         let status = response.status();
-        let message = response.text().await.unwrap_or_default();
+        let message = read_error_body(response).await.unwrap_or_default();
         bail!(
             "HTTP backend request failed ({status}): {}",
-            error_detail(&message)
+            sanitize_error_detail(&error_detail(&message))
         );
     }
 
@@ -765,6 +784,13 @@ impl HttpBackend {
             None => request,
         }
     }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn find_resource(value: Value, key: &str, expected: &str, kind: &str) -> Result<i64> {
@@ -810,6 +836,31 @@ fn error_detail(message: &str) -> String {
         .unwrap_or_else(|| message.to_owned())
 }
 
+async fn read_error_body(mut response: reqwest::Response) -> Result<String, reqwest::Error> {
+    let mut body = Vec::with_capacity(ERROR_BODY_LIMIT);
+    while body.len() < ERROR_BODY_LIMIT {
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        let remaining = ERROR_BODY_LIMIT - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+fn sanitize_error_detail(detail: &str) -> String {
+    detail
+        .chars()
+        .map(|character| {
+            if character.is_ascii_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn print_human(value: &Value) {
     match value {
         Value::Array(items) => println!("{} item(s):\n{}", items.len(), pretty(value)),
@@ -826,7 +877,7 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use axum::{
-        Json, Router,
+        Extension, Json, Router,
         body::Body,
         extract::{Request, State},
         http::{HeaderValue, StatusCode},
@@ -840,14 +891,32 @@ mod tests {
     use serde_json::json;
     use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
-    use crate::cli::{Command, ExportAction, PageAction, ProjectAction, split_csv};
+    use crate::{
+        api::test_helpers::{
+            json_post, parse_json, seed_project, test_peer, with_attachment_layers,
+            with_client_ip_test_layers,
+        },
+        cli::{Command, ExportAction, IssueAction, PageAction, ProjectAction, split_csv},
+        config::AuthConfig,
+        db::models::AuthUser,
+        realtime::RealtimeHub,
+    };
 
     use super::{
-        HttpBackend, IssueCreate, IssueUpdate, PageCreate, ProjectCreate, error_detail,
-        export_filename, find_resource, safe_filename, segment,
+        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueUpdate, PageCreate, ProjectCreate,
+        error_detail, export_filename, find_resource, is_loopback_host, safe_filename,
+        sanitize_error_detail, segment,
     };
 
     type CapturedRequest = Arc<Mutex<Option<(String, Option<String>)>>>;
+
+    struct RealApiFixture {
+        url: String,
+        project_page_identifier: String,
+        workspace_page_identifier: String,
+        issue_identifier: String,
+        server: JoinHandle<()>,
+    }
 
     async fn spawn_server(router: Router) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -856,6 +925,68 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
         (format!("http://{address}"), task)
+    }
+
+    async fn spawn_real_api_server() -> RealApiFixture {
+        let db = crate::db::open_memory().expect("test db");
+        let admin_id = {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('test-admin', 'admin@test.local', 'x', 'Test Admin', 1, 0)",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let app = with_client_ip_test_layers(
+            with_attachment_layers(crate::api::router(db, &[])),
+            test_peer(),
+        )
+        .layer(Extension(RealtimeHub::new()))
+        .layer(Extension(AuthConfig {
+            allow_signup: true,
+            required: true,
+            secure_cookies: false,
+        }))
+        .layer(Extension(Some(AuthUser {
+            id: admin_id,
+            username: "test-admin".into(),
+            display_name: "Test Admin".into(),
+            is_admin: true,
+        })));
+        let (project_id, _) = seed_project(&app).await;
+        let project_page = parse_json(
+            json_post(
+                &app,
+                "/api/pages",
+                json!({"project_id": project_id, "title": "Project page"}),
+            )
+            .await,
+        )
+        .await;
+        let workspace_page = parse_json(
+            json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await,
+        )
+        .await;
+        let issue = parse_json(
+            json_post(
+                &app,
+                "/api/issues",
+                json!({"project_id": project_id, "title": "Test issue"}),
+            )
+            .await,
+        )
+        .await;
+        let (url, server) = spawn_server(app).await;
+
+        RealApiFixture {
+            url,
+            project_page_identifier: project_page["identifier"].as_str().unwrap().to_owned(),
+            workspace_page_identifier: workspace_page["identifier"].as_str().unwrap().to_owned(),
+            issue_identifier: issue["identifier"].as_str().unwrap().to_owned(),
+            server,
+        }
     }
 
     async fn capture_request(
@@ -876,6 +1007,22 @@ mod tests {
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "request rejected"})),
         )
+    }
+
+    async fn oversized_failed_request() -> Response {
+        let mut response = Response::new(Body::from("x".repeat(ERROR_BODY_LIMIT + 1)));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response
+    }
+
+    async fn redirect_response() -> Response {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::FOUND;
+        response.headers_mut().insert(
+            axum::http::header::LOCATION,
+            HeaderValue::from_static("/api/projects"),
+        );
+        response
     }
 
     async fn export_response() -> Response {
@@ -934,6 +1081,16 @@ mod tests {
     fn trims_backend_url_whitespace_before_trailing_slashes() {
         let backend = HttpBackend::new("  https://tracker.invalid///  ", None).unwrap();
         assert_eq!(backend.base_url, "https://tracker.invalid");
+    }
+
+    #[test]
+    fn identifies_loopback_hosts_for_plaintext_warning() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("127.1.2.3"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("tracker.example"));
     }
 
     #[test]
@@ -1074,6 +1231,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounds_http_error_response_bodies() {
+        let router = Router::new().route("/api/projects", get(oversized_failed_request));
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let error = backend.get_json("/api/projects", &[]).await.unwrap_err();
+        let prefix = "HTTP backend request failed (400 Bad Request): ";
+        assert_eq!(error.to_string().len(), prefix.len() + ERROR_BODY_LIMIT);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_http_redirects() {
+        let captured = Arc::new(Mutex::new(None));
+        let router = Router::new()
+            .route("/api/redirect", get(redirect_response))
+            .route("/api/projects", any(capture_request))
+            .with_state(captured.clone());
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, Some("test-key")).unwrap();
+
+        let error = backend.get_json("/api/redirect", &[]).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .starts_with("HTTP backend request failed (302 Found):"));
+        assert!(captured.lock().await.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn writes_http_export_response_using_server_filename() {
         let router = Router::new().route("/api/export/issues/{identifier}", get(export_response));
         let (url, server) = spawn_server(router).await;
@@ -1096,12 +1285,88 @@ mod tests {
             std::fs::read_to_string(output_dir.join("report.txt")).unwrap(),
             "export contents"
         );
-        assert_eq!(
-            output["files"][0],
-            output_dir.join("report.txt").display().to_string()
-        );
+        assert_eq!(output, json!([output_dir.join("report.txt").display().to_string()]));
         std::fs::remove_dir_all(output_dir).unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn gets_project_page_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let page = backend
+            .execute(&Command::Page {
+                action: PageAction::Get {
+                    identifier: fixture.project_page_identifier,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(page["title"], "Project page");
+        assert_eq!(page["identifier"], "TST-DOC-1");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn gets_workspace_page_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let page = backend
+            .execute(&Command::Page {
+                action: PageAction::Get {
+                    identifier: fixture.workspace_page_identifier,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(page["title"], "Workspace page");
+        assert_eq!(page["identifier"], "DOC-1");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn gets_issue_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let issue = backend
+            .execute(&Command::Issue {
+                action: IssueAction::Get {
+                    identifier: fixture.issue_identifier,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(issue["title"], "Test issue");
+        assert_eq!(issue["identifier"], "TST-1");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn sanitizes_real_api_error_details() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let error = backend
+            .execute(&Command::Page {
+                action: PageAction::Get {
+                    identifier: "TST-DOC-\u{1b}[31m".into(),
+                },
+            })
+            .await
+            .unwrap_err();
+        let error = error.to_string();
+
+        assert!(error.starts_with(
+            "HTTP backend request failed (400 Bad Request): invalid page identifier: TST-DOC- [31m"
+        ));
+        assert!(!error.chars().any(|character| character.is_ascii_control()));
+        fixture.server.abort();
     }
 
     #[test]
@@ -1236,6 +1501,14 @@ mod tests {
         assert_eq!(
             error_detail(r#"{"message":"access denied"}"#),
             r#"{"message":"access denied"}"#
+        );
+    }
+
+    #[test]
+    fn sanitizes_ascii_control_characters_in_error_details() {
+        assert_eq!(
+            sanitize_error_detail("access\u{1b}[31m denied\n\t"),
+            "access [31m denied  "
         );
     }
 

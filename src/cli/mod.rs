@@ -13,6 +13,10 @@ pub mod ui;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("--api-key was provided but empty")]
+pub(super) struct EmptyHttpCredential;
+
 #[must_use = "iterate over the non-empty CSV values"]
 pub(super) fn split_csv(value: &str) -> impl Iterator<Item = &str> {
     value
@@ -30,14 +34,20 @@ pub(super) fn borrowed_labels(value: Option<&str>) -> Option<Vec<&str>> {
 pub(super) fn resolve_http_credential(
     explicit: Option<&str>,
     stored: impl FnOnce() -> Option<String>,
-) -> Option<String> {
-    explicit
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(stored)
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+) -> Result<Option<String>, EmptyHttpCredential> {
+    match explicit {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Err(EmptyHttpCredential)
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        }
+        None => Ok(stored()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())),
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -1208,16 +1218,22 @@ mod tests {
     }
 
     #[test]
-    fn http_credential_prefers_explicit_and_ignores_blank_values() {
+    fn http_credential_prefers_explicit_and_ignores_blank_stored_values() {
         assert_eq!(
             resolve_http_credential(Some(" explicit "), || Some("stored".into())),
-            Some("explicit".into())
+            Ok(Some("explicit".into()))
         );
         assert_eq!(
-            resolve_http_credential(Some("  "), || Some(" stored ".into())),
-            Some("stored".into())
+            resolve_http_credential(None, || Some(" stored ".into())),
+            Ok(Some("stored".into()))
         );
-        assert_eq!(resolve_http_credential(None, || Some("  ".into())), None);
+        assert_eq!(resolve_http_credential(None, || Some("  ".into())), Ok(None));
+    }
+
+    #[test]
+    fn http_credential_rejects_blank_explicit_value() {
+        let error = resolve_http_credential(Some("  "), || Some("stored".into())).unwrap_err();
+        assert_eq!(error.to_string(), "--api-key was provided but empty");
     }
 
     #[test]
@@ -1228,7 +1244,7 @@ mod tests {
             Some("stored".into())
         });
 
-        assert_eq!(credential, Some("explicit".into()));
+        assert_eq!(credential.unwrap(), Some("explicit".into()));
         assert!(!loaded);
     }
 

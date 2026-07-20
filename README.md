@@ -197,7 +197,7 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue update APP-42 --status done
 ```
 
-`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. If no API key is supplied, it also uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file). The default backend remains direct SQL; HTTP mode never opens the local database for data commands.
+`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. If no API key is supplied, it also uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file). The default backend remains direct SQL; HTTP mode never opens the local database for data commands. Its human-readable output is currently pretty-printed JSON. A remote project export downloads one archive file from the server rather than individual Markdown files.
 
 ## MCP tools
 

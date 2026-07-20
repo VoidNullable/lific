@@ -39,11 +39,15 @@ const KEYRING_SERVICE: &str = "lific";
 /// (`http://H:3998` vs `http://H:3998/`) must resolve to one entry.
 pub fn normalize_base_url(base: &str) -> String {
     let trimmed = base.trim().trim_end_matches('/');
-    // Lowercase only the scheme://host portion; leave any path/port digits as-is
-    // (ports are digits, hosts are case-insensitive). Simplest robust approach:
-    // lowercase the whole thing — URLs have no case-sensitive component that
-    // matters for our keying (we never store paths with case-sensitive segments).
-    trimmed.to_ascii_lowercase()
+    let Ok(mut url) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_owned();
+    };
+    let scheme = url.scheme().to_ascii_lowercase();
+    let _ = url.set_scheme(&scheme);
+    if let Some(host) = url.host_str().map(str::to_ascii_lowercase) {
+        let _ = url.set_host(Some(&host));
+    }
+    url.to_string().trim_end_matches('/').to_owned()
 }
 
 /// Where the plaintext fallback file lives: `~/.config/lific/credentials.json`.
@@ -266,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_base_url_strips_trailing_slash_and_lowercases() {
+    fn normalize_base_url_strips_trailing_slash_and_lowercases_scheme_and_host() {
         assert_eq!(
             normalize_base_url("http://Example.com:3998/"),
             "http://example.com:3998"
@@ -279,6 +283,14 @@ mod tests {
         assert_eq!(
             normalize_base_url("http://127.0.0.1:3998"),
             normalize_base_url("http://127.0.0.1:3998/")
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_preserves_path_case() {
+        assert_eq!(
+            normalize_base_url(" HTTPS://LIFIC.Example/CaseSensitive/Path/ "),
+            "https://lific.example/CaseSensitive/Path"
         );
     }
 

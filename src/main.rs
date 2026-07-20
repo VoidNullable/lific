@@ -159,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let api_key = cli::resolve_http_credential(
             cli.api_key.as_deref(),
             || cli::credentials::load(&url),
-        );
+        )?;
         let json = cli::term::wants_json(cli.json);
         return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
             .await
