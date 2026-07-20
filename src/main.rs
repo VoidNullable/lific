@@ -32,7 +32,9 @@ use axum::{
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, InstanceAction, KeyAction, MemberAction, ServiceAction, UserAction};
+use cli::{
+    BackendKind, Cli, Command, InstanceAction, KeyAction, MemberAction, ServiceAction, UserAction,
+};
 use config::Config;
 
 // Commands that operate directly on the database (no server required)
@@ -140,6 +142,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLI overrides
     if let Some(ref db) = cli.db {
         cfg.database.path = db.clone();
+    }
+
+    if cli.backend == BackendKind::Http {
+        if !is_crud_command(&cli.command) {
+            return Err(
+                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, and folder"
+                    .into(),
+            );
+        }
+        let url = http_backend_url(
+            cli.url.as_deref(),
+            cfg.server.public_url.as_deref(),
+            &cfg,
+        );
+        let api_key = cli::resolve_http_credential(
+            cli.api_key.as_deref(),
+            || cli::credentials::load(&url),
+        );
+        let json = cli::term::wants_json(cli.json);
+        return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
+            .await
+            .map_err(Into::into);
     }
 
     // Handle CRUD commands (direct database access, no server needed)
@@ -1308,6 +1332,13 @@ fn local_url(cfg: &Config) -> String {
     format!("http://{}:{}", host, cfg.server.port)
 }
 
+fn http_backend_url(cli_url: Option<&str>, public_url: Option<&str>, cfg: &Config) -> String {
+    cli_url
+        .or(public_url)
+        .map(str::to_owned)
+        .unwrap_or_else(|| local_url(cfg))
+}
+
 /// Print the one-time initial API key. No box-drawing: keys are longer than
 /// any fixed-width frame (the old box rendered broken), and plain lines are
 /// easier to copy.
@@ -1939,6 +1970,40 @@ mod init_target_tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("--here conflicts with --config"));
+    }
+}
+
+#[cfg(test)]
+mod http_backend_url_tests {
+    use super::{http_backend_url, Config};
+
+    #[test]
+    fn maps_bind_any_hosts_to_loopback() {
+        let cfg = Config::default();
+
+        assert_eq!(
+            http_backend_url(None, None, &cfg),
+            "http://127.0.0.1:3456"
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_cli_and_public_urls() {
+        let mut cfg = Config::default();
+        cfg.server.public_url = Some("https://public.example.test".into());
+
+        assert_eq!(
+            http_backend_url(None, cfg.server.public_url.as_deref(), &cfg),
+            "https://public.example.test"
+        );
+        assert_eq!(
+            http_backend_url(
+                Some("https://cli.example.test"),
+                cfg.server.public_url.as_deref(),
+                &cfg,
+            ),
+            "https://cli.example.test"
+        );
     }
 }
 

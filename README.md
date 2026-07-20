@@ -183,7 +183,7 @@ Issues stay flat and lateral; the hierarchy lives on the plan. It's the differen
 - **Pipe-native CLI.** Output auto-upgrades to JSON when piped, so `lific issue list --project APP | jq` just works, no `--json` needed (though it's there). Prompts never hang a non-interactive caller; they fail fast and name the bypass flag.
 - **Shell completions:** `lific completion fish | source` (bash, zsh, fish, powershell, elvish).
 
-The CLI also works directly against the database, no server or auth required:
+The CLI works directly against the database, with no server or auth required. Data commands also support an HTTP backend when you want the CLI to operate on a remote Lific instance:
 
 ```bash
 lific project list
@@ -191,7 +191,13 @@ lific issue list --project APP
 lific issue create --project APP --title "Fix login bug" --priority high
 lific issue update APP-42 --status done
 lific search "authentication" --project APP
+
+# Remote mode (the same commands use the server API)
+lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue list --project APP
+lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue update APP-42 --status done
 ```
+
+`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. The default backend remains direct SQL; HTTP mode never opens the local database for data commands.
 
 ## MCP tools
 

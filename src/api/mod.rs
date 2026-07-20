@@ -204,7 +204,8 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         .route(
             "/api/folders/{id}",
-            delete(resources::delete_folder_handler),
+            put(resources::update_folder)
+                .delete(resources::delete_folder_handler),
         )
         // Users (for dropdowns)
         .route("/api/users", get(auth::list_users))
