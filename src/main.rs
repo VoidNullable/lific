@@ -1979,11 +1979,13 @@ mod http_backend_url_tests {
 
     #[test]
     fn maps_bind_any_hosts_to_loopback() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.server.host = "0.0.0.0".into();
+        cfg.server.port = 4567;
 
         assert_eq!(
             http_backend_url(None, None, &cfg),
-            "http://127.0.0.1:3456"
+            "http://127.0.0.1:4567"
         );
     }
 
