@@ -16,7 +16,7 @@ lific [--config <PATH>] [--db <PATH>] [--json] [--backend sql|http] [--url <URL>
 - `--json` writes JSON output. Data commands also select JSON output when standard output is not a terminal.
 - `--backend sql|http` selects the direct SQLite backend (the default) or the HTTP server backend.
 - `--url <URL>` sets the HTTP server base URL. It can also be supplied as `LIFIC_URL`; when omitted, the configured `server.public_url` or local bind address is used.
-- `--api-key <KEY>` sends a bearer API key to the HTTP server. It can also be supplied as `LIFIC_API_KEY`.
+- `--api-key <KEY>` sends a bearer API key to the HTTP server. It can also be supplied as `LIFIC_API_KEY`. When omitted, HTTP mode uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file).
 
 For example, run the same command against a remote server with:
 
