@@ -376,6 +376,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn folder_update_allows_maintainer_and_denies_viewer_and_non_member_when_enforced() {
+        let (db, _admin, _lead, maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+        let maintainer_app = app_as_user(db.clone(), &maintainer);
+        let folder = parse_json(
+            json_post(
+                &maintainer_app,
+                "/api/folders",
+                serde_json::json!({ "project_id": project_id, "name": "Docs" }),
+            )
+            .await,
+        )
+        .await;
+        let folder_id = folder["id"].as_i64().unwrap();
+
+        let response = json_put(
+            &maintainer_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Documentation" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(parse_json(response).await["name"], "Documentation");
+
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        let response = json_put(
+            &viewer_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Nope" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let non_member_app = app_as_user(db, &non_member);
+        let response = json_put(
+            &non_member_app,
+            &format!("/api/folders/{folder_id}"),
+            serde_json::json!({ "name": "Still nope" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn regular_cannot_create_folder() {
         let (db, _, _lead, regular, project_id) = setup_lead_test();
         let regular_app = app_as_user(db, &regular);

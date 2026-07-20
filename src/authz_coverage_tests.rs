@@ -316,6 +316,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         // ── Pages ──
         (("GET", "/api/pages"), Filtered),
         (("POST", "/api/pages"), Gated(Maintainer)),
+        (("GET", "/api/pages/resolve/{identifier}"), Gated(Viewer)),
         (("GET", "/api/pages/{id}"), Gated(Viewer)),
         (("PUT", "/api/pages/{id}"), Gated(Maintainer)),
         (("DELETE", "/api/pages/{id}"), Gated(Maintainer)),
