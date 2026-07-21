@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.3.0 (2026-07-20)
+
+The CLI learns to talk to a running server over HTTP instead of requiring the database file, OAuth discovery works out of the box on localhost instances, and the documentation got a full contributed overhaul with a CI check that keeps it honest.
+
+### CLI: run data commands against a remote instance (PR #15 by [@mjc](https://github.com/mjc))
+
+Every data command previously opened the SQLite file directly, so the CLI only worked on the machine hosting the instance. A new selectable HTTP backend routes those commands - issues, projects, pages, search, export, comments, modules, labels, and folders - through the REST API of a running server instead:
+
+- **Select it** with `--backend http`. The target URL comes from `--url` or `LIFIC_URL`, falling back to the configured `server.public_url`, then the local bind address.
+- **Credentials**: `--api-key` or `LIFIC_API_KEY`, else the credential stored by `lific login` (env token, keyring, or credential file). Mutations are attributed to that credential's identity, exactly like any other API client. `comment add --user` remains SQLite-only - impersonation stays behind shell access to the database.
+- **The transport is hardened**: a warning before sending a key over plain HTTP to a non-loopback host, redirects refused, a 30-second timeout, error bodies bounded, control characters sanitized out of server-supplied text, and export downloads written under safe filenames.
+- **The default SQLite backend is untouched** - no flag, no behavior change.
+
+Supporting it, a new `GET /api/pages/resolve/{identifier}` endpoint resolves page identifiers (project-scoped `PRO-DOC-3` and workspace `DOC-3` alike), the way `/api/issues/resolve` already did for issues.
+
+### OAuth discovery works without `public_url`
+
+With `server.public_url` unset, OAuth discovery metadata advertised an issuer derived from the bind address - a client connecting via `localhost` or the IPv6 loopback then failed token audience validation, which broke MCP OAuth flows (Claude among them) against local instances. The issuer and every advertised OAuth endpoint now derive from the request's Host header when that host is allowlisted; an explicit `public_url` remains authoritative, and forwarded headers are never trusted for this.
+
+### Documentation, contributed and CI-enforced (PRs #6-#12 by [@mjc](https://github.com/mjc))
+
+- **Contracts are written down**: the REST API surface and the MCP tools' output shapes are now documented, and a sweep corrected reference drift between docs and code.
+- **Guides**: the web UI, upgrading, and repository layout each have one; connecting Codex is clarified; and the repo gains `SECURITY.md` and `CONTRIBUTING.md`.
+- **CI keeps it honest**: a new docs check fails the build when documented commands, routes, or tool names and counts drift from what the code actually ships.
+
+### Web UI
+
+- **Page identifiers are visible**: the page detail breadcrumb now ends with the identifier in mono (matching how issues render), and every list surface - the folder tree, Recent/Drafts/Archived, pinned cards - shows it too. Previously it only appeared in search results.
+
+### Ecosystem
+
+- MCP directory listings: a `glama.json` manifest and a Dockerfile for directory indexers, plus internal infrastructure hostnames scrubbed from the public tree.
+
 ## v2.2.1 (2026-07-15)
 
 The MCP tool surface gets smaller and cheaper: 27 tools (down from 29) at about 5.6k tokens of schema (down from 6.4k), measured with tiktoken o200k_base against `tools/list` output.
