@@ -1269,6 +1269,7 @@
                         <p class="text-caption text-[var(--text-faint)] line-clamp-1 mt-0.5">{prev}</p>
                       {/if}
                       <div class="flex items-center gap-2 mt-1.5 text-micro text-[var(--text-faint)]">
+                        <span class="font-mono shrink-0">{page.identifier}</span><span>·</span>
                         {#if fName}<span class="truncate">{fName}</span><span>·</span>{/if}
                         <TimeAgo class="tabular-nums shrink-0" date={page.updated_at} />
                         {#if page.status !== "active"}
@@ -1493,10 +1494,12 @@
           <div class="flex-1 min-w-0">
             <div class="text-body-lg text-[var(--text)] truncate">{page.title}</div>
             <div class="flex items-center gap-2 mt-0.5 text-caption text-[var(--text-faint)]">
+              <span class="font-mono shrink-0">{page.identifier}</span>
               {#if containingFolder}
-                <span class="truncate">{containingFolder}</span>
                 <span>·</span>
+                <span class="truncate">{containingFolder}</span>
               {/if}
+              <span>·</span>
               <TimeAgo class="tabular-nums shrink-0" date={page.updated_at} />
             </div>
           </div>
@@ -1644,6 +1647,13 @@
         <div class="flex items-center gap-2">
           <span class="text-body-lg text-[var(--text)] truncate flex-1">
             {page.title}
+          </span>
+
+          <!-- Identifier (LIF-DOC-N) — the handle used for cross-references
+               and MCP tools; mirrors the search-result rows so it's visible
+               without searching. Hidden below sm where row width is scarce. -->
+          <span class="hidden sm:inline text-caption font-mono text-[var(--text-faint)] shrink-0">
+            {page.identifier}
           </span>
 
           <!-- LIF-105: label chips. Up to 2 then a "+N" overflow. -->

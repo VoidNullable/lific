@@ -299,11 +299,14 @@
     return false;
   }
 
-  // LIF-286: breadcrumb trail — PROJ › Pages › (Folder ›) Title. The folder
-  // segment appears only when the page is filed under one; its name is
+  // LIF-286: breadcrumb trail — PROJ › Pages › (Folder ›) LIF-DOC-N. The
+  // folder segment appears only when the page is filed under one; its name is
   // resolved from the folders fetched in loadPage. PageList has no per-folder
-  // route, so the folder crumb links to the flat pages list. The Title
-  // segment falls back to the identifier until the page loads.
+  // route, so the folder crumb links to the flat pages list. The trail ends
+  // with the page identifier in mono, matching IssueDetail's convention: the
+  // title already reads as the document heading directly below, while the
+  // identifier (the handle used in MCP tools, exports, and cross-references)
+  // otherwise never surfaced in the shell.
   let breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
     const crumbs: import("../lib/Breadcrumbs.svelte").Crumb[] = [
       { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
@@ -313,7 +316,7 @@
       const name = folders.find((f) => f.id === page!.folder_id)?.name;
       if (name) crumbs.push({ label: name, href: `#/${projectIdentifier}/pages` });
     }
-    crumbs.push({ label: page?.title || page?.identifier || "Page" });
+    crumbs.push({ label: page?.identifier || "Page", mono: true });
     return crumbs;
   });
 
