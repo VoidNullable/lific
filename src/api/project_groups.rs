@@ -6,6 +6,10 @@
 //! body names a project id, so it takes the normal Viewer gate. Without that,
 //! a user could file a project they can't see into a group and learn the id
 //! exists.
+//!
+//! The `ProjectGroupsChanged` events below are addressed to the owning user,
+//! which in this codebase still means admins receive them — see that
+//! variant's doc comment for what that does and doesn't expose.
 
 use axum::{
     Extension,

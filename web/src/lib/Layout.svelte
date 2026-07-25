@@ -920,45 +920,49 @@
             {/if}
         {/snippet}
 
-        <!-- Groups render above the ungrouped list. The guard covers groups
-             too: without it an instance with no projects offers no way to
-             create a group, and a group whose last project left would vanish
-             instead of staying around to be renamed or deleted. -->
+        <!-- The header renders unconditionally: it carries the only affordance
+             for creating a group, so gating it on having projects would make
+             the first group unreachable on a brand-new instance. -->
+        <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
+          <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
+            Projects
+          </span>
+          <button
+            class="size-5 flex items-center justify-center rounded
+                   text-[var(--text-faint)] hover:text-[var(--accent)]
+                   hover:bg-[var(--bg-subtle)] transition-colors"
+            title="New project or group"
+            onclick={openCreateMenu}
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+
+        <!-- Outside the guard below for the same reason as the header: on an
+             empty instance this input is the whole first-group flow. -->
+        {#snippet groupNameInput()}
+          <input
+            class="w-full h-7 px-2 mb-0.5 rounded-md text-body-sm bg-[var(--bg)]
+                   border border-[var(--border)] text-[var(--text)]"
+            placeholder="Group name"
+            bind:value={draftGroupName}
+            onblur={commitGroupName}
+            onkeydown={(e) => {
+              if (e.key === "Enter") commitGroupName();
+              if (e.key === "Escape") cancelGroupEdit();
+            }}
+            autofocus
+          />
+        {/snippet}
+
+        {#if editingGroupId === NEW_GROUP}
+          {@render groupNameInput()}
+        {/if}
+
+        <!-- Groups render above the ungrouped list. The guard covers groups as
+             well as projects so a group whose last project left stays around
+             to be renamed or deleted instead of vanishing. -->
         {#if projects.length > 0 || groups.length > 0}
-          <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
-            <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-              Projects
-            </span>
-            <button
-              class="size-5 flex items-center justify-center rounded
-                     text-[var(--text-faint)] hover:text-[var(--accent)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              title="New project or group"
-              onclick={openCreateMenu}
-            >
-              <Plus size={13} />
-            </button>
-          </div>
-
-          {#snippet groupNameInput()}
-            <input
-              class="w-full h-7 px-2 mb-0.5 rounded-md text-body-sm bg-[var(--bg)]
-                     border border-[var(--border)] text-[var(--text)]"
-              placeholder="Group name"
-              bind:value={draftGroupName}
-              onblur={commitGroupName}
-              onkeydown={(e) => {
-                if (e.key === "Enter") commitGroupName();
-                if (e.key === "Escape") cancelGroupEdit();
-              }}
-              autofocus
-            />
-          {/snippet}
-
-          {#if editingGroupId === NEW_GROUP}
-            {@render groupNameInput()}
-          {/if}
-
           {#each groups as group (group.id)}
             {@const collapsed = collapsedGroups.has(group.id)}
             {#if editingGroupId === group.id}
@@ -1018,15 +1022,23 @@
             </div>
           {/each}
           </div>
-        {:else}
+        {:else if editingGroupId !== NEW_GROUP}
           <div class="px-3 py-6">
             <p class="text-body-sm text-[var(--text-faint)] mb-2">No projects yet.</p>
-            <button
-              class="text-body-sm text-[var(--accent)] hover:underline"
-              onclick={() => navigate("/projects/new")}
-            >
-              Create a project
-            </button>
+            <div class="flex flex-col items-start gap-1">
+              <button
+                class="text-body-sm text-[var(--accent)] hover:underline"
+                onclick={() => navigate("/projects/new")}
+              >
+                Create a project
+              </button>
+              <button
+                class="text-body-sm text-[var(--accent)] hover:underline"
+                onclick={() => startCreatingGroup()}
+              >
+                Create a group
+              </button>
+            </div>
           </div>
         {/if}
       </nav>
