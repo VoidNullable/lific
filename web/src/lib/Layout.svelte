@@ -8,20 +8,23 @@
     listModules,
     listPages,
     listPlans,
+    listProjectGroups,
     type AuthUser,
     type Project,
+    type ProjectGroup,
     type Issue,
     type Module,
     type Page,
     type Plan,
   } from "./api";
+  import { loadCollapsedGroups, saveCollapsedGroups } from "./projectGroups";
   import ProjectIcon from "./ProjectIcon.svelte";
   import CommandPalette from "./CommandPalette.svelte";
   import ShortcutHelp from "./ShortcutHelp.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle, Folder } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
@@ -232,6 +235,28 @@
   let projects = $state<Project[]>([]);
   let loading = $state(true);
 
+  // ── Per-user sidebar project groups ────────────────────────
+  let groups = $state<ProjectGroup[]>([]);
+  let collapsedGroups = $state<Set<number>>(loadCollapsedGroups());
+
+  // Membership is the server's answer, so a project missing from every group
+  // is ungrouped by definition — there's no "ungrouped" row to keep in sync.
+  let groupedIds = $derived(new Set(groups.flatMap((g) => g.project_ids)));
+  let ungrouped = $derived(projects.filter((p) => !groupedIds.has(p.id)));
+
+  // `projects` is already in sidebar order, so filtering preserves it inside
+  // a group too.
+  function projectsIn(group: ProjectGroup): Project[] {
+    return projects.filter((p) => group.project_ids.includes(p.id));
+  }
+
+  function toggleGroup(id: number) {
+    const next = new Set(collapsedGroups);
+    if (!next.delete(id)) next.add(id);
+    collapsedGroups = next;
+    saveCollapsedGroups(next);
+  }
+
   // Load user once on mount
   $effect(() => {
     loadUser();
@@ -250,9 +275,12 @@
     startAutoRefresh({
       refresh: refreshProjects,
       isBusy: () => dragActive,
+      // `project_groups.changed` uses an underscore, so the `project.` prefix
+      // test below does not cover it — it needs its own clause.
       shouldRefresh: (event) =>
         event.type === "resync.required" ||
         event.type === "projects.reordered" ||
+        event.type === "project_groups.changed" ||
         event.type.startsWith("project."),
     }),
   );
@@ -276,9 +304,15 @@
     // route-change refresh landing mid-drag would corrupt the zone. The
     // finalize handler re-syncs from the server response once the drop settles.
     if (dragActive) return;
-    const res = await listProjects();
-    if (res.ok) {
-      projects = res.data;
+    const [projectsRes, groupsRes] = await Promise.all([
+      listProjects(),
+      listProjectGroups(),
+    ]);
+    if (projectsRes.ok) {
+      projects = projectsRes.data;
+    }
+    if (groupsRes.ok) {
+      groups = groupsRes.data;
     }
   }
 
@@ -593,45 +627,12 @@
           Home
         </button>
 
-        {#if projects.length > 0}
-          <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
-            <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
-              Projects
-            </span>
-            <button
-              class="size-5 flex items-center justify-center rounded
-                     text-[var(--text-faint)] hover:text-[var(--accent)]
-                     hover:bg-[var(--bg-subtle)] transition-colors"
-              title="New project"
-              onclick={() => navigate("/projects/new")}
-            >
-              <Plus size={13} />
-            </button>
-          </div>
-
-          <!-- LIF-233: drag-to-reorder zone. Each project is a SINGLE direct
-               child of the zone (pill + its sub-nav wrapped together), so
-               svelte-dnd-action's one-item-per-child model stays 1:1 — the
-               active project's expanded sub-nav must NOT become its own
-               draggable item. The header/+button above sit OUTSIDE the zone. -->
-          <div
-            use:dndzone={{
-              items: projects,
-              flipDurationMs: flipMs(),
-              type: "lific-projects",
-              dropTargetStyle: {},
-              dragDisabled: projects.length < 2,
-            }}
-            onconsider={handleProjectConsider}
-            onfinalize={handleProjectFinalize}
-          >
-          {#each projects as project (project.id)}
+        <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
+             the grouped lists and the ungrouped drag zone below, so a project
+             looks and behaves identically wherever it is filed. -->
+        {#snippet projectEntry(project: Project)}
             {@const isProjectActive = activeProject === project.identifier}
             {@const open = subnavOpen(project)}
-            <!-- One draggable item per project. animate:flip gives the reorder
-                 its slide; the wrapper holds both the pill and (when open)
-                 the sub-nav so they move as a unit. -->
-            <div animate:flip={{ duration: flipMs() }}>
             <!-- Project pill. Clicking the active project toggles its sub-nav
                  (the chevron is a real disclosure control); clicking any other
                  project navigates in and opens it. The chevron rotates with the
@@ -746,6 +747,79 @@
                 {@render subItem(`/${project.identifier}/insights`, "Insights", TrendingUp)}
               </div>
             {/if}
+        {/snippet}
+
+        <!-- Groups render above the ungrouped list. The guard covers groups
+             too: without it an instance with no projects offers no way to
+             create a group, and a group whose last project left would vanish
+             instead of staying around to be renamed or deleted. -->
+        {#if projects.length > 0 || groups.length > 0}
+          <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
+            <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
+              Projects
+            </span>
+            <button
+              class="size-5 flex items-center justify-center rounded
+                     text-[var(--text-faint)] hover:text-[var(--accent)]
+                     hover:bg-[var(--bg-subtle)] transition-colors"
+              title="New project"
+              onclick={() => navigate("/projects/new")}
+            >
+              <Plus size={13} />
+            </button>
+          </div>
+
+          {#each groups as group (group.id)}
+            {@const collapsed = collapsedGroups.has(group.id)}
+            <button
+              class="group w-full flex items-center gap-1.5 pl-1.5 pr-2 py-1.5 rounded-md
+                     text-left text-body-sm transition text-[var(--text-muted)]
+                     hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
+              aria-expanded={!collapsed}
+              onclick={() => toggleGroup(group.id)}
+            >
+              <ChevronRight
+                size={13}
+                class="shrink-0 transition-transform {collapsed ? '' : 'rotate-90'}
+                       text-[var(--text-faint)] group-hover:text-[var(--text-muted)]"
+              />
+              <Folder size={14} class="shrink-0 text-[var(--text-faint)]" />
+              <span class="truncate flex-1">{group.name}</span>
+            </button>
+            {#if !collapsed}
+              <!-- Same indent and guide line as a project's sub-nav, so the
+                   sidebar reads as one tree rather than two conventions. -->
+              <div class="ml-[1.125rem] pl-2.5 border-l border-[var(--border)]">
+                {#each projectsIn(group) as project (project.id)}
+                  {@render projectEntry(project)}
+                {/each}
+              </div>
+            {/if}
+          {/each}
+
+          <!-- LIF-233: drag-to-reorder zone, now holding only the ungrouped
+               projects. Each is a SINGLE direct child of the zone (pill + its
+               sub-nav wrapped together), so svelte-dnd-action's
+               one-item-per-child model stays 1:1 — the active project's
+               expanded sub-nav must NOT become its own draggable item. The
+               header/+button and the groups above sit OUTSIDE the zone. -->
+          <div
+            use:dndzone={{
+              items: ungrouped,
+              flipDurationMs: flipMs(),
+              type: "lific-projects",
+              dropTargetStyle: {},
+              dragDisabled: ungrouped.length < 2,
+            }}
+            onconsider={handleProjectConsider}
+            onfinalize={handleProjectFinalize}
+          >
+          {#each ungrouped as project (project.id)}
+            <!-- animate:flip gives the reorder its slide; the wrapper holds
+                 both the pill and (when open) the sub-nav so they move as a
+                 unit. -->
+            <div animate:flip={{ duration: flipMs() }}>
+              {@render projectEntry(project)}
             </div>
           {/each}
           </div>
