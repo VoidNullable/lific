@@ -239,6 +239,28 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("GET", "/api/projects/{id}"), Gated(Viewer)),
         (("PUT", "/api/projects/{id}"), Gated(Lead)),
         (("DELETE", "/api/projects/{id}"), Gated(ProjectDelete)),
+        // ── Sidebar project groups (per-user) ──
+        // CRUD is identity-scoped, not project-scoped: every query filters on
+        // the caller's user_id and an id belonging to someone else 404s, so
+        // there is no project role to gate on. `assign` is the exception —
+        // its body names a project, so it takes the Viewer gate.
+        (
+            ("GET", "/api/project-groups"),
+            Exempt("per-user groups; ownership enforced in the query layer by user_id"),
+        ),
+        (
+            ("POST", "/api/project-groups"),
+            Exempt("per-user groups; creates only for the caller"),
+        ),
+        (
+            ("PATCH", "/api/project-groups/{id}"),
+            Exempt("per-user groups; another user's id is NotFound, never Forbidden"),
+        ),
+        (
+            ("DELETE", "/api/project-groups/{id}"),
+            Exempt("per-user groups; another user's id is NotFound, never Forbidden"),
+        ),
+        (("PUT", "/api/project-groups/assign"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/board"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/issue-counts"), Gated(Viewer)),
         (("POST", "/api/projects/{id}/import/github"), Gated(Lead)),

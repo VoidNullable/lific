@@ -128,6 +128,11 @@ pub enum RealtimeEvent {
     ProjectDeleted { project_id: i64 },
     #[serde(rename = "projects.reordered")]
     ProjectsReordered,
+    /// Only ever delivered through `send_to_users`. Groups are per-user, so
+    /// broadcasting this would tell every connected client that someone
+    /// reorganized their own sidebar.
+    #[serde(rename = "project_groups.changed")]
+    ProjectGroupsChanged,
     #[serde(rename = "issue.created")]
     IssueCreated { project_id: i64, issue_id: i64 },
     #[serde(rename = "issue.updated")]
@@ -395,7 +400,7 @@ impl RealtimeEvent {
             | Self::IssueDeleted { project_id, .. }
             | Self::IssueLinked { project_id, .. }
             | Self::IssueUnlinked { project_id, .. } => Some(*project_id),
-            Self::ResyncRequired | Self::ProjectsReordered => None,
+            Self::ResyncRequired | Self::ProjectsReordered | Self::ProjectGroupsChanged => None,
         }
     }
 }

@@ -8,6 +8,7 @@ mod issues;
 mod members;
 mod pages;
 mod plans;
+mod project_groups;
 mod projects;
 mod resources;
 mod views;
@@ -103,6 +104,21 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             get(projects::get_project)
                 .put(projects::update_project)
                 .delete(projects::delete_project_handler),
+        )
+        // Per-user sidebar project groups. Identity-scoped, no project role
+        // for CRUD — see src/api/project_groups.rs's doc comment. `assign`
+        // sits before `{id}` for the same reason as `projects/reorder`.
+        .route(
+            "/api/project-groups",
+            get(project_groups::list_groups).post(project_groups::create_group),
+        )
+        .route(
+            "/api/project-groups/assign",
+            put(project_groups::assign_project),
+        )
+        .route(
+            "/api/project-groups/{id}",
+            patch(project_groups::update_group).delete(project_groups::delete_group),
         )
         // Issues
         .route(
