@@ -244,6 +244,11 @@
   let groupedIds = $derived(new Set(groups.flatMap((g) => g.project_ids)));
   let ungrouped = $derived(projects.filter((p) => !groupedIds.has(p.id)));
 
+  // `ungrouped` is derived, so svelte-dnd-action can't own it during a drag.
+  // The in-flight order lives here and wins while the drag is live.
+  let ungroupedDuringDrag = $state<Project[] | null>(null);
+  let ungroupedItems = $derived(ungroupedDuringDrag ?? ungrouped);
+
   // `projects` is already in sidebar order, so filtering preserves it inside
   // a group too.
   function projectsIn(group: ProjectGroup): Project[] {
@@ -330,13 +335,12 @@
 
   function handleProjectConsider(e: CustomEvent<DndEvent<Project>>) {
     dragActive = true;
-    projects = e.detail.items;
+    ungroupedDuringDrag = e.detail.items;
   }
 
   async function handleProjectFinalize(e: CustomEvent<DndEvent<Project>>) {
-    projects = e.detail.items;
-    const ids = projects.map((p) => p.id);
-    const res = await reorderProjects(ids);
+    ungroupedDuringDrag = e.detail.items;
+    const res = await reorderProjects(reorderPayload(e.detail));
     if (res.ok) {
       projects = res.data;
     } else {
@@ -344,7 +348,43 @@
       const fresh = await listProjects();
       if (fresh.ok) projects = fresh.data;
     }
+    ungroupedDuringDrag = null;
     dragActive = false;
+  }
+
+  // sort_order is a single global column, but groups are per-user. So the
+  // payload must never be derived from the sidebar's grouped layout: doing
+  // that would write this user's private grouping into an order every other
+  // user reads. Sending only the dragged zone's ids is no better — the server
+  // reindexes them to 0..N and collides with the ranks held by grouped
+  // projects. Instead, take the canonical order the server last returned and
+  // move exactly one project within it: the one that was dragged. The result
+  // is always a permutation of the canonical list with a single element
+  // relocated, which carries no grouping information at all.
+  function reorderPayload(detail: DndEvent<Project>): number[] {
+    const movedId = Number(detail.info.id);
+    const moved = projects.find((p) => p.id === movedId);
+    if (!moved) return projects.map((p) => p.id);
+
+    const items = detail.items;
+    const pos = items.findIndex((p) => p.id === movedId);
+    const after = items[pos + 1];
+    const before = items[pos - 1];
+
+    const rest = projects.filter((p) => p.id !== movedId);
+    // Anchor to whichever ungrouped neighbour the drop landed against; with
+    // no neighbour on either side the zone held only this project, so its
+    // position relative to everything else is unchanged.
+    let at: number;
+    if (after) {
+      at = rest.findIndex((p) => p.id === after.id);
+    } else if (before) {
+      at = rest.findIndex((p) => p.id === before.id) + 1;
+    } else {
+      at = rest.length;
+    }
+    rest.splice(at, 0, moved);
+    return rest.map((p) => p.id);
   }
 
   function initials(name: string): string {
@@ -805,16 +845,16 @@
                header/+button and the groups above sit OUTSIDE the zone. -->
           <div
             use:dndzone={{
-              items: ungrouped,
+              items: ungroupedItems,
               flipDurationMs: flipMs(),
               type: "lific-projects",
               dropTargetStyle: {},
-              dragDisabled: ungrouped.length < 2,
+              dragDisabled: ungroupedItems.length < 2,
             }}
             onconsider={handleProjectConsider}
             onfinalize={handleProjectFinalize}
           >
-          {#each ungrouped as project (project.id)}
+          {#each ungroupedItems as project (project.id)}
             <!-- animate:flip gives the reorder its slide; the wrapper holds
                  both the pill and (when open) the sub-nav so they move as a
                  unit. -->
