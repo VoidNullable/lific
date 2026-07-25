@@ -6,6 +6,7 @@ mod issues;
 pub(crate) mod members;
 mod pages;
 pub(crate) mod plans;
+pub(crate) mod project_groups;
 mod projects;
 mod resources;
 mod search;
