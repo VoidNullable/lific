@@ -9,6 +9,10 @@
     listPages,
     listPlans,
     listProjectGroups,
+    createProjectGroup,
+    renameProjectGroup,
+    deleteProjectGroup,
+    assignProjectGroup,
     type AuthUser,
     type Project,
     type ProjectGroup,
@@ -24,11 +28,12 @@
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle, Folder } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2 } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
-  import { contextMenuState } from "./contextMenuState.svelte";
+  import { contextMenuState, openContextMenu } from "./contextMenuState.svelte";
+  import { toast } from "./toast/toast.svelte";
   import ContextMenu from "./ContextMenu.svelte"; // LIF-248
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { toggleShortcutHelp } from "./shortcutHelpState.svelte";
@@ -260,6 +265,131 @@
     if (!next.delete(id)) next.add(id);
     collapsedGroups = next;
     saveCollapsedGroups(next);
+  }
+
+  // ── Managing groups ────────────────────────────────────────
+  // The id being renamed, or NEW_GROUP while creating one.
+  const NEW_GROUP = -1;
+  let editingGroupId = $state<number | null>(null);
+  let draftGroupName = $state("");
+  // Set when "New group…" came from a project's menu: the project to file
+  // into the group as soon as it exists.
+  let pendingGroupProjectId = $state<number | null>(null);
+
+  function openProjectMenu(e: MouseEvent, project: Project) {
+    e.preventDefault();
+    e.stopPropagation();
+    const current = groups.find((g) => g.project_ids.includes(project.id));
+    openContextMenu(e.clientX, e.clientY, [
+      ...groups
+        .filter((g) => g.id !== current?.id)
+        .map((g) => ({
+          label: `Move to ${g.name}`,
+          icon: Folder,
+          action: () => void assignProject(project.id, g.id),
+        })),
+      ...(current
+        ? [
+            {
+              label: "Remove from group",
+              icon: FolderMinus,
+              action: () => void assignProject(project.id, null),
+            },
+          ]
+        : []),
+      {
+        label: "New group…",
+        icon: FolderPlus,
+        action: () => startCreatingGroup(project.id),
+      },
+    ]);
+  }
+
+  function openGroupMenu(e: MouseEvent, group: ProjectGroup) {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu(e.clientX, e.clientY, [
+      { label: "Rename", icon: Pencil, action: () => startRenamingGroup(group) },
+      { label: "Delete group", icon: Trash2, action: () => void removeGroup(group) },
+    ]);
+  }
+
+  function openCreateMenu(e: MouseEvent) {
+    // Without this the click keeps bubbling to ContextMenu's window listener,
+    // which closes the menu this very call just opened.
+    e.stopPropagation();
+    // Anchored to the button's own box, not the cursor, so the menu lines up
+    // under the + rather than wherever the pointer happened to be.
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    openContextMenu(rect.left, rect.bottom, [
+      { label: "New project", icon: Plus, action: () => navigate("/projects/new") },
+      { label: "New group", icon: FolderPlus, action: () => startCreatingGroup() },
+    ]);
+  }
+
+  function startRenamingGroup(group: ProjectGroup) {
+    editingGroupId = group.id;
+    draftGroupName = group.name;
+  }
+
+  function startCreatingGroup(projectId: number | null = null) {
+    editingGroupId = NEW_GROUP;
+    draftGroupName = "";
+    pendingGroupProjectId = projectId;
+  }
+
+  function cancelGroupEdit() {
+    editingGroupId = null;
+    pendingGroupProjectId = null;
+  }
+
+  async function assignProject(projectId: number, groupId: number | null) {
+    const res = await assignProjectGroup(projectId, groupId);
+    if (res.ok) {
+      await refreshProjects();
+    } else {
+      toast(res.error, { kind: "error" });
+    }
+  }
+
+  async function commitGroupName() {
+    const name = draftGroupName.trim();
+    const editing = editingGroupId;
+    const pending = pendingGroupProjectId;
+    cancelGroupEdit();
+    if (!name || editing === null) return;
+
+    const res =
+      editing === NEW_GROUP
+        ? await createProjectGroup(name)
+        : await renameProjectGroup(editing, name);
+    if (!res.ok) {
+      toast(res.error, { kind: "error" });
+      return;
+    }
+    // The group exists now even if the follow-up assignment fails, so report
+    // that separately: the user's next move is to file the project by hand,
+    // not to create the group again.
+    if (editing === NEW_GROUP && pending !== null) {
+      const assigned = await assignProjectGroup(pending, res.data.id);
+      if (!assigned.ok) {
+        toast(`Group created, but the project wasn't moved into it: ${assigned.error}`, {
+          kind: "error",
+        });
+      }
+    }
+    await refreshProjects();
+  }
+
+  // Deleting a group never touches the projects inside it — they reappear in
+  // the ungrouped list below, so there is nothing to confirm.
+  async function removeGroup(group: ProjectGroup) {
+    const res = await deleteProjectGroup(group.id);
+    if (res.ok) {
+      await refreshProjects();
+    } else {
+      toast(res.error, { kind: "error" });
+    }
   }
 
   // Load user once on mount
@@ -686,6 +816,7 @@
                 : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
               aria-expanded={drawerOpen || isProjectActive ? open : undefined}
               onclick={() => onProjectClick(project)}
+              oncontextmenu={(e) => openProjectMenu(e, project)}
             >
               <ChevronRight
                 size={13}
@@ -802,21 +933,44 @@
               class="size-5 flex items-center justify-center rounded
                      text-[var(--text-faint)] hover:text-[var(--accent)]
                      hover:bg-[var(--bg-subtle)] transition-colors"
-              title="New project"
-              onclick={() => navigate("/projects/new")}
+              title="New project or group"
+              onclick={openCreateMenu}
             >
               <Plus size={13} />
             </button>
           </div>
 
+          {#snippet groupNameInput()}
+            <input
+              class="w-full h-7 px-2 mb-0.5 rounded-md text-body-sm bg-[var(--bg)]
+                     border border-[var(--border)] text-[var(--text)]"
+              placeholder="Group name"
+              bind:value={draftGroupName}
+              onblur={commitGroupName}
+              onkeydown={(e) => {
+                if (e.key === "Enter") commitGroupName();
+                if (e.key === "Escape") cancelGroupEdit();
+              }}
+              autofocus
+            />
+          {/snippet}
+
+          {#if editingGroupId === NEW_GROUP}
+            {@render groupNameInput()}
+          {/if}
+
           {#each groups as group (group.id)}
             {@const collapsed = collapsedGroups.has(group.id)}
+            {#if editingGroupId === group.id}
+              {@render groupNameInput()}
+            {:else}
             <button
               class="group w-full flex items-center gap-1.5 pl-1.5 pr-2 py-1.5 rounded-md
                      text-left text-body-sm transition text-[var(--text-muted)]
                      hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
               aria-expanded={!collapsed}
               onclick={() => toggleGroup(group.id)}
+              oncontextmenu={(e) => openGroupMenu(e, group)}
             >
               <ChevronRight
                 size={13}
@@ -826,6 +980,7 @@
               <Folder size={14} class="shrink-0 text-[var(--text-faint)]" />
               <span class="truncate flex-1">{group.name}</span>
             </button>
+            {/if}
             {#if !collapsed}
               <!-- Same indent and guide line as a project's sub-nav, so the
                    sidebar reads as one tree rather than two conventions. -->
