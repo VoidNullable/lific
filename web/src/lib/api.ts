@@ -456,6 +456,51 @@ export async function deleteProject(id: number) {
   });
 }
 
+/** A user's sidebar project group. `project_ids` carries only projects the
+ *  caller can see — the server drops memberships pointing at projects whose
+ *  access was revoked, so a group never renders an entry that 403s on click. */
+export interface ProjectGroup {
+  id: number;
+  user_id: number;
+  name: string;
+  sort_order: number;
+  project_ids: number[];
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listProjectGroups() {
+  return request<ProjectGroup[]>("/project-groups");
+}
+
+export async function createProjectGroup(name: string) {
+  return request<ProjectGroup>("/project-groups", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function renameProjectGroup(id: number, name: string) {
+  return request<ProjectGroup>(`/project-groups/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteProjectGroup(id: number) {
+  return request<{ deleted: boolean }>(`/project-groups/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/** Move a project into a group, or out of every group with `groupId: null`. */
+export async function assignProjectGroup(projectId: number, groupId: number | null) {
+  return request<{ ok: boolean }>("/project-groups/assign", {
+    method: "PUT",
+    body: JSON.stringify({ project_id: projectId, group_id: groupId }),
+  });
+}
+
 export async function downloadProjectExport(identifier: string) {
   return download(`/export/projects/${identifier}`);
 }
