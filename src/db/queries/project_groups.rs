@@ -109,6 +109,64 @@ pub fn create_group(
     get_owned_group(conn, conn.last_insert_rowid(), user_id)
 }
 
+/// Rename a group. Ownership is re-checked here, so callers may pass an id
+/// straight from a request body.
+pub fn update_group(
+    conn: &Connection,
+    id: i64,
+    user_id: i64,
+    input: &UpdateProjectGroup,
+) -> Result<ProjectGroup, LificError> {
+    get_owned_group(conn, id, user_id)?;
+    if let Some(name) = &input.name {
+        validate_name(name)?;
+        let name = name.trim();
+        conn.execute(
+            "UPDATE project_groups SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![name, id],
+        )
+        .map_err(constraint_err(name))?;
+    }
+    get_owned_group(conn, id, user_id)
+}
+
+/// Delete a group. Its memberships go with it through `ON DELETE CASCADE`;
+/// the projects themselves are untouched and become ungrouped.
+pub fn delete_group(conn: &Connection, id: i64, user_id: i64) -> Result<bool, LificError> {
+    get_owned_group(conn, id, user_id)?;
+    let changed = conn.execute("DELETE FROM project_groups WHERE id = ?1", params![id])?;
+    Ok(changed > 0)
+}
+
+/// Move `project_id` into `group_id`, or out of every one of the caller's
+/// groups when `group_id` is `None`. Both halves run in one SAVEPOINT, which
+/// is what keeps a project from ever sitting in two of the same user's groups.
+pub fn assign_project(
+    conn: &Connection,
+    user_id: i64,
+    project_id: i64,
+    group_id: Option<i64>,
+) -> Result<(), LificError> {
+    let target = group_id
+        .map(|id| get_owned_group(conn, id, user_id))
+        .transpose()?;
+    super::savepoint(conn, "assign_project_group", || {
+        conn.execute(
+            "DELETE FROM project_group_items
+             WHERE project_id = ?1
+               AND group_id IN (SELECT id FROM project_groups WHERE user_id = ?2)",
+            params![project_id, user_id],
+        )?;
+        if let Some(group) = &target {
+            conn.execute(
+                "INSERT INTO project_group_items (group_id, project_id) VALUES (?1, ?2)",
+                params![group.id, project_id],
+            )?;
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +187,21 @@ mod tests {
                 display_name: None,
                 is_admin: false,
                 is_bot: false,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn seed_project(conn: &Connection, ident: &str) -> i64 {
+        queries::create_project(
+            conn,
+            &crate::db::models::CreateProject {
+                name: format!("Project {ident}"),
+                identifier: ident.into(),
+                description: String::new(),
+                emoji: None,
+                lead_user_id: None,
             },
         )
         .unwrap()
@@ -189,5 +262,194 @@ mod tests {
         let err =
             create_group(&conn, alice, &CreateProjectGroup { name: "   ".into() }).unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
+    }
+
+    // ── assignment ──────────────────────────────────────────────
+
+    #[test]
+    fn assigning_a_project_twice_moves_it_instead_of_duplicating_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let project = seed_project(&conn, "APP");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let personal =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Personal".into() }).unwrap();
+
+        assign_project(&conn, alice, project, Some(work.id)).unwrap();
+        assign_project(&conn, alice, project, Some(personal.id)).unwrap();
+
+        let groups = list_groups(&conn, alice).unwrap();
+        let work_now = groups.iter().find(|g| g.id == work.id).unwrap();
+        let personal_now = groups.iter().find(|g| g.id == personal.id).unwrap();
+        assert!(
+            work_now.project_ids.is_empty(),
+            "project should have moved out of Work"
+        );
+        assert_eq!(personal_now.project_ids, vec![project]);
+    }
+
+    #[test]
+    fn assigning_none_ungroups_the_project() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let project = seed_project(&conn, "APP");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+
+        assign_project(&conn, alice, project, Some(work.id)).unwrap();
+        assign_project(&conn, alice, project, None).unwrap();
+
+        let groups = list_groups(&conn, alice).unwrap();
+        assert!(groups[0].project_ids.is_empty());
+    }
+
+    #[test]
+    fn two_users_may_file_the_same_project_differently() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let bob = seed_user(&conn, "bob");
+        let project = seed_project(&conn, "APP");
+        let alice_work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let bob_side =
+            create_group(&conn, bob, &CreateProjectGroup { name: "Side".into() }).unwrap();
+
+        assign_project(&conn, alice, project, Some(alice_work.id)).unwrap();
+        assign_project(&conn, bob, project, Some(bob_side.id)).unwrap();
+
+        assert_eq!(
+            list_groups(&conn, alice).unwrap()[0].project_ids,
+            vec![project]
+        );
+        assert_eq!(
+            list_groups(&conn, bob).unwrap()[0].project_ids,
+            vec![project]
+        );
+    }
+
+    #[test]
+    fn assigning_into_another_users_group_is_not_found() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let bob = seed_user(&conn, "bob");
+        let project = seed_project(&conn, "APP");
+        let alice_work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+
+        let err = assign_project(&conn, bob, project, Some(alice_work.id)).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
+    }
+
+    // ── delete and cascades ─────────────────────────────────────
+
+    #[test]
+    fn deleting_a_group_leaves_its_projects_intact_and_ungrouped() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let project = seed_project(&conn, "APP");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        assign_project(&conn, alice, project, Some(work.id)).unwrap();
+
+        assert!(delete_group(&conn, work.id, alice).unwrap());
+
+        assert!(list_groups(&conn, alice).unwrap().is_empty());
+        queries::get_project(&conn, project).expect("project must survive its group");
+    }
+
+    #[test]
+    fn deleting_another_users_group_is_not_found() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let bob = seed_user(&conn, "bob");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+
+        let err = delete_group(&conn, work.id, bob).unwrap_err();
+        assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn deleting_a_project_drops_its_memberships() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let project = seed_project(&conn, "APP");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        assign_project(&conn, alice, project, Some(work.id)).unwrap();
+
+        queries::delete_project(&conn, project).unwrap();
+
+        assert!(list_groups(&conn, alice).unwrap()[0].project_ids.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_user_cascades_their_groups_away() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+
+        conn.execute("DELETE FROM users WHERE id = ?1", params![alice])
+            .unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    // ── rename ──────────────────────────────────────────────────
+
+    #[test]
+    fn renaming_onto_an_existing_name_conflicts() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let personal =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Personal".into() }).unwrap();
+
+        let err = update_group(
+            &conn,
+            personal.id,
+            alice,
+            &UpdateProjectGroup {
+                name: Some("Work".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn renaming_keeps_the_groups_membership() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let project = seed_project(&conn, "APP");
+        let work =
+            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        assign_project(&conn, alice, project, Some(work.id)).unwrap();
+
+        let renamed = update_group(
+            &conn,
+            work.id,
+            alice,
+            &UpdateProjectGroup {
+                name: Some("Day job".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.name, "Day job");
+        assert_eq!(list_groups(&conn, alice).unwrap()[0].project_ids, vec![project]);
     }
 }
