@@ -254,4 +254,94 @@ mod tests {
         let groups = parse_json(resp).await;
         assert_eq!(groups[0]["project_ids"][0].as_i64().unwrap(), project_id);
     }
+
+    #[tokio::test]
+    async fn deleting_another_users_group_is_not_found_and_leaves_it_intact() {
+        let (db, _admin, _lead, _maintainer, viewer, non_member, _project_id) =
+            setup_membership_test();
+        let owner_app = app_as_user(db.clone(), &viewer);
+        let other_app = app_as_user(db, &non_member);
+
+        let created = parse_json(
+            json_post(
+                &owner_app,
+                "/api/project-groups",
+                serde_json::json!({ "name": "Work" }),
+            )
+            .await,
+        )
+        .await;
+        let group_id = created["id"].as_i64().unwrap();
+
+        let resp = json_delete(&other_app, &format!("/api/project-groups/{group_id}")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // 404 has to mean "left alone", not "deleted but reported as missing":
+        // delete_group runs get_owned_group first, and this is what proves the
+        // ownership check gates the DELETE rather than merely shaping its
+        // response.
+        let resp = json_get(&owner_app, "/api/project-groups").await;
+        let groups = parse_json(resp).await;
+        assert_eq!(groups.as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["id"].as_i64().unwrap(), group_id);
+    }
+
+    #[tokio::test]
+    async fn revoking_access_drops_the_project_from_the_group_listing() {
+        let (db, _admin, _lead, _maintainer, viewer, _non_member, project_id) =
+            setup_membership_test();
+        let app = app_as_user(db.clone(), &viewer);
+
+        let created = parse_json(
+            json_post(
+                &app,
+                "/api/project-groups",
+                serde_json::json!({ "name": "Work" }),
+            )
+            .await,
+        )
+        .await;
+        let group_id = created["id"].as_i64().unwrap();
+
+        let resp = json_put(
+            &app,
+            "/api/project-groups/assign",
+            serde_json::json!({ "project_id": project_id, "group_id": group_id }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The membership row outlives the caller's access to the project.
+        // list_groups intersects project_ids against visible_project_ids so the
+        // sidebar never renders an entry that 403s the moment it is clicked.
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::remove_member(&conn, project_id, viewer.id).unwrap();
+        }
+
+        let resp = json_get(&app, "/api/project-groups").await;
+        let groups = parse_json(resp).await;
+        assert_eq!(groups.as_array().unwrap().len(), 1, "the group itself stays");
+        assert!(
+            groups[0]["project_ids"].as_array().unwrap().is_empty(),
+            "a project the caller can no longer see must not be listed"
+        );
+
+        // Filtered from the response, not deleted: restoring access brings it
+        // back without the user having to file the project again.
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::upsert_member(
+                &conn,
+                project_id,
+                viewer.id,
+                crate::db::models::Role::Viewer,
+            )
+            .unwrap();
+        }
+
+        let resp = json_get(&app, "/api/project-groups").await;
+        let groups = parse_json(resp).await;
+        assert_eq!(groups[0]["project_ids"][0].as_i64().unwrap(), project_id);
+    }
 }
