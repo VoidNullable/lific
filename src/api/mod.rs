@@ -956,6 +956,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn presented_invalid_api_key_returns_401() {
+        use api_keys_simplified::{Environment, ExposeSecret, SecureString};
+
+        let db = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().expect("key manager");
+        let valid_key = crate::auth::create_api_key(&db, &manager, "valid-test-key")
+            .expect("create valid key");
+        let invalid_key = manager
+            .generate(Environment::production())
+            .expect("generate mismatched key")
+            .key()
+            .expose_secret()
+            .to_string();
+        let invalid_key_id = manager.extract_key_id(&SecureString::from(invalid_key.clone()));
+        // Generated before `manager` moves into AuthState below.
+        let never_issued = manager
+            .generate(Environment::production())
+            .expect("generate never-issued key")
+            .key()
+            .expose_secret()
+            .to_string();
+        let app = crate::api::router(db.clone(), &[])
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+            .layer(axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
+            .layer(axum::middleware::from_fn_with_state(
+                crate::auth::AuthState {
+                    db: db.clone(),
+                    manager,
+                    public_url: "https://example.com".into(),
+                    required: true,
+                },
+                crate::auth::require_api_key,
+            ));
+
+        // Control. Without this the two 401 assertions below could both pass
+        // for an unrelated reason (misbuilt router, wrong route) and the test
+        // would prove nothing.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .header("authorization", format!("Bearer {valid_key}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the valid key must authenticate, otherwise the 401s below are vacuous"
+        );
+
+        {
+            // Keep checksum validation and the indexed lookup valid so the
+            // middleware reaches its stored-hash comparison branch. This is a
+            // state that cannot arise naturally; it exists only to reach that
+            // branch.
+            let conn = db.write().expect("test db write lock");
+            conn.execute(
+                "UPDATE api_keys SET key_id = ?1 WHERE name = 'valid-test-key'",
+                rusqlite::params![invalid_key_id],
+            )
+            .expect("point lookup at the mismatched key");
+        }
+
+        // Deepest branch: checksum valid and key_id resolves to a row, but the
+        // stored hash does not match. Guards the comparison itself, which a
+        // never-issued key cannot reach because it fails at lookup first.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .header("authorization", format!("Bearer {invalid_key}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // The realistic case: a well-formed key that was simply never issued.
+        // Fails at the key_id lookup rather than the hash comparison, so it
+        // covers a different branch than the assertion above.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .header("authorization", format!("Bearer {never_issued}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn issue_crud_round_trip_over_http() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+
+        let created = json_post(
+            &app,
+            "/api/issues",
+            serde_json::json!({
+                "project_id": project_id,
+                "title": "Created through HTTP"
+            }),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = parse_json(created).await;
+        assert_eq!(created["identifier"], "TST-1");
+        let issue_id = created["id"].as_i64().expect("created issue id");
+
+        let read = json_get(&app, &format!("/api/issues/{issue_id}")).await;
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(parse_json(read).await["title"], "Created through HTTP");
+
+        let updated = json_put(
+            &app,
+            &format!("/api/issues/{issue_id}"),
+            serde_json::json!({ "title": "Updated through HTTP" }),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(parse_json(updated).await["title"], "Updated through HTTP");
+
+        let deleted = json_delete(&app, &format!("/api/issues/{issue_id}")).await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        assert_eq!(parse_json(deleted).await["deleted"], true);
+
+        let missing = json_get(&app, &format!("/api/issues/{issue_id}")).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn search_returns_results() {
         let app = test_app();
         let (project_id, _) = seed_project(&app).await;

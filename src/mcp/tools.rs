@@ -3185,6 +3185,87 @@ mod tests {
         )
     }
 
+    #[test]
+    fn project_resolver_matches_exact_identifiers_only() {
+        let m = mcp();
+        seed_project(&m, "Resolver Project", "RSL");
+
+        assert!(resolve_project(&m.db, "RSL").expect("exact identifier should resolve") > 0);
+
+        for identifier in ["rsl", "RS", "MISSING"] {
+            let error =
+                resolve_project(&m.db, identifier).expect_err("identifier should not resolve");
+            assert!(
+                error.contains(&format!("project '{identifier}' not found")),
+                "got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_resolver_matches_names_case_insensitively_without_substrings() {
+        let m = mcp();
+        seed_project(&m, "Resolver Project", "MOD");
+        let project_id = resolve_project(&m.db, "MOD").expect("project should resolve");
+        let created = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("MOD".into()),
+            name: Some("Backend".into()),
+            ..Default::default()
+        }));
+        assert!(created.starts_with("Created module"), "got: {created}");
+
+        let exact =
+            resolve_module(&m.db, project_id, "Backend").expect("exact name should resolve");
+        assert_eq!(
+            resolve_module(&m.db, project_id, "backend")
+                .expect("case-insensitive name should resolve"),
+            exact
+        );
+
+        for name in ["Back", "Missing"] {
+            let error =
+                resolve_module(&m.db, project_id, name).expect_err("name should not resolve");
+            assert!(
+                error.contains(&format!("module '{name}' not found in project")),
+                "got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_resolver_matches_names_case_insensitively_without_substrings() {
+        let m = mcp();
+        seed_project(&m, "Resolver Project", "FLD");
+        let project_id = resolve_project(&m.db, "FLD").expect("project should resolve");
+        let created = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "folder".into(),
+            action: "create".into(),
+            project: Some("FLD".into()),
+            name: Some("Documentation".into()),
+            ..Default::default()
+        }));
+        assert!(created.starts_with("Created folder"), "got: {created}");
+
+        let exact =
+            resolve_folder(&m.db, project_id, "Documentation").expect("exact name should resolve");
+        assert_eq!(
+            resolve_folder(&m.db, project_id, "documentation")
+                .expect("case-insensitive name should resolve"),
+            exact
+        );
+
+        for name in ["Document", "Missing"] {
+            let error =
+                resolve_folder(&m.db, project_id, name).expect_err("name should not resolve");
+            assert!(
+                error.contains(&format!("folder '{name}' not found in project")),
+                "got: {error}"
+            );
+        }
+    }
+
     // ── manage_resource ──
 
     #[test]
@@ -4270,6 +4351,44 @@ mod tests {
         }));
         assert!(result.contains("1 results"), "got: {result}");
         assert!(result.contains("searchterm"), "got: {result}");
+    }
+
+    #[test]
+    fn search_formats_issue_page_and_comment_results_distinctly() {
+        let m = mcp();
+        let _guard = seed_user(&m);
+        seed_project(&m, "Formatting", "FMT");
+        seed_issue(&m, "FMT", "Issue mixedformatneedle");
+        let page = m.create_page(Parameters(CreatePageInput {
+            project: Some("FMT".into()),
+            title: "Page mixedformatneedle".into(),
+            content: None,
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+        assert!(page.starts_with("Created FMT-DOC-1"), "got: {page}");
+        let comment = m.add_comment(Parameters(AddCommentInput {
+            identifier: "FMT-1".into(),
+            content: "Comment mixedformatneedle".into(),
+        }));
+        assert!(comment.starts_with("Comment #"), "got: {comment}");
+
+        let result = m.search(Parameters(SearchInput {
+            query: "mixedformatneedle".into(),
+            ..Default::default()
+        }));
+
+        assert!(result.starts_with("3 results:\n"), "got: {result}");
+        assert!(
+            result.contains("- [issue] FMT-1 Issue mixedformatneedle "),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("- [page] FMT-DOC-1 Page mixedformatneedle "),
+            "got: {result}"
+        );
+        assert!(result.contains("- [comment] on FMT-1 "), "got: {result}");
     }
 
     // LIF-304: literal mode surfaces punctuation-heavy needles FTS tokenizes
