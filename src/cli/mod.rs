@@ -1270,14 +1270,24 @@ mod tests {
         assert_eq!(cli.api_key.as_deref(), Some("key-123"));
     }
 
+    /// Value clap's `env` fallback will supply for `var` when the matching
+    /// flag is absent. Tests that assert "this flag was not passed" must
+    /// compare against this rather than `None`: `--url` and `--api-key` are
+    /// declared with `env = "LIFIC_URL"` / `env = "LIFIC_API_KEY"`, so a
+    /// developer with either exported (normal, it is how you talk to a real
+    /// instance) would otherwise fail the suite on an unmodified checkout.
+    fn env_fallback(var: &str) -> Option<String> {
+        std::env::var(var).ok()
+    }
+
     #[test]
     fn defaults_to_sql_backend_without_remote_options() {
         let cli = Cli::try_parse_from(["lific", "project", "list"])
             .expect("default backend options should parse");
 
         assert_eq!(cli.backend, BackendKind::Sql);
-        assert!(cli.url.is_none());
-        assert!(cli.api_key.is_none());
+        assert_eq!(cli.url, env_fallback("LIFIC_URL"));
+        assert_eq!(cli.api_key, env_fallback("LIFIC_API_KEY"));
     }
 
     #[test]
@@ -1460,7 +1470,7 @@ mod tests {
         let cli = Cli::try_parse_from(["lific", "doctor"]).unwrap();
         match cli.command {
             Command::Doctor { key } => {
-                assert_eq!(key, std::env::var("LIFIC_API_KEY").ok());
+                assert_eq!(key, env_fallback("LIFIC_API_KEY"));
             }
             _ => panic!("expected Doctor"),
         }
@@ -1479,7 +1489,10 @@ mod tests {
                 label,
                 no_store,
             } => {
-                assert!(url.is_none());
+                // Global `--url` is declared with `env = "LIFIC_URL"` and
+                // shares its long name with this subcommand's own `--url`,
+                // so the env fallback reaches this field too.
+                assert_eq!(url, env_fallback("LIFIC_URL"));
                 assert!(!non_interactive);
                 assert!(complete.is_none());
                 assert!(label.is_none());
@@ -1541,7 +1554,7 @@ mod tests {
     fn parse_logout_defaults() {
         let cli = Cli::try_parse_from(["lific", "logout"]).unwrap();
         match cli.command {
-            Command::Logout { url } => assert!(url.is_none()),
+            Command::Logout { url } => assert_eq!(url, env_fallback("LIFIC_URL")),
             _ => panic!("expected Logout"),
         }
     }
@@ -1586,7 +1599,7 @@ mod tests {
                 assert_eq!(scope, "global");
                 assert!(!stdio);
                 assert!(!oauth);
-                assert!(url.is_none());
+                assert_eq!(url, env_fallback("LIFIC_URL"));
                 assert!(key.is_none());
                 assert!(user.is_none());
                 assert!(!yes);
