@@ -1252,9 +1252,11 @@
                           {page.title}
                         </span>
                         {#if canEdit}
+                           <!-- LIF-228: pointer-coarse keeps unpin reachable on touch;
+                               there is no other way to unpin a page there. -->
                           <span
                             class="shrink-0 text-[var(--text-faint)] opacity-0 group-hover:opacity-100
-                                   hover:text-[var(--accent)] transition"
+                                   pointer-coarse:opacity-100 hover:text-[var(--accent)] transition"
                             role="button"
                             tabindex="0"
                             title="Unpin"

@@ -433,7 +433,7 @@
                   onclick={startEditName}
                 >
                   {project.name}
-                  <Pencil size={14} class="text-[var(--text-faint)] opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <Pencil size={14} class="text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />
                 </button>
               {/if}
               <button
@@ -444,7 +444,7 @@
                 title="Copy identifier"
               >
                 {project.identifier}
-                {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 transition-opacity" />{/if}
+                {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />{/if}
               </button>
               {#if savedAt}
                 <span class="inline-flex items-center gap-1 text-micro text-[var(--success)]" aria-live="polite">
@@ -486,7 +486,7 @@
                 {:else}
                   <span class="text-body-sm text-[var(--text-faint)] italic">Add a description…</span>
                 {/if}
-                <Pencil size={12} class="inline ml-1 text-[var(--text-faint)] opacity-0 group-hover:opacity-100 transition-opacity align-baseline" />
+                <Pencil size={12} class="inline ml-1 text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity align-baseline" />
               </button>
             {/if}
 

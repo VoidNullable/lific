@@ -285,7 +285,7 @@
           title="Copy identifier"
         >
           {issue.identifier}
-          {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 transition-opacity" />{/if}
+          {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />{/if}
         </button>
         {#if commentCount !== null && commentCount > 0}
           <span class="inline-flex items-center gap-1 text-caption text-[var(--text-faint)]">
