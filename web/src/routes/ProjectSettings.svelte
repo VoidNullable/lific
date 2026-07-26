@@ -12,7 +12,10 @@
     updateProject,
     deleteProject,
     downloadProjectExport,
+    listProjectGroups,
+    assignProjectGroup,
     type Project,
+    type ProjectGroup,
     type Issue,
     type Activity,
     type IssueStatusCounts,
@@ -122,6 +125,7 @@
     if (issuesRes.ok) issues = issuesRes.data;
     if (actRes.ok) activity = actRes.data.items;
     if (usersRes.ok) users = usersRes.data;
+    await loadGroups();
     loading = false;
   }
 
@@ -174,6 +178,42 @@
       saveField("lead_user_id", next);
     }
   });
+
+  // ── Sidebar group ────────────────────────────────────────
+  // Not a saveField: the group is per-user and rides its own endpoint, not
+  // updateProject. Unlike Lead this autosaves on change rather than through
+  // an effect, so a rejected write can put the select back where it was.
+  let groups = $state<ProjectGroup[]>([]);
+  let selectedGroupId = $state<number | null>(null);
+
+  function currentGroupId(): number | null {
+    if (!project) return null;
+    const id = project.id;
+    return groups.find((g) => g.project_ids.includes(id))?.id ?? null;
+  }
+
+  async function loadGroups() {
+    const res = await listProjectGroups();
+    if (!res.ok) return;
+    groups = res.data;
+    selectedGroupId = currentGroupId();
+  }
+
+  async function saveGroup(groupId: number | null) {
+    if (!project) return;
+    const res = await assignProjectGroup(project.id, groupId);
+    if (!res.ok) {
+      toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
+      // Put the select back so it never shows a value the server rejected.
+      selectedGroupId = currentGroupId();
+      return;
+    }
+    const latest = await listProjectGroups();
+    if (latest.ok) groups = latest.data;
+    onProjectChange?.();
+    savedAt = Date.now();
+    window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+  }
 
   async function copyIdentifier() {
     if (!project) return;
@@ -516,6 +556,35 @@
               {/each}
             </div>
           {/if}
+        </section>
+
+        <!-- ── SIDEBAR GROUP ────────────────────────────── -->
+        <!-- Personal to the signed-in user, so it needs no role gate and
+             stays out of the danger zone: nobody else's sidebar changes. -->
+        <section class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <div class="flex items-center gap-3">
+            <div class="flex-1">
+              <p class="text-body-sm font-medium text-[var(--text)]">Sidebar group</p>
+              <p class="text-caption text-[var(--text-muted)]">
+                Where this project sits in your sidebar. Only you see it.
+              </p>
+            </div>
+            <select
+              value={selectedGroupId === null ? "" : String(selectedGroupId)}
+              onchange={(e) => {
+                const v = e.currentTarget.value;
+                selectedGroupId = v === "" ? null : Number(v);
+                saveGroup(selectedGroupId);
+              }}
+              class="text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)]
+                     text-[var(--text)] px-2.5 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            >
+              <option value="">No group</option>
+              {#each groups as group (group.id)}
+                <option value={String(group.id)}>{group.name}</option>
+              {/each}
+            </select>
+          </div>
         </section>
 
         <!-- ── LABELS (management) ──────────────────────── -->

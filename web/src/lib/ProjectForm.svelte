@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { listUsers, type UserSummary } from "./api";
+  import { listUsers, listProjectGroups, type UserSummary, type ProjectGroup } from "./api";
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
 
@@ -9,6 +9,7 @@
     description = $bindable(""),
     emoji = $bindable(""),
     leadUserId = $bindable<number | null>(null),
+    groupId = $bindable<number | null>(null),
     mode = "create",
     identifierLocked = false,
   }: {
@@ -17,16 +18,23 @@
     description?: string;
     emoji?: string;
     leadUserId?: number | null;
+    /** Sidebar group to file the project into. The form only collects it —
+     *  persisting it is the caller's job, since it rides a separate endpoint. */
+    groupId?: number | null;
     mode?: "create" | "edit";
     identifierLocked?: boolean;
   } = $props();
 
   let users = $state<UserSummary[]>([]);
+  let groups = $state<ProjectGroup[]>([]);
   let identifierTouched = $state(false);
 
   $effect(() => {
     listUsers().then((res) => {
       if (res.ok) users = res.data;
+    });
+    listProjectGroups().then((res) => {
+      if (res.ok) groups = res.data;
     });
   });
 
@@ -58,6 +66,11 @@
   const placeholder = PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)];
 
   let previewId = $derived((identifier.trim().toUpperCase() || "PRO") + "-1");
+
+  let groupOptions = $derived([
+    { value: null, label: "No group" },
+    ...groups.map((g) => ({ value: g.id, label: g.name })),
+  ]);
 
   let userOptions = $derived([
     { value: null, label: "No lead" },
@@ -166,6 +179,16 @@
       <IconPicker value={emoji} onchange={(v) => { emoji = v; }} />
     </div>
   </div>
+
+  {#if groups.length > 0}
+    <!-- Sidebar grouping. Personal to the signed-in user, unlike Lead. -->
+    <div class="mb-8 max-w-xs">
+      <label class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit">
+        Group
+      </label>
+      <Select options={groupOptions} bind:value={groupId} placeholder="No group" />
+    </div>
+  {/if}
 
   <!-- Description -->
   <div class="mb-8">

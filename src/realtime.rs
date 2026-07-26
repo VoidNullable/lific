@@ -128,6 +128,17 @@ pub enum RealtimeEvent {
     ProjectDeleted { project_id: i64 },
     #[serde(rename = "projects.reordered")]
     ProjectsReordered,
+    /// Addressed to the owning user through `send_to_users` rather than
+    /// broadcast, since groups are per-user and every other client would only
+    /// be told that someone reorganized their own sidebar.
+    ///
+    /// That is an audience, not a secret: `visible_to` lets any admin see
+    /// every `Users(..)`-addressed event, the same superuser rule
+    /// `can_view_project` and `visible_project_ids` follow. The payload
+    /// carries no group data, and an admin's client refetches only its own
+    /// groups, so what leaks is the bare fact that a user changed theirs.
+    #[serde(rename = "project_groups.changed")]
+    ProjectGroupsChanged,
     #[serde(rename = "issue.created")]
     IssueCreated { project_id: i64, issue_id: i64 },
     #[serde(rename = "issue.updated")]
@@ -395,7 +406,7 @@ impl RealtimeEvent {
             | Self::IssueDeleted { project_id, .. }
             | Self::IssueLinked { project_id, .. }
             | Self::IssueUnlinked { project_id, .. } => Some(*project_id),
-            Self::ResyncRequired | Self::ProjectsReordered => None,
+            Self::ResyncRequired | Self::ProjectsReordered | Self::ProjectGroupsChanged => None,
         }
     }
 }

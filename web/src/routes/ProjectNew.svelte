@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createProject } from "../lib/api";
+  import { createProject, assignProjectGroup } from "../lib/api";
+  import { toast } from "../lib/toast/toast.svelte";
   import ProjectForm from "../lib/ProjectForm.svelte";
   import { ArrowLeft } from "lucide-svelte";
   import { getContext } from "svelte";
@@ -20,6 +21,7 @@
   let description = $state("");
   let emoji = $state("");
   let leadUserId = $state<number | null>(null);
+  let groupId = $state<number | null>(null);
   let saving = $state(false);
   let error = $state("");
 
@@ -39,6 +41,18 @@
     });
 
     if (res.ok) {
+      // The group rides a separate endpoint, so it can only be filed once the
+      // project has an id. If that call fails the project still exists — say
+      // so rather than landing the user on the overview with their choice
+      // silently dropped.
+      if (groupId !== null) {
+        const assigned = await assignProjectGroup(res.data.id, groupId);
+        if (!assigned.ok) {
+          toast(`Project created, but it wasn't added to the group: ${assigned.error}`, {
+            kind: "error",
+          });
+        }
+      }
       navigate(`/${res.data.identifier}/overview`);
     } else {
       error = res.error;
@@ -56,6 +70,7 @@
       bind:description
       bind:emoji
       bind:leadUserId
+      bind:groupId
       mode="create"
     />
   </div>

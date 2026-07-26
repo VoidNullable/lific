@@ -49,6 +49,37 @@ pub struct UpdateProject {
     pub lead_user_id: Option<Option<i64>>,
 }
 
+/// A user's named group of projects in the sidebar. `project_ids` is derived,
+/// populated by `queries::project_groups::list_groups`; it is not a column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectGroup {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub project_ids: Vec<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateProjectGroup {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProjectGroup {
+    pub name: Option<String>,
+}
+
+/// `PUT /api/project-groups/assign` body. `group_id: None` takes the project
+/// out of every one of the caller's groups.
+#[derive(Debug, Deserialize)]
+pub struct AssignProjectGroup {
+    pub project_id: i64,
+    pub group_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: i64,

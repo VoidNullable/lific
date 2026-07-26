@@ -165,6 +165,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "comment search",
         include_str!("../../migrations/034_comment_search.sql"),
     ),
+    (
+        35,
+        "project groups",
+        include_str!("../../migrations/035_project_groups.sql"),
+    ),
 ];
 
 /// Highest migration version this binary knows how to apply. Used by
