@@ -81,7 +81,10 @@
     if (!target || scrollingTarget === target || comments.length === 0) return;
     scrollingTarget = target;
     void tick().then(() => {
-      if (pendingCommentTarget !== target) return;
+      if (pendingCommentTarget !== target) {
+        if (scrollingTarget === target) scrollingTarget = null;
+        return;
+      }
       const comment = document.getElementById(target);
       if (!comment) {
         scrollingTarget = null;

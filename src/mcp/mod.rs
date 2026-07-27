@@ -58,7 +58,7 @@ thread_local! {
 /// the handler so every DB write a tool performs is attributed to this
 /// user via MCP — both the OAuth /mcp route and the authless /mcp/<token>
 /// route funnel through here.
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn with_request_user<F, Fut, R>(user: Option<AuthUser>, f: F) -> R
 where
     F: FnOnce() -> Fut,
@@ -73,7 +73,7 @@ where
 /// OAuth/session tokens), so `authz` can treat it as admin-equivalent in
 /// enforced mode. `with_request_user` keeps the old signature (operator =
 /// false) for every non-unbound-key caller.
-#[cfg(test)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn with_request_identity<F, Fut, R>(user: Option<AuthUser>, is_operator: bool, f: F) -> R
 where
     F: FnOnce() -> Fut,
@@ -460,10 +460,17 @@ mod tests {
     #[tokio::test]
     async fn with_request_context_scopes_issue_link_origin() {
         let context = IssueLinkContext::parse("https://tracker.example/base");
-        let seen = with_request_context(None, false, context, || async {
-            current_issue_link_context()
+        let (seen, global_seen) = with_request_context(None, false, context, || async {
+            let scoped = current_issue_link_context()
                 .expect("request origin should be visible")
-                .issue_markdown("LIF-1")
+                .issue_markdown("LIF-1");
+            let global = MCP_REQUEST_ISSUE_LINKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("production request context should also be populated")
+                .issue_markdown("LIF-1");
+            (scoped, global)
         })
         .await;
 
@@ -471,7 +478,14 @@ mod tests {
             seen,
             "[LIF-1](https://tracker.example/base/LIF/issues/LIF-1)"
         );
+        assert_eq!(global_seen, seen);
         assert!(current_issue_link_context().is_none());
+        assert!(
+            MCP_REQUEST_ISSUE_LINKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none()
+        );
     }
 
     // End-to-end: an operator-trusted unbound API key aimed at /mcp passes an

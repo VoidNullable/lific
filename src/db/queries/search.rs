@@ -166,6 +166,7 @@ fn search_fts(
             title: row.get(2)?,
             snippet: row.get(3)?,
             project_id: row.get(4)?,
+            parent_page_id: cmt_page_id,
         })
     })?;
 
@@ -247,6 +248,7 @@ fn search_literal(
                     title,
                     snippet,
                     project_id,
+                    parent_page_id: None,
                 },
             ))
         })?;
@@ -286,6 +288,7 @@ fn search_literal(
                     title,
                     snippet,
                     project_id,
+                    parent_page_id: None,
                 },
             ))
         })?;
@@ -350,6 +353,7 @@ fn search_literal(
                     title: String::new(),
                     snippet,
                     project_id,
+                    parent_page_id: cmt_page_id,
                 },
             ))
         })?;
@@ -1023,6 +1027,7 @@ mod tests {
         assert_eq!(results[0].result_type, "comment");
         // A page comment links back to its parent page's DOC identifier.
         assert_eq!(results[0].identifier, Some("TST-DOC-1".into()));
+        assert_eq!(results[0].parent_page_id, Some(page.id));
     }
 
     #[test]

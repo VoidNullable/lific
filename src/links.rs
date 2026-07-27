@@ -3,9 +3,11 @@ use reqwest::Url;
 pub(crate) fn parse_http_authority(
     host_header: &str,
 ) -> Option<axum::http::uri::Authority> {
-    let host_header = host_header.trim();
     let authority = host_header.parse::<axum::http::uri::Authority>().ok()?;
     if authority.as_str() != host_header {
+        return None;
+    }
+    if authority.as_str().contains('@') {
         return None;
     }
     Some(authority)
@@ -100,8 +102,11 @@ impl IssueLinkContext {
 
     #[must_use]
     pub(crate) fn page_url(&self, identifier: &str, page_id: i64) -> Option<String> {
-        let (project, sequence) = identifier.split_once("-DOC-")?;
-        (valid_project_identifier(project)
+        let (project, sequence) = identifier
+            .strip_prefix("DOC-")
+            .map(|sequence| ("DOC", sequence))
+            .or_else(|| identifier.split_once("-DOC-"))?;
+        ((project == "DOC" || valid_project_identifier(project))
             && sequence.chars().all(|c| c.is_ascii_digit())
             && !sequence.is_empty()
             && page_id > 0)
@@ -223,14 +228,14 @@ fn escape_markdown_link_label(label: &str) -> String {
 }
 
 fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
-    project != "DOC"
-        && valid_project_identifier(project)
+    valid_project_identifier(project)
         && !sequence.is_empty()
         && sequence.chars().all(|c| c.is_ascii_digit())
 }
 
 fn valid_project_identifier(project: &str) -> bool {
-    project.len() <= 5
+    project != "DOC"
+        && project.len() <= 5
         && project
             .chars()
             .next()
@@ -277,12 +282,29 @@ mod tests {
             "[LIF-DOC-3](https://tracker.example/lific/LIF/pages/17)"
         );
         assert_eq!(
+            context.page_markdown("DOC-3", 18),
+            "[DOC-3](https://tracker.example/lific/DOC/pages/18)"
+        );
+        assert_eq!(
             context.plan_markdown("LIF-PLAN-4", 19),
             "[LIF-PLAN-4](https://tracker.example/lific/LIF/plans/19)"
         );
         assert_eq!(
             context.module_markdown("LIF", 23, "Backend"),
             "[Backend](https://tracker.example/lific/LIF/modules/23)"
+        );
+    }
+
+    #[test]
+    fn reserved_doc_identifier_only_links_workspace_pages() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+
+        assert_eq!(context.project_markdown("DOC"), "DOC");
+        assert_eq!(context.plan_markdown("DOC-PLAN-1", 19), "DOC-PLAN-1");
+        assert_eq!(context.module_markdown("DOC", 23, "Backend"), "Backend");
+        assert_eq!(
+            context.page_markdown("DOC-3", 18),
+            "[DOC-3](https://tracker.example/lific/DOC/pages/18)"
         );
     }
 
@@ -307,6 +329,10 @@ mod tests {
         assert_eq!(
             context.page_comment_markdown("LIF-DOC-3", 17, 8),
             "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
+        );
+        assert_eq!(
+            context.page_comment_markdown("DOC-3", 18, 9),
+            "[comment #9](https://tracker.example/lific/DOC/pages/18#comment-9)"
         );
     }
 
@@ -346,6 +372,18 @@ mod tests {
         assert!(
             IssueLinkContext::for_http_request(None, Some("spoofed.example"), &allowed_hosts,)
                 .is_none()
+        );
+        assert!(
+            IssueLinkContext::for_http_request(None, Some(" localhost:3456 "), &allowed_hosts,)
+                .is_none()
+        );
+        assert!(
+            IssueLinkContext::for_http_request(
+                None,
+                Some("evil.example@localhost:3456"),
+                &allowed_hosts,
+            )
+            .is_none()
         );
     }
 }

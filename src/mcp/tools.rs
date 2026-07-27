@@ -3,7 +3,10 @@ use std::{cmp::Ordering, sync::Arc};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::db::{DbPool, models, queries};
+use crate::{
+    db::{DbPool, models, queries},
+    links::IssueLinkContext,
+};
 
 use super::schemas::*;
 use super::{LificMcp, current_issue_link_context};
@@ -434,6 +437,13 @@ fn resolve_project(db: &Arc<DbPool>, ident: &str) -> Result<i64, String> {
     queries::resolve_project_identifier(&conn, ident).map_err(|e| e.to_string())
 }
 
+fn canonical_project_identifier(db: &Arc<DbPool>, project_id: i64) -> Result<String, String> {
+    let conn = db.read().map_err(|e| e.to_string())?;
+    queries::get_project(&conn, project_id)
+        .map(|project| project.identifier)
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_module(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, String> {
     let conn = db.read().map_err(|e| e.to_string())?;
     queries::resolve_module_name(&conn, project_id, name).map_err(|e| e.to_string())
@@ -562,91 +572,227 @@ fn truncate_value(v: &str, max: usize) -> String {
 
 /// Render one audit entry as a compact line:
 /// `[ts] actor via transport — LABEL action detail`
-fn activity_reference(a: &models::Activity, project: Option<&str>) -> String {
-    let label = a.entity_label.as_deref().unwrap_or("?");
-    let Some(context) = current_issue_link_context() else {
-        return label.to_owned();
+fn resolves_to(result: Result<i64, crate::error::LificError>, expected: i64) -> bool {
+    result.is_ok_and(|id| id == expected)
+}
+
+fn activity_comment_reference(
+    conn: &rusqlite::Connection,
+    context: &IssueLinkContext,
+    activity: &models::Activity,
+    label: &str,
+) -> String {
+    let (issue_id, page_id) = if activity.action == "delete" {
+        (activity.issue_id, activity.page_id)
+    } else {
+        let Ok(comment) = queries::comments::get_comment(conn, activity.entity_id) else {
+            return label.to_owned();
+        };
+        if comment.issue_id != activity.issue_id || comment.page_id != activity.page_id {
+            return label.to_owned();
+        }
+        (comment.issue_id, comment.page_id)
     };
 
-    if a.action == "delete" {
-        return match a.entity_type.as_str() {
-            "comment" if a.issue_id.is_some() => context.issue_markdown(label),
-            "comment" => a
-                .page_id
-                .map_or_else(|| label.to_owned(), |id| context.page_markdown(label, id)),
-            _ => label.to_owned(),
-        };
-    }
-
-    match a.entity_type.as_str() {
-        "issue" => context.issue_markdown(label),
-        "project" => context.project_markdown(label),
-        "page" => context.page_markdown(label, a.entity_id),
-        "plan" => context.plan_markdown(label, a.entity_id),
-        "module" => project.map_or_else(
-            || label.to_owned(),
-            |project| context.module_markdown(project, a.entity_id, label),
-        ),
-        "comment" if a.issue_id.is_some() => {
-            context.issue_comment_markdown(label, a.entity_id)
+    match (issue_id, page_id) {
+        (Some(issue_id), _)
+            if resolves_to(queries::resolve_identifier(conn, label), issue_id) =>
+        {
+            if activity.action == "delete" {
+                context.issue_markdown(label)
+            } else {
+                context.issue_comment_markdown(label, activity.entity_id)
+            }
         }
-        "comment" => a.page_id.map_or_else(
-            || label.to_owned(),
-            |page_id| context.page_comment_markdown(label, page_id, a.entity_id),
-        ),
+        (_, Some(page_id))
+            if resolves_to(queries::resolve_page_identifier(conn, label), page_id) =>
+        {
+            if activity.action == "delete" {
+                context.page_markdown(label, page_id)
+            } else {
+                context.page_comment_markdown(label, page_id, activity.entity_id)
+            }
+        }
         _ => label.to_owned(),
     }
 }
 
-fn fmt_activity(a: &models::Activity, project: Option<&str>) -> String {
-    let who = match (&a.actor_display_name, &a.actor_username) {
-        (Some(d), _) if !d.is_empty() => d.clone(),
-        (_, Some(u)) => u.clone(),
+fn activity_reference(
+    conn: &rusqlite::Connection,
+    activity: &models::Activity,
+    project: Option<&str>,
+    context: Option<&IssueLinkContext>,
+) -> String {
+    let label = activity.entity_label.as_deref().unwrap_or("?");
+    let Some(context) = context else {
+        return label.to_owned();
+    };
+    if activity.entity_type == "plan_step" {
+        return queries::plans::resolve_plan_identifier(conn, label).map_or_else(
+            |_| label.to_owned(),
+            |plan_id| context.plan_markdown(label, plan_id),
+        );
+    }
+    if activity.entity_type == "comment" {
+        return activity_comment_reference(conn, context, activity, label);
+    }
+    if activity.action == "delete" {
+        return label.to_owned();
+    }
+
+    match activity.entity_type.as_str() {
+        "issue" if resolves_to(queries::resolve_identifier(conn, label), activity.entity_id) => {
+            context.issue_markdown(label)
+        }
+        "project"
+            if resolves_to(
+                queries::resolve_project_identifier(conn, label),
+                activity.entity_id,
+            ) =>
+        {
+            context.project_markdown(label)
+        }
+        "page" if resolves_to(
+            queries::resolve_page_identifier(conn, label),
+            activity.entity_id,
+        ) => context.page_markdown(label, activity.entity_id),
+        "plan" if resolves_to(
+            queries::plans::resolve_plan_identifier(conn, label),
+            activity.entity_id,
+        ) => context.plan_markdown(label, activity.entity_id),
+        "module" => match (
+            project,
+            queries::get_module(conn, activity.entity_id).ok(),
+        ) {
+            (Some(project), Some(module))
+                if Some(module.project_id) == activity.project_id
+                    && resolves_to(
+                        queries::resolve_project_identifier(conn, project),
+                        module.project_id,
+                    ) =>
+            {
+                context.module_markdown(project, activity.entity_id, label)
+            }
+            _ => label.to_owned(),
+        },
+        _ => label.to_owned(),
+    }
+}
+
+fn activity_issue_reference(
+    conn: &rusqlite::Connection,
+    context: Option<&IssueLinkContext>,
+    identifier: &str,
+) -> String {
+    let Some(context) = context else {
+        return identifier.to_owned();
+    };
+    queries::resolve_identifier(conn, identifier).map_or_else(
+        |_| identifier.to_owned(),
+        |id| {
+            queries::get_issue(conn, id).map_or_else(
+                |_| identifier.to_owned(),
+                |issue| {
+                    if issue.identifier == identifier {
+                        context.issue_markdown(identifier)
+                    } else {
+                        identifier.to_owned()
+                    }
+                },
+            )
+        },
+    )
+}
+
+fn activity_field_value(
+    conn: &rusqlite::Connection,
+    context: Option<&IssueLinkContext>,
+    field: Option<&str>,
+    value: &str,
+) -> String {
+    if matches!(field, Some("issue" | "anchor_issue")) {
+        activity_issue_reference(conn, context, value)
+    } else {
+        truncate_value(value, 60)
+    }
+}
+
+fn fmt_activity(
+    conn: &rusqlite::Connection,
+    activity: &models::Activity,
+    project: Option<&str>,
+    context: Option<&IssueLinkContext>,
+) -> String {
+    let who = match (&activity.actor_display_name, &activity.actor_username) {
+        (Some(display_name), _) if !display_name.is_empty() => display_name.clone(),
+        (_, Some(username)) => username.clone(),
         _ => "system".into(),
     };
-    let agent = if a.actor_is_bot { " (agent)" } else { "" };
-    let label = activity_reference(a, project);
+    let agent = if activity.actor_is_bot {
+        " (agent)"
+    } else {
+        ""
+    };
+    let label = activity_reference(conn, activity, project, context);
 
-    let detail = match a.action.as_str() {
+    let detail = match activity.action.as_str() {
         "create" => format!(
             "created {} {}: {}",
-            a.entity_type,
+            activity.entity_type,
             label,
-            truncate_value(a.new_value.as_deref().unwrap_or(""), 60)
+            truncate_value(activity.new_value.as_deref().unwrap_or(""), 60)
         ),
         "delete" => format!(
             "deleted {} {} ({})",
-            a.entity_type,
+            activity.entity_type,
             label,
-            truncate_value(a.old_value.as_deref().unwrap_or(""), 60)
+            truncate_value(activity.old_value.as_deref().unwrap_or(""), 60)
         ),
         "update" => format!(
             "{} {}: {} → {}",
             label,
-            a.field.as_deref().unwrap_or("?"),
-            truncate_value(a.old_value.as_deref().unwrap_or("(none)"), 60),
-            truncate_value(a.new_value.as_deref().unwrap_or("(none)"), 60)
+            activity.field.as_deref().unwrap_or("?"),
+            activity_field_value(
+                conn,
+                context,
+                activity.field.as_deref(),
+                activity.old_value.as_deref().unwrap_or("(none)")
+            ),
+            activity_field_value(
+                conn,
+                context,
+                activity.field.as_deref(),
+                activity.new_value.as_deref().unwrap_or("(none)")
+            )
         ),
-        "attach" => format!("{} +label {}", label, a.new_value.as_deref().unwrap_or("?")),
-        "detach" => format!("{} -label {}", label, a.old_value.as_deref().unwrap_or("?")),
+        "attach" => format!(
+            "{} +label {}",
+            label,
+            activity.new_value.as_deref().unwrap_or("?")
+        ),
+        "detach" => format!(
+            "{} -label {}",
+            label,
+            activity.old_value.as_deref().unwrap_or("?")
+        ),
         "link" => format!(
             "{} {} → {}",
             label,
-            a.field.as_deref().unwrap_or("relates_to"),
-            issue_reference(a.new_value.as_deref().unwrap_or("?"))
+            activity.field.as_deref().unwrap_or("relates_to"),
+            activity_issue_reference(conn, context, activity.new_value.as_deref().unwrap_or("?"))
         ),
         "unlink" => format!(
             "{} un-{} → {}",
             label,
-            a.field.as_deref().unwrap_or("relates_to"),
-            issue_reference(a.old_value.as_deref().unwrap_or("?"))
+            activity.field.as_deref().unwrap_or("relates_to"),
+            activity_issue_reference(conn, context, activity.old_value.as_deref().unwrap_or("?"))
         ),
         other => format!("{label} {other}"),
     };
 
     format!(
         "[{}] {}{} via {} — {}",
-        a.ts, who, agent, a.transport, detail
+        activity.ts, who, agent, activity.transport, detail
     )
 }
 
@@ -883,6 +1029,7 @@ impl LificMcp {
                 if has_more {
                     results.truncate(limit as usize);
                 }
+                let link_context = current_issue_link_context();
                 let mut out = format!("{} results:\n", results.len());
                 for r in &results {
                     let ident = r.identifier.as_deref().unwrap_or("");
@@ -890,17 +1037,8 @@ impl LificMcp {
                     // match on its parent so the reader knows to open the
                     // parent issue/page to find the thread (LIF-146).
                     if r.result_type == "comment" {
-                        let page_id = current_issue_link_context().and_then(|_| {
-                            looks_like_page_identifier(ident)
-                                .then(|| {
-                                    self.read(|conn| {
-                                        queries::resolve_page_identifier(conn, ident)
-                                    })
-                                    .ok()
-                                })
-                                .flatten()
-                        });
-                        let parent = current_issue_link_context().map_or_else(
+                        let page_id = r.parent_page_id;
+                        let parent = link_context.as_ref().map_or_else(
                             || ident.to_owned(),
                             |context| {
                                 page_id.map_or_else(
@@ -909,7 +1047,7 @@ impl LificMcp {
                                 )
                             },
                         );
-                        let comment = current_issue_link_context().map_or_else(
+                        let comment = link_context.as_ref().map_or_else(
                             || "[comment]".to_owned(),
                             |context| page_id.map_or_else(
                                 || context.issue_comment_markdown(ident, r.id),
@@ -922,17 +1060,20 @@ impl LificMcp {
                         ));
                     } else {
                         let identifier = if r.result_type == "page" {
-                            current_issue_link_context().map_or_else(
+                            link_context.as_ref().map_or_else(
                                 || ident.to_owned(),
                                 |context| context.page_markdown(ident, r.id),
                             )
                         } else if r.result_type == "plan" {
-                            current_issue_link_context().map_or_else(
+                            link_context.as_ref().map_or_else(
                                 || ident.to_owned(),
                                 |context| context.plan_markdown(ident, r.id),
                             )
                         } else {
-                            issue_reference(ident)
+                            link_context.as_ref().map_or_else(
+                                || ident.to_owned(),
+                                |context| context.issue_markdown(ident),
+                            )
                         };
                         out.push_str(&format!(
                             "- [{}] {} {} — {}\n",
@@ -965,17 +1106,19 @@ impl LificMcp {
             if looks_like_page_identifier(ident) {
             match self.read(|conn| {
                 let id = queries::resolve_page_identifier(conn, ident)?;
-                queries::get_page(conn, id)
+                let page = queries::get_page(conn, id)?;
+                let project_identifier = page
+                    .project_id
+                    .and_then(|project_id| queries::get_project(conn, project_id).ok())
+                    .map(|project| project.identifier);
+                let scope_reference = page_reference(&page);
+                Ok((page, scope_reference, project_identifier))
             }) {
-                Ok(page) => {
-                    let project_identifier = page
-                        .identifier
-                        .split_once("-DOC-")
-                        .map(|(project, _)| project.to_owned());
+                Ok((page, scope_reference, project_identifier)) => {
                     (
                         queries::activity::ActivityScope::Page(page.id),
                         page.project_id,
-                        page_reference(&page),
+                        scope_reference,
                         project_identifier,
                     )
                 }
@@ -983,16 +1126,18 @@ impl LificMcp {
             }
         } else if let Ok(issue) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, ident)?;
-            queries::get_issue(conn, id)
+            let issue = queries::get_issue(conn, id)?;
+            let project_identifier = queries::get_project(conn, issue.project_id)
+                .ok()
+                .map(|project| project.identifier);
+            let scope_reference = issue_reference(&issue.identifier);
+            Ok((issue, scope_reference, project_identifier))
         }) {
-            let project_identifier = issue
-                .identifier
-                .rsplit_once('-')
-                .map(|(project, _)| project.to_owned());
+            let (issue, scope_reference, project_identifier) = issue;
             (
                 queries::activity::ActivityScope::Issue(issue.id),
                 Some(issue.project_id),
-                issue_reference(&issue.identifier),
+                scope_reference,
                 project_identifier,
             )
         } else {
@@ -1023,25 +1168,37 @@ impl LificMcp {
             return format!("Error: {e}");
         }
 
-        match self
-            .read(|conn| queries::activity::list_activity(conn, scope, Some(limit), Some(offset)))
-        {
-            Ok(feed) if feed.items.is_empty() && offset == 0 => {
+        let link_context = current_issue_link_context();
+        match self.read(|conn| {
+            let feed = queries::activity::list_activity(conn, scope, Some(limit), Some(offset))?;
+            // ponytail: feeds cap at 200; batch target checks only if this read path profiles hot.
+            let items: Vec<_> = feed
+                .items
+                .iter()
+                .map(|activity| {
+                    fmt_activity(
+                        conn,
+                        activity,
+                        project_identifier.as_deref(),
+                        link_context.as_ref(),
+                    )
+                })
+                .collect();
+            Ok((items, feed.has_more))
+        }) {
+            Ok((items, _)) if items.is_empty() && offset == 0 => {
                 format!("No recorded activity for {scope_reference} yet.")
             }
-            Ok(feed) => {
+            Ok((items, has_more)) => {
                 let mut out = format!(
                     "{} activity entries for {}:\n",
-                    feed.items.len(),
+                    items.len(),
                     scope_reference
                 );
-                for a in &feed.items {
-                    out.push_str(&format!(
-                        "- {}\n",
-                        fmt_activity(a, project_identifier.as_deref())
-                    ));
+                for item in &items {
+                    out.push_str(&format!("- {item}\n"));
                 }
-                append_pagination_hint(&mut out, feed.has_more, offset + limit);
+                append_pagination_hint(&mut out, has_more, offset + limit);
                 out
             }
             Err(e) => format!("Error: {e}"),
@@ -2522,13 +2679,17 @@ impl LificMcp {
                 if let Err(e) = require_role_mcp(&self.db, pid, models::Role::Viewer) {
                     return format!("Error: {e}");
                 }
+                let canonical_project = match canonical_project_identifier(&self.db, pid) {
+                    Ok(identifier) => identifier,
+                    Err(e) => return format!("Error: {e}"),
+                };
                 match self.read(|conn| queries::list_modules(conn, pid)) {
                     Ok(ms) => {
                         let mut out = format!("{} modules:\n", ms.len());
                         for m in &ms {
                             out.push_str(&format!(
                                 "- {} ({})",
-                                module_reference(proj, m),
+                                module_reference(&canonical_project, m),
                                 m.status
                             ));
                             if !m.description.is_empty() {
@@ -2690,6 +2851,10 @@ impl LificMcp {
                 if let Err(e) = require_structure_role_mcp(&self.db, pid) {
                     return format!("Error: {e}");
                 }
+                let canonical_project = match canonical_project_identifier(&self.db, pid) {
+                    Ok(identifier) => identifier,
+                    Err(e) => return format!("Error: {e}"),
+                };
                 let Some(ref name) = input.name else {
                     return "Error: name required".into();
                 };
@@ -2709,7 +2874,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Created module {}", module_reference(proj, &m))
+                        format!("Created module {}", module_reference(&canonical_project, &m))
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2725,6 +2890,10 @@ impl LificMcp {
                 if let Err(e) = require_structure_role_mcp(&self.db, pid) {
                     return format!("Error: {e}");
                 }
+                let canonical_project = match canonical_project_identifier(&self.db, pid) {
+                    Ok(identifier) => identifier,
+                    Err(e) => return format!("Error: {e}"),
+                };
                 let Some(ref current) = input.current_name else {
                     return "Error: current_name required to identify module".into();
                 };
@@ -2748,7 +2917,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Updated module {}", module_reference(proj, &m))
+                        format!("Updated module {}", module_reference(&canonical_project, &m))
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -3584,6 +3753,15 @@ mod tests {
     fn project_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
         mcp.read(|conn| queries::resolve_project_identifier(conn, identifier))
             .expect("project id")
+    }
+
+    #[test]
+    fn canonical_project_identifier_comes_from_project_record() {
+        let m = mcp();
+        seed_project(&m, "Canonical", "CAN");
+        let project_id = project_id_for(&m, "CAN");
+
+        assert_eq!(canonical_project_identifier(&m.db, project_id).unwrap(), "CAN");
     }
 
     fn issue_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
@@ -7850,6 +8028,152 @@ mod tests {
                 "[comment #1](https://tracker.example/TST/issues/TST-1#comment-1)"
             ),
             "got: {issue}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_activity_leaves_stale_identifiers_unlinked_after_project_rename() {
+        let m = mcp();
+        seed_project(&m, "Audit", "TST");
+        seed_issue(&m, "TST", "Historical issue");
+        let updated = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "project".into(),
+            action: "update".into(),
+            project: Some("TST".into()),
+            identifier: Some("NEW".into()),
+            ..Default::default()
+        }));
+        assert!(updated.contains("Updated project NEW"), "got: {updated}");
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+            m.get_activity(Parameters(GetActivityInput {
+                identifier: "NEW".into(),
+                ..Default::default()
+            }))
+        })
+        .await;
+
+        assert!(out.contains("created issue TST-1"), "got: {out}");
+        assert!(!out.contains("[TST-1]("), "stale link in: {out}");
+    }
+
+    #[tokio::test]
+    async fn get_activity_leaves_stale_relation_targets_unlinked_after_project_rename() {
+        let m = mcp();
+        seed_project(&m, "Audit", "TST");
+        seed_issue(&m, "TST", "Source");
+        seed_issue(&m, "TST", "Target");
+        let linked = m.link_issues(Parameters(LinkIssuesInput {
+            source: "TST-1".into(),
+            target: "TST-2".into(),
+            relation_type: "blocks".into(),
+        }));
+        assert_eq!(linked, "TST-1 blocks TST-2");
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let (live, stale) =
+            crate::mcp::with_request_context(None, false, Some(context), || async {
+                let live = m.get_activity(Parameters(GetActivityInput {
+                    identifier: "TST".into(),
+                    ..Default::default()
+                }));
+                m.manage_resource(Parameters(ManageResourceInput {
+                    resource_type: "project".into(),
+                    action: "update".into(),
+                    project: Some("TST".into()),
+                    identifier: Some("NEW".into()),
+                    ..Default::default()
+                }));
+                let stale = m.get_activity(Parameters(GetActivityInput {
+                    identifier: "NEW".into(),
+                    ..Default::default()
+                }));
+                (live, stale)
+            })
+            .await;
+
+        assert!(
+            live.contains(
+                "[TST-1](https://tracker.example/TST/issues/TST-1) blocks → [TST-2](https://tracker.example/TST/issues/TST-2)"
+            ),
+            "got: {live}"
+        );
+        assert!(stale.contains("TST-1 blocks → TST-2"), "got: {stale}");
+        assert!(
+            !stale.contains("[TST-2]("),
+            "stale relation link in: {stale}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_activity_links_plan_steps_to_their_parent_plan() {
+        let m = mcp();
+        seed_project(&m, "Audit", "TST");
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "TST".into(),
+            title: "Audit plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "Exercise the link".into(),
+                ..Default::default()
+            }]),
+        }));
+        assert!(created.contains("Created TST-PLAN-1"), "got: {created}");
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+            m.get_activity(Parameters(GetActivityInput {
+                identifier: "TST".into(),
+                ..Default::default()
+            }))
+        })
+        .await;
+
+        assert!(
+            out.contains(
+                "created plan_step [TST-PLAN-1](https://tracker.example/TST/plans/1): Exercise the link"
+            ),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_activity_links_plan_step_issue_values() {
+        let m = mcp();
+        seed_project(&m, "Audit", "TST");
+        seed_issue(&m, "TST", "Linked issue");
+        m.create_plan(Parameters(CreatePlanInput {
+            project: "TST".into(),
+            title: "Audit plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "Exercise the link".into(),
+                ..Default::default()
+            }]),
+        }));
+        let updated = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "TST-PLAN-1".into(),
+            step_id: Some(1),
+            attach_issue: Some("TST-1".into()),
+            ..Default::default()
+        }));
+        assert!(updated.contains("Attached TST-1"), "got: {updated}");
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+            m.get_activity(Parameters(GetActivityInput {
+                identifier: "TST".into(),
+                ..Default::default()
+            }))
+        })
+        .await;
+
+        assert!(
+            out.contains(
+                "[TST-PLAN-1](https://tracker.example/TST/plans/1) issue: (none) → [TST-1](https://tracker.example/TST/issues/TST-1)"
+            ),
+            "got: {out}"
         );
     }
 

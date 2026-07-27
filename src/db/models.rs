@@ -604,6 +604,8 @@ pub struct SearchResult {
     pub title: String,
     pub snippet: String,
     pub project_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_page_id: Option<i64>,
 }
 
 // ── Audit log (LIF-155/156) ──────────────────────────────────
