@@ -54,12 +54,10 @@ function checkLocalLinks() {
   }
 }
 
-const cargo = read(join(root, "Cargo.toml"));
-const version = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-const installation = read(join(docsRoot, "installation.mdx"));
-if (!version || !installation.includes(`source tree declares version \`${version}\``)) {
-  errors.push("installation.mdx version does not match Cargo.toml");
-}
+// The docs deliberately state no version number. Pinning one in prose means
+// every release edits a file that carries no information a reader needs: the
+// releases page, crates.io, and `lific --version` all answer it authoritatively
+// and stay correct on their own. Do not reintroduce a version-parity check.
 
 const mcpSource = read(join(root, "src", "mcp", "tools.rs"));
 const mcpDocs = read(join(docsRoot, "mcp", "tools.mdx"));
@@ -77,4 +75,4 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log(`Documentation checks passed: version ${version}, ${sourceToolCount} MCP tools, navigation and local links valid.`);
+console.log(`Documentation checks passed: ${sourceToolCount} MCP tools, navigation and local links valid.`);
