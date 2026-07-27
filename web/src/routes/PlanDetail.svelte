@@ -429,7 +429,7 @@
   {@const expanded = isExpanded(step)}
   {@const hasBody = step.description.trim().length > 0}
   <div class="flex flex-col">
-    <div class="group flex items-start gap-2 py-1 rounded-md hover:bg-[var(--bg-subtle)]" style="padding-left: {depth * 1.5}rem">
+    <div class="group flex items-start gap-2 py-1 rounded-md hover:bg-[var(--bg-subtle)]" style="padding-left: min({depth * 1.5}rem, 25%)">
       <!-- caret -->
       <button
         class="mt-0.5 size-4 shrink-0 flex items-center justify-center text-[var(--text-faint)] hover:text-[var(--text)]"
