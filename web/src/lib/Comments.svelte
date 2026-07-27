@@ -60,6 +60,17 @@
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
 
+  let hashScrolled = false;
+  $effect(() => {
+    if (hashScrolled || comments.length === 0) return;
+    const target = window.location.hash.slice(1);
+    hashScrolled = true;
+    if (!target.startsWith("comment-")) return;
+    void tick().then(() => {
+      document.getElementById(target)?.scrollIntoView({ block: "center" });
+    });
+  });
+
   // ── @mention autocomplete (LIF-263) ─────────────────────
   //
   // Candidates are fetched once when the project id is known; the popover
@@ -315,7 +326,7 @@
     <ol class="cmt__thread">
       {#each comments as comment (comment.id)}
         {@const author = comment.author_display_name || comment.author}
-        <li class="cmt__item" in:fly={{ y: 6, duration: 180 }}>
+        <li id={`comment-${comment.id}`} class="cmt__item" in:fly={{ y: 6, duration: 180 }}>
           <div class="cmt__avatar" aria-hidden="true">{initials(author)}</div>
           <div class="cmt__body">
             <div class="cmt__meta">

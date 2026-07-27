@@ -156,12 +156,16 @@ pub async fn run(
     let issue_links = IssueLinkContext::parse(base_url);
     if json_output {
         if let Some(context) = issue_links.as_ref() {
-            decorate_issue_links(&mut output, context, IssueLinkOutput::Url);
+            decorate_resource_links(&mut output, context, IssueLinkOutput::Url);
+            decorate_comment_links(&mut output, command, context, IssueLinkOutput::Url);
+            decorate_module_links(&mut output, command, context, IssueLinkOutput::Url);
         }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         if let Some(context) = issue_links.as_ref() {
-            decorate_issue_links(&mut output, context, IssueLinkOutput::Markdown);
+            decorate_resource_links(&mut output, context, IssueLinkOutput::Markdown);
+            decorate_comment_links(&mut output, command, context, IssueLinkOutput::Markdown);
+            decorate_module_links(&mut output, command, context, IssueLinkOutput::Markdown);
         }
         print_human(&output);
     }
@@ -883,14 +887,14 @@ enum IssueLinkOutput {
     Markdown,
 }
 
-fn decorate_issue_links(value: &mut Value, context: &IssueLinkContext, output: IssueLinkOutput) {
+fn decorate_resource_links(value: &mut Value, context: &IssueLinkContext, output: IssueLinkOutput) {
     match value {
         Value::Array(items) => items
             .iter_mut()
-            .for_each(|item| decorate_issue_links(item, context, output)),
+            .for_each(|item| decorate_resource_links(item, context, output)),
         Value::Object(object) => {
             if let Some(identifier) = object.get("identifier").and_then(Value::as_str)
-                && let Some(url) = context.issue_url(identifier)
+                && let Some(url) = resource_url(object, context, identifier)
             {
                 match output {
                     IssueLinkOutput::Url => {
@@ -899,14 +903,137 @@ fn decorate_issue_links(value: &mut Value, context: &IssueLinkContext, output: I
                     IssueLinkOutput::Markdown => {
                         object.insert(
                             "identifier".into(),
-                            Value::String(context.issue_markdown(identifier)),
+                            Value::String(format!("[{identifier}]({url})")),
                         );
                     }
                 }
             }
             object
                 .values_mut()
-                .for_each(|item| decorate_issue_links(item, context, output));
+                .for_each(|item| decorate_resource_links(item, context, output));
+        }
+        _ => {}
+    }
+}
+
+fn resource_url(object: &serde_json::Map<String, Value>, context: &IssueLinkContext, identifier: &str) -> Option<String> {
+    if let Some(url) = context.issue_url(identifier) {
+        return Some(url);
+    }
+    let id = object.get("id").and_then(Value::as_i64)?;
+    if let Some(url) = context.page_url(identifier, id) {
+        return Some(url);
+    }
+    if let Some(url) = context.plan_url(identifier, id) {
+        return Some(url);
+    }
+    context.project_url(identifier)
+}
+
+fn decorate_comment_links(
+    value: &mut Value,
+    command: &Command,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+) {
+    let Some(identifier) = (match command {
+        Command::Comment { action } => match action {
+            CommentAction::List { identifier } | CommentAction::Add { identifier, .. } => {
+                Some(identifier.as_str())
+            }
+        },
+        _ => None,
+    }) else {
+        return;
+    };
+    decorate_comment_value(value, identifier, context, output);
+}
+
+fn decorate_comment_value(
+    value: &mut Value,
+    parent_identifier: &str,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(|item| {
+            decorate_comment_value(item, parent_identifier, context, output)
+        }),
+        Value::Object(object) => {
+            if let Some(comment_id) = object.get("id").and_then(Value::as_i64)
+                && let Some(url) = context.issue_comment_url(parent_identifier, comment_id)
+            {
+                match output {
+                    IssueLinkOutput::Url => {
+                        object.insert("web_url".into(), Value::String(url));
+                    }
+                    IssueLinkOutput::Markdown => {
+                        object.insert(
+                            "comment".into(),
+                            Value::String(format!("[comment #{comment_id}]({url})")),
+                        );
+                    }
+                }
+            }
+            object.values_mut().for_each(|item| {
+                decorate_comment_value(item, parent_identifier, context, output)
+            });
+        }
+        _ => {}
+    }
+}
+
+fn decorate_module_links(
+    value: &mut Value,
+    command: &Command,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+) {
+    let Some(project) = (match command {
+        Command::Module { action } => match action {
+            ModuleAction::List { project }
+            | ModuleAction::Create { project, .. }
+            | ModuleAction::Update { project, .. }
+            | ModuleAction::Delete { project, .. } => Some(project.as_str()),
+        },
+        _ => None,
+    }) else {
+        return;
+    };
+    decorate_module_value(value, &project.to_ascii_uppercase(), context, output);
+}
+
+fn decorate_module_value(
+    value: &mut Value,
+    project: &str,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| decorate_module_value(item, project, context, output)),
+        Value::Object(object) => {
+            if let Some(module_id) = object.get("id").and_then(Value::as_i64)
+                && let Some(url) = context.module_url(project, module_id)
+            {
+                match output {
+                    IssueLinkOutput::Url => {
+                        object.insert("web_url".into(), Value::String(url));
+                    }
+                    IssueLinkOutput::Markdown => {
+                        if let Some(name) = object.get("name").and_then(Value::as_str) {
+                            object.insert(
+                                "name".into(),
+                                Value::String(format!("[{name}]({url})")),
+                            );
+                        }
+                    }
+                }
+            }
+            object.values_mut().for_each(|item| {
+                decorate_module_value(item, project, context, output)
+            });
         }
         _ => {}
     }
@@ -948,7 +1075,8 @@ mod tests {
 
     use super::{
         ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueLinkOutput, IssueUpdate, PageCreate,
-        ProjectCreate, decorate_issue_links, error_detail, export_filename, find_resource,
+        ProjectCreate, decorate_comment_links, decorate_resource_links, error_detail,
+        decorate_module_links, export_filename, find_resource, resource_url,
         is_loopback_host, safe_filename, sanitize_error_detail, segment,
     };
     use crate::links::IssueLinkContext;
@@ -1653,24 +1781,80 @@ mod tests {
     }
 
     #[test]
-    fn decorates_http_issue_results_without_touching_page_identifiers() {
+    fn decorates_http_resource_results() {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
         let mut value = json!([
             {"identifier": "LIF-42", "title": "Fix"},
-            {"identifier": "LIF-DOC-3", "title": "Page"}
+            {"identifier": "LIF-DOC-3", "id": 17, "title": "Page"},
+            {"identifier": "LIF-PLAN-4", "id": 19, "title": "Plan"},
+            {"identifier": "LIF", "id": 23, "name": "Project"}
         ]);
 
-        decorate_issue_links(&mut value, &context, IssueLinkOutput::Url);
+        decorate_resource_links(&mut value, &context, IssueLinkOutput::Url);
         assert_eq!(
             value[0]["web_url"],
             "https://tracker.example/lific/LIF/issues/LIF-42"
         );
-        assert!(value[1]["web_url"].is_null());
-        decorate_issue_links(&mut value, &context, IssueLinkOutput::Markdown);
+        assert_eq!(
+            value[1]["web_url"],
+            "https://tracker.example/lific/LIF/pages/17"
+        );
+        assert_eq!(
+            value[2]["web_url"],
+            "https://tracker.example/lific/LIF/plans/19"
+        );
+        assert_eq!(
+            value[3]["web_url"],
+            "https://tracker.example/lific/LIF/overview"
+        );
+        assert_eq!(
+            resource_url(value[1].as_object().unwrap(), &context, "LIF-DOC-3"),
+            Some("https://tracker.example/lific/LIF/pages/17".into())
+        );
+        decorate_resource_links(&mut value, &context, IssueLinkOutput::Markdown);
         assert_eq!(
             value[0]["identifier"],
             "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
         );
-        assert_eq!(value[1]["identifier"], "LIF-DOC-3");
+        assert_eq!(
+            value[1]["identifier"],
+            "[LIF-DOC-3](https://tracker.example/lific/LIF/pages/17)"
+        );
+    }
+
+    #[test]
+    fn decorates_http_comment_results_with_issue_anchor() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let command = Command::Comment {
+            action: crate::cli::CommentAction::List {
+                identifier: "LIF-42".into(),
+            },
+        };
+        let mut value = json!([{"id": 7, "content": "Looks good"}]);
+
+        decorate_comment_links(&mut value, &command, &context, IssueLinkOutput::Markdown);
+
+        assert_eq!(
+            value[0]["comment"],
+            "[comment #7](https://tracker.example/lific/LIF/issues/LIF-42#comment-7)"
+        );
+    }
+
+    #[test]
+    fn decorates_http_module_results_with_project_route() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let command = Command::Module {
+            action: crate::cli::ModuleAction::List {
+                project: "lif".into(),
+            },
+        };
+        let mut value = json!([{"id": 23, "name": "Backend"}]);
+
+        decorate_module_links(&mut value, &command, &context, IssueLinkOutput::Markdown);
+
+        assert_eq!(
+            value[0]["name"],
+            "[Backend](https://tracker.example/lific/LIF/modules/23)"
+        );
     }
 }

@@ -92,6 +92,73 @@ fn issue_reference_with_context(context: Option<&IssueLinkContext>, identifier: 
     )
 }
 
+fn comment_reference(
+    parent_identifier: &str,
+    parent: queries::comments::CommentParent,
+    comment_id: i64,
+) -> String {
+    current_issue_link_context().map_or_else(
+        || format!("comment #{comment_id}"),
+        |context| match parent {
+            queries::comments::CommentParent::Issue(_) => {
+                context.issue_comment_markdown(parent_identifier, comment_id)
+            }
+            queries::comments::CommentParent::Page(page_id) => {
+                context.page_comment_markdown(parent_identifier, page_id, comment_id)
+            }
+        },
+    )
+}
+
+fn comment_parent_reference(
+    parent_identifier: &str,
+    parent: queries::comments::CommentParent,
+) -> String {
+    current_issue_link_context().map_or_else(
+        || parent_identifier.to_owned(),
+        |context| match parent {
+            queries::comments::CommentParent::Issue(_) => {
+                context.issue_markdown(parent_identifier)
+            }
+            queries::comments::CommentParent::Page(page_id) => {
+                context.page_markdown(parent_identifier, page_id)
+            }
+        },
+    )
+}
+
+fn project_reference(identifier: &str) -> String {
+    current_issue_link_context().map_or_else(
+        || identifier.to_owned(),
+        |context| context.project_markdown(identifier),
+    )
+}
+
+fn page_reference(page: &models::Page) -> String {
+    current_issue_link_context().map_or_else(
+        || page.identifier.clone(),
+        |context| context.page_markdown(&page.identifier, page.id),
+    )
+}
+
+fn plan_reference(plan: &models::Plan) -> String {
+    plan_reference_value(&plan.identifier, plan.id)
+}
+
+fn plan_reference_value(identifier: &str, plan_id: i64) -> String {
+    current_issue_link_context().map_or_else(
+        || identifier.to_owned(),
+        |context| context.plan_markdown(identifier, plan_id),
+    )
+}
+
+fn module_reference(project: &str, module: &models::Module) -> String {
+    current_issue_link_context().map_or_else(
+        || module.name.clone(),
+        |context| context.module_markdown(project, module.id, &module.name),
+    )
+}
+
 fn issue_reference_with_suffix(value: &str) -> String {
     let Some((identifier, suffix)) = value.split_once(' ') else {
         return issue_reference(value);
@@ -115,7 +182,12 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
         .unwrap_or_default();
     let mut out = format!(
         "{} [{}] {}{} — {}/{} done\n",
-        p.identifier, p.status, p.title, anchor, p.done_count, p.step_count
+        plan_reference(p),
+        p.status,
+        p.title,
+        anchor,
+        p.done_count,
+        p.step_count
     );
     fmt_steps(&p.steps, 0, &mut out);
     out
@@ -207,6 +279,7 @@ impl PlanStepCascadeAction {
 
 struct CascadedPlanStep {
     id: i64,
+    plan_id: i64,
     plan_identifier: String,
 }
 
@@ -221,7 +294,7 @@ fn issue_status_cascaded_plan_steps(
     action: PlanStepCascadeAction,
 ) -> Result<Vec<CascadedPlanStep>, crate::error::LificError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT ps.id, p.identifier || '-PLAN-' || pl.sequence
+        "SELECT ps.id, pl.id, p.identifier || '-PLAN-' || pl.sequence
            FROM audit_log al
            JOIN plan_steps ps ON ps.id = al.entity_id
            JOIN plans pl ON pl.id = ps.plan_id
@@ -237,7 +310,8 @@ fn issue_status_cascaded_plan_steps(
         |row| {
             Ok(CascadedPlanStep {
                 id: row.get(0)?,
-                plan_identifier: row.get(1)?,
+                plan_id: row.get(1)?,
+                plan_identifier: row.get(2)?,
             })
         },
     )?;
@@ -254,7 +328,7 @@ fn fmt_issue_plan_step_cascade(
             " ({} plan step #{} in {})",
             action.response_verb(),
             step.id,
-            step.plan_identifier
+            plan_reference_value(&step.plan_identifier, step.plan_id)
         )),
         steps => Some(format!(
             " ({} {} plan steps: {})",
@@ -262,7 +336,13 @@ fn fmt_issue_plan_step_cascade(
             steps.len(),
             steps
                 .iter()
-                .map(|step| format!("#{} in {}", step.id, step.plan_identifier))
+                .map(|step| {
+                    format!(
+                        "#{} in {}",
+                        step.id,
+                        plan_reference_value(&step.plan_identifier, step.plan_id)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
@@ -743,20 +823,54 @@ impl LificMcp {
                     // match on its parent so the reader knows to open the
                     // parent issue/page to find the thread (LIF-146).
                     if r.result_type == "comment" {
+                        let page_id = current_issue_link_context().and_then(|_| {
+                            looks_like_page_identifier(ident)
+                                .then(|| {
+                                    self.read(|conn| {
+                                        queries::resolve_page_identifier(conn, ident)
+                                    })
+                                    .ok()
+                                })
+                                .flatten()
+                        });
+                        let parent = current_issue_link_context().map_or_else(
+                            || ident.to_owned(),
+                            |context| {
+                                page_id.map_or_else(
+                                    || context.issue_markdown(ident),
+                                    |page_id| context.page_markdown(ident, page_id),
+                                )
+                            },
+                        );
+                        let comment = current_issue_link_context().map_or_else(
+                            || "comment".to_owned(),
+                            |context| page_id.map_or_else(
+                                || context.issue_comment_markdown(ident, r.id),
+                                |page_id| context.page_comment_markdown(ident, page_id, r.id),
+                            ),
+                        );
                         out.push_str(&format!(
-                            "- [comment] on {} — {}\n",
-                            issue_reference(ident),
-                            r.snippet
+                            "- [{}] on {} — {}\n",
+                            comment, parent, r.snippet
                         ));
                     } else {
+                        let identifier = if r.result_type == "page" {
+                            current_issue_link_context().map_or_else(
+                                || ident.to_owned(),
+                                |context| context.page_markdown(ident, r.id),
+                            )
+                        } else if r.result_type == "plan" {
+                            current_issue_link_context().map_or_else(
+                                || ident.to_owned(),
+                                |context| context.plan_markdown(ident, r.id),
+                            )
+                        } else {
+                            issue_reference(ident)
+                        };
                         out.push_str(&format!(
                             "- [{}] {} {} — {}\n",
                             r.result_type,
-                            if r.result_type == "issue" {
-                                issue_reference(ident)
-                            } else {
-                                ident.to_owned()
-                            },
+                            identifier,
                             r.title,
                             r.snippet
                         ));
@@ -1051,20 +1165,50 @@ impl LificMcp {
                                 "\n--- Comments ({total}, showing last 3 — use list_comments) ---\n"
                             ));
                             for c in &comments[total - 3..] {
-                                out.push_str(&format!(
-                                    "[{}] {} ({}): {}\n",
-                                    c.created_at, c.author, c.author_display_name, c.content
-                                ));
+                                if current_issue_link_context().is_some() {
+                                    out.push_str(&format!(
+                                        "[{}] {} ({}) — {}: {}\n",
+                                        c.created_at,
+                                        c.author,
+                                        c.author_display_name,
+                                        comment_reference(
+                                            &issue.identifier,
+                                            queries::comments::CommentParent::Issue(issue.id),
+                                            c.id
+                                        ),
+                                        c.content
+                                    ));
+                                } else {
+                                    out.push_str(&format!(
+                                        "[{}] {} ({}): {}\n",
+                                        c.created_at, c.author, c.author_display_name, c.content
+                                    ));
+                                }
                             }
                         }
                         // "all", or "recent" with <= 3 comments: today's format.
                         _ => {
                             out.push_str(&format!("\n--- Comments ({total}) ---\n"));
                             for c in &comments {
-                                out.push_str(&format!(
-                                    "[{}] {} ({}): {}\n",
-                                    c.created_at, c.author, c.author_display_name, c.content
-                                ));
+                                if current_issue_link_context().is_some() {
+                                    out.push_str(&format!(
+                                        "[{}] {} ({}) — {}: {}\n",
+                                        c.created_at,
+                                        c.author,
+                                        c.author_display_name,
+                                        comment_reference(
+                                            &issue.identifier,
+                                            queries::comments::CommentParent::Issue(issue.id),
+                                            c.id
+                                        ),
+                                        c.content
+                                    ));
+                                } else {
+                                    out.push_str(&format!(
+                                        "[{}] {} ({}): {}\n",
+                                        c.created_at, c.author, c.author_display_name, c.content
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1693,7 +1837,7 @@ impl LificMcp {
                 let mut out = format!(
                     "{}{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}\n",
                     if page.pinned { "📌 " } else { "" },
-                    page.identifier,
+                    page_reference(&page),
                     page.title,
                     page.status,
                     folder_name.as_deref().unwrap_or("none"),
@@ -1749,7 +1893,7 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Created {}: {}", page.identifier, page.title)
+                format!("Created {}: {}", page_reference(&page), page.title)
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1802,7 +1946,7 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Updated {}: {}", page.identifier, page.title)
+                format!("Updated {}: {}", page_reference(&page), page.title)
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1875,7 +2019,7 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Edited {}: {}", page.identifier, page.title)
+                format!("Edited {}: {}", page_reference(&page), page.title)
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1925,7 +2069,13 @@ impl LificMcp {
                 match self.write(|conn| queries::plans::delete_plan(conn, id)) {
                     Ok(()) => {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
-                        format!("Deleted plan {}", input.identifier)
+                        format!(
+                            "Deleted plan {}",
+                            current_issue_link_context().map_or_else(
+                                || input.identifier.clone(),
+                                |context| context.plan_markdown(&input.identifier, id),
+                            )
+                        )
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -1951,7 +2101,13 @@ impl LificMcp {
                                 project_id,
                             });
                         }
-                        format!("Deleted page {}", input.identifier)
+                        format!(
+                            "Deleted page {}",
+                            current_issue_link_context().map_or_else(
+                                || input.identifier.clone(),
+                                |context| context.page_markdown(&input.identifier, id),
+                            )
+                        )
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -1975,7 +2131,7 @@ impl LificMcp {
                             Some(user_ids) => self.realtime.send_to_users(event, user_ids),
                             None => self.emit(event),
                         }
-                        format!("Deleted project {}", input.identifier)
+                        format!("Deleted project {}", project_reference(&input.identifier))
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2066,7 +2222,12 @@ impl LificMcp {
                                 .unwrap_or_default();
                             out.push_str(&format!(
                                 "- {} | {} | {} ({}/{} done){}\n",
-                                p.identifier, p.status, p.title, p.done_count, p.step_count, anchor
+                                plan_reference(p),
+                                p.status,
+                                p.title,
+                                p.done_count,
+                                p.step_count,
+                                anchor
                             ));
                         }
                         out
@@ -2098,7 +2259,7 @@ impl LificMcp {
                         let mut out = format!("{} projects:\n", ps.len());
                         let now = Utc::now();
                         for p in &ps {
-                            out.push_str(&format!("- {} | {}", p.identifier, p.name));
+                            out.push_str(&format!("- {} | {}", project_reference(&p.identifier), p.name));
                             if !p.description.is_empty() {
                                 out.push_str(&format!(" — {}", p.description));
                             }
@@ -2254,7 +2415,13 @@ impl LificMcp {
                             let pin = if p.pinned { "📌 " } else { "" };
                             out.push_str(&format!(
                                 "- {}{} | {} | {}{}{} — updated {}\n",
-                                pin, p.identifier, p.status, p.title, labels, folder, updated
+                                pin,
+                                page_reference(p),
+                                p.status,
+                                p.title,
+                                labels,
+                                folder,
+                                updated
                             ));
                         }
                         append_pagination_hint(&mut out, has_more, offset + limit);
@@ -2278,7 +2445,11 @@ impl LificMcp {
                     Ok(ms) => {
                         let mut out = format!("{} modules:\n", ms.len());
                         for m in &ms {
-                            out.push_str(&format!("- {} ({})", m.name, m.status));
+                            out.push_str(&format!(
+                                "- {} ({})",
+                                module_reference(proj, m),
+                                m.status
+                            ));
                             if !m.description.is_empty() {
                                 out.push_str(&format!(" — {}", m.description));
                             }
@@ -2385,7 +2556,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectCreated {
                             project_id: p.id,
                         });
-                        format!("Created project {} | {}", p.identifier, p.name)
+                        format!("Created project {} | {}", project_reference(&p.identifier), p.name)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2422,7 +2593,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: p.id,
                         });
-                        format!("Updated project {} | {}", p.identifier, p.name)
+                        format!("Updated project {} | {}", project_reference(&p.identifier), p.name)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2457,7 +2628,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Created module [{}]: {}", m.id, m.name)
+                        format!("Created module {}", module_reference(proj, &m))
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2496,7 +2667,7 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Updated module: {}", m.name)
+                        format!("Updated module {}", module_reference(proj, &m))
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2721,13 +2892,20 @@ impl LificMcp {
                 if let Some(event) = event {
                     self.emit(event);
                 }
-                format!(
-                    "Comment #{} added to {} by {} at {}",
-                    c.id,
-                    issue_reference(&input.identifier),
-                    c.author,
-                    c.created_at
-                )
+                if current_issue_link_context().is_some() {
+                    format!(
+                        "{} added to {} by {} at {}",
+                        comment_reference(&input.identifier, parent, c.id),
+                        comment_parent_reference(&input.identifier, parent),
+                        c.author,
+                        c.created_at
+                    )
+                } else {
+                    format!(
+                        "Comment #{} added to {} by {} at {}",
+                        c.id, input.identifier, c.author, c.created_at
+                    )
+                }
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2763,11 +2941,14 @@ impl LificMcp {
         }) {
             Ok((comments, total)) if comments.is_empty() => {
                 if total == 0 {
-                    format!("No comments on {}.", issue_reference(&input.identifier))
+                    format!(
+                        "No comments on {}.",
+                        comment_parent_reference(&input.identifier, parent)
+                    )
                 } else {
                     format!(
                         "No comments in this range on {} (offset {offset}, {total} total).",
-                        issue_reference(&input.identifier)
+                        comment_parent_reference(&input.identifier, parent)
                     )
                 }
             }
@@ -2786,27 +2967,38 @@ impl LificMcp {
                     };
                     format!(
                         "Showing {shown} {edge} of {total} comment(s) on {}:\n",
-                        issue_reference(&input.identifier)
+                        comment_parent_reference(&input.identifier, parent)
                     )
                 } else if offset > 0 {
                     format!(
                         "Showing comments {}-{} of {total} on {} ({} first):\n",
                         offset + 1,
                         offset + shown,
-                        issue_reference(&input.identifier),
+                        comment_parent_reference(&input.identifier, parent),
                         if order == "desc" { "newest" } else { "oldest" }
                     )
                 } else {
                     format!(
                         "{total} comment(s) on {}:\n",
-                        issue_reference(&input.identifier)
+                        comment_parent_reference(&input.identifier, parent)
                     )
                 };
                 for c in &comments {
-                    out.push_str(&format!(
-                        "[{}] {} ({}): {}\n",
-                        c.created_at, c.author, c.author_display_name, c.content
-                    ));
+                    if current_issue_link_context().is_some() {
+                        out.push_str(&format!(
+                            "[{}] {} ({}) — {}: {}\n",
+                            c.created_at,
+                            c.author,
+                            c.author_display_name,
+                            comment_reference(&input.identifier, parent, c.id),
+                            c.content
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "[{}] {} ({}): {}\n",
+                            c.created_at, c.author, c.author_display_name, c.content
+                        ));
+                    }
                 }
                 if has_more {
                     let next_offset = offset + shown;
@@ -2955,7 +3147,7 @@ impl LificMcp {
                 self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                     project_id: plan.project_id,
                 });
-                format!("Created {}\n{}", plan.identifier, fmt_plan(&plan))
+                format!("Created {}\n{}", plan_reference(&plan), fmt_plan(&plan))
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3022,7 +3214,7 @@ impl LificMcp {
                 format!(
                     "Edited step #{} in {}\n{}",
                     input.step_id,
-                    plan.identifier,
+                    plan_reference(&plan),
                     fmt_plan(&plan)
                 )
             }
@@ -3201,7 +3393,7 @@ impl LificMcp {
                     format!(
                         "{}\n{} [{}]: {}/{} done",
                         notes.join("; "),
-                        plan.identifier,
+                        plan_reference(&plan),
                         plan.status,
                         plan.done_count,
                         plan.step_count

@@ -61,6 +61,130 @@ impl IssueLinkContext {
             .push(identifier);
         Some(url.to_string())
     }
+
+    #[must_use]
+    pub(crate) fn project_markdown(&self, identifier: &str) -> String {
+        self.project_url(identifier).map_or_else(
+            || identifier.to_owned(),
+            |url| format!("[{identifier}]({url})"),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn project_url(&self, identifier: &str) -> Option<String> {
+        valid_project_identifier(identifier).then(|| self.path_url([identifier, "overview"]))
+    }
+
+    #[must_use]
+    pub(crate) fn page_markdown(&self, identifier: &str, page_id: i64) -> String {
+        self.page_url(identifier, page_id).map_or_else(
+            || identifier.to_owned(),
+            |url| format!("[{identifier}]({url})"),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn page_url(&self, identifier: &str, page_id: i64) -> Option<String> {
+        let (project, sequence) = identifier.split_once("-DOC-")?;
+        (valid_project_identifier(project)
+            && sequence.chars().all(|c| c.is_ascii_digit())
+            && !sequence.is_empty()
+            && page_id > 0)
+            .then(|| self.path_url([project, "pages", &page_id.to_string()]))
+    }
+
+    #[must_use]
+    pub(crate) fn plan_markdown(&self, identifier: &str, plan_id: i64) -> String {
+        self.plan_url(identifier, plan_id).map_or_else(
+            || identifier.to_owned(),
+            |url| format!("[{identifier}]({url})"),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn plan_url(&self, identifier: &str, plan_id: i64) -> Option<String> {
+        let (project, suffix) = identifier.split_once("-PLAN-")?;
+        (valid_project_identifier(project)
+            && suffix.chars().all(|c| c.is_ascii_digit())
+            && !suffix.is_empty()
+            && plan_id > 0)
+            .then(|| self.path_url([project, "plans", &plan_id.to_string()]))
+    }
+
+    #[must_use]
+    pub(crate) fn module_markdown(&self, project: &str, module_id: i64, label: &str) -> String {
+        self.module_url(project, module_id).map_or_else(
+            || label.to_owned(),
+            |url| format!("[{label}]({url})"),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn module_url(&self, project: &str, module_id: i64) -> Option<String> {
+        (valid_project_identifier(project) && module_id > 0)
+            .then(|| self.path_url([project, "modules", &module_id.to_string()]))
+    }
+
+    #[must_use]
+    pub(crate) fn issue_comment_markdown(
+        &self,
+        identifier: &str,
+        comment_id: i64,
+    ) -> String {
+        self.issue_comment_url(identifier, comment_id).map_or_else(
+            || format!("comment #{comment_id}"),
+            |url| format!("[comment #{comment_id}]({url})"),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn issue_comment_url(&self, identifier: &str, comment_id: i64) -> Option<String> {
+        if comment_id <= 0 {
+            return None;
+        }
+        Some(format!(
+            "{}#comment-{comment_id}",
+            self.issue_url(identifier)?
+        ))
+    }
+
+    #[must_use]
+    pub(crate) fn page_comment_markdown(
+        &self,
+        identifier: &str,
+        page_id: i64,
+        comment_id: i64,
+    ) -> String {
+        self.page_comment_url(identifier, page_id, comment_id)
+            .map_or_else(
+                || format!("comment #{comment_id}"),
+                |url| format!("[comment #{comment_id}]({url})"),
+            )
+    }
+
+    #[must_use]
+    pub(crate) fn page_comment_url(
+        &self,
+        identifier: &str,
+        page_id: i64,
+        comment_id: i64,
+    ) -> Option<String> {
+        if comment_id <= 0 {
+            return None;
+        }
+        Some(format!(
+            "{}#comment-{comment_id}",
+            self.page_url(identifier, page_id)?
+        ))
+    }
+
+    fn path_url<const N: usize>(&self, segments: [&str; N]) -> String {
+        let mut url = self.base_url.clone();
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.extend(segments);
+        }
+        url.to_string()
+    }
 }
 
 fn valid_base_url(base_url: &Url) -> bool {
@@ -74,7 +198,13 @@ fn valid_base_url(base_url: &Url) -> bool {
 
 fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
     project != "DOC"
-        && project.len() <= 5
+        && valid_project_identifier(project)
+        && !sequence.is_empty()
+        && sequence.chars().all(|c| c.is_ascii_digit())
+}
+
+fn valid_project_identifier(project: &str) -> bool {
+    project.len() <= 5
         && project
             .chars()
             .next()
@@ -83,8 +213,6 @@ fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
             .chars()
             .skip(1)
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-        && !sequence.is_empty()
-        && sequence.chars().all(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -108,6 +236,42 @@ mod tests {
         for identifier in ["DOC-1", "lif-1", "LIF", "LIF-nope", "TOOLONG-1"] {
             assert_eq!(context.issue_markdown(identifier), identifier);
         }
+    }
+
+    #[test]
+    fn resource_markdown_uses_detail_routes() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+
+        assert_eq!(
+            context.project_markdown("LIF"),
+            "[LIF](https://tracker.example/lific/LIF/overview)"
+        );
+        assert_eq!(
+            context.page_markdown("LIF-DOC-3", 17),
+            "[LIF-DOC-3](https://tracker.example/lific/LIF/pages/17)"
+        );
+        assert_eq!(
+            context.plan_markdown("LIF-PLAN-4", 19),
+            "[LIF-PLAN-4](https://tracker.example/lific/LIF/plans/19)"
+        );
+        assert_eq!(
+            context.module_markdown("LIF", 23, "Backend"),
+            "[Backend](https://tracker.example/lific/LIF/modules/23)"
+        );
+    }
+
+    #[test]
+    fn comment_markdown_points_at_comment_anchor() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+
+        assert_eq!(
+            context.issue_comment_markdown("LIF-42", 7),
+            "[comment #7](https://tracker.example/lific/LIF/issues/LIF-42#comment-7)"
+        );
+        assert_eq!(
+            context.page_comment_markdown("LIF-DOC-3", 17, 8),
+            "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
+        );
     }
 
     #[test]
