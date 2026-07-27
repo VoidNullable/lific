@@ -29,7 +29,7 @@ HTTP mode uses the authenticated server identity for mutations. In particular, `
 
 HTTP mode currently uses pretty-printed JSON for human-readable output. Remote project export downloads one archive file from the server into the output directory rather than writing individual Markdown files.
 
-When HTTP mode returns issue objects, JSON output includes a `web_url` built from the configured server URL. Human-readable output renders structured issue identifiers as Markdown links. Direct SQL mode cannot add these links because it has no authoritative external hostname.
+When HTTP mode returns issues, projects, pages, plans, modules, or comments, JSON output includes a `web_url` built from the configured server URL. Human-readable output renders the corresponding identifier, name, or comment handle as a Markdown link. Direct SQL mode cannot add these links because it has no authoritative external hostname.
 
 Clap also provides `--help` and `--version`.
 

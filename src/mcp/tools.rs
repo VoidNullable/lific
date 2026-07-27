@@ -473,32 +473,68 @@ fn looks_like_page_identifier(s: &str) -> bool {
 fn resolve_comment_parent(
     mcp: &LificMcp,
     identifier: &str,
-) -> Result<queries::comments::CommentParent, String> {
+) -> Result<
+    (
+        queries::comments::CommentParent,
+        String,
+        Option<i64>,
+    ),
+    String,
+> {
     if looks_like_page_identifier(identifier) {
         let conn = mcp.db.read().map_err(|e| e.to_string())?;
         let id = queries::resolve_page_identifier(&conn, identifier).map_err(|e| e.to_string())?;
-        Ok(queries::comments::CommentParent::Page(id))
+        let page = queries::get_page(&conn, id).map_err(|e| e.to_string())?;
+        Ok((
+            queries::comments::CommentParent::Page(page.id),
+            page.identifier,
+            page.project_id,
+        ))
     } else {
         let conn = mcp.db.read().map_err(|e| e.to_string())?;
         let id = queries::resolve_identifier(&conn, identifier).map_err(|e| e.to_string())?;
-        Ok(queries::comments::CommentParent::Issue(id))
+        let issue = queries::get_issue(&conn, id).map_err(|e| e.to_string())?;
+        Ok((
+            queries::comments::CommentParent::Issue(issue.id),
+            issue.identifier,
+            Some(issue.project_id),
+        ))
     }
 }
 
-/// LIF-143: resolve the project a comment belongs to, via its issue or page
-/// parent. Mirrors `api::comments::resolve_comment_project` — a page comment
-/// may have a NULL project (workspace page), which `mention_candidates`
-/// handles.
-fn resolve_comment_project(
+/// Resolve an existing comment's canonical parent and project in one read.
+/// A page comment may have a NULL project (workspace page), which
+/// `mention_candidates` handles.
+fn resolve_comment_context(
     conn: &rusqlite::Connection,
     comment: &models::Comment,
-) -> Result<Option<i64>, crate::error::LificError> {
+) -> Result<
+    (
+        Option<i64>,
+        queries::comments::CommentParent,
+        String,
+    ),
+    crate::error::LificError,
+> {
     if let Some(issue_id) = comment.issue_id {
-        Ok(Some(queries::get_issue(conn, issue_id)?.project_id))
+        let issue = queries::get_issue(conn, issue_id)?;
+        Ok((
+            Some(issue.project_id),
+            queries::comments::CommentParent::Issue(issue.id),
+            issue.identifier,
+        ))
     } else if let Some(page_id) = comment.page_id {
-        Ok(queries::get_page(conn, page_id)?.project_id)
+        let page = queries::get_page(conn, page_id)?;
+        Ok((
+            page.project_id,
+            queries::comments::CommentParent::Page(page.id),
+            page.identifier,
+        ))
     } else {
-        Ok(None)
+        Err(crate::error::LificError::Internal(format!(
+            "comment {} has no parent",
+            comment.id
+        )))
     }
 }
 
@@ -526,19 +562,50 @@ fn truncate_value(v: &str, max: usize) -> String {
 
 /// Render one audit entry as a compact line:
 /// `[ts] actor via transport — LABEL action detail`
-fn fmt_activity(a: &models::Activity) -> String {
+fn activity_reference(a: &models::Activity, project: Option<&str>) -> String {
+    let label = a.entity_label.as_deref().unwrap_or("?");
+    let Some(context) = current_issue_link_context() else {
+        return label.to_owned();
+    };
+
+    if a.action == "delete" {
+        return match a.entity_type.as_str() {
+            "comment" if a.issue_id.is_some() => context.issue_markdown(label),
+            "comment" => a
+                .page_id
+                .map_or_else(|| label.to_owned(), |id| context.page_markdown(label, id)),
+            _ => label.to_owned(),
+        };
+    }
+
+    match a.entity_type.as_str() {
+        "issue" => context.issue_markdown(label),
+        "project" => context.project_markdown(label),
+        "page" => context.page_markdown(label, a.entity_id),
+        "plan" => context.plan_markdown(label, a.entity_id),
+        "module" => project.map_or_else(
+            || label.to_owned(),
+            |project| context.module_markdown(project, a.entity_id, label),
+        ),
+        "comment" if a.issue_id.is_some() => {
+            context.issue_comment_markdown(label, a.entity_id)
+        }
+        "comment" => a.page_id.map_or_else(
+            || label.to_owned(),
+            |page_id| context.page_comment_markdown(label, page_id, a.entity_id),
+        ),
+        _ => label.to_owned(),
+    }
+}
+
+fn fmt_activity(a: &models::Activity, project: Option<&str>) -> String {
     let who = match (&a.actor_display_name, &a.actor_username) {
         (Some(d), _) if !d.is_empty() => d.clone(),
         (_, Some(u)) => u.clone(),
         _ => "system".into(),
     };
     let agent = if a.actor_is_bot { " (agent)" } else { "" };
-    let raw_label = a.entity_label.as_deref().unwrap_or("?");
-    let label = if a.entity_type == "issue" {
-        issue_reference(raw_label)
-    } else {
-        raw_label.to_owned()
-    };
+    let label = activity_reference(a, project);
 
     let detail = match a.action.as_str() {
         "create" => format!(
@@ -843,14 +910,14 @@ impl LificMcp {
                             },
                         );
                         let comment = current_issue_link_context().map_or_else(
-                            || "comment".to_owned(),
+                            || "[comment]".to_owned(),
                             |context| page_id.map_or_else(
                                 || context.issue_comment_markdown(ident, r.id),
                                 |page_id| context.page_comment_markdown(ident, page_id, r.id),
                             ),
                         );
                         out.push_str(&format!(
-                            "- [{}] on {} — {}\n",
+                            "- {} on {} — {}\n",
                             comment, parent, r.snippet
                         ));
                     } else {
@@ -894,16 +961,54 @@ impl LificMcp {
         // Resolve the identifier shape: page → issue → project. Pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
         // tail, so a bare project identifier falls through cleanly.
-        let scope = if looks_like_page_identifier(ident) {
-            match self.read(|conn| queries::resolve_page_identifier(conn, ident)) {
-                Ok(id) => queries::activity::ActivityScope::Page(id),
+        let (scope, project_id, scope_reference, project_identifier) =
+            if looks_like_page_identifier(ident) {
+            match self.read(|conn| {
+                let id = queries::resolve_page_identifier(conn, ident)?;
+                queries::get_page(conn, id)
+            }) {
+                Ok(page) => {
+                    let project_identifier = page
+                        .identifier
+                        .split_once("-DOC-")
+                        .map(|(project, _)| project.to_owned());
+                    (
+                        queries::activity::ActivityScope::Page(page.id),
+                        page.project_id,
+                        page_reference(&page),
+                        project_identifier,
+                    )
+                }
                 Err(e) => return format!("Error: {e}"),
             }
-        } else if let Ok(id) = self.read(|conn| queries::resolve_identifier(conn, ident)) {
-            queries::activity::ActivityScope::Issue(id)
+        } else if let Ok(issue) = self.read(|conn| {
+            let id = queries::resolve_identifier(conn, ident)?;
+            queries::get_issue(conn, id)
+        }) {
+            let project_identifier = issue
+                .identifier
+                .rsplit_once('-')
+                .map(|(project, _)| project.to_owned());
+            (
+                queries::activity::ActivityScope::Issue(issue.id),
+                Some(issue.project_id),
+                issue_reference(&issue.identifier),
+                project_identifier,
+            )
         } else {
-            match self.read(|conn| queries::resolve_project_identifier(conn, ident)) {
-                Ok(id) => queries::activity::ActivityScope::Project(id),
+            match self.read(|conn| {
+                let id = queries::resolve_project_identifier(conn, ident)?;
+                queries::get_project(conn, id)
+            }) {
+                Ok(project) => {
+                    let project_identifier = project.identifier.clone();
+                    (
+                        queries::activity::ActivityScope::Project(project.id),
+                        Some(project.id),
+                        project_reference(&project.identifier),
+                        Some(project_identifier),
+                    )
+                }
                 Err(_) => {
                     return format!(
                         "Error: '{ident}' is not a known issue, page, or project identifier"
@@ -914,27 +1019,6 @@ impl LificMcp {
 
         // LIF-198: resolve the scope's project (Viewer gate); workspace
         // pages (project_id None) fall back to admin-only.
-        let project_id: Option<i64> = match scope {
-            queries::activity::ActivityScope::Issue(id) => {
-                match self.read(|conn| queries::get_issue(conn, id)) {
-                    Ok(issue) => Some(issue.project_id),
-                    Err(e) => return format!("Error: {e}"),
-                }
-            }
-            queries::activity::ActivityScope::Page(id) => {
-                match self.read(|conn| queries::get_page(conn, id)) {
-                    Ok(page) => page.project_id,
-                    Err(e) => return format!("Error: {e}"),
-                }
-            }
-            queries::activity::ActivityScope::Plan(id) => {
-                match self.read(|conn| queries::plans::get_plan(conn, id)) {
-                    Ok(plan) => Some(plan.project_id),
-                    Err(e) => return format!("Error: {e}"),
-                }
-            }
-            queries::activity::ActivityScope::Project(id) => Some(id),
-        };
         if let Err(e) = require_page_role_mcp(&self.db, project_id, models::Role::Viewer) {
             return format!("Error: {e}");
         }
@@ -943,16 +1027,19 @@ impl LificMcp {
             .read(|conn| queries::activity::list_activity(conn, scope, Some(limit), Some(offset)))
         {
             Ok(feed) if feed.items.is_empty() && offset == 0 => {
-                format!("No recorded activity for {} yet.", issue_reference(ident))
+                format!("No recorded activity for {scope_reference} yet.")
             }
             Ok(feed) => {
                 let mut out = format!(
                     "{} activity entries for {}:\n",
                     feed.items.len(),
-                    issue_reference(ident)
+                    scope_reference
                 );
                 for a in &feed.items {
-                    out.push_str(&format!("- {}\n", fmt_activity(a)));
+                    out.push_str(&format!(
+                        "- {}\n",
+                        fmt_activity(a, project_identifier.as_deref())
+                    ));
                 }
                 append_pagination_hint(&mut out, feed.has_more, offset + limit);
                 out
@@ -1769,9 +1856,9 @@ impl LificMcp {
                 });
                 format!(
                     "{} {} {}",
-                    issue_reference(&input.source),
+                    issue_reference(&source.identifier),
                     input.relation_type,
-                    issue_reference(&input.target)
+                    issue_reference(&target.identifier)
                 )
             }
             Err(e) => format!("Error: {e}"),
@@ -1809,8 +1896,8 @@ impl LificMcp {
                 });
                 format!(
                     "Unlinked {} and {}",
-                    issue_reference(&input.source),
-                    issue_reference(&input.target)
+                    issue_reference(&source.identifier),
+                    issue_reference(&target.identifier)
                 )
             }
             Err(e) => format!("Error: {e}"),
@@ -2049,65 +2136,55 @@ impl LificMcp {
                             project_id: issue.project_id,
                             issue_id: issue.id,
                         });
-                        format!("Deleted issue {}", issue_reference(&input.identifier))
+                        format!("Deleted issue {}", issue.identifier)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
             }
             "plan" => {
-                let (id, project_id) = match self.read(|conn| {
+                let plan = match self.read(|conn| {
                     let id = queries::plans::resolve_plan_identifier(conn, &input.identifier)?;
-                    let project_id = queries::plans::get_plan(conn, id)?.project_id;
-                    Ok((id, project_id))
-                }) {
-                    Ok(v) => v,
-                    Err(e) => return format!("Error: {e}"),
-                };
-                if let Err(e) = require_role_mcp(&self.db, project_id, models::Role::Maintainer) {
-                    return format!("Error: {e}");
-                }
-                match self.write(|conn| queries::plans::delete_plan(conn, id)) {
-                    Ok(()) => {
-                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
-                        format!(
-                            "Deleted plan {}",
-                            current_issue_link_context().map_or_else(
-                                || input.identifier.clone(),
-                                |context| context.plan_markdown(&input.identifier, id),
-                            )
-                        )
-                    }
-                    Err(e) => format!("Error: {e}"),
-                }
-            }
-            "page" => {
-                let (id, project_id) = match self.read(|conn| {
-                    let id = queries::resolve_page_identifier(conn, &input.identifier)?;
-                    let project_id = queries::get_page(conn, id)?.project_id;
-                    Ok((id, project_id))
+                    queries::plans::get_plan(conn, id)
                 }) {
                     Ok(v) => v,
                     Err(e) => return format!("Error: {e}"),
                 };
                 if let Err(e) =
-                    require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)
+                    require_role_mcp(&self.db, plan.project_id, models::Role::Maintainer)
                 {
                     return format!("Error: {e}");
                 }
-                match self.write(|conn| queries::delete_page(conn, id)) {
+                match self.write(|conn| queries::plans::delete_plan(conn, plan.id)) {
                     Ok(()) => {
-                        if let Some(project_id) = project_id {
+                        self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
+                            project_id: plan.project_id,
+                        });
+                        format!("Deleted plan {}", plan.identifier)
+                    }
+                    Err(e) => format!("Error: {e}"),
+                }
+            }
+            "page" => {
+                let page = match self.read(|conn| {
+                    let id = queries::resolve_page_identifier(conn, &input.identifier)?;
+                    queries::get_page(conn, id)
+                }) {
+                    Ok(v) => v,
+                    Err(e) => return format!("Error: {e}"),
+                };
+                if let Err(e) =
+                    require_page_role_mcp(&self.db, page.project_id, models::Role::Maintainer)
+                {
+                    return format!("Error: {e}");
+                }
+                match self.write(|conn| queries::delete_page(conn, page.id)) {
+                    Ok(()) => {
+                        if let Some(project_id) = page.project_id {
                             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                                 project_id,
                             });
                         }
-                        format!(
-                            "Deleted page {}",
-                            current_issue_link_context().map_or_else(
-                                || input.identifier.clone(),
-                                |context| context.page_markdown(&input.identifier, id),
-                            )
-                        )
+                        format!("Deleted page {}", page.identifier)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2131,7 +2208,7 @@ impl LificMcp {
                             Some(user_ids) => self.realtime.send_to_users(event, user_ids),
                             None => self.emit(event),
                         }
-                        format!("Deleted project {}", project_reference(&input.identifier))
+                        format!("Deleted project {}", project.identifier)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2153,24 +2230,28 @@ impl LificMcp {
                 let result = match input.resource_type.as_str() {
                     "module" => self.write(|conn| {
                         let id = queries::resolve_module_name(conn, pid, &input.identifier)?;
-                        queries::delete_module(conn, id)
+                        let module = queries::get_module(conn, id)?;
+                        queries::delete_module(conn, id)?;
+                        Ok(module.name)
                     }),
                     "label" => self.write(|conn| {
                         let id = queries::resolve_label_name(conn, pid, &input.identifier)?;
-                        queries::delete_label(conn, id)
+                        queries::delete_label(conn, id)?;
+                        Ok(format!("'{}'", input.identifier))
                     }),
                     "folder" => self.write(|conn| {
                         let id = queries::resolve_folder_name(conn, pid, &input.identifier)?;
-                        queries::delete_folder(conn, id)
+                        queries::delete_folder(conn, id)?;
+                        Ok(format!("'{}'", input.identifier))
                     }),
                     _ => unreachable!(),
                 };
                 match result {
-                    Ok(()) => {
+                    Ok(reference) => {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Deleted {} '{}'", input.resource_type, input.identifier)
+                        format!("Deleted {} {reference}", input.resource_type)
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2821,8 +2902,9 @@ impl LificMcp {
         description = "Add a comment to an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). The author is the authenticated user."
     )]
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
-        let parent = match resolve_comment_parent(self, &input.identifier) {
-            Ok(p) => p,
+        let (parent, parent_identifier, project_id) =
+            match resolve_comment_parent(self, &input.identifier) {
+            Ok(context) => context,
             Err(e) => return format!("Error: {e}"),
         };
         if let Err(e) = self.require_comment_role_mcp(parent, models::Role::Viewer) {
@@ -2846,20 +2928,6 @@ impl LificMcp {
         // front (read connections), then record @mentions in the same write
         // that creates the comment. Same visible-member rules as the REST
         // path — only tokens matching a visible member resolve.
-        let project_id: Option<i64> = match parent {
-            queries::comments::CommentParent::Issue(id) => {
-                match self.read(|conn| queries::get_issue(conn, id)) {
-                    Ok(i) => Some(i.project_id),
-                    Err(e) => return format!("Error: {e}"),
-                }
-            }
-            queries::comments::CommentParent::Page(id) => {
-                match self.read(|conn| queries::get_page(conn, id)) {
-                    Ok(p) => p.project_id,
-                    Err(e) => return format!("Error: {e}"),
-                }
-            }
-        };
         let member_scoped = match crate::authz::authz_enforced(&self.db) {
             Ok(v) => v,
             Err(e) => return format!("Error: {e}"),
@@ -2895,15 +2963,15 @@ impl LificMcp {
                 if current_issue_link_context().is_some() {
                     format!(
                         "{} added to {} by {} at {}",
-                        comment_reference(&input.identifier, parent, c.id),
-                        comment_parent_reference(&input.identifier, parent),
+                        comment_reference(&parent_identifier, parent, c.id),
+                        comment_parent_reference(&parent_identifier, parent),
                         c.author,
                         c.created_at
                     )
                 } else {
                     format!(
                         "Comment #{} added to {} by {} at {}",
-                        c.id, input.identifier, c.author, c.created_at
+                        c.id, parent_identifier, c.author, c.created_at
                     )
                 }
             }
@@ -2915,8 +2983,8 @@ impl LificMcp {
         description = "List comments on an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages)."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
-        let parent = match resolve_comment_parent(self, &input.identifier) {
-            Ok(p) => p,
+        let (parent, parent_identifier, _) = match resolve_comment_parent(self, &input.identifier) {
+            Ok(context) => context,
             Err(e) => return format!("Error: {e}"),
         };
         if let Err(e) = self.require_comment_role_mcp(parent, models::Role::Viewer) {
@@ -2943,12 +3011,12 @@ impl LificMcp {
                 if total == 0 {
                     format!(
                         "No comments on {}.",
-                        comment_parent_reference(&input.identifier, parent)
+                        comment_parent_reference(&parent_identifier, parent)
                     )
                 } else {
                     format!(
                         "No comments in this range on {} (offset {offset}, {total} total).",
-                        comment_parent_reference(&input.identifier, parent)
+                        comment_parent_reference(&parent_identifier, parent)
                     )
                 }
             }
@@ -2967,20 +3035,20 @@ impl LificMcp {
                     };
                     format!(
                         "Showing {shown} {edge} of {total} comment(s) on {}:\n",
-                        comment_parent_reference(&input.identifier, parent)
+                        comment_parent_reference(&parent_identifier, parent)
                     )
                 } else if offset > 0 {
                     format!(
                         "Showing comments {}-{} of {total} on {} ({} first):\n",
                         offset + 1,
                         offset + shown,
-                        comment_parent_reference(&input.identifier, parent),
+                        comment_parent_reference(&parent_identifier, parent),
                         if order == "desc" { "newest" } else { "oldest" }
                     )
                 } else {
                     format!(
                         "{total} comment(s) on {}:\n",
-                        comment_parent_reference(&input.identifier, parent)
+                        comment_parent_reference(&parent_identifier, parent)
                     )
                 };
                 for c in &comments {
@@ -2990,7 +3058,7 @@ impl LificMcp {
                             c.created_at,
                             c.author,
                             c.author_display_name,
-                            comment_reference(&input.identifier, parent, c.id),
+                            comment_reference(&parent_identifier, parent, c.id),
                             c.content
                         ));
                     } else {
@@ -3038,8 +3106,9 @@ impl LificMcp {
 
         // LIF-263: recompute the mention set against the parent project's
         // visible members, resolving the project from the comment's parent.
-        let project_id = match self.read(|conn| resolve_comment_project(conn, &existing)) {
-            Ok(p) => p,
+        let (project_id, parent, parent_identifier) =
+            match self.read(|conn| resolve_comment_context(conn, &existing)) {
+            Ok(context) => context,
             Err(e) => return format!("Error: {e}"),
         };
         let member_scoped = match crate::authz::authz_enforced(&self.db) {
@@ -3065,7 +3134,15 @@ impl LificMcp {
                 } else if let Some(project_id) = project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Comment #{} edited at {}", c.id, c.updated_at)
+                if current_issue_link_context().is_some() {
+                    format!(
+                        "{} edited at {}",
+                        comment_reference(&parent_identifier, parent, c.id),
+                        c.updated_at
+                    )
+                } else {
+                    format!("Comment #{} edited at {}", c.id, c.updated_at)
+                }
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3090,8 +3167,9 @@ impl LificMcp {
             return "Error: you can only delete your own comments".into();
         }
 
-        let project_id = match self.read(|conn| resolve_comment_project(conn, &existing)) {
-            Ok(project_id) => project_id,
+        let (project_id, parent, parent_identifier) =
+            match self.read(|conn| resolve_comment_context(conn, &existing)) {
+            Ok(context) => context,
             Err(e) => return format!("Error: {e}"),
         };
 
@@ -3105,7 +3183,15 @@ impl LificMcp {
                 } else if let Some(project_id) = project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Comment #{} deleted", input.comment_id)
+                if current_issue_link_context().is_some() {
+                    format!(
+                        "Comment #{} deleted from {}",
+                        input.comment_id,
+                        comment_parent_reference(&parent_identifier, parent)
+                    )
+                } else {
+                    format!("Comment #{} deleted", input.comment_id)
+                }
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3297,10 +3383,11 @@ impl LificMcp {
                         }
                         if let Some(ref ident) = input.attach_issue {
                             let iid = queries::resolve_identifier(conn, ident)?;
+                            let issue = queries::get_issue(conn, iid)?;
                             queries::plans::set_step_issue(conn, step_id, Some(iid))?;
                             notes.push(format!(
                                 "Attached {} to step #{step_id}",
-                                issue_reference(ident)
+                                issue_reference(&issue.identifier)
                             ));
                         }
                         if input.detach_issue.unwrap_or(false) {
@@ -4099,10 +4186,10 @@ mod tests {
 
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "issue".into(),
-            identifier: "DEL-1".into(),
+            identifier: "DEL-01".into(),
             project: None,
         }));
-        assert!(result.contains("Deleted issue"), "got: {result}");
+        assert_eq!(result, "Deleted issue DEL-1");
 
         // Verify gone
         let get = m.get_issue(Parameters(GetIssueInput {
@@ -4110,6 +4197,27 @@ mod tests {
             ..Default::default()
         }));
         assert!(get.starts_with("Error"), "got: {get}");
+    }
+
+    #[tokio::test]
+    async fn issue_delete_keeps_the_deleted_resource_reference_plain() {
+        let m = mcp();
+        seed_project(&m, "Test", "DEL");
+        seed_issue(&m, "DEL", "Doomed");
+        let context =
+            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let result =
+            crate::mcp::with_request_context(None, false, Some(context), || async {
+                m.delete(Parameters(DeleteInput {
+                    resource_type: "issue".into(),
+                    identifier: "DEL-01".into(),
+                    project: None,
+                }))
+            })
+            .await;
+
+        assert_eq!(result, "Deleted issue DEL-1");
     }
 
     #[test]
@@ -4313,11 +4421,11 @@ mod tests {
         seed_issue(&m, "LNK", "Blocked");
 
         let result = m.link_issues(Parameters(LinkIssuesInput {
-            source: "LNK-1".into(),
-            target: "LNK-2".into(),
+            source: "LNK-01".into(),
+            target: "LNK-02".into(),
             relation_type: "blocks".into(),
         }));
-        assert!(result.contains("blocks"), "got: {result}");
+        assert_eq!(result, "LNK-1 blocks LNK-2");
 
         // Verify relation shows in get_issue, now annotated with the related
         // issue's status (LIF-303). LNK-2 is a fresh issue → backlog.
@@ -4328,10 +4436,10 @@ mod tests {
         assert!(detail.contains("Blocks: LNK-2 (backlog)"), "got: {detail}");
 
         let result = m.unlink_issues(Parameters(UnlinkIssuesInput {
-            source: "LNK-1".into(),
-            target: "LNK-2".into(),
+            source: "LNK-01".into(),
+            target: "LNK-02".into(),
         }));
-        assert!(result.contains("Unlinked"), "got: {result}");
+        assert_eq!(result, "Unlinked LNK-1 and LNK-2");
     }
 
     // LIF-303: get_issue annotates relation identifiers with the related
@@ -4700,10 +4808,10 @@ mod tests {
         }));
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "page".into(),
-            identifier: "PGD-DOC-1".into(),
+            identifier: "PGD-DOC-01".into(),
             project: None,
         }));
-        assert!(result.contains("Deleted page"), "got: {result}");
+        assert_eq!(result, "Deleted page PGD-DOC-1");
     }
 
     // ── search ──
@@ -4760,6 +4868,48 @@ mod tests {
             "got: {result}"
         );
         assert!(result.contains("- [comment] on FMT-1 "), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn search_renders_a_comment_as_one_direct_link() {
+        let m = mcp();
+        seed_project(&m, "Test", "SRC");
+        seed_issue(&m, "SRC", "Search comments");
+        let author = make_user(&m, "author", false);
+        let auth_user = models::AuthUser {
+            id: author.id,
+            username: author.username,
+            display_name: author.display_name,
+            is_admin: author.is_admin,
+        };
+        let context =
+            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let result = crate::mcp::with_request_context(
+            Some(auth_user),
+            false,
+            Some(context),
+            || async {
+                m.add_comment(Parameters(AddCommentInput {
+                    identifier: "SRC-1".into(),
+                    content: "Unique comment needle".into(),
+                }));
+                m.search(Parameters(SearchInput {
+                    query: "needle".into(),
+                    result_type: Some("comment".into()),
+                    ..Default::default()
+                }))
+            },
+        )
+        .await;
+
+        assert!(
+            result.contains(
+                "- [comment #1](https://tracker.example/SRC/issues/SRC-1#comment-1) on [SRC-1](https://tracker.example/SRC/issues/SRC-1)"
+            ),
+            "got: {result}"
+        );
+        assert!(!result.contains("[[comment"), "got: {result}");
     }
 
     // LIF-304: literal mode surfaces punctuation-heavy needles FTS tokenizes
@@ -5031,6 +5181,27 @@ mod tests {
             project: None,
         }));
         assert!(result.contains("project required"), "got: {result}");
+    }
+
+    #[test]
+    fn delete_module_reports_the_canonical_module_name() {
+        let m = mcp();
+        seed_project(&m, "Modules", "MOD");
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("MOD".into()),
+            name: Some("Backend".into()),
+            ..Default::default()
+        }));
+
+        let result = m.delete(Parameters(DeleteInput {
+            resource_type: "module".into(),
+            identifier: "backend".into(),
+            project: Some("MOD".into()),
+        }));
+
+        assert_eq!(result, "Deleted module Backend");
     }
 
     #[test]
@@ -5698,17 +5869,21 @@ mod tests {
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
-            identifier: "PGC-DOC-1".into(),
+            identifier: "PGC-DOC-01".into(),
             content: "Comment on a page".into(),
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
         assert!(result.contains("PGC-DOC-1"), "got: {result}");
+        assert!(!result.contains("PGC-DOC-01"), "got: {result}");
 
         let listing = m.list_comments(Parameters(ListCommentsInput {
-            identifier: "PGC-DOC-1".into(),
+            identifier: "PGC-DOC-01".into(),
             ..Default::default()
         }));
-        assert!(listing.contains("1 comment(s)"), "got: {listing}");
+        assert!(
+            listing.starts_with("1 comment(s) on PGC-DOC-1:"),
+            "got: {listing}"
+        );
         assert!(listing.contains("Comment on a page"), "got: {listing}");
     }
 
@@ -7260,6 +7435,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn comment_mutations_link_the_live_comment_or_parent() {
+        let m = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Linked comments");
+        let author = make_user(&m, "author", false);
+        let auth_user = models::AuthUser {
+            id: author.id,
+            username: author.username,
+            display_name: author.display_name,
+            is_admin: author.is_admin,
+        };
+        let context =
+            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let (comment_id, edited, deleted) = crate::mcp::with_request_context(
+            Some(auth_user),
+            false,
+            Some(context),
+            || async {
+                let added = m.add_comment(Parameters(AddCommentInput {
+                    identifier: "PRJ-1".into(),
+                    content: "original".into(),
+                }));
+                let comment_id = comment_id_from(&added);
+                let edited = m.edit_comment(Parameters(EditCommentInput {
+                    comment_id,
+                    content: "revised".into(),
+                }));
+                let deleted =
+                    m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
+                (comment_id, edited, deleted)
+            },
+        )
+        .await;
+
+        assert!(
+            edited.contains(&format!(
+                "[comment #{comment_id}](https://tracker.example/PRJ/issues/PRJ-1#comment-{comment_id}) edited"
+            )),
+            "got: {edited}"
+        );
+        assert_eq!(
+            deleted,
+            format!(
+                "Comment #{comment_id} deleted from [PRJ-1](https://tracker.example/PRJ/issues/PRJ-1)"
+            )
+        );
+    }
+
     #[test]
     fn issue_comment_edit_and_delete_emit_updates() {
         let (m, mut events) = mcp_with_realtime();
@@ -7542,6 +7767,92 @@ mod tests {
         assert!(!next.contains("offset="), "no further hint: {next}");
     }
 
+    #[tokio::test]
+    async fn get_activity_links_the_resolved_resource_type() {
+        let m = mcp();
+        seed_project(&m, "Audit", "TST");
+        seed_issue(&m, "TST", "Audit issue");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("TST".into()),
+            title: "Audit page".into(),
+            content: None,
+            folder: None,
+            status: None,
+            labels: None,
+        }));
+        m.create_plan(Parameters(CreatePlanInput {
+            project: "TST".into(),
+            title: "Audit plan".into(),
+            anchor_issue: None,
+            steps: None,
+        }));
+        m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: "module".into(),
+            action: "create".into(),
+            project: Some("TST".into()),
+            name: Some("Backend".into()),
+            ..Default::default()
+        }));
+        let author = make_user(&m, "author", false);
+        let auth_user = models::AuthUser {
+            id: author.id,
+            username: author.username,
+            display_name: author.display_name,
+            is_admin: author.is_admin,
+        };
+        let context =
+            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let (project, page, issue) =
+            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
+                m.add_comment(Parameters(AddCommentInput {
+                    identifier: "TST-1".into(),
+                    content: "Audit comment".into(),
+                }));
+                (
+                    m.get_activity(Parameters(GetActivityInput {
+                        identifier: "TST".into(),
+                        ..Default::default()
+                    })),
+                    m.get_activity(Parameters(GetActivityInput {
+                        identifier: "TST-DOC-1".into(),
+                        ..Default::default()
+                    })),
+                    m.get_activity(Parameters(GetActivityInput {
+                        identifier: "TST-1".into(),
+                        ..Default::default()
+                    })),
+                )
+            })
+            .await;
+
+        assert!(
+            project.contains(
+                "activity entries for [TST](https://tracker.example/TST/overview):"
+            ),
+            "got: {project}"
+        );
+        assert!(
+            page.contains(
+                "activity entries for [TST-DOC-1](https://tracker.example/TST/pages/1):"
+            ),
+            "got: {page}"
+        );
+        for expected in [
+            "[TST-DOC-1](https://tracker.example/TST/pages/1)",
+            "[TST-PLAN-1](https://tracker.example/TST/plans/1)",
+            "[Backend](https://tracker.example/TST/modules/1)",
+        ] {
+            assert!(project.contains(expected), "missing {expected}: {project}");
+        }
+        assert!(
+            issue.contains(
+                "[comment #1](https://tracker.example/TST/issues/TST-1#comment-1)"
+            ),
+            "got: {issue}"
+        );
+    }
+
     #[test]
     fn get_activity_rejects_unknown_identifier() {
         let m = mcp();
@@ -7691,6 +8002,47 @@ mod tests {
             "get_plan should rehydrate tree: {got}"
         );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
+    }
+
+    #[tokio::test]
+    async fn attaching_an_issue_to_a_plan_step_links_its_canonical_identifier() {
+        let m = mcp();
+        seed_project(&m, "Plans", "PLN");
+        seed_issue(&m, "PLN", "Real work");
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "PLN".into(),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "mirror".into(),
+                ..Default::default()
+            }]),
+        }));
+        let step_id = created
+            .split('#')
+            .nth(1)
+            .and_then(|value| value.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|value| value.parse().ok())
+            .expect("step id in output");
+        let context =
+            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+
+        let output =
+            crate::mcp::with_request_context(None, false, Some(context), || async {
+                m.update_plan_step(Parameters(UpdatePlanStepInput {
+                    plan: "PLN-PLAN-1".into(),
+                    step_id: Some(step_id),
+                    attach_issue: Some("PLN-01".into()),
+                    ..Default::default()
+                }))
+            })
+            .await;
+
+        assert!(
+            output.contains("[PLN-1](https://tracker.example/PLN/issues/PLN-1)"),
+            "got: {output}"
+        );
+        assert!(!output.contains("/PLN-01"), "got: {output}");
     }
 
     #[test]
@@ -8081,10 +8433,10 @@ mod tests {
         }));
         let out = m.delete(Parameters(DeleteInput {
             resource_type: "plan".into(),
-            identifier: "PLN-PLAN-1".into(),
+            identifier: "PLN-PLAN-01".into(),
             project: None,
         }));
-        assert!(out.contains("Deleted plan"), "got: {out}");
+        assert_eq!(out, "Deleted plan PLN-PLAN-1");
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
         }));

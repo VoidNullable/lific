@@ -1,5 +1,29 @@
 use reqwest::Url;
 
+pub(crate) fn parse_http_authority(
+    host_header: &str,
+) -> Option<axum::http::uri::Authority> {
+    let host_header = host_header.trim();
+    let authority = host_header.parse::<axum::http::uri::Authority>().ok()?;
+    if authority.as_str() != host_header {
+        return None;
+    }
+    Some(authority)
+}
+
+pub(crate) fn authority_is_allowlisted(
+    authority: &axum::http::uri::Authority,
+    allowed_hosts: &[String],
+) -> bool {
+    let host = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct IssueLinkContext {
     base_url: Url,
@@ -21,20 +45,11 @@ impl IssueLinkContext {
         match public_url {
             Some(public_url) => Self::parse(public_url),
             None => {
-                let host_header = host_header?.trim();
-                let authority = host_header.parse::<axum::http::uri::Authority>().ok()?;
-                if authority.as_str() != host_header {
+                let authority = parse_http_authority(host_header?)?;
+                if !authority_is_allowlisted(&authority, allowed_hosts) {
                     return None;
                 }
-                let host = authority
-                    .host()
-                    .trim_start_matches('[')
-                    .trim_end_matches(']');
-                allowed_hosts
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(host))
-                    .then(|| Self::parse(&format!("http://{host_header}")))
-                    .flatten()
+                Self::parse(&format!("http://{authority}"))
             }
         }
     }
@@ -115,7 +130,7 @@ impl IssueLinkContext {
     pub(crate) fn module_markdown(&self, project: &str, module_id: i64, label: &str) -> String {
         self.module_url(project, module_id).map_or_else(
             || label.to_owned(),
-            |url| format!("[{label}]({url})"),
+            |url| format!("[{}]({url})", escape_markdown_link_label(label)),
         )
     }
 
@@ -196,6 +211,17 @@ fn valid_base_url(base_url: &Url) -> bool {
         && base_url.fragment().is_none()
 }
 
+fn escape_markdown_link_label(label: &str) -> String {
+    let mut escaped = String::with_capacity(label.len());
+    for character in label.chars() {
+        if matches!(character, '\\' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
     project != "DOC"
         && valid_project_identifier(project)
@@ -257,6 +283,16 @@ mod tests {
         assert_eq!(
             context.module_markdown("LIF", 23, "Backend"),
             "[Backend](https://tracker.example/lific/LIF/modules/23)"
+        );
+    }
+
+    #[test]
+    fn module_markdown_escapes_link_label_delimiters() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+
+        assert_eq!(
+            context.module_markdown("LIF", 23, r"API [v2]\stable"),
+            r"[API \[v2\]\\stable](https://tracker.example/lific/LIF/modules/23)"
         );
     }
 

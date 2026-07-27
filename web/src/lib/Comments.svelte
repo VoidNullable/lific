@@ -23,7 +23,12 @@
   import { MENTION_RE } from "./mentions";
   import { MessageSquare, CornerDownLeft, Paperclip } from "lucide-svelte";
   import { fly } from "svelte/transition";
-  import { tick, onDestroy } from "svelte";
+  import { tick, onDestroy, onMount } from "svelte";
+  import {
+    commentTargetFromHash,
+    routeWithCommentTarget,
+    splitResourcePath,
+  } from "./commentLinks";
   import { filesFromClipboard, insertAtCaret } from "./attachments/compose";
   import { createUploadController } from "./attachments/uploads.svelte";
   import DropOverlay from "./attachments/DropOverlay.svelte";
@@ -60,14 +65,42 @@
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
 
-  let hashScrolled = false;
+  let pendingCommentTarget = $state(commentTargetFromHash(window.location.hash));
+  let scrollingTarget: string | null = null;
+
+  onMount(() => {
+    function onHashChange(event: HashChangeEvent) {
+      pendingCommentTarget = commentTargetFromHash(new URL(event.newURL).hash);
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  });
+
   $effect(() => {
-    if (hashScrolled || comments.length === 0) return;
-    const target = window.location.hash.slice(1);
-    hashScrolled = true;
-    if (!target.startsWith("comment-")) return;
+    const target = pendingCommentTarget;
+    if (!target || scrollingTarget === target || comments.length === 0) return;
+    scrollingTarget = target;
     void tick().then(() => {
-      document.getElementById(target)?.scrollIntoView({ block: "center" });
+      if (pendingCommentTarget !== target) return;
+      const comment = document.getElementById(target);
+      if (!comment) {
+        scrollingTarget = null;
+        return;
+      }
+      comment.scrollIntoView({ block: "center" });
+      const resourcePath = splitResourcePath(window.location.pathname);
+      if (resourcePath && window.location.hash === `#${target}`) {
+        const route = resourcePath.route + window.location.search;
+        history.replaceState(
+          null,
+          "",
+          resourcePath.basePath +
+            "/#" +
+            routeWithCommentTarget(route, target),
+        );
+      }
+      pendingCommentTarget = null;
+      scrollingTarget = null;
     });
   });
 

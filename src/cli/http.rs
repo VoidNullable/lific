@@ -153,20 +153,16 @@ pub async fn run(
 ) -> Result<()> {
     let backend = HttpBackend::new(base_url, api_key)?;
     let mut output = backend.execute(command).await?;
-    let issue_links = IssueLinkContext::parse(base_url);
+    let issue_links = backend.link_context();
     if json_output {
-        if let Some(context) = issue_links.as_ref() {
-            decorate_resource_links(&mut output, context, IssueLinkOutput::Url);
-            decorate_comment_links(&mut output, command, context, IssueLinkOutput::Url);
-            decorate_module_links(&mut output, command, context, IssueLinkOutput::Url);
-        }
+        decorate_resource_links(&mut output, issue_links, IssueLinkOutput::Url);
+        decorate_comment_links(&mut output, command, issue_links, IssueLinkOutput::Url);
+        decorate_module_links(&mut output, command, issue_links, IssueLinkOutput::Url);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        if let Some(context) = issue_links.as_ref() {
-            decorate_resource_links(&mut output, context, IssueLinkOutput::Markdown);
-            decorate_comment_links(&mut output, command, context, IssueLinkOutput::Markdown);
-            decorate_module_links(&mut output, command, context, IssueLinkOutput::Markdown);
-        }
+        decorate_resource_links(&mut output, issue_links, IssueLinkOutput::Markdown);
+        decorate_comment_links(&mut output, command, issue_links, IssueLinkOutput::Markdown);
+        decorate_module_links(&mut output, command, issue_links, IssueLinkOutput::Markdown);
         print_human(&output);
     }
     Ok(())
@@ -175,6 +171,7 @@ pub async fn run(
 struct HttpBackend {
     client: Client,
     base_url: String,
+    link_context: IssueLinkContext,
     api_key: Option<String>,
 }
 
@@ -189,6 +186,9 @@ impl HttpBackend {
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             bail!("HTTP backend URL must use http:// or https://");
         }
+        let link_context = IssueLinkContext::parse(base_url).ok_or_else(|| {
+            anyhow!("HTTP backend URL must not contain credentials, a query, or a fragment")
+        })?;
         if parsed.scheme() == "http"
             && parsed
                 .host_str()
@@ -205,8 +205,13 @@ impl HttpBackend {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             base_url: base_url.to_owned(),
+            link_context,
             api_key: api_key.map(str::to_owned),
         })
+    }
+
+    fn link_context(&self) -> &IssueLinkContext {
+        &self.link_context
     }
 
     async fn execute(&self, command: &Command) -> Result<Value> {
@@ -946,7 +951,19 @@ fn decorate_comment_links(
     }) else {
         return;
     };
-    decorate_comment_value(value, identifier, context, output);
+    let canonical_identifier = canonical_issue_identifier(identifier);
+    decorate_comment_value(
+        value,
+        canonical_identifier.as_deref().unwrap_or(identifier),
+        context,
+        output,
+    );
+}
+
+fn canonical_issue_identifier(identifier: &str) -> Option<String> {
+    let (project, sequence) = identifier.rsplit_once('-')?;
+    let sequence = sequence.parse::<i64>().ok()?;
+    (sequence > 0).then(|| format!("{}-{sequence}", project.to_ascii_uppercase()))
 }
 
 fn decorate_comment_value(
@@ -1025,7 +1042,7 @@ fn decorate_module_value(
                         if let Some(name) = object.get("name").and_then(Value::as_str) {
                             object.insert(
                                 "name".into(),
-                                Value::String(format!("[{name}]({url})")),
+                                Value::String(context.module_markdown(project, module_id, name)),
                             );
                         }
                     }
@@ -1138,9 +1155,10 @@ mod tests {
             .await,
         )
         .await;
-        let workspace_page =
-            parse_json(json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await)
-                .await;
+        let workspace_page = parse_json(
+            json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await,
+        )
+        .await;
         let issue = parse_json(
             json_post(
                 &app,
@@ -1253,6 +1271,27 @@ mod tests {
     fn trims_backend_url_whitespace_before_trailing_slashes() {
         let backend = HttpBackend::new("  https://tracker.invalid///  ", None).unwrap();
         assert_eq!(backend.base_url, "https://tracker.invalid");
+    }
+
+    #[test]
+    fn normalized_backend_url_decorates_links() {
+        let backend = HttpBackend::new("  https://tracker.invalid/lific/  ", None).unwrap();
+
+        assert_eq!(
+            backend.link_context().issue_markdown("LIF-42"),
+            "[LIF-42](https://tracker.invalid/lific/LIF/issues/LIF-42)"
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_backend_urls() {
+        for base_url in [
+            "https://user:password@tracker.invalid",
+            "https://tracker.invalid?tenant=one",
+            "https://tracker.invalid#fragment",
+        ] {
+            assert!(HttpBackend::new(base_url, None).is_err(), "{base_url}");
+        }
     }
 
     #[test]
@@ -1427,11 +1466,9 @@ mod tests {
 
         let error = backend.get_json("/api/redirect", &[]).await.unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .starts_with("HTTP backend request failed (302 Found):")
-        );
+        assert!(error
+            .to_string()
+            .starts_with("HTTP backend request failed (302 Found):"));
         assert!(captured.lock().await.is_none());
         server.abort();
     }
@@ -1459,10 +1496,7 @@ mod tests {
             std::fs::read_to_string(output_dir.join("report.txt")).unwrap(),
             "export contents"
         );
-        assert_eq!(
-            output,
-            json!([output_dir.join("report.txt").display().to_string()])
-        );
+        assert_eq!(output, json!([output_dir.join("report.txt").display().to_string()]));
         std::fs::remove_dir_all(output_dir).unwrap();
         server.abort();
     }
@@ -1827,7 +1861,7 @@ mod tests {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
         let command = Command::Comment {
             action: crate::cli::CommentAction::List {
-                identifier: "LIF-42".into(),
+                identifier: "lif-042".into(),
             },
         };
         let mut value = json!([{"id": 7, "content": "Looks good"}]);
@@ -1848,13 +1882,13 @@ mod tests {
                 project: "lif".into(),
             },
         };
-        let mut value = json!([{"id": 23, "name": "Backend"}]);
+        let mut value = json!([{"id": 23, "name": "Backend [internal]"}]);
 
         decorate_module_links(&mut value, &command, &context, IssueLinkOutput::Markdown);
 
         assert_eq!(
             value[0]["name"],
-            "[Backend](https://tracker.example/lific/LIF/modules/23)"
+            "[Backend \\[internal\\]](https://tracker.example/lific/LIF/modules/23)"
         );
     }
 }
