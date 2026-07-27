@@ -14,6 +14,8 @@ use reqwest::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::links::IssueLinkContext;
+
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
     PageAction, ProjectAction, borrowed_labels,
@@ -150,10 +152,17 @@ pub async fn run(
     json_output: bool,
 ) -> Result<()> {
     let backend = HttpBackend::new(base_url, api_key)?;
-    let output = backend.execute(command).await?;
+    let mut output = backend.execute(command).await?;
+    let issue_links = IssueLinkContext::parse(base_url);
     if json_output {
+        if let Some(context) = issue_links.as_ref() {
+            decorate_issue_links(&mut output, context, IssueLinkOutput::Url);
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
+        if let Some(context) = issue_links.as_ref() {
+            decorate_issue_links(&mut output, context, IssueLinkOutput::Markdown);
+        }
         print_human(&output);
     }
     Ok(())
@@ -868,6 +877,41 @@ fn print_human(value: &Value) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum IssueLinkOutput {
+    Url,
+    Markdown,
+}
+
+fn decorate_issue_links(value: &mut Value, context: &IssueLinkContext, output: IssueLinkOutput) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| decorate_issue_links(item, context, output)),
+        Value::Object(object) => {
+            if let Some(identifier) = object.get("identifier").and_then(Value::as_str)
+                && let Some(url) = context.issue_url(identifier)
+            {
+                match output {
+                    IssueLinkOutput::Url => {
+                        object.insert("web_url".into(), Value::String(url));
+                    }
+                    IssueLinkOutput::Markdown => {
+                        object.insert(
+                            "identifier".into(),
+                            Value::String(context.issue_markdown(identifier)),
+                        );
+                    }
+                }
+            }
+            object
+                .values_mut()
+                .for_each(|item| decorate_issue_links(item, context, output));
+        }
+        _ => {}
+    }
+}
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -903,10 +947,11 @@ mod tests {
     };
 
     use super::{
-        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueUpdate, PageCreate, ProjectCreate,
-        error_detail, export_filename, find_resource, is_loopback_host, safe_filename,
-        sanitize_error_detail, segment,
+        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueLinkOutput, IssueUpdate, PageCreate,
+        ProjectCreate, decorate_issue_links, error_detail, export_filename, find_resource,
+        is_loopback_host, safe_filename, sanitize_error_detail, segment,
     };
+    use crate::links::IssueLinkContext;
 
     type CapturedRequest = Arc<Mutex<Option<(String, Option<String>)>>>;
 
@@ -965,10 +1010,9 @@ mod tests {
             .await,
         )
         .await;
-        let workspace_page = parse_json(
-            json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await,
-        )
-        .await;
+        let workspace_page =
+            parse_json(json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await)
+                .await;
         let issue = parse_json(
             json_post(
                 &app,
@@ -1255,9 +1299,11 @@ mod tests {
 
         let error = backend.get_json("/api/redirect", &[]).await.unwrap_err();
 
-        assert!(error
-            .to_string()
-            .starts_with("HTTP backend request failed (302 Found):"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("HTTP backend request failed (302 Found):")
+        );
         assert!(captured.lock().await.is_none());
         server.abort();
     }
@@ -1285,7 +1331,10 @@ mod tests {
             std::fs::read_to_string(output_dir.join("report.txt")).unwrap(),
             "export contents"
         );
-        assert_eq!(output, json!([output_dir.join("report.txt").display().to_string()]));
+        assert_eq!(
+            output,
+            json!([output_dir.join("report.txt").display().to_string()])
+        );
         std::fs::remove_dir_all(output_dir).unwrap();
         server.abort();
     }
@@ -1601,5 +1650,27 @@ mod tests {
             error.to_string(),
             "the HTTP backend does not support this command yet"
         );
+    }
+
+    #[test]
+    fn decorates_http_issue_results_without_touching_page_identifiers() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let mut value = json!([
+            {"identifier": "LIF-42", "title": "Fix"},
+            {"identifier": "LIF-DOC-3", "title": "Page"}
+        ]);
+
+        decorate_issue_links(&mut value, &context, IssueLinkOutput::Url);
+        assert_eq!(
+            value[0]["web_url"],
+            "https://tracker.example/lific/LIF/issues/LIF-42"
+        );
+        assert!(value[1]["web_url"].is_null());
+        decorate_issue_links(&mut value, &context, IssueLinkOutput::Markdown);
+        assert_eq!(
+            value[0]["identifier"],
+            "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
+        );
+        assert_eq!(value[1]["identifier"], "LIF-DOC-3");
     }
 }

@@ -12,6 +12,7 @@ mod dump;
 mod error;
 mod export;
 mod import;
+mod links;
 mod mcp;
 mod oauth;
 mod ratelimit;
@@ -979,6 +980,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             storage::start_gc_task(pool.clone(), attachment_store.clone());
 
             // Routes behind auth: REST API + MCP
+            let mcp_public_url = cfg.server.public_url.clone();
+            let mcp_allowed_hosts_for_links = mcp_allowed_hosts.clone();
             let authed_routes = api::router(pool.clone(), &cfg.server.cors_origins)
                 .route(
                     "/mcp",
@@ -1001,7 +1004,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .get::<auth::OperatorCredential>()
                             .is_some();
 
-                        mcp::with_request_identity(auth_user, is_operator, || async {
+                        let issue_links = links::IssueLinkContext::for_http_request(
+                            mcp_public_url.as_deref(),
+                            request
+                                .headers()
+                                .get(header::HOST)
+                                .and_then(|value| value.to_str().ok()),
+                            &mcp_allowed_hosts_for_links,
+                        );
+
+                        mcp::with_request_context(auth_user, is_operator, issue_links, || async {
                             mcp_service.handle(request).await.into_response()
                         })
                         .await
@@ -1083,6 +1095,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &token,
                         authless_user,
                         mcp_allowed_hosts.clone(),
+                        cfg.server.public_url.clone(),
                         realtime.clone(),
                     )
                 });
@@ -1814,8 +1827,10 @@ fn build_authless_mcp_router(
     token: &str,
     user: Option<db::models::AuthUser>,
     allowed_hosts: Vec<String>,
+    public_url: Option<String>,
     realtime: realtime::RealtimeHub,
 ) -> Router {
+    let allowed_hosts_for_links = allowed_hosts.clone();
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true)
@@ -1833,7 +1848,15 @@ fn build_authless_mcp_router(
     Router::new().route(
         &format!("/mcp/{token}"),
         any(move |request: Request<Body>| async move {
-            mcp::with_request_user(user, || async {
+            let issue_links = links::IssueLinkContext::for_http_request(
+                public_url.as_deref(),
+                request
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|value| value.to_str().ok()),
+                &allowed_hosts_for_links,
+            );
+            mcp::with_request_context(user, false, issue_links, || async {
                 service.handle(request).await.into_response()
             })
             .await
@@ -2223,6 +2246,7 @@ mod authless_mcp_tests {
             token,
             None,
             vec!["localhost".into()],
+            None,
             realtime::RealtimeHub::new(),
         );
 
@@ -2259,6 +2283,7 @@ mod authless_mcp_tests {
             "the-right-token",
             None,
             vec!["localhost".into()],
+            None,
             realtime::RealtimeHub::new(),
         );
 

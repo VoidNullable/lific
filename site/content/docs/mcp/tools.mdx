@@ -5,6 +5,8 @@ description: Reference for the MCP tools exposed by Lific.
 
 Lific exposes 27 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
+When MCP is reached over HTTP and its origin is known, structured issue identifiers are rendered as Markdown links to the canonical `/<PROJECT>/issues/<ISSUE>` route. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain identifiers.
+
 ## Issues
 
 ### `list_issues`
