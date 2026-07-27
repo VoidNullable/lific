@@ -1,8 +1,8 @@
+use std::fmt::{self, Display, Formatter};
+
 use reqwest::Url;
 
-pub(crate) fn parse_http_authority(
-    host_header: &str,
-) -> Option<axum::http::uri::Authority> {
+pub(crate) fn parse_http_authority(host_header: &str) -> Option<axum::http::uri::Authority> {
     let authority = host_header.parse::<axum::http::uri::Authority>().ok()?;
     if authority.as_str() != host_header {
         return None;
@@ -31,6 +31,119 @@ pub(crate) struct IssueLinkContext {
     base_url: Url,
 }
 
+#[derive(Clone, Copy)]
+enum ResourcePath<'a> {
+    Issue {
+        project: &'a str,
+        identifier: &'a str,
+    },
+    Project(&'a str),
+    Page {
+        project: &'a str,
+        id: i64,
+    },
+    Plan {
+        project: &'a str,
+        id: i64,
+    },
+    Module {
+        project: &'a str,
+        id: i64,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ResourceUrl<'a> {
+    base_url: &'a str,
+    path: ResourcePath<'a>,
+    comment_id: Option<i64>,
+}
+
+impl Display for ResourceUrl<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.base_url)?;
+        if !self.base_url.ends_with('/') {
+            formatter.write_str("/")?;
+        }
+        match self.path {
+            ResourcePath::Issue {
+                project,
+                identifier,
+            } => write!(formatter, "{project}/issues/{identifier}")?,
+            ResourcePath::Project(project) => write!(formatter, "{project}/overview")?,
+            ResourcePath::Page { project, id } => write!(formatter, "{project}/pages/{id}")?,
+            ResourcePath::Plan { project, id } => write!(formatter, "{project}/plans/{id}")?,
+            ResourcePath::Module { project, id } => write!(formatter, "{project}/modules/{id}")?,
+        }
+        if let Some(comment_id) = self.comment_id {
+            write!(formatter, "#comment-{comment_id}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LinkLabel<'a> {
+    Text(&'a str),
+    Escaped(&'a str),
+    Comment(i64),
+}
+
+impl LinkLabel<'_> {
+    fn fmt(self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(label) => formatter.write_str(label),
+            Self::Escaped(label) => {
+                for character in label.chars() {
+                    if matches!(character, '\\' | '[' | ']') {
+                        formatter.write_str("\\")?;
+                    }
+                    write!(formatter, "{character}")?;
+                }
+                Ok(())
+            }
+            Self::Comment(comment_id) => write!(formatter, "comment #{comment_id}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MarkdownReference<'a> {
+    label: LinkLabel<'a>,
+    url: Option<ResourceUrl<'a>>,
+}
+
+impl<'a> MarkdownReference<'a> {
+    pub(crate) fn plain(label: &'a str) -> Self {
+        Self {
+            label: LinkLabel::Text(label),
+            url: None,
+        }
+    }
+
+    pub(crate) fn linked(label: &'a str, url: ResourceUrl<'a>) -> Self {
+        Self {
+            label: LinkLabel::Text(label),
+            url: Some(url),
+        }
+    }
+}
+
+impl Display for MarkdownReference<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        if let Some(url) = self.url {
+            formatter.write_str("[")?;
+            self.label.fmt(formatter)?;
+            write!(formatter, "]({url})")
+        } else {
+            match self.label {
+                LinkLabel::Escaped(label) => formatter.write_str(label),
+                label => label.fmt(formatter),
+            }
+        }
+    }
+}
+
 impl IssueLinkContext {
     #[must_use]
     pub(crate) fn parse(base_url: &str) -> Option<Self> {
@@ -57,153 +170,186 @@ impl IssueLinkContext {
     }
 
     #[must_use]
-    pub(crate) fn issue_markdown(&self, identifier: &str) -> String {
-        self.issue_url(identifier).map_or_else(
-            || identifier.to_owned(),
-            |url| format!("[{identifier}]({url})"),
-        )
+    pub(crate) fn issue_markdown<'a>(&'a self, identifier: &'a str) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Text(identifier),
+            url: self.issue_url(identifier),
+        }
     }
 
     #[must_use]
-    pub(crate) fn issue_url(&self, identifier: &str) -> Option<String> {
+    pub(crate) fn issue_url<'a>(&'a self, identifier: &'a str) -> Option<ResourceUrl<'a>> {
         let (project, sequence) = identifier.rsplit_once('-')?;
         if !valid_issue_identifier(project, sequence) {
             return None;
         }
-        let mut url = self.base_url.clone();
-        url.path_segments_mut()
-            .ok()?
-            .push(project)
-            .push("issues")
-            .push(identifier);
-        Some(url.to_string())
+        Some(self.url(ResourcePath::Issue {
+            project,
+            identifier,
+        }))
     }
 
     #[must_use]
-    pub(crate) fn project_markdown(&self, identifier: &str) -> String {
-        self.project_url(identifier).map_or_else(
-            || identifier.to_owned(),
-            |url| format!("[{identifier}]({url})"),
-        )
+    pub(crate) fn project_markdown<'a>(&'a self, identifier: &'a str) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Text(identifier),
+            url: self.project_url(identifier),
+        }
     }
 
     #[must_use]
-    pub(crate) fn project_url(&self, identifier: &str) -> Option<String> {
-        valid_project_identifier(identifier).then(|| self.path_url([identifier, "overview"]))
+    pub(crate) fn project_url<'a>(&'a self, identifier: &'a str) -> Option<ResourceUrl<'a>> {
+        valid_project_identifier(identifier).then(|| self.url(ResourcePath::Project(identifier)))
     }
 
     #[must_use]
-    pub(crate) fn page_markdown(&self, identifier: &str, page_id: i64) -> String {
-        self.page_url(identifier, page_id).map_or_else(
-            || identifier.to_owned(),
-            |url| format!("[{identifier}]({url})"),
-        )
+    pub(crate) fn page_markdown<'a>(
+        &'a self,
+        identifier: &'a str,
+        page_id: i64,
+    ) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Text(identifier),
+            url: self.page_url(identifier, page_id),
+        }
     }
 
     #[must_use]
-    pub(crate) fn page_url(&self, identifier: &str, page_id: i64) -> Option<String> {
-        let (project, sequence) = identifier
-            .strip_prefix("DOC-")
-            .map(|sequence| ("DOC", sequence))
-            .or_else(|| identifier.split_once("-DOC-"))?;
-        ((project == "DOC" || valid_project_identifier(project))
-            && sequence.chars().all(|c| c.is_ascii_digit())
-            && !sequence.is_empty()
-            && page_id > 0)
-            .then(|| self.path_url([project, "pages", &page_id.to_string()]))
+    pub(crate) fn page_url<'a>(
+        &'a self,
+        identifier: &'a str,
+        page_id: i64,
+    ) -> Option<ResourceUrl<'a>> {
+        let project = valid_page_identifier(identifier)?;
+        (page_id > 0).then(|| {
+            self.url(ResourcePath::Page {
+                project,
+                id: page_id,
+            })
+        })
     }
 
     #[must_use]
-    pub(crate) fn plan_markdown(&self, identifier: &str, plan_id: i64) -> String {
-        self.plan_url(identifier, plan_id).map_or_else(
-            || identifier.to_owned(),
-            |url| format!("[{identifier}]({url})"),
-        )
+    pub(crate) fn plan_markdown<'a>(
+        &'a self,
+        identifier: &'a str,
+        plan_id: i64,
+    ) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Text(identifier),
+            url: self.plan_url(identifier, plan_id),
+        }
     }
 
     #[must_use]
-    pub(crate) fn plan_url(&self, identifier: &str, plan_id: i64) -> Option<String> {
+    pub(crate) fn plan_url<'a>(
+        &'a self,
+        identifier: &'a str,
+        plan_id: i64,
+    ) -> Option<ResourceUrl<'a>> {
         let (project, suffix) = identifier.split_once("-PLAN-")?;
         (valid_project_identifier(project)
             && suffix.chars().all(|c| c.is_ascii_digit())
             && !suffix.is_empty()
             && plan_id > 0)
-            .then(|| self.path_url([project, "plans", &plan_id.to_string()]))
+            .then(|| {
+                self.url(ResourcePath::Plan {
+                    project,
+                    id: plan_id,
+                })
+            })
     }
 
     #[must_use]
-    pub(crate) fn module_markdown(&self, project: &str, module_id: i64, label: &str) -> String {
-        self.module_url(project, module_id).map_or_else(
-            || label.to_owned(),
-            |url| format!("[{}]({url})", escape_markdown_link_label(label)),
-        )
-    }
-
-    #[must_use]
-    pub(crate) fn module_url(&self, project: &str, module_id: i64) -> Option<String> {
-        (valid_project_identifier(project) && module_id > 0)
-            .then(|| self.path_url([project, "modules", &module_id.to_string()]))
-    }
-
-    #[must_use]
-    pub(crate) fn issue_comment_markdown(
-        &self,
-        identifier: &str,
-        comment_id: i64,
-    ) -> String {
-        self.issue_comment_url(identifier, comment_id).map_or_else(
-            || format!("comment #{comment_id}"),
-            |url| format!("[comment #{comment_id}]({url})"),
-        )
-    }
-
-    #[must_use]
-    pub(crate) fn issue_comment_url(&self, identifier: &str, comment_id: i64) -> Option<String> {
-        if comment_id <= 0 {
-            return None;
+    pub(crate) fn module_markdown<'a>(
+        &'a self,
+        project: &'a str,
+        module_id: i64,
+        label: &'a str,
+    ) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Escaped(label),
+            url: self.module_url(project, module_id),
         }
-        Some(format!(
-            "{}#comment-{comment_id}",
-            self.issue_url(identifier)?
-        ))
     }
 
     #[must_use]
-    pub(crate) fn page_comment_markdown(
-        &self,
-        identifier: &str,
+    pub(crate) fn module_url<'a>(
+        &'a self,
+        project: &'a str,
+        module_id: i64,
+    ) -> Option<ResourceUrl<'a>> {
+        (valid_project_identifier(project) && module_id > 0).then(|| {
+            self.url(ResourcePath::Module {
+                project,
+                id: module_id,
+            })
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn issue_comment_markdown<'a>(
+        &'a self,
+        identifier: &'a str,
+        comment_id: i64,
+    ) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Comment(comment_id),
+            url: self.issue_comment_url(identifier, comment_id),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn issue_comment_url<'a>(
+        &'a self,
+        identifier: &'a str,
+        comment_id: i64,
+    ) -> Option<ResourceUrl<'a>> {
+        (comment_id > 0)
+            .then(|| self.issue_url(identifier))
+            .flatten()
+            .map(|url| url.with_comment(comment_id))
+    }
+
+    #[must_use]
+    pub(crate) fn page_comment_markdown<'a>(
+        &'a self,
+        identifier: &'a str,
         page_id: i64,
         comment_id: i64,
-    ) -> String {
-        self.page_comment_url(identifier, page_id, comment_id)
-            .map_or_else(
-                || format!("comment #{comment_id}"),
-                |url| format!("[comment #{comment_id}]({url})"),
-            )
+    ) -> MarkdownReference<'a> {
+        MarkdownReference {
+            label: LinkLabel::Comment(comment_id),
+            url: self.page_comment_url(identifier, page_id, comment_id),
+        }
     }
 
     #[must_use]
-    pub(crate) fn page_comment_url(
-        &self,
-        identifier: &str,
+    pub(crate) fn page_comment_url<'a>(
+        &'a self,
+        identifier: &'a str,
         page_id: i64,
         comment_id: i64,
-    ) -> Option<String> {
-        if comment_id <= 0 {
-            return None;
-        }
-        Some(format!(
-            "{}#comment-{comment_id}",
-            self.page_url(identifier, page_id)?
-        ))
+    ) -> Option<ResourceUrl<'a>> {
+        (comment_id > 0)
+            .then(|| self.page_url(identifier, page_id))
+            .flatten()
+            .map(|url| url.with_comment(comment_id))
     }
 
-    fn path_url<const N: usize>(&self, segments: [&str; N]) -> String {
-        let mut url = self.base_url.clone();
-        if let Ok(mut path) = url.path_segments_mut() {
-            path.extend(segments);
+    fn url<'a>(&'a self, path: ResourcePath<'a>) -> ResourceUrl<'a> {
+        ResourceUrl {
+            base_url: self.base_url.as_str(),
+            path,
+            comment_id: None,
         }
-        url.to_string()
+    }
+}
+
+impl ResourceUrl<'_> {
+    fn with_comment(mut self, comment_id: i64) -> Self {
+        self.comment_id = Some(comment_id);
+        self
     }
 }
 
@@ -216,21 +362,21 @@ fn valid_base_url(base_url: &Url) -> bool {
         && base_url.fragment().is_none()
 }
 
-fn escape_markdown_link_label(label: &str) -> String {
-    let mut escaped = String::with_capacity(label.len());
-    for character in label.chars() {
-        if matches!(character, '\\' | '[' | ']') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
-}
-
 fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
     valid_project_identifier(project)
         && !sequence.is_empty()
         && sequence.chars().all(|c| c.is_ascii_digit())
+}
+
+fn valid_page_identifier(identifier: &str) -> Option<&str> {
+    let (project, sequence) = identifier
+        .strip_prefix("DOC-")
+        .map(|sequence| ("DOC", sequence))
+        .or_else(|| identifier.split_once("-DOC-"))?;
+    ((project == "DOC" || valid_project_identifier(project))
+        && !sequence.is_empty()
+        && sequence.chars().all(|c| c.is_ascii_digit()))
+    .then_some(project)
 }
 
 fn valid_project_identifier(project: &str) -> bool {
@@ -252,12 +398,16 @@ mod tests {
 
     #[test]
     fn issue_markdown_preserves_base_path() {
-        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
-
-        assert_eq!(
-            context.issue_markdown("LIF-42"),
-            "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
-        );
+        for base_url in [
+            "https://tracker.example/lific",
+            "https://tracker.example/lific/",
+        ] {
+            let context = IssueLinkContext::parse(base_url).unwrap();
+            assert_eq!(
+                context.issue_markdown("LIF-42").to_string(),
+                "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
+            );
+        }
     }
 
     #[test]
@@ -265,7 +415,7 @@ mod tests {
         let context = IssueLinkContext::parse("https://tracker.example").unwrap();
 
         for identifier in ["DOC-1", "lif-1", "LIF", "LIF-nope", "TOOLONG-1"] {
-            assert_eq!(context.issue_markdown(identifier), identifier);
+            assert_eq!(context.issue_markdown(identifier).to_string(), identifier);
         }
     }
 
@@ -274,23 +424,23 @@ mod tests {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
 
         assert_eq!(
-            context.project_markdown("LIF"),
+            context.project_markdown("LIF").to_string(),
             "[LIF](https://tracker.example/lific/LIF/overview)"
         );
         assert_eq!(
-            context.page_markdown("LIF-DOC-3", 17),
+            context.page_markdown("LIF-DOC-3", 17).to_string(),
             "[LIF-DOC-3](https://tracker.example/lific/LIF/pages/17)"
         );
         assert_eq!(
-            context.page_markdown("DOC-3", 18),
+            context.page_markdown("DOC-3", 18).to_string(),
             "[DOC-3](https://tracker.example/lific/DOC/pages/18)"
         );
         assert_eq!(
-            context.plan_markdown("LIF-PLAN-4", 19),
+            context.plan_markdown("LIF-PLAN-4", 19).to_string(),
             "[LIF-PLAN-4](https://tracker.example/lific/LIF/plans/19)"
         );
         assert_eq!(
-            context.module_markdown("LIF", 23, "Backend"),
+            context.module_markdown("LIF", 23, "Backend").to_string(),
             "[Backend](https://tracker.example/lific/LIF/modules/23)"
         );
     }
@@ -299,11 +449,17 @@ mod tests {
     fn reserved_doc_identifier_only_links_workspace_pages() {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
 
-        assert_eq!(context.project_markdown("DOC"), "DOC");
-        assert_eq!(context.plan_markdown("DOC-PLAN-1", 19), "DOC-PLAN-1");
-        assert_eq!(context.module_markdown("DOC", 23, "Backend"), "Backend");
+        assert_eq!(context.project_markdown("DOC").to_string(), "DOC");
         assert_eq!(
-            context.page_markdown("DOC-3", 18),
+            context.plan_markdown("DOC-PLAN-1", 19).to_string(),
+            "DOC-PLAN-1"
+        );
+        assert_eq!(
+            context.module_markdown("DOC", 23, "Backend").to_string(),
+            "Backend"
+        );
+        assert_eq!(
+            context.page_markdown("DOC-3", 18).to_string(),
             "[DOC-3](https://tracker.example/lific/DOC/pages/18)"
         );
     }
@@ -313,7 +469,9 @@ mod tests {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
 
         assert_eq!(
-            context.module_markdown("LIF", 23, r"API [v2]\stable"),
+            context
+                .module_markdown("LIF", 23, r"API [v2]\stable")
+                .to_string(),
             r"[API \[v2\]\\stable](https://tracker.example/lific/LIF/modules/23)"
         );
     }
@@ -323,15 +481,17 @@ mod tests {
         let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
 
         assert_eq!(
-            context.issue_comment_markdown("LIF-42", 7),
+            context.issue_comment_markdown("LIF-42", 7).to_string(),
             "[comment #7](https://tracker.example/lific/LIF/issues/LIF-42#comment-7)"
         );
         assert_eq!(
-            context.page_comment_markdown("LIF-DOC-3", 17, 8),
+            context
+                .page_comment_markdown("LIF-DOC-3", 17, 8)
+                .to_string(),
             "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
         );
         assert_eq!(
-            context.page_comment_markdown("DOC-3", 18, 9),
+            context.page_comment_markdown("DOC-3", 18, 9).to_string(),
             "[comment #9](https://tracker.example/lific/DOC/pages/18#comment-9)"
         );
     }
@@ -358,7 +518,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            public.issue_markdown("LIF-1"),
+            public.issue_markdown("LIF-1").to_string(),
             "[LIF-1](https://tracker.example/lific/LIF/issues/LIF-1)"
         );
 
@@ -366,7 +526,7 @@ mod tests {
             IssueLinkContext::for_http_request(None, Some("localhost:3456"), &allowed_hosts)
                 .unwrap();
         assert_eq!(
-            direct.issue_markdown("LIF-1"),
+            direct.issue_markdown("LIF-1").to_string(),
             "[LIF-1](http://localhost:3456/LIF/issues/LIF-1)"
         );
         assert!(

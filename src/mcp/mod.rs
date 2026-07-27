@@ -39,11 +39,11 @@ static MCP_REQUEST_OPERATOR: Mutex<bool> = Mutex::new(false);
 
 /// Per-request external origin used for structured resource links.
 /// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
-static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<IssueLinkContext>> = Mutex::new(None);
+static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<Arc<IssueLinkContext>>> = Mutex::new(None);
 
 #[cfg(test)]
 tokio::task_local! {
-    static TEST_REQUEST_ISSUE_LINKS: Option<IssueLinkContext>;
+    static TEST_REQUEST_ISSUE_LINKS: Option<Arc<IssueLinkContext>>;
 }
 
 #[cfg(test)]
@@ -96,6 +96,7 @@ where
     Fut: std::future::Future<Output = R>,
 {
     let _guard = MCP_HANDLER_LOCK.lock().await;
+    let issue_links = issue_links.map(Arc::new);
     #[cfg(test)]
     let test_issue_links = issue_links.clone();
     let actor = crate::actor::ActorCtx {
@@ -147,7 +148,7 @@ pub(crate) fn current_is_operator() -> bool {
 
 /// Get the validated external origin for structured resource links, if this MCP
 /// request arrived through an HTTP transport that knows it.
-pub(crate) fn current_issue_link_context() -> Option<IssueLinkContext> {
+pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
     #[cfg(test)]
     {
         TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
@@ -463,13 +464,15 @@ mod tests {
         let (seen, global_seen) = with_request_context(None, false, context, || async {
             let scoped = current_issue_link_context()
                 .expect("request origin should be visible")
-                .issue_markdown("LIF-1");
+                .issue_markdown("LIF-1")
+                .to_string();
             let global = MCP_REQUEST_ISSUE_LINKS
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
                 .expect("production request context should also be populated")
-                .issue_markdown("LIF-1");
+                .issue_markdown("LIF-1")
+                .to_string();
             (scoped, global)
         })
         .await;

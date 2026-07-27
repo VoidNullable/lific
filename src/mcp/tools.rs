@@ -1,11 +1,15 @@
-use std::{cmp::Ordering, sync::Arc};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display, Write as _},
+    sync::Arc,
+};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
     db::{DbPool, models, queries},
-    links::IssueLinkContext,
+    links::{IssueLinkContext, MarkdownReference},
 };
 
 use super::schemas::*;
@@ -24,153 +28,385 @@ impl LificMcp {
     }
 }
 
-pub(crate) fn fmt_issue(i: &models::Issue) -> String {
-    let context = current_issue_link_context();
-    fmt_issue_with_context(i, context.as_ref())
+fn try_render(render: impl FnOnce(&mut String) -> fmt::Result) -> Result<String, fmt::Error> {
+    let mut output = String::new();
+    render(&mut output).map(|()| output)
 }
 
-fn fmt_issue_with_context(i: &models::Issue, context: Option<&IssueLinkContext>) -> String {
-    let mut s = format!(
-        "{} | {} | {} | {}",
-        issue_reference_with_context(context, &i.identifier),
-        i.status,
-        i.priority,
-        i.title
-    );
-    if !i.labels.is_empty() {
-        s.push_str(&format!(" [{}]", i.labels.join(", ")));
+fn render_response(render: impl FnOnce(&mut String) -> fmt::Result) -> String {
+    match try_render(render) {
+        Ok(output) => output,
+        Err(error) => format!("Error: failed to format response: {error}"),
     }
-    if !i.blocks.is_empty() {
-        s.push_str(&format!(
-            " blocks:{}",
-            i.blocks
-                .iter()
-                .map(|identifier| issue_reference_with_context(context, identifier))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if !i.blocked_by.is_empty() {
-        s.push_str(&format!(
-            " blocked_by:{}",
-            i.blocked_by
-                .iter()
-                .map(|identifier| issue_reference_with_context(context, identifier))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if !i.duplicates.is_empty() {
-        s.push_str(&format!(
-            " duplicates:{}",
-            i.duplicates
-                .iter()
-                .map(|identifier| issue_reference_with_context(context, identifier))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if !i.duplicated_by.is_empty() {
-        s.push_str(&format!(
-            " duplicated_by:{}",
-            i.duplicated_by
-                .iter()
-                .map(|identifier| issue_reference_with_context(context, identifier))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    s
 }
 
-fn issue_reference(identifier: &str) -> String {
-    let context = current_issue_link_context();
-    issue_reference_with_context(context.as_ref(), identifier)
+fn finish_response(output: String, result: fmt::Result) -> String {
+    match result {
+        Ok(()) => output,
+        Err(error) => format!("Error: failed to format response: {error}"),
+    }
 }
 
-fn issue_reference_with_context(context: Option<&IssueLinkContext>, identifier: &str) -> String {
-    context.map_or_else(
-        || identifier.to_owned(),
-        |context| context.issue_markdown(identifier),
-    )
+fn write_joined<T>(
+    formatter: &mut fmt::Formatter<'_>,
+    values: &[T],
+    separator: &str,
+    mut write_value: impl FnMut(&mut fmt::Formatter<'_>, &T) -> fmt::Result,
+) -> fmt::Result {
+    values.split_first().map_or(Ok(()), |(first, rest)| {
+        write_value(formatter, first)?;
+        rest.iter().try_for_each(|value| {
+            formatter.write_str(separator)?;
+            write_value(formatter, value)
+        })
+    })
 }
 
-fn comment_reference(
+struct JoinedStrings<'a> {
+    values: &'a [String],
+    separator: &'a str,
+}
+
+impl Display for JoinedStrings<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_joined(
+            formatter,
+            self.values,
+            self.separator,
+            |formatter, value| formatter.write_str(value),
+        )
+    }
+}
+
+struct IssueReference<'a> {
+    context: Option<&'a IssueLinkContext>,
+    identifier: &'a str,
+}
+
+impl Display for IssueReference<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.context {
+            Some(context) => Display::fmt(&context.issue_markdown(self.identifier), formatter),
+            None => formatter.write_str(self.identifier),
+        }
+    }
+}
+
+struct IssueRelations<'a> {
+    label: &'a str,
+    identifiers: &'a [String],
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for IssueRelations<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.identifiers.split_first().map_or(Ok(()), |_| {
+            formatter.write_str(self.label)?;
+            write_joined(formatter, self.identifiers, ",", |formatter, identifier| {
+                Display::fmt(
+                    &IssueReference {
+                        context: self.context,
+                        identifier,
+                    },
+                    formatter,
+                )
+            })
+        })
+    }
+}
+
+struct IssueLine<'a> {
+    issue: &'a models::Issue,
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for IssueLine<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let issue = self.issue;
+        write!(
+            formatter,
+            "{} | {} | {} | {}",
+            IssueReference {
+                context: self.context,
+                identifier: &issue.identifier,
+            },
+            issue.status,
+            issue.priority,
+            issue.title
+        )?;
+        issue.labels.split_first().map_or(Ok(()), |_| {
+            write!(
+                formatter,
+                " [{}]",
+                JoinedStrings {
+                    values: &issue.labels,
+                    separator: ", ",
+                }
+            )
+        })?;
+        [
+            (" blocks:", issue.blocks.as_slice()),
+            (" blocked_by:", issue.blocked_by.as_slice()),
+            (" duplicates:", issue.duplicates.as_slice()),
+            (" duplicated_by:", issue.duplicated_by.as_slice()),
+        ]
+        .into_iter()
+        .try_for_each(|(label, identifiers)| {
+            Display::fmt(
+                &IssueRelations {
+                    label,
+                    identifiers,
+                    context: self.context,
+                },
+                formatter,
+            )
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReferenceKind<'a> {
+    Issue(&'a str),
+    Project(&'a str),
+    Page(&'a str, i64),
+    Plan(&'a str, i64),
+    Module(&'a str, i64, &'a str),
+    IssueComment(&'a str, i64),
+    PageComment(&'a str, i64, i64),
+    IssueSearchComment(&'a str, i64),
+    PageSearchComment(&'a str, i64, i64),
+}
+
+#[derive(Clone, Copy)]
+enum ActivityScopeReference {
+    Issue,
+    Page(i64),
+    Project,
+}
+
+struct Reference<'a> {
+    context: Option<&'a IssueLinkContext>,
+    kind: ReferenceKind<'a>,
+}
+
+impl Display for Reference<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt_with_context(self.context, formatter)
+    }
+}
+
+impl ReferenceKind<'_> {
+    fn fmt_with_context(
+        self,
+        context: Option<&IssueLinkContext>,
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        match context {
+            Some(context) => self.fmt_linked(context, formatter),
+            None => self.fmt_plain(formatter),
+        }
+    }
+
+    fn fmt_linked(
+        self,
+        context: &IssueLinkContext,
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        match self {
+            Self::Issue(identifier) => Display::fmt(&context.issue_markdown(identifier), formatter),
+            Self::Project(identifier) => {
+                Display::fmt(&context.project_markdown(identifier), formatter)
+            }
+            Self::Page(identifier, page_id) => {
+                Display::fmt(&context.page_markdown(identifier, page_id), formatter)
+            }
+            Self::Plan(identifier, plan_id) => {
+                Display::fmt(&context.plan_markdown(identifier, plan_id), formatter)
+            }
+            Self::Module(project, module_id, label) => Display::fmt(
+                &context.module_markdown(project, module_id, label),
+                formatter,
+            ),
+            Self::IssueComment(identifier, comment_id)
+            | Self::IssueSearchComment(identifier, comment_id) => Display::fmt(
+                &context.issue_comment_markdown(identifier, comment_id),
+                formatter,
+            ),
+            Self::PageComment(identifier, page_id, comment_id)
+            | Self::PageSearchComment(identifier, page_id, comment_id) => Display::fmt(
+                &context.page_comment_markdown(identifier, page_id, comment_id),
+                formatter,
+            ),
+        }
+    }
+
+    fn fmt_plain(self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Module(_, _, label) => formatter.write_str(label),
+            Self::IssueSearchComment(_, _) | Self::PageSearchComment(_, _, _) => {
+                formatter.write_str("[comment]")
+            }
+            Self::IssueComment(_, comment_id) | Self::PageComment(_, _, comment_id) => {
+                write!(formatter, "comment #{comment_id}")
+            }
+            Self::Issue(identifier)
+            | Self::Project(identifier)
+            | Self::Page(identifier, _)
+            | Self::Plan(identifier, _) => formatter.write_str(identifier),
+        }
+    }
+}
+
+fn reference_with_context<'a>(
+    context: Option<&'a IssueLinkContext>,
+    kind: ReferenceKind<'a>,
+) -> Reference<'a> {
+    Reference { context, kind }
+}
+
+fn comment_reference_kind(
     parent_identifier: &str,
     parent: queries::comments::CommentParent,
     comment_id: i64,
-) -> String {
-    current_issue_link_context().map_or_else(
-        || format!("comment #{comment_id}"),
-        |context| match parent {
-            queries::comments::CommentParent::Issue(_) => {
-                context.issue_comment_markdown(parent_identifier, comment_id)
-            }
-            queries::comments::CommentParent::Page(page_id) => {
-                context.page_comment_markdown(parent_identifier, page_id, comment_id)
-            }
-        },
-    )
+) -> ReferenceKind<'_> {
+    match parent {
+        queries::comments::CommentParent::Issue(_) => {
+            ReferenceKind::IssueComment(parent_identifier, comment_id)
+        }
+        queries::comments::CommentParent::Page(page_id) => {
+            ReferenceKind::PageComment(parent_identifier, page_id, comment_id)
+        }
+    }
 }
 
-fn comment_parent_reference(
+fn comment_parent_reference_kind(
     parent_identifier: &str,
     parent: queries::comments::CommentParent,
-) -> String {
-    current_issue_link_context().map_or_else(
-        || parent_identifier.to_owned(),
-        |context| match parent {
-            queries::comments::CommentParent::Issue(_) => {
-                context.issue_markdown(parent_identifier)
-            }
-            queries::comments::CommentParent::Page(page_id) => {
-                context.page_markdown(parent_identifier, page_id)
-            }
-        },
+) -> ReferenceKind<'_> {
+    match parent {
+        queries::comments::CommentParent::Issue(_) => ReferenceKind::Issue(parent_identifier),
+        queries::comments::CommentParent::Page(page_id) => {
+            ReferenceKind::Page(parent_identifier, page_id)
+        }
+    }
+}
+
+fn issue_reference<'a>(
+    context: Option<&'a IssueLinkContext>,
+    identifier: &'a str,
+) -> Reference<'a> {
+    reference_with_context(context, ReferenceKind::Issue(identifier))
+}
+
+fn project_reference<'a>(
+    context: Option<&'a IssueLinkContext>,
+    identifier: &'a str,
+) -> Reference<'a> {
+    reference_with_context(context, ReferenceKind::Project(identifier))
+}
+
+fn page_reference<'a>(
+    context: Option<&'a IssueLinkContext>,
+    page: &'a models::Page,
+) -> Reference<'a> {
+    reference_with_context(context, ReferenceKind::Page(&page.identifier, page.id))
+}
+
+fn plan_reference<'a>(
+    context: Option<&'a IssueLinkContext>,
+    plan: &'a models::Plan,
+) -> Reference<'a> {
+    plan_reference_value(context, &plan.identifier, plan.id)
+}
+
+fn plan_reference_value<'a>(
+    context: Option<&'a IssueLinkContext>,
+    identifier: &'a str,
+    plan_id: i64,
+) -> Reference<'a> {
+    reference_with_context(context, ReferenceKind::Plan(identifier, plan_id))
+}
+
+fn module_reference<'a>(
+    context: Option<&'a IssueLinkContext>,
+    project: &'a str,
+    module: &'a models::Module,
+) -> Reference<'a> {
+    reference_with_context(
+        context,
+        ReferenceKind::Module(project, module.id, &module.name),
     )
 }
 
-fn project_reference(identifier: &str) -> String {
-    current_issue_link_context().map_or_else(
-        || identifier.to_owned(),
-        |context| context.project_markdown(identifier),
-    )
+struct IssueReferenceWithSuffix<'a> {
+    context: Option<&'a IssueLinkContext>,
+    value: &'a str,
 }
 
-fn page_reference(page: &models::Page) -> String {
-    current_issue_link_context().map_or_else(
-        || page.identifier.clone(),
-        |context| context.page_markdown(&page.identifier, page.id),
-    )
+impl Display for IssueReferenceWithSuffix<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.context, self.value.split_once(' ')) {
+            (Some(context), Some((identifier, suffix))) => match context.issue_url(identifier) {
+                Some(_) => write!(formatter, "{} {suffix}", context.issue_markdown(identifier)),
+                None => formatter.write_str(self.value),
+            },
+            (Some(context), None) => Display::fmt(&context.issue_markdown(self.value), formatter),
+            (None, _) => formatter.write_str(self.value),
+        }
+    }
 }
 
-fn plan_reference(plan: &models::Plan) -> String {
-    plan_reference_value(&plan.identifier, plan.id)
+struct IssueReferenceList<'a> {
+    label: &'a str,
+    values: &'a [String],
+    context: Option<&'a IssueLinkContext>,
 }
 
-fn plan_reference_value(identifier: &str, plan_id: i64) -> String {
-    current_issue_link_context().map_or_else(
-        || identifier.to_owned(),
-        |context| context.plan_markdown(identifier, plan_id),
-    )
+impl Display for IssueReferenceList<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.values.split_first().map_or(Ok(()), |_| {
+            formatter.write_str(self.label)?;
+            write_joined(formatter, self.values, ", ", |formatter, value| {
+                Display::fmt(
+                    &IssueReferenceWithSuffix {
+                        context: self.context,
+                        value,
+                    },
+                    formatter,
+                )
+            })?;
+            formatter.write_char('\n')
+        })
+    }
 }
 
-fn module_reference(project: &str, module: &models::Module) -> String {
-    current_issue_link_context().map_or_else(
-        || module.name.clone(),
-        |context| context.module_markdown(project, module.id, &module.name),
-    )
+struct CommentLines<'a> {
+    comments: &'a [models::Comment],
+    parent_identifier: &'a str,
+    parent: queries::comments::CommentParent,
+    context: Option<&'a IssueLinkContext>,
 }
 
-fn issue_reference_with_suffix(value: &str) -> String {
-    let Some((identifier, suffix)) = value.split_once(' ') else {
-        return issue_reference(value);
-    };
-    let rendered = issue_reference(identifier);
-    if rendered == identifier {
-        value.to_owned()
-    } else {
-        format!("{rendered} {suffix}")
+impl Display for CommentLines<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.comments.iter().try_for_each(|comment| {
+            write!(
+                formatter,
+                "[{}] {} ({})",
+                comment.created_at, comment.author, comment.author_display_name
+            )?;
+            self.context.map_or(Ok(()), |context| {
+                write!(
+                    formatter,
+                    " — {}",
+                    reference_with_context(
+                        Some(context),
+                        comment_reference_kind(self.parent_identifier, self.parent, comment.id),
+                    )
+                )
+            })?;
+            writeln!(formatter, ": {}", comment.content)
+        })
     }
 }
 
@@ -178,25 +414,71 @@ fn issue_reference_with_suffix(value: &str) -> String {
 /// Step lines carry `#<id>` so the agent can target edits, and issue-linked
 /// steps show provenance ("via LIF-42" / "reopened — LIF-42 reopened").
 pub(crate) fn fmt_plan(p: &models::Plan) -> String {
-    let anchor = p
-        .anchor_identifier
-        .as_ref()
-        .map(|a| format!(" — anchor {}", issue_reference(a)))
-        .unwrap_or_default();
-    let mut out = format!(
-        "{} [{}] {}{} — {}/{} done\n",
-        plan_reference(p),
-        p.status,
-        p.title,
-        anchor,
-        p.done_count,
-        p.step_count
-    );
-    fmt_steps(&p.steps, 0, &mut out);
-    out
+    let context = current_issue_link_context();
+    render_response(|output| {
+        write!(
+            output,
+            "{}",
+            PlanView {
+                plan: p,
+                context: context.as_deref(),
+            }
+        )
+    })
 }
 
-fn relative_age(timestamp: &str, now: DateTime<Utc>) -> Option<String> {
+struct PlanView<'a> {
+    plan: &'a models::Plan,
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for PlanView<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let plan = self.plan;
+        write!(
+            formatter,
+            "{} [{}] {}",
+            plan_reference(self.context, plan),
+            plan.status,
+            plan.title
+        )?;
+        plan.anchor_identifier.as_deref().map_or(Ok(()), |anchor| {
+            write!(
+                formatter,
+                " — anchor {}",
+                issue_reference(self.context, anchor)
+            )
+        })?;
+        writeln!(formatter, " — {}/{} done", plan.done_count, plan.step_count)?;
+        Display::fmt(
+            &PlanSteps {
+                nodes: &plan.steps,
+                depth: 0,
+                context: self.context,
+            },
+            formatter,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RelativeAge {
+    Minutes(i64),
+    Hours(i64),
+    Days(i64),
+}
+
+impl Display for RelativeAge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Minutes(value) => write!(formatter, "{value}m ago"),
+            Self::Hours(value) => write!(formatter, "{value}h ago"),
+            Self::Days(value) => write!(formatter, "{value}d ago"),
+        }
+    }
+}
+
+fn relative_age(timestamp: &str, now: DateTime<Utc>) -> Option<RelativeAge> {
     let activity_at = match NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") {
         Ok(timestamp) => timestamp.and_utc(),
         Err(_) => DateTime::parse_from_rfc3339(timestamp)
@@ -205,36 +487,58 @@ fn relative_age(timestamp: &str, now: DateTime<Utc>) -> Option<String> {
     };
     let minutes = now.signed_duration_since(activity_at).num_minutes().max(0);
     Some(if minutes < 60 {
-        format!("{minutes}m ago")
+        RelativeAge::Minutes(minutes)
     } else if minutes < 24 * 60 {
-        format!("{}h ago", minutes / 60)
+        RelativeAge::Hours(minutes / 60)
     } else {
-        format!("{}d ago", minutes / (24 * 60))
+        RelativeAge::Days(minutes / (24 * 60))
     })
 }
 
-fn fmt_project_agent_stats(
-    stats: &queries::ProjectAgentStats,
+#[derive(Clone, Copy)]
+enum ProjectAgentStat {
+    Workable(i64),
+    ActivePlans(i64),
+    LastActivity(RelativeAge),
+}
+
+impl Display for ProjectAgentStat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Workable(count) => write!(formatter, "{count} workable"),
+            Self::ActivePlans(1) => formatter.write_str("1 active plan"),
+            Self::ActivePlans(count) => write!(formatter, "{count} active plans"),
+            Self::LastActivity(age) => write!(formatter, "last activity {age}"),
+        }
+    }
+}
+
+struct ProjectAgentStats<'a> {
+    stats: &'a queries::ProjectAgentStats,
     now: DateTime<Utc>,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    if stats.workable > 0 {
-        parts.push(format!("{} workable", stats.workable));
-    }
-    if stats.active_plans > 0 {
-        let noun = if stats.active_plans == 1 {
-            "active plan"
-        } else {
-            "active plans"
+}
+
+impl Display for ProjectAgentStats<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let stats = self.stats;
+        let mut parts = [
+            (stats.workable > 0).then_some(ProjectAgentStat::Workable(stats.workable)),
+            (stats.active_plans > 0).then_some(ProjectAgentStat::ActivePlans(stats.active_plans)),
+            stats
+                .last_activity
+                .as_deref()
+                .and_then(|timestamp| relative_age(timestamp, self.now))
+                .map(ProjectAgentStat::LastActivity),
+        ]
+        .into_iter()
+        .flatten();
+        let Some(first) = parts.next() else {
+            return Ok(());
         };
-        parts.push(format!("{} {noun}", stats.active_plans));
+        write!(formatter, " ({first}")?;
+        parts.try_for_each(|part| write!(formatter, ", {part}"))?;
+        formatter.write_char(')')
     }
-    if let Some(last_activity) = stats.last_activity.as_deref()
-        && let Some(age) = relative_age(last_activity, now)
-    {
-        parts.push(format!("last activity {age}"));
-    }
-    (!parts.is_empty()).then(|| format!(" ({})", parts.join(", ")))
 }
 
 fn cmp_projects_by_activity(
@@ -321,66 +625,96 @@ fn issue_status_cascaded_plan_steps(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn fmt_issue_plan_step_cascade(
+struct IssuePlanStepCascade<'a> {
     action: PlanStepCascadeAction,
-    steps: &[CascadedPlanStep],
-) -> Option<String> {
-    match steps {
-        [] => None,
-        [step] => Some(format!(
-            " ({} plan step #{} in {})",
-            action.response_verb(),
-            step.id,
-            plan_reference_value(&step.plan_identifier, step.plan_id)
-        )),
-        steps => Some(format!(
-            " ({} {} plan steps: {})",
-            action.response_verb(),
-            steps.len(),
-            steps
-                .iter()
-                .map(|step| {
-                    format!(
+    steps: &'a [CascadedPlanStep],
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for IssuePlanStepCascade<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.steps {
+            [] => Ok(()),
+            [step] => write!(
+                formatter,
+                " ({} plan step #{} in {})",
+                self.action.response_verb(),
+                step.id,
+                plan_reference_value(self.context, &step.plan_identifier, step.plan_id)
+            ),
+            steps => {
+                write!(
+                    formatter,
+                    " ({} {} plan steps: ",
+                    self.action.response_verb(),
+                    steps.len()
+                )?;
+                write_joined(formatter, steps, ", ", |formatter, step| {
+                    write!(
+                        formatter,
                         "#{} in {}",
                         step.id,
-                        plan_reference_value(&step.plan_identifier, step.plan_id)
+                        plan_reference_value(self.context, &step.plan_identifier, step.plan_id)
                     )
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+                })?;
+                formatter.write_char(')')
+            }
+        }
     }
 }
 
-fn fmt_steps(nodes: &[models::PlanStepNode], depth: usize, out: &mut String) {
-    for n in nodes {
-        let indent = "  ".repeat(depth);
-        let check = if n.done { "x" } else { " " };
-        // Provenance suffix for issue-linked steps.
-        let suffix = match (&n.issue_identifier, n.issue_status.as_deref()) {
-            (Some(iss), Some("done")) if n.done => {
-                format!(" (via {})", issue_reference(iss))
-            }
-            (Some(iss), _) if n.reopened_via_issue_at.is_some() && !n.done => {
-                format!(" (reopened — {} reopened)", issue_reference(iss))
-            }
-            (Some(iss), Some(st)) => format!(" [{}: {st}]", issue_reference(iss)),
-            (Some(iss), None) => format!(" [{}]", issue_reference(iss)),
-            _ => String::new(),
-        };
-        out.push_str(&format!(
-            "{indent}- [{check}] #{} {}{}\n",
-            n.id, n.title, suffix
-        ));
-        if !n.description.is_empty() {
-            out.push_str(&format!(
-                "{indent}    {}\n",
-                truncate_value(&n.description, 100)
-            ));
-        }
-        if !n.children.is_empty() {
-            fmt_steps(&n.children, depth + 1, out);
-        }
+struct PlanSteps<'a> {
+    nodes: &'a [models::PlanStepNode],
+    depth: usize,
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for PlanSteps<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.nodes.iter().try_for_each(|node| {
+            let check = if node.done { "x" } else { " " };
+            (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+            write!(formatter, "- [{check}] #{} {}", node.id, node.title)?;
+            match (&node.issue_identifier, node.issue_status.as_deref()) {
+                (Some(iss), Some("done")) if node.done => {
+                    write!(formatter, " (via {})", issue_reference(self.context, iss))
+                }
+                (Some(iss), _) if node.reopened_via_issue_at.is_some() && !node.done => {
+                    write!(
+                        formatter,
+                        " (reopened — {} reopened)",
+                        issue_reference(self.context, iss)
+                    )
+                }
+                (Some(iss), Some(st)) => {
+                    write!(formatter, " [{}: {st}]", issue_reference(self.context, iss))
+                }
+                (Some(iss), None) => {
+                    write!(formatter, " [{}]", issue_reference(self.context, iss))
+                }
+                _ => Ok(()),
+            }?;
+            formatter.write_char('\n')?;
+            (!node.description.is_empty())
+                .then(|| {
+                    (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+                    writeln!(formatter, "    {}", truncate_value(&node.description, 100))
+                })
+                .transpose()?;
+            (!node.children.is_empty())
+                .then(|| {
+                    Display::fmt(
+                        &Self {
+                            nodes: &node.children,
+                            depth: self.depth + 1,
+                            context: self.context,
+                        },
+                        formatter,
+                    )
+                })
+                .transpose()?;
+            Ok(())
+        })
     }
 }
 
@@ -483,14 +817,7 @@ fn looks_like_page_identifier(s: &str) -> bool {
 fn resolve_comment_parent(
     mcp: &LificMcp,
     identifier: &str,
-) -> Result<
-    (
-        queries::comments::CommentParent,
-        String,
-        Option<i64>,
-    ),
-    String,
-> {
+) -> Result<(queries::comments::CommentParent, String, Option<i64>), String> {
     if looks_like_page_identifier(identifier) {
         let conn = mcp.db.read().map_err(|e| e.to_string())?;
         let id = queries::resolve_page_identifier(&conn, identifier).map_err(|e| e.to_string())?;
@@ -518,14 +845,7 @@ fn resolve_comment_parent(
 fn resolve_comment_context(
     conn: &rusqlite::Connection,
     comment: &models::Comment,
-) -> Result<
-    (
-        Option<i64>,
-        queries::comments::CommentParent,
-        String,
-    ),
-    crate::error::LificError,
-> {
+) -> Result<(Option<i64>, queries::comments::CommentParent, String), crate::error::LificError> {
     if let Some(issue_id) = comment.issue_id {
         let issue = queries::get_issue(conn, issue_id)?;
         Ok((
@@ -550,24 +870,46 @@ fn resolve_comment_context(
 
 /// Append a paging hint to `out` if `has_more` is true.
 /// `next_offset` is the offset the agent should use to fetch the next page.
-fn append_pagination_hint(out: &mut String, has_more: bool, next_offset: i64) {
-    if has_more {
-        out.push_str(&format!(
-            "\n... more results available — call again with offset={next_offset}\n"
-        ));
-    }
+fn append_pagination_hint(
+    output: &mut impl fmt::Write,
+    has_more: bool,
+    next_offset: i64,
+) -> fmt::Result {
+    has_more
+        .then(|| {
+            writeln!(
+                output,
+                "\n... more results available — call again with offset={next_offset}"
+            )
+        })
+        .transpose()
+        .map(|_| ())
 }
 
 /// Truncate long values (descriptions, page bodies) for one-line activity
 /// rendering. Newlines collapse so an entry never spans lines.
-fn truncate_value(v: &str, max: usize) -> String {
-    let flat = v.replace('\n', " ");
-    if flat.chars().count() <= max {
-        flat
-    } else {
-        let cut: String = flat.chars().take(max).collect();
-        format!("{cut}…")
+struct TruncatedValue<'a> {
+    value: &'a str,
+    max: usize,
+}
+
+impl Display for TruncatedValue<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut characters = self.value.chars();
+        characters
+            .by_ref()
+            .take(self.max)
+            .try_for_each(|character| {
+                formatter.write_char(if character == '\n' { ' ' } else { character })
+            })?;
+        characters
+            .next()
+            .map_or(Ok(()), |_| formatter.write_char('…'))
     }
+}
+
+fn truncate_value(value: &str, max: usize) -> TruncatedValue<'_> {
+    TruncatedValue { value, max }
 }
 
 /// Render one audit entry as a compact line:
@@ -576,28 +918,26 @@ fn resolves_to(result: Result<i64, crate::error::LificError>, expected: i64) -> 
     result.is_ok_and(|id| id == expected)
 }
 
-fn activity_comment_reference(
+fn activity_comment_reference<'a>(
     conn: &rusqlite::Connection,
-    context: &IssueLinkContext,
+    context: &'a IssueLinkContext,
     activity: &models::Activity,
-    label: &str,
-) -> String {
+    label: &'a str,
+) -> MarkdownReference<'a> {
     let (issue_id, page_id) = if activity.action == "delete" {
         (activity.issue_id, activity.page_id)
     } else {
         let Ok(comment) = queries::comments::get_comment(conn, activity.entity_id) else {
-            return label.to_owned();
+            return MarkdownReference::plain(label);
         };
         if comment.issue_id != activity.issue_id || comment.page_id != activity.page_id {
-            return label.to_owned();
+            return MarkdownReference::plain(label);
         }
         (comment.issue_id, comment.page_id)
     };
 
     match (issue_id, page_id) {
-        (Some(issue_id), _)
-            if resolves_to(queries::resolve_identifier(conn, label), issue_id) =>
-        {
+        (Some(issue_id), _) if resolves_to(queries::resolve_identifier(conn, label), issue_id) => {
             if activity.action == "delete" {
                 context.issue_markdown(label)
             } else {
@@ -613,23 +953,23 @@ fn activity_comment_reference(
                 context.page_comment_markdown(label, page_id, activity.entity_id)
             }
         }
-        _ => label.to_owned(),
+        _ => MarkdownReference::plain(label),
     }
 }
 
-fn activity_reference(
+fn activity_reference<'a>(
     conn: &rusqlite::Connection,
-    activity: &models::Activity,
-    project: Option<&str>,
-    context: Option<&IssueLinkContext>,
-) -> String {
+    activity: &'a models::Activity,
+    project: Option<&'a str>,
+    context: Option<&'a IssueLinkContext>,
+) -> MarkdownReference<'a> {
     let label = activity.entity_label.as_deref().unwrap_or("?");
     let Some(context) = context else {
-        return label.to_owned();
+        return MarkdownReference::plain(label);
     };
     if activity.entity_type == "plan_step" {
         return queries::plans::resolve_plan_identifier(conn, label).map_or_else(
-            |_| label.to_owned(),
+            |_| MarkdownReference::plain(label),
             |plan_id| context.plan_markdown(label, plan_id),
         );
     }
@@ -637,7 +977,7 @@ fn activity_reference(
         return activity_comment_reference(conn, context, activity, label);
     }
     if activity.action == "delete" {
-        return label.to_owned();
+        return MarkdownReference::plain(label);
     }
 
     match activity.entity_type.as_str() {
@@ -652,18 +992,23 @@ fn activity_reference(
         {
             context.project_markdown(label)
         }
-        "page" if resolves_to(
-            queries::resolve_page_identifier(conn, label),
-            activity.entity_id,
-        ) => context.page_markdown(label, activity.entity_id),
-        "plan" if resolves_to(
-            queries::plans::resolve_plan_identifier(conn, label),
-            activity.entity_id,
-        ) => context.plan_markdown(label, activity.entity_id),
-        "module" => match (
-            project,
-            queries::get_module(conn, activity.entity_id).ok(),
-        ) {
+        "page"
+            if resolves_to(
+                queries::resolve_page_identifier(conn, label),
+                activity.entity_id,
+            ) =>
+        {
+            context.page_markdown(label, activity.entity_id)
+        }
+        "plan"
+            if resolves_to(
+                queries::plans::resolve_plan_identifier(conn, label),
+                activity.entity_id,
+            ) =>
+        {
+            context.plan_markdown(label, activity.entity_id)
+        }
+        "module" => match (project, queries::get_module(conn, activity.entity_id).ok()) {
             (Some(project), Some(module))
                 if Some(module.project_id) == activity.project_id
                     && resolves_to(
@@ -673,30 +1018,30 @@ fn activity_reference(
             {
                 context.module_markdown(project, activity.entity_id, label)
             }
-            _ => label.to_owned(),
+            _ => MarkdownReference::plain(label),
         },
-        _ => label.to_owned(),
+        _ => MarkdownReference::plain(label),
     }
 }
 
-fn activity_issue_reference(
+fn activity_issue_reference<'a>(
     conn: &rusqlite::Connection,
-    context: Option<&IssueLinkContext>,
-    identifier: &str,
-) -> String {
+    context: Option<&'a IssueLinkContext>,
+    identifier: &'a str,
+) -> MarkdownReference<'a> {
     let Some(context) = context else {
-        return identifier.to_owned();
+        return MarkdownReference::plain(identifier);
     };
     queries::resolve_identifier(conn, identifier).map_or_else(
-        |_| identifier.to_owned(),
+        |_| MarkdownReference::plain(identifier),
         |id| {
             queries::get_issue(conn, id).map_or_else(
-                |_| identifier.to_owned(),
+                |_| MarkdownReference::plain(identifier),
                 |issue| {
                     if issue.identifier == identifier {
                         context.issue_markdown(identifier)
                     } else {
-                        identifier.to_owned()
+                        MarkdownReference::plain(identifier)
                     }
                 },
             )
@@ -704,96 +1049,130 @@ fn activity_issue_reference(
     )
 }
 
-fn activity_field_value(
+fn activity_field_value<'a>(
     conn: &rusqlite::Connection,
-    context: Option<&IssueLinkContext>,
+    context: Option<&'a IssueLinkContext>,
     field: Option<&str>,
-    value: &str,
-) -> String {
+    value: &'a str,
+) -> ActivityFieldValue<'a> {
     if matches!(field, Some("issue" | "anchor_issue")) {
-        activity_issue_reference(conn, context, value)
+        ActivityFieldValue::Reference(activity_issue_reference(conn, context, value))
     } else {
-        truncate_value(value, 60)
+        ActivityFieldValue::Text(truncate_value(value, 60))
     }
 }
 
-fn fmt_activity(
-    conn: &rusqlite::Connection,
-    activity: &models::Activity,
-    project: Option<&str>,
-    context: Option<&IssueLinkContext>,
-) -> String {
-    let who = match (&activity.actor_display_name, &activity.actor_username) {
-        (Some(display_name), _) if !display_name.is_empty() => display_name.clone(),
-        (_, Some(username)) => username.clone(),
-        _ => "system".into(),
-    };
-    let agent = if activity.actor_is_bot {
-        " (agent)"
-    } else {
-        ""
-    };
-    let label = activity_reference(conn, activity, project, context);
+enum ActivityFieldValue<'a> {
+    Reference(MarkdownReference<'a>),
+    Text(TruncatedValue<'a>),
+}
 
-    let detail = match activity.action.as_str() {
-        "create" => format!(
-            "created {} {}: {}",
-            activity.entity_type,
-            label,
-            truncate_value(activity.new_value.as_deref().unwrap_or(""), 60)
-        ),
-        "delete" => format!(
-            "deleted {} {} ({})",
-            activity.entity_type,
-            label,
-            truncate_value(activity.old_value.as_deref().unwrap_or(""), 60)
-        ),
-        "update" => format!(
-            "{} {}: {} → {}",
-            label,
-            activity.field.as_deref().unwrap_or("?"),
-            activity_field_value(
-                conn,
-                context,
-                activity.field.as_deref(),
-                activity.old_value.as_deref().unwrap_or("(none)")
+impl Display for ActivityFieldValue<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reference(reference) => Display::fmt(reference, formatter),
+            Self::Text(value) => Display::fmt(value, formatter),
+        }
+    }
+}
+
+struct ActivityLine<'a> {
+    conn: &'a rusqlite::Connection,
+    activity: &'a models::Activity,
+    project: Option<&'a str>,
+    context: Option<&'a IssueLinkContext>,
+}
+
+impl Display for ActivityLine<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let activity = self.activity;
+        let who = match (&activity.actor_display_name, &activity.actor_username) {
+            (Some(display_name), _) if !display_name.is_empty() => display_name.as_str(),
+            (_, Some(username)) => username.as_str(),
+            _ => "system",
+        };
+        let agent = if activity.actor_is_bot {
+            " (agent)"
+        } else {
+            ""
+        };
+        let label = activity_reference(self.conn, activity, self.project, self.context);
+
+        write!(
+            formatter,
+            "[{}] {}{} via {} — ",
+            activity.ts, who, agent, activity.transport
+        )?;
+        match activity.action.as_str() {
+            "create" => write!(
+                formatter,
+                "created {} {}: {}",
+                activity.entity_type,
+                label,
+                truncate_value(activity.new_value.as_deref().unwrap_or(""), 60)
             ),
-            activity_field_value(
-                conn,
-                context,
-                activity.field.as_deref(),
-                activity.new_value.as_deref().unwrap_or("(none)")
-            )
-        ),
-        "attach" => format!(
-            "{} +label {}",
-            label,
-            activity.new_value.as_deref().unwrap_or("?")
-        ),
-        "detach" => format!(
-            "{} -label {}",
-            label,
-            activity.old_value.as_deref().unwrap_or("?")
-        ),
-        "link" => format!(
-            "{} {} → {}",
-            label,
-            activity.field.as_deref().unwrap_or("relates_to"),
-            activity_issue_reference(conn, context, activity.new_value.as_deref().unwrap_or("?"))
-        ),
-        "unlink" => format!(
-            "{} un-{} → {}",
-            label,
-            activity.field.as_deref().unwrap_or("relates_to"),
-            activity_issue_reference(conn, context, activity.old_value.as_deref().unwrap_or("?"))
-        ),
-        other => format!("{label} {other}"),
-    };
-
-    format!(
-        "[{}] {}{} via {} — {}",
-        activity.ts, who, agent, activity.transport, detail
-    )
+            "delete" => write!(
+                formatter,
+                "deleted {} {} ({})",
+                activity.entity_type,
+                label,
+                truncate_value(activity.old_value.as_deref().unwrap_or(""), 60)
+            ),
+            "update" => write!(
+                formatter,
+                "{} {}: {} → {}",
+                label,
+                activity.field.as_deref().unwrap_or("?"),
+                activity_field_value(
+                    self.conn,
+                    self.context,
+                    activity.field.as_deref(),
+                    activity.old_value.as_deref().unwrap_or("(none)")
+                ),
+                activity_field_value(
+                    self.conn,
+                    self.context,
+                    activity.field.as_deref(),
+                    activity.new_value.as_deref().unwrap_or("(none)")
+                )
+            ),
+            "attach" => write!(
+                formatter,
+                "{} +label {}",
+                label,
+                activity.new_value.as_deref().unwrap_or("?")
+            ),
+            "detach" => write!(
+                formatter,
+                "{} -label {}",
+                label,
+                activity.old_value.as_deref().unwrap_or("?")
+            ),
+            "link" => write!(
+                formatter,
+                "{} {} → {}",
+                label,
+                activity.field.as_deref().unwrap_or("relates_to"),
+                activity_issue_reference(
+                    self.conn,
+                    self.context,
+                    activity.new_value.as_deref().unwrap_or("?")
+                )
+            ),
+            "unlink" => write!(
+                formatter,
+                "{} un-{} → {}",
+                label,
+                activity.field.as_deref().unwrap_or("relates_to"),
+                activity_issue_reference(
+                    self.conn,
+                    self.context,
+                    activity.old_value.as_deref().unwrap_or("?")
+                )
+            ),
+            other => write!(formatter, "{label} {other}"),
+        }
+    }
 }
 
 // ── LIF-198: MCP authorization gates ────────────────────────────
@@ -1030,62 +1409,51 @@ impl LificMcp {
                     results.truncate(limit as usize);
                 }
                 let link_context = current_issue_link_context();
-                let mut out = format!("{} results:\n", results.len());
-                for r in &results {
-                    let ident = r.identifier.as_deref().unwrap_or("");
-                    // A comment hit has no title of its own; render it as a
-                    // match on its parent so the reader knows to open the
-                    // parent issue/page to find the thread (LIF-146).
-                    if r.result_type == "comment" {
-                        let page_id = r.parent_page_id;
-                        let parent = link_context.as_ref().map_or_else(
-                            || ident.to_owned(),
-                            |context| {
-                                page_id.map_or_else(
-                                    || context.issue_markdown(ident),
-                                    |page_id| context.page_markdown(ident, page_id),
-                                )
-                            },
-                        );
-                        let comment = link_context.as_ref().map_or_else(
-                            || "[comment]".to_owned(),
-                            |context| page_id.map_or_else(
-                                || context.issue_comment_markdown(ident, r.id),
-                                |page_id| context.page_comment_markdown(ident, page_id, r.id),
-                            ),
-                        );
-                        out.push_str(&format!(
-                            "- {} on {} — {}\n",
-                            comment, parent, r.snippet
-                        ));
-                    } else {
-                        let identifier = if r.result_type == "page" {
-                            link_context.as_ref().map_or_else(
-                                || ident.to_owned(),
-                                |context| context.page_markdown(ident, r.id),
-                            )
-                        } else if r.result_type == "plan" {
-                            link_context.as_ref().map_or_else(
-                                || ident.to_owned(),
-                                |context| context.plan_markdown(ident, r.id),
-                            )
+                render_response(|output| {
+                    writeln!(output, "{} results:", results.len())?;
+                    results.iter().try_for_each(|result| {
+                        let identifier = result.identifier.as_deref().unwrap_or("");
+                        // A comment hit has no title of its own; render it as a
+                        // match on its parent so the reader knows to open the
+                        // parent issue/page to find the thread (LIF-146).
+                        if result.result_type == "comment" {
+                            let page_id = result.parent_page_id;
+                            let parent = reference_with_context(
+                                link_context.as_deref(),
+                                page_id.map_or(ReferenceKind::Issue(identifier), |page_id| {
+                                    ReferenceKind::Page(identifier, page_id)
+                                }),
+                            );
+                            let comment = reference_with_context(
+                                link_context.as_deref(),
+                                page_id.map_or(
+                                    ReferenceKind::IssueSearchComment(identifier, result.id),
+                                    |page_id| {
+                                        ReferenceKind::PageSearchComment(
+                                            identifier, page_id, result.id,
+                                        )
+                                    },
+                                ),
+                            );
+                            writeln!(output, "- {comment} on {parent} — {}", result.snippet)
                         } else {
-                            link_context.as_ref().map_or_else(
-                                || ident.to_owned(),
-                                |context| context.issue_markdown(ident),
+                            let kind = match result.result_type.as_str() {
+                                "page" => ReferenceKind::Page(identifier, result.id),
+                                "plan" => ReferenceKind::Plan(identifier, result.id),
+                                _ => ReferenceKind::Issue(identifier),
+                            };
+                            writeln!(
+                                output,
+                                "- [{}] {} {} — {}",
+                                result.result_type,
+                                reference_with_context(link_context.as_deref(), kind),
+                                result.title,
+                                result.snippet
                             )
-                        };
-                        out.push_str(&format!(
-                            "- [{}] {} {} — {}\n",
-                            r.result_type,
-                            identifier,
-                            r.title,
-                            r.snippet
-                        ));
-                    }
-                }
-                append_pagination_hint(&mut out, has_more, offset + limit);
-                out
+                        }
+                    })?;
+                    append_pagination_hint(output, has_more, offset + limit)
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1102,65 +1470,61 @@ impl LificMcp {
         // Resolve the identifier shape: page → issue → project. Pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
         // tail, so a bare project identifier falls through cleanly.
-        let (scope, project_id, scope_reference, project_identifier) =
+        let (scope, project_id, scope_reference, scope_identifier, project_identifier) =
             if looks_like_page_identifier(ident) {
-            match self.read(|conn| {
-                let id = queries::resolve_page_identifier(conn, ident)?;
-                let page = queries::get_page(conn, id)?;
-                let project_identifier = page
-                    .project_id
-                    .and_then(|project_id| queries::get_project(conn, project_id).ok())
-                    .map(|project| project.identifier);
-                let scope_reference = page_reference(&page);
-                Ok((page, scope_reference, project_identifier))
-            }) {
-                Ok((page, scope_reference, project_identifier)) => {
-                    (
+                match self.read(|conn| {
+                    let id = queries::resolve_page_identifier(conn, ident)?;
+                    let page = queries::get_page(conn, id)?;
+                    let project_identifier = page
+                        .project_id
+                        .and_then(|project_id| queries::get_project(conn, project_id).ok())
+                        .map(|project| project.identifier);
+                    Ok((page, project_identifier))
+                }) {
+                    Ok((page, project_identifier)) => (
                         queries::activity::ActivityScope::Page(page.id),
                         page.project_id,
-                        scope_reference,
+                        ActivityScopeReference::Page(page.id),
+                        page.identifier,
                         project_identifier,
-                    )
+                    ),
+                    Err(e) => return format!("Error: {e}"),
                 }
-                Err(e) => return format!("Error: {e}"),
-            }
-        } else if let Ok(issue) = self.read(|conn| {
-            let id = queries::resolve_identifier(conn, ident)?;
-            let issue = queries::get_issue(conn, id)?;
-            let project_identifier = queries::get_project(conn, issue.project_id)
-                .ok()
-                .map(|project| project.identifier);
-            let scope_reference = issue_reference(&issue.identifier);
-            Ok((issue, scope_reference, project_identifier))
-        }) {
-            let (issue, scope_reference, project_identifier) = issue;
-            (
-                queries::activity::ActivityScope::Issue(issue.id),
-                Some(issue.project_id),
-                scope_reference,
-                project_identifier,
-            )
-        } else {
-            match self.read(|conn| {
-                let id = queries::resolve_project_identifier(conn, ident)?;
-                queries::get_project(conn, id)
+            } else if let Ok(issue) = self.read(|conn| {
+                let id = queries::resolve_identifier(conn, ident)?;
+                let issue = queries::get_issue(conn, id)?;
+                let project_identifier = queries::get_project(conn, issue.project_id)
+                    .ok()
+                    .map(|project| project.identifier);
+                Ok((issue, project_identifier))
             }) {
-                Ok(project) => {
-                    let project_identifier = project.identifier.clone();
-                    (
+                let (issue, project_identifier) = issue;
+                (
+                    queries::activity::ActivityScope::Issue(issue.id),
+                    Some(issue.project_id),
+                    ActivityScopeReference::Issue,
+                    issue.identifier,
+                    project_identifier,
+                )
+            } else {
+                match self.read(|conn| {
+                    let id = queries::resolve_project_identifier(conn, ident)?;
+                    queries::get_project(conn, id)
+                }) {
+                    Ok(project) => (
                         queries::activity::ActivityScope::Project(project.id),
                         Some(project.id),
-                        project_reference(&project.identifier),
-                        Some(project_identifier),
-                    )
+                        ActivityScopeReference::Project,
+                        project.identifier,
+                        None,
+                    ),
+                    Err(_) => {
+                        return format!(
+                            "Error: '{ident}' is not a known issue, page, or project identifier"
+                        );
+                    }
                 }
-                Err(_) => {
-                    return format!(
-                        "Error: '{ident}' is not a known issue, page, or project identifier"
-                    );
-                }
-            }
-        };
+            };
 
         // LIF-198: resolve the scope's project (Viewer gate); workspace
         // pages (project_id None) fall back to admin-only.
@@ -1169,38 +1533,60 @@ impl LificMcp {
         }
 
         let link_context = current_issue_link_context();
+        let scope_reference = reference_with_context(
+            link_context.as_deref(),
+            match scope_reference {
+                ActivityScopeReference::Issue => ReferenceKind::Issue(&scope_identifier),
+                ActivityScopeReference::Page(page_id) => {
+                    ReferenceKind::Page(&scope_identifier, page_id)
+                }
+                ActivityScopeReference::Project => ReferenceKind::Project(&scope_identifier),
+            },
+        );
+        let activity_project_identifier = project_identifier.as_deref().or(matches!(
+            scope_reference.kind,
+            ReferenceKind::Project(_)
+        )
+        .then_some(scope_identifier.as_str()));
         match self.read(|conn| {
             let feed = queries::activity::list_activity(conn, scope, Some(limit), Some(offset))?;
-            // ponytail: feeds cap at 200; batch target checks only if this read path profiles hot.
-            let items: Vec<_> = feed
-                .items
-                .iter()
-                .map(|activity| {
-                    fmt_activity(
-                        conn,
-                        activity,
-                        project_identifier.as_deref(),
-                        link_context.as_ref(),
+            if feed.items.is_empty() {
+                return Ok((None, 0, feed.has_more));
+            }
+            let output = try_render(|output| {
+                writeln!(
+                    output,
+                    "{} activity entries for {scope_reference}:",
+                    feed.items.len()
+                )?;
+                feed.items.iter().try_for_each(|activity| {
+                    writeln!(
+                        output,
+                        "- {}",
+                        ActivityLine {
+                            conn,
+                            activity,
+                            project: activity_project_identifier,
+                            context: link_context.as_deref(),
+                        }
                     )
                 })
-                .collect();
-            Ok((items, feed.has_more))
+            })
+            .map_err(|error| {
+                crate::error::LificError::Internal(format!(
+                    "failed to format activity response: {error}"
+                ))
+            })?;
+            Ok((Some(output), feed.items.len(), feed.has_more))
         }) {
-            Ok((items, _)) if items.is_empty() && offset == 0 => {
-                format!("No recorded activity for {scope_reference} yet.")
+            Ok((None, _, _)) if offset == 0 => render_response(|output| {
+                write!(output, "No recorded activity for {scope_reference} yet.")
+            }),
+            Ok((Some(mut out), _, has_more)) => {
+                let result = append_pagination_hint(&mut out, has_more, offset + limit);
+                finish_response(out, result)
             }
-            Ok((items, has_more)) => {
-                let mut out = format!(
-                    "{} activity entries for {}:\n",
-                    items.len(),
-                    scope_reference
-                );
-                for item in &items {
-                    out.push_str(&format!("- {item}\n"));
-                }
-                append_pagination_hint(&mut out, has_more, offset + limit);
-                out
-            }
+            Ok((None, _, _)) => "No activity entries in this range.".into(),
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -1258,15 +1644,20 @@ impl LificMcp {
                     issues.truncate(limit as usize);
                 }
                 let context = current_issue_link_context();
-                let mut out = format!("{} issues:\n", issues.len());
-                for i in &issues {
-                    out.push_str(&format!(
-                        "- {}\n",
-                        fmt_issue_with_context(i, context.as_ref())
-                    ));
-                }
-                append_pagination_hint(&mut out, has_more, offset + limit);
-                out
+                render_response(|output| {
+                    writeln!(output, "{} issues:", issues.len())?;
+                    issues.iter().try_for_each(|issue| {
+                        writeln!(
+                            output,
+                            "- {}",
+                            IssueLine {
+                                issue,
+                                context: context.as_deref(),
+                            }
+                        )
+                    })?;
+                    append_pagination_hint(output, has_more, offset + limit)
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1321,143 +1712,100 @@ impl LificMcp {
                 if let Err(e) = require_role_mcp(&self.db, issue.project_id, models::Role::Viewer) {
                     return format!("Error: {e}");
                 }
-                let mut out = format!(
-                    "{} — {}\nStatus: {} | Priority: {} | Module: {}\n",
-                    issue_reference(&issue.identifier),
-                    issue.title,
-                    issue.status,
-                    issue.priority,
-                    module_name
-                );
-                if !issue.labels.is_empty() {
-                    out.push_str(&format!("Labels: {}\n", issue.labels.join(", ")));
-                }
-                if !rels.blocks.is_empty() {
-                    out.push_str(&format!(
-                        "Blocks: {}\n",
-                        rels.blocks
-                            .iter()
-                            .map(|r| issue_reference_with_suffix(r))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !rels.blocked_by.is_empty() {
-                    out.push_str(&format!(
-                        "Blocked by: {}\n",
-                        rels.blocked_by
-                            .iter()
-                            .map(|r| issue_reference_with_suffix(r))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !rels.relates_to.is_empty() {
-                    out.push_str(&format!(
-                        "Relates to: {}\n",
-                        rels.relates_to
-                            .iter()
-                            .map(|r| issue_reference_with_suffix(r))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !rels.duplicates.is_empty() {
-                    out.push_str(&format!(
-                        "Duplicates: {}\n",
-                        rels.duplicates
-                            .iter()
-                            .map(|r| issue_reference_with_suffix(r))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !rels.duplicated_by.is_empty() {
-                    out.push_str(&format!(
-                        "Duplicated by: {}\n",
-                        rels.duplicated_by
-                            .iter()
-                            .map(|r| issue_reference_with_suffix(r))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                if !issue.description.is_empty() {
-                    out.push_str(&format!("\n{}\n", issue.description));
-                }
-                // Include comments per the requested trail mode (LIF-301).
-                if let Ok(comments) = self.read(|conn| {
-                    queries::comments::list_comments(
-                        conn,
-                        queries::comments::CommentParent::Issue(issue.id),
-                        None,
-                        None,
-                    )
-                }) && !comments.is_empty()
-                {
-                    let total = comments.len();
-                    match comment_mode {
-                        // Emit only a stub pointing at list_comments.
-                        "none" => {
-                            out.push_str(&format!(
-                                "\n--- Comments ({total}, omitted — use list_comments) ---\n"
-                            ));
-                        }
-                        // Last 3 by default; full header only when truncating.
-                        "recent" if total > 3 => {
-                            out.push_str(&format!(
-                                "\n--- Comments ({total}, showing last 3 — use list_comments) ---\n"
-                            ));
-                            for c in &comments[total - 3..] {
-                                if current_issue_link_context().is_some() {
-                                    out.push_str(&format!(
-                                        "[{}] {} ({}) — {}: {}\n",
-                                        c.created_at,
-                                        c.author,
-                                        c.author_display_name,
-                                        comment_reference(
-                                            &issue.identifier,
-                                            queries::comments::CommentParent::Issue(issue.id),
-                                            c.id
-                                        ),
-                                        c.content
-                                    ));
-                                } else {
-                                    out.push_str(&format!(
-                                        "[{}] {} ({}): {}\n",
-                                        c.created_at, c.author, c.author_display_name, c.content
-                                    ));
-                                }
+                let context = current_issue_link_context();
+                let comments = self
+                    .read(|conn| {
+                        queries::comments::list_comments(
+                            conn,
+                            queries::comments::CommentParent::Issue(issue.id),
+                            None,
+                            None,
+                        )
+                    })
+                    .ok()
+                    .filter(|comments| !comments.is_empty());
+                render_response(|output| {
+                    writeln!(
+                        output,
+                        "{} — {}\nStatus: {} | Priority: {} | Module: {}",
+                        issue_reference(context.as_deref(), &issue.identifier),
+                        issue.title,
+                        issue.status,
+                        issue.priority,
+                        module_name
+                    )?;
+                    issue.labels.split_first().map_or(Ok(()), |_| {
+                        writeln!(
+                            output,
+                            "Labels: {}",
+                            JoinedStrings {
+                                values: &issue.labels,
+                                separator: ", ",
+                            }
+                        )
+                    })?;
+                    [
+                        ("Blocks: ", rels.blocks.as_slice()),
+                        ("Blocked by: ", rels.blocked_by.as_slice()),
+                        ("Relates to: ", rels.relates_to.as_slice()),
+                        ("Duplicates: ", rels.duplicates.as_slice()),
+                        ("Duplicated by: ", rels.duplicated_by.as_slice()),
+                    ]
+                    .into_iter()
+                    .try_for_each(|(label, values)| {
+                        write!(
+                            output,
+                            "{}",
+                            IssueReferenceList {
+                                label,
+                                values,
+                                context: context.as_deref(),
+                            }
+                        )
+                    })?;
+                    (!issue.description.is_empty())
+                        .then(|| writeln!(output, "\n{}", issue.description))
+                        .transpose()?;
+                    comments.as_ref().map_or(Ok(()), |comments| {
+                        let total = comments.len();
+                        let parent = queries::comments::CommentParent::Issue(issue.id);
+                        match comment_mode {
+                            "none" => writeln!(
+                                output,
+                                "\n--- Comments ({total}, omitted — use list_comments) ---"
+                            ),
+                            "recent" if total > 3 => {
+                                writeln!(
+                                    output,
+                                    "\n--- Comments ({total}, showing last 3 — use list_comments) ---"
+                                )?;
+                                write!(
+                                    output,
+                                    "{}",
+                                    CommentLines {
+                                        comments: &comments[total - 3..],
+                                        parent_identifier: &issue.identifier,
+                                        parent,
+                                        context: context.as_deref(),
+                                    }
+                                )
+                            }
+                            _ => {
+                                writeln!(output, "\n--- Comments ({total}) ---")?;
+                                write!(
+                                    output,
+                                    "{}",
+                                    CommentLines {
+                                        comments,
+                                        parent_identifier: &issue.identifier,
+                                        parent,
+                                        context: context.as_deref(),
+                                    }
+                                )
                             }
                         }
-                        // "all", or "recent" with <= 3 comments: today's format.
-                        _ => {
-                            out.push_str(&format!("\n--- Comments ({total}) ---\n"));
-                            for c in &comments {
-                                if current_issue_link_context().is_some() {
-                                    out.push_str(&format!(
-                                        "[{}] {} ({}) — {}: {}\n",
-                                        c.created_at,
-                                        c.author,
-                                        c.author_display_name,
-                                        comment_reference(
-                                            &issue.identifier,
-                                            queries::comments::CommentParent::Issue(issue.id),
-                                            c.id
-                                        ),
-                                        c.content
-                                    ));
-                                } else {
-                                    out.push_str(&format!(
-                                        "[{}] {} ({}): {}\n",
-                                        c.created_at, c.author, c.author_display_name, c.content
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                out
+                    })
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1520,13 +1868,13 @@ impl LificMcp {
                 return format!("Error: {e}");
             }
             match self.read(|conn| crate::export::export_project(conn, ident)) {
-                Ok(bundle) => {
-                    let mut out = format!("{} exported file(s):\n", bundle.files.len());
-                    for file in bundle.files {
-                        out.push_str(&format!("- {}\n", file.path));
-                    }
-                    out
-                }
+                Ok(bundle) => render_response(|output| {
+                    writeln!(output, "{} exported file(s):", bundle.files.len())?;
+                    bundle
+                        .files
+                        .iter()
+                        .try_for_each(|file| writeln!(output, "- {}", file.path))
+                }),
                 Err(e) => format!("Error: {e}"),
             }
         }
@@ -1570,11 +1918,15 @@ impl LificMcp {
                     project_id: issue.project_id,
                     issue_id: issue.id,
                 });
-                format!(
-                    "Created {}: {}",
-                    issue_reference(&issue.identifier),
-                    issue.title
-                )
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Created {}: {}",
+                        issue_reference(context.as_deref(), &issue.identifier),
+                        issue.title
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1601,15 +1953,15 @@ impl LificMcp {
             // Keep an audit checkpoint before the direct issue update so the
             // response can name only steps the trigger actually changed.
             let previous_issue = queries::get_issue(conn, id)?;
-            let audit_checkpoint = if input.status.is_some() {
-                Some(
+            let audit_checkpoint = input
+                .status
+                .as_ref()
+                .map(|_| {
                     conn.query_row("SELECT COALESCE(MAX(id), 0) FROM audit_log", [], |row| {
                         row.get(0)
-                    })?,
-                )
-            } else {
-                None
-            };
+                    })
+                })
+                .transpose()?;
             // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
             // (unassign module), non-empty = resolve + set.
             let module_id = match &input.module {
@@ -1656,17 +2008,32 @@ impl LificMcp {
                     project_id: issue.project_id,
                     issue_id: issue.id,
                 });
-                let mut output = format!(
-                    "Updated {}: {}",
-                    issue_reference(&issue.identifier),
-                    fmt_issue(&issue)
-                );
-                if let Some(note) = cascade_action
-                    .and_then(|action| fmt_issue_plan_step_cascade(action, &cascaded_steps))
-                {
-                    output.push_str(&note);
-                }
-                output
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Updated {}: {}",
+                        IssueReference {
+                            context: context.as_deref(),
+                            identifier: &issue.identifier,
+                        },
+                        IssueLine {
+                            issue: &issue,
+                            context: context.as_deref(),
+                        }
+                    )?;
+                    cascade_action.map_or(Ok(()), |action| {
+                        write!(
+                            output,
+                            "{}",
+                            IssuePlanStepCascade {
+                                action,
+                                steps: &cascaded_steps,
+                                context: context.as_deref(),
+                            }
+                        )
+                    })
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1821,11 +2188,21 @@ impl LificMcp {
                     project_id: issue.project_id,
                     issue_id: issue.id,
                 });
-                format!(
-                    "Edited {}: {}",
-                    issue_reference(&issue.identifier),
-                    fmt_issue(&issue)
-                )
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Edited {}: {}",
+                        IssueReference {
+                            context: context.as_deref(),
+                            identifier: &issue.identifier,
+                        },
+                        IssueLine {
+                            issue: &issue,
+                            context: context.as_deref(),
+                        }
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -1924,55 +2301,65 @@ impl LificMcp {
                 };
                 let mut ordered: Vec<(&String, &Vec<&models::Issue>)> = groups.iter().collect();
                 ordered.sort_by_key(|(key, _)| rank(key));
-                let mut out = String::new();
-                if truncated {
-                    out.push_str(&format!(
-                        "warning: board view capped at {BOARD_CAP} issues — older issues are not shown. Use list_issues with offset for full paging.\n\n"
-                    ));
-                }
                 let context = current_issue_link_context();
                 let max_per_column = input.max_per_column.filter(|n| *n >= 0);
-                for (group, items) in ordered {
-                    // Status grouping keeps closed groups as count-only stubs:
-                    // header + stub on ONE line, replacing the item lines. Only
-                    // reached for non-empty groups (empty groups never enter
-                    // `groups`).
-                    if !include_closed
-                        && group_by == "status"
-                        && (group == "done" || group == "cancelled")
-                    {
-                        out.push_str(&format!(
-                            "── {} ({}) ── [omitted — pass include_closed=true]\n\n",
-                            group,
-                            items.len()
-                        ));
-                        continue;
-                    }
-                    out.push_str(&format!("── {} ({}) ──\n", group, items.len()));
-                    let shown = match max_per_column {
-                        Some(n) => (n as usize).min(items.len()),
-                        None => items.len(),
-                    };
-                    for i in &items[..shown] {
-                        out.push_str(&format!(
-                            "  {}\n",
-                            fmt_issue_with_context(i, context.as_ref())
-                        ));
-                    }
-                    if shown < items.len() {
-                        out.push_str(&format!(
-                            "  … +{} more (use list_issues)\n",
-                            items.len() - shown
-                        ));
-                    }
-                    out.push('\n');
-                }
-                if closed_omitted > 0 {
-                    out.push_str(&format!(
-                        "({closed_omitted} closed issues omitted — pass include_closed=true)\n"
-                    ));
-                }
-                out
+                render_response(|output| {
+                    truncated
+                        .then(|| {
+                            writeln!(
+                                output,
+                                "warning: board view capped at {BOARD_CAP} issues — older issues are not shown. Use list_issues with offset for full paging.\n"
+                            )
+                        })
+                        .transpose()?;
+                    ordered.into_iter().try_for_each(|(group, items)| {
+                        // Status grouping keeps closed groups as count-only stubs:
+                        // header + stub on ONE line, replacing the item lines.
+                        let closed_stub = !include_closed
+                            && group_by == "status"
+                            && matches!(group.as_str(), "done" | "cancelled");
+                        if closed_stub {
+                            return writeln!(
+                                output,
+                                "── {} ({}) ── [omitted — pass include_closed=true]\n",
+                                group,
+                                items.len()
+                            );
+                        }
+                        writeln!(output, "── {} ({}) ──", group, items.len())?;
+                        let shown = max_per_column
+                            .map_or(items.len(), |limit| (limit as usize).min(items.len()));
+                        items[..shown].iter().try_for_each(|issue| {
+                            writeln!(
+                                output,
+                                "  {}",
+                                IssueLine {
+                                    issue,
+                                    context: context.as_deref(),
+                                }
+                            )
+                        })?;
+                        (shown < items.len())
+                            .then(|| {
+                                writeln!(
+                                    output,
+                                    "  … +{} more (use list_issues)",
+                                    items.len() - shown
+                                )
+                            })
+                            .transpose()?;
+                        output.write_char('\n')
+                    })?;
+                    (closed_omitted > 0)
+                        .then(|| {
+                            writeln!(
+                                output,
+                                "({closed_omitted} closed issues omitted — pass include_closed=true)"
+                            )
+                        })
+                        .transpose()
+                        .map(|_| ())
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2011,12 +2398,16 @@ impl LificMcp {
                     project_id: target.project_id,
                     issue_id: target.id,
                 });
-                format!(
-                    "{} {} {}",
-                    issue_reference(&source.identifier),
-                    input.relation_type,
-                    issue_reference(&target.identifier)
-                )
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "{} {} {}",
+                        issue_reference(context.as_deref(), &source.identifier),
+                        input.relation_type,
+                        issue_reference(context.as_deref(), &target.identifier)
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2051,11 +2442,15 @@ impl LificMcp {
                     project_id: target.project_id,
                     issue_id: target.id,
                 });
-                format!(
-                    "Unlinked {} and {}",
-                    issue_reference(&source.identifier),
-                    issue_reference(&target.identifier)
-                )
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Unlinked {} and {}",
+                        issue_reference(context.as_deref(), &source.identifier),
+                        issue_reference(context.as_deref(), &target.identifier)
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2078,23 +2473,34 @@ impl LificMcp {
                 {
                     return format!("Error: {e}");
                 }
-                let mut out = format!(
-                    "{}{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}\n",
-                    if page.pinned { "📌 " } else { "" },
-                    page_reference(&page),
-                    page.title,
-                    page.status,
-                    folder_name.as_deref().unwrap_or("none"),
-                    page.created_at,
-                    page.updated_at
-                );
-                if !page.labels.is_empty() {
-                    out.push_str(&format!("Labels: {}\n", page.labels.join(", ")));
-                }
-                if !page.content.is_empty() {
-                    out.push_str(&format!("\n{}\n", page.content));
-                }
-                out
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    writeln!(
+                        output,
+                        "{}{} — {}\nStatus: {} | Folder: {}\nCreated: {} | Updated: {}",
+                        if page.pinned { "📌 " } else { "" },
+                        page_reference(context.as_deref(), &page),
+                        page.title,
+                        page.status,
+                        folder_name.as_deref().unwrap_or("none"),
+                        page.created_at,
+                        page.updated_at
+                    )?;
+                    page.labels.split_first().map_or(Ok(()), |_| {
+                        writeln!(
+                            output,
+                            "Labels: {}",
+                            JoinedStrings {
+                                values: &page.labels,
+                                separator: ", ",
+                            }
+                        )
+                    })?;
+                    (!page.content.is_empty())
+                        .then(|| writeln!(output, "\n{}", page.content))
+                        .transpose()
+                        .map(|_| ())
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2137,7 +2543,15 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Created {}: {}", page_reference(&page), page.title)
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Created {}: {}",
+                        page_reference(context.as_deref(), &page),
+                        page.title
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2190,7 +2604,15 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Updated {}: {}", page_reference(&page), page.title)
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Updated {}: {}",
+                        page_reference(context.as_deref(), &page),
+                        page.title
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2263,7 +2685,15 @@ impl LificMcp {
                 if let Some(project_id) = page.project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                format!("Edited {}: {}", page_reference(&page), page.title)
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    write!(
+                        output,
+                        "Edited {}: {}",
+                        page_reference(context.as_deref(), &page),
+                        page.title
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -2423,6 +2853,7 @@ impl LificMcp {
         description = "List resources by type: project, module, label, folder, page, issue, or plan. Most types need a project identifier."
     )]
     fn list_resources(&self, Parameters(input): Parameters<ListResourcesInput>) -> String {
+        let context = current_issue_link_context();
         match input.resource_type.as_str() {
             "plan" => {
                 let Some(ref proj) = input.project else {
@@ -2450,26 +2881,28 @@ impl LificMcp {
                     )
                 }) {
                     Ok(plans) if plans.is_empty() => "No plans found.".into(),
-                    Ok(plans) => {
-                        let mut out = format!("{} plans:\n", plans.len());
-                        for p in &plans {
-                            let anchor = p
-                                .anchor_identifier
-                                .as_ref()
-                                .map(|a| format!(" — anchor {}", issue_reference(a)))
-                                .unwrap_or_default();
-                            out.push_str(&format!(
-                                "- {} | {} | {} ({}/{} done){}\n",
-                                plan_reference(p),
-                                p.status,
-                                p.title,
-                                p.done_count,
-                                p.step_count,
-                                anchor
-                            ));
-                        }
-                        out
-                    }
+                    Ok(plans) => render_response(|output| {
+                        writeln!(output, "{} plans:", plans.len())?;
+                        plans.iter().try_for_each(|plan| {
+                            write!(
+                                output,
+                                "- {} | {} | {} ({}/{} done)",
+                                plan_reference(context.as_deref(), plan),
+                                plan.status,
+                                plan.title,
+                                plan.done_count,
+                                plan.step_count
+                            )?;
+                            plan.anchor_identifier.as_deref().map_or(Ok(()), |anchor| {
+                                write!(
+                                    output,
+                                    " — anchor {}",
+                                    issue_reference(context.as_deref(), anchor)
+                                )
+                            })?;
+                            output.write_char('\n')
+                        })
+                    }),
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2494,22 +2927,25 @@ impl LificMcp {
                     Ok((ps, stats)) => {
                         let mut ps = filter_visible(ps, &visible, |p| Some(p.id));
                         ps.sort_by(|left, right| cmp_projects_by_activity(left, right, &stats));
-                        let mut out = format!("{} projects:\n", ps.len());
                         let now = Utc::now();
-                        for p in &ps {
-                            out.push_str(&format!("- {} | {}", project_reference(&p.identifier), p.name));
-                            if !p.description.is_empty() {
-                                out.push_str(&format!(" — {}", p.description));
-                            }
-                            if let Some(suffix) = stats
-                                .get(&p.id)
-                                .and_then(|stats| fmt_project_agent_stats(stats, now))
-                            {
-                                out.push_str(&suffix);
-                            }
-                            out.push('\n');
-                        }
-                        out
+                        render_response(|output| {
+                            writeln!(output, "{} projects:", ps.len())?;
+                            ps.iter().try_for_each(|project| {
+                                write!(
+                                    output,
+                                    "- {} | {}",
+                                    project_reference(context.as_deref(), &project.identifier,),
+                                    project.name
+                                )?;
+                                (!project.description.is_empty())
+                                    .then(|| write!(output, " — {}", project.description))
+                                    .transpose()?;
+                                stats.get(&project.id).map_or(Ok(()), |stats| {
+                                    write!(output, "{}", ProjectAgentStats { stats, now })
+                                })?;
+                                output.write_char('\n')
+                            })
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2543,18 +2979,23 @@ impl LificMcp {
                         if has_more {
                             issues.truncate(limit as usize);
                         }
-                        let mut out =
-                            format!("{} issues (use list_issues for filtering):\n", issues.len());
-                        for i in &issues {
-                            out.push_str(&format!(
-                                "- {} | {} | {}\n",
-                                issue_reference(&i.identifier),
-                                i.status,
-                                i.title
-                            ));
-                        }
-                        append_pagination_hint(&mut out, has_more, offset + limit);
-                        out
+                        render_response(|output| {
+                            writeln!(
+                                output,
+                                "{} issues (use list_issues for filtering):",
+                                issues.len()
+                            )?;
+                            issues.iter().try_for_each(|issue| {
+                                writeln!(
+                                    output,
+                                    "- {} | {} | {}",
+                                    issue_reference(context.as_deref(), &issue.identifier),
+                                    issue.status,
+                                    issue.title
+                                )
+                            })?;
+                            append_pagination_hint(output, has_more, offset + limit)
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2631,39 +3072,44 @@ impl LificMcp {
                         if has_more {
                             pages.truncate(limit as usize);
                         }
-                        let mut out = format!("{} pages:\n", pages.len());
-                        for p in &pages {
-                            // Mirror `fmt_issue`: only suffix the label
-                            // bracket when there's something to show, so
-                            // unlabeled pages stay terse.
-                            let labels = if p.labels.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" [{}]", p.labels.join(", "))
-                            };
-                            let folder = p
-                                .folder_id
-                                .and_then(|fid| folder_names.get(&fid))
-                                .map(|name| format!(" (folder: {name})"))
-                                .unwrap_or_default();
-                            // Timestamps are "YYYY-MM-DD HH:MM:SS"; the date
-                            // part keeps list lines scannable. Full stamps
-                            // live on get_page.
-                            let updated = p.updated_at.split(' ').next().unwrap_or(&p.updated_at);
-                            let pin = if p.pinned { "📌 " } else { "" };
-                            out.push_str(&format!(
-                                "- {}{} | {} | {}{}{} — updated {}\n",
-                                pin,
-                                page_reference(p),
-                                p.status,
-                                p.title,
-                                labels,
-                                folder,
-                                updated
-                            ));
-                        }
-                        append_pagination_hint(&mut out, has_more, offset + limit);
-                        out
+                        render_response(|output| {
+                            writeln!(output, "{} pages:", pages.len())?;
+                            pages.iter().try_for_each(|page| {
+                                // Timestamps are "YYYY-MM-DD HH:MM:SS"; the date
+                                // part keeps list lines scannable. Full stamps
+                                // live on get_page.
+                                let updated = page
+                                    .updated_at
+                                    .split(' ')
+                                    .next()
+                                    .unwrap_or(&page.updated_at);
+                                let pin = if page.pinned { "📌 " } else { "" };
+                                write!(
+                                    output,
+                                    "- {pin}{} | {} | {}",
+                                    page_reference(context.as_deref(), page),
+                                    page.status,
+                                    page.title
+                                )?;
+                                page.labels.split_first().map_or(Ok(()), |_| {
+                                    write!(
+                                        output,
+                                        " [{}]",
+                                        JoinedStrings {
+                                            values: &page.labels,
+                                            separator: ", ",
+                                        }
+                                    )
+                                })?;
+                                page.folder_id
+                                    .and_then(|folder_id| folder_names.get(&folder_id))
+                                    .map_or(Ok(()), |folder| {
+                                        write!(output, " (folder: {folder})")
+                                    })?;
+                                writeln!(output, " — updated {updated}")
+                            })?;
+                            append_pagination_hint(output, has_more, offset + limit)
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2684,21 +3130,21 @@ impl LificMcp {
                     Err(e) => return format!("Error: {e}"),
                 };
                 match self.read(|conn| queries::list_modules(conn, pid)) {
-                    Ok(ms) => {
-                        let mut out = format!("{} modules:\n", ms.len());
-                        for m in &ms {
-                            out.push_str(&format!(
+                    Ok(modules) => render_response(|output| {
+                        writeln!(output, "{} modules:", modules.len())?;
+                        modules.iter().try_for_each(|module| {
+                            write!(
+                                output,
                                 "- {} ({})",
-                                module_reference(&canonical_project, m),
-                                m.status
-                            ));
-                            if !m.description.is_empty() {
-                                out.push_str(&format!(" — {}", m.description));
-                            }
-                            out.push('\n');
-                        }
-                        out
-                    }
+                                module_reference(context.as_deref(), &canonical_project, module,),
+                                module.status
+                            )?;
+                            (!module.description.is_empty())
+                                .then(|| write!(output, " — {}", module.description))
+                                .transpose()?;
+                            output.write_char('\n')
+                        })
+                    }),
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2714,13 +3160,12 @@ impl LificMcp {
                     return format!("Error: {e}");
                 }
                 match self.read(|conn| queries::list_labels(conn, pid)) {
-                    Ok(ls) => {
-                        let mut out = format!("{} labels:\n", ls.len());
-                        for l in &ls {
-                            out.push_str(&format!("- {} ({})\n", l.name, l.color));
-                        }
-                        out
-                    }
+                    Ok(labels) => render_response(|output| {
+                        writeln!(output, "{} labels:", labels.len())?;
+                        labels.iter().try_for_each(|label| {
+                            writeln!(output, "- {} ({})", label.name, label.color)
+                        })
+                    }),
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2736,13 +3181,12 @@ impl LificMcp {
                     return format!("Error: {e}");
                 }
                 match self.read(|conn| queries::list_folders(conn, pid)) {
-                    Ok(fs) => {
-                        let mut out = format!("{} folders:\n", fs.len());
-                        for f in &fs {
-                            out.push_str(&format!("- [{}] {}\n", f.id, f.name));
-                        }
-                        out
-                    }
+                    Ok(folders) => render_response(|output| {
+                        writeln!(output, "{} folders:", folders.len())?;
+                        folders.iter().try_for_each(|folder| {
+                            writeln!(output, "- [{}] {}", folder.id, folder.name)
+                        })
+                    }),
                     Err(e) => format!("Error: {e}"),
                 }
             }
@@ -2756,6 +3200,7 @@ impl LificMcp {
         description = "Create or update a project, module, label, or folder. Create project requires name and identifier; project update requires project=<IDENT>; module/label/folder create requires project and name; module/label/folder update requires project and current_name. Use delete for deletion."
     )]
     fn manage_resource(&self, Parameters(input): Parameters<ManageResourceInput>) -> String {
+        let context = current_issue_link_context();
         match (input.resource_type.as_str(), input.action.as_str()) {
             ("project", "create") => {
                 let Some(ref name) = input.name else {
@@ -2798,13 +3243,20 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectCreated {
                             project_id: p.id,
                         });
-                        format!("Created project {} | {}", project_reference(&p.identifier), p.name)
+                        render_response(|output| {
+                            write!(
+                                output,
+                                "Created project {} | {}",
+                                project_reference(context.as_deref(), &p.identifier),
+                                p.name
+                            )
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
             }
             ("project", "update") => {
-                if input.current_name.is_some() && input.project.is_none() {
+                if matches!((&input.current_name, &input.project), (Some(_), None)) {
                     return "Error: project updates must be targeted with project=<identifier>, not current_name"
                         .into();
                 }
@@ -2835,7 +3287,14 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: p.id,
                         });
-                        format!("Updated project {} | {}", project_reference(&p.identifier), p.name)
+                        render_response(|output| {
+                            write!(
+                                output,
+                                "Updated project {} | {}",
+                                project_reference(context.as_deref(), &p.identifier),
+                                p.name
+                            )
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2874,7 +3333,13 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Created module {}", module_reference(&canonical_project, &m))
+                        render_response(|output| {
+                            write!(
+                                output,
+                                "Created module {}",
+                                module_reference(context.as_deref(), &canonical_project, &m)
+                            )
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -2917,7 +3382,13 @@ impl LificMcp {
                         self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                             project_id: pid,
                         });
-                        format!("Updated module {}", module_reference(&canonical_project, &m))
+                        render_response(|output| {
+                            write!(
+                                output,
+                                "Updated module {}",
+                                module_reference(context.as_deref(), &canonical_project, &m)
+                            )
+                        })
                     }
                     Err(e) => format!("Error: {e}"),
                 }
@@ -3073,9 +3544,9 @@ impl LificMcp {
     fn add_comment(&self, Parameters(input): Parameters<AddCommentInput>) -> String {
         let (parent, parent_identifier, project_id) =
             match resolve_comment_parent(self, &input.identifier) {
-            Ok(context) => context,
-            Err(e) => return format!("Error: {e}"),
-        };
+                Ok(context) => context,
+                Err(e) => return format!("Error: {e}"),
+            };
         if let Err(e) = self.require_comment_role_mcp(parent, models::Role::Viewer) {
             return format!("Error: {e}");
         }
@@ -3126,22 +3597,31 @@ impl LificMcp {
             // (LIF-115). The comment id is the useful new handle for any
             // follow-up edit/delete.
             Ok((c, event)) => {
-                if let Some(event) = event {
-                    self.emit(event);
-                }
-                if current_issue_link_context().is_some() {
-                    format!(
-                        "{} added to {} by {} at {}",
-                        comment_reference(&parent_identifier, parent, c.id),
-                        comment_parent_reference(&parent_identifier, parent),
-                        c.author,
-                        c.created_at
-                    )
-                } else {
-                    format!(
-                        "Comment #{} added to {} by {} at {}",
-                        c.id, parent_identifier, c.author, c.created_at
-                    )
+                event.into_iter().for_each(|event| self.emit(event));
+                match current_issue_link_context() {
+                    Some(context) => render_response(|output| {
+                        write!(
+                            output,
+                            "{} added to {} by {} at {}",
+                            reference_with_context(
+                                Some(context.as_ref()),
+                                comment_reference_kind(&parent_identifier, parent, c.id),
+                            ),
+                            reference_with_context(
+                                Some(context.as_ref()),
+                                comment_parent_reference_kind(&parent_identifier, parent),
+                            ),
+                            c.author,
+                            c.created_at
+                        )
+                    }),
+                    None => render_response(|output| {
+                        write!(
+                            output,
+                            "Comment #{} added to {} by {} at {}",
+                            c.id, parent_identifier, c.author, c.created_at
+                        )
+                    }),
                 }
             }
             Err(e) => format!("Error: {e}"),
@@ -3163,6 +3643,15 @@ impl LificMcp {
         let limit = input.limit.map(|limit| limit.clamp(1, 500));
         let offset = input.offset.unwrap_or(0).max(0);
         let order = input.order.as_deref().unwrap_or("asc");
+        let link_context = current_issue_link_context();
+        let parent_kind = match parent {
+            queries::comments::CommentParent::Issue(_) => {
+                ReferenceKind::Issue(parent_identifier.as_str())
+            }
+            queries::comments::CommentParent::Page(page_id) => {
+                ReferenceKind::Page(parent_identifier.as_str(), page_id)
+            }
+        };
 
         match self.read(|conn| {
             let comments = queries::comments::list_comments_paginated(
@@ -3180,71 +3669,76 @@ impl LificMcp {
                 if total == 0 {
                     format!(
                         "No comments on {}.",
-                        comment_parent_reference(&parent_identifier, parent)
+                        reference_with_context(link_context.as_deref(), parent_kind)
                     )
                 } else {
                     format!(
                         "No comments in this range on {} (offset {offset}, {total} total).",
-                        comment_parent_reference(&parent_identifier, parent)
+                        reference_with_context(link_context.as_deref(), parent_kind)
                     )
                 }
             }
             Ok((mut comments, total)) => {
                 let page_limit = limit.filter(|&limit| comments.len() as i64 > limit);
                 let has_more = page_limit.is_some();
-                if let Some(limit) = page_limit {
-                    comments.truncate(limit as usize);
-                }
+                page_limit
+                    .into_iter()
+                    .for_each(|page_limit| comments.truncate(page_limit as usize));
                 let shown = comments.len() as i64;
-                let mut out = if limit.is_some() && offset == 0 && shown < total {
-                    let edge = if order == "desc" {
-                        "most recent"
-                    } else {
-                        "oldest"
-                    };
-                    format!(
-                        "Showing {shown} {edge} of {total} comment(s) on {}:\n",
-                        comment_parent_reference(&parent_identifier, parent)
-                    )
-                } else if offset > 0 {
-                    format!(
-                        "Showing comments {}-{} of {total} on {} ({} first):\n",
-                        offset + 1,
-                        offset + shown,
-                        comment_parent_reference(&parent_identifier, parent),
-                        if order == "desc" { "newest" } else { "oldest" }
-                    )
-                } else {
-                    format!(
-                        "{total} comment(s) on {}:\n",
-                        comment_parent_reference(&parent_identifier, parent)
-                    )
-                };
-                for c in &comments {
-                    if current_issue_link_context().is_some() {
-                        out.push_str(&format!(
-                            "[{}] {} ({}) — {}: {}\n",
-                            c.created_at,
-                            c.author,
-                            c.author_display_name,
-                            comment_reference(&parent_identifier, parent, c.id),
-                            c.content
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "[{}] {} ({}): {}\n",
-                            c.created_at, c.author, c.author_display_name, c.content
-                        ));
+                render_response(|output| {
+                    match (limit, offset, shown < total) {
+                        (Some(_), 0, true) => {
+                            let edge = if order == "desc" {
+                                "most recent"
+                            } else {
+                                "oldest"
+                            };
+                            writeln!(
+                                output,
+                                "Showing {shown} {edge} of {total} comment(s) on {}:",
+                                reference_with_context(link_context.as_deref(), parent_kind)
+                            )?;
+                        }
+                        (_, offset, _) if offset > 0 => {
+                            writeln!(
+                                output,
+                                "Showing comments {}-{} of {total} on {} ({} first):",
+                                offset + 1,
+                                offset + shown,
+                                reference_with_context(link_context.as_deref(), parent_kind),
+                                if order == "desc" { "newest" } else { "oldest" }
+                            )?;
+                        }
+                        _ => {
+                            writeln!(
+                                output,
+                                "{total} comment(s) on {}:",
+                                reference_with_context(link_context.as_deref(), parent_kind)
+                            )?;
+                        }
                     }
-                }
-                if has_more {
-                    let next_offset = offset + shown;
-                    let remaining = total.saturating_sub(next_offset);
-                    out.push_str(&format!(
-                        "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}\n"
-                    ));
-                }
-                out
+                    write!(
+                        output,
+                        "{}",
+                        CommentLines {
+                            comments: &comments,
+                            parent_identifier: &parent_identifier,
+                            parent,
+                            context: link_context.as_deref(),
+                        }
+                    )?;
+                    has_more
+                        .then(|| {
+                            let next_offset = offset + shown;
+                            let remaining = total.saturating_sub(next_offset);
+                            writeln!(
+                                output,
+                                "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}"
+                            )
+                        })
+                        .transpose()
+                        .map(|_| ())
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3277,9 +3771,9 @@ impl LificMcp {
         // visible members, resolving the project from the comment's parent.
         let (project_id, parent, parent_identifier) =
             match self.read(|conn| resolve_comment_context(conn, &existing)) {
-            Ok(context) => context,
-            Err(e) => return format!("Error: {e}"),
-        };
+                Ok(context) => context,
+                Err(e) => return format!("Error: {e}"),
+            };
         let member_scoped = match crate::authz::authz_enforced(&self.db) {
             Ok(v) => v,
             Err(e) => return format!("Error: {e}"),
@@ -3303,14 +3797,21 @@ impl LificMcp {
                 } else if let Some(project_id) = project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                if current_issue_link_context().is_some() {
-                    format!(
-                        "{} edited at {}",
-                        comment_reference(&parent_identifier, parent, c.id),
-                        c.updated_at
-                    )
-                } else {
-                    format!("Comment #{} edited at {}", c.id, c.updated_at)
+                match current_issue_link_context() {
+                    Some(context) => render_response(|output| {
+                        write!(
+                            output,
+                            "{} edited at {}",
+                            reference_with_context(
+                                Some(context.as_ref()),
+                                comment_reference_kind(&parent_identifier, parent, c.id),
+                            ),
+                            c.updated_at
+                        )
+                    }),
+                    None => render_response(|output| {
+                        write!(output, "Comment #{} edited at {}", c.id, c.updated_at)
+                    }),
                 }
             }
             Err(e) => format!("Error: {e}"),
@@ -3338,9 +3839,9 @@ impl LificMcp {
 
         let (project_id, parent, parent_identifier) =
             match self.read(|conn| resolve_comment_context(conn, &existing)) {
-            Ok(context) => context,
-            Err(e) => return format!("Error: {e}"),
-        };
+                Ok(context) => context,
+                Err(e) => return format!("Error: {e}"),
+            };
 
         match self.write(|conn| queries::comments::delete_comment(conn, input.comment_id)) {
             Ok(()) => {
@@ -3352,14 +3853,21 @@ impl LificMcp {
                 } else if let Some(project_id) = project_id {
                     self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
                 }
-                if current_issue_link_context().is_some() {
-                    format!(
-                        "Comment #{} deleted from {}",
-                        input.comment_id,
-                        comment_parent_reference(&parent_identifier, parent)
-                    )
-                } else {
-                    format!("Comment #{} deleted", input.comment_id)
+                match current_issue_link_context() {
+                    Some(context) => render_response(|output| {
+                        write!(
+                            output,
+                            "Comment #{} deleted from {}",
+                            input.comment_id,
+                            reference_with_context(
+                                Some(context.as_ref()),
+                                comment_parent_reference_kind(&parent_identifier, parent),
+                            )
+                        )
+                    }),
+                    None => render_response(|output| {
+                        write!(output, "Comment #{} deleted", input.comment_id)
+                    }),
                 }
             }
             Err(e) => format!("Error: {e}"),
@@ -3402,7 +3910,22 @@ impl LificMcp {
                 self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                     project_id: plan.project_id,
                 });
-                format!("Created {}\n{}", plan_reference(&plan), fmt_plan(&plan))
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    writeln!(
+                        output,
+                        "Created {}",
+                        plan_reference(context.as_deref(), &plan)
+                    )?;
+                    write!(
+                        output,
+                        "{}",
+                        PlanView {
+                            plan: &plan,
+                            context: context.as_deref(),
+                        }
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3466,12 +3989,23 @@ impl LificMcp {
                 self.emit(crate::realtime::RealtimeEvent::ProjectUpdated {
                     project_id: plan.project_id,
                 });
-                format!(
-                    "Edited step #{} in {}\n{}",
-                    input.step_id,
-                    plan_reference(&plan),
-                    fmt_plan(&plan)
-                )
+                let context = current_issue_link_context();
+                render_response(|output| {
+                    writeln!(
+                        output,
+                        "Edited step #{} in {}",
+                        input.step_id,
+                        plan_reference(context.as_deref(), &plan)
+                    )?;
+                    write!(
+                        output,
+                        "{}",
+                        PlanView {
+                            plan: &plan,
+                            context: context.as_deref(),
+                        }
+                    )
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3515,6 +4049,7 @@ impl LificMcp {
             return format!("Error: {e}");
         }
 
+        let context = current_issue_link_context();
         match self.write(|conn| {
             let plan_id = queries::plans::resolve_plan_identifier(conn, &input.plan)?;
             let mut notes: Vec<String> = Vec::new();
@@ -3554,10 +4089,20 @@ impl LificMcp {
                             let iid = queries::resolve_identifier(conn, ident)?;
                             let issue = queries::get_issue(conn, iid)?;
                             queries::plans::set_step_issue(conn, step_id, Some(iid))?;
-                            notes.push(format!(
-                                "Attached {} to step #{step_id}",
-                                issue_reference(&issue.identifier)
-                            ));
+                            notes.push(
+                                try_render(|output| {
+                                    write!(
+                                        output,
+                                        "Attached {} to step #{step_id}",
+                                        issue_reference(context.as_deref(), &issue.identifier,)
+                                    )
+                                })
+                                .map_err(|error| {
+                                    crate::error::LificError::Internal(format!(
+                                        "failed to format plan-step response: {error}"
+                                    ))
+                                })?,
+                            );
                         }
                         if input.detach_issue.unwrap_or(false) {
                             queries::plans::set_step_issue(conn, step_id, None)?;
@@ -3565,30 +4110,50 @@ impl LificMcp {
                         }
                         if let Some(done) = input.done {
                             let effect = queries::plans::set_step_done(conn, step_id, done)?;
-                            let mut msg = format!(
-                                "Step #{step_id} {}",
-                                if done { "marked done" } else { "reopened" }
-                            );
-                            if let Some(iss) = &effect.issue_identifier {
-                                if effect.issue_status_changed {
-                                    let issue_id = queries::resolve_identifier(conn, iss)?;
+                            enum IssueEffect<'a> {
+                                MarkedDone(&'a str),
+                                AlreadyDone(&'a str),
+                                None,
+                            }
+                            let issue_effect = match effect.issue_identifier.as_deref() {
+                                Some(identifier) if effect.issue_status_changed => {
+                                    let issue_id = queries::resolve_identifier(conn, identifier)?;
                                     let issue = queries::get_issue(conn, issue_id)?;
                                     events.push(crate::realtime::RealtimeEvent::IssueUpdated {
                                         project_id: issue.project_id,
                                         issue_id: issue.id,
                                     });
-                                    msg.push_str(&format!(
-                                        " → {} marked done",
-                                        issue_reference(iss)
-                                    ));
-                                } else if done {
-                                    msg.push_str(&format!(
-                                        " (linked {} already done)",
-                                        issue_reference(iss)
-                                    ));
+                                    IssueEffect::MarkedDone(identifier)
                                 }
-                            }
-                            notes.push(msg);
+                                Some(identifier) if done => IssueEffect::AlreadyDone(identifier),
+                                _ => IssueEffect::None,
+                            };
+                            let message = try_render(|output| {
+                                write!(
+                                    output,
+                                    "Step #{step_id} {}",
+                                    if done { "marked done" } else { "reopened" }
+                                )?;
+                                match issue_effect {
+                                    IssueEffect::MarkedDone(identifier) => write!(
+                                        output,
+                                        " → {} marked done",
+                                        issue_reference(context.as_deref(), identifier)
+                                    ),
+                                    IssueEffect::AlreadyDone(identifier) => write!(
+                                        output,
+                                        " (linked {} already done)",
+                                        issue_reference(context.as_deref(), identifier)
+                                    ),
+                                    IssueEffect::None => Ok(()),
+                                }
+                            })
+                            .map_err(|error| {
+                                crate::error::LificError::Internal(format!(
+                                    "failed to format plan-step response: {error}"
+                                ))
+                            })?;
+                            notes.push(message);
                         }
                         if let Some(ref child_title) = input.add_child_title {
                             let child_issue = match &input.add_child_issue {
@@ -3643,18 +4208,34 @@ impl LificMcp {
                 // progress summary built from the same Plan fields as
                 // fmt_plan's header, minus the title and step tree). Pass
                 // echo_tree=true to restore the full re-rendered tree.
-                if input.echo_tree.unwrap_or(false) {
-                    format!("{}\n{}", notes.join("; "), fmt_plan(&plan))
-                } else {
-                    format!(
-                        "{}\n{} [{}]: {}/{} done",
-                        notes.join("; "),
-                        plan_reference(&plan),
-                        plan.status,
-                        plan.done_count,
-                        plan.step_count
-                    )
-                }
+                render_response(|output| {
+                    writeln!(
+                        output,
+                        "{}",
+                        JoinedStrings {
+                            values: &notes,
+                            separator: "; ",
+                        }
+                    )?;
+                    match input.echo_tree.unwrap_or(false) {
+                        true => write!(
+                            output,
+                            "{}",
+                            PlanView {
+                                plan: &plan,
+                                context: context.as_deref(),
+                            }
+                        ),
+                        false => write!(
+                            output,
+                            "{} [{}]: {}/{} done",
+                            plan_reference(context.as_deref(), &plan),
+                            plan.status,
+                            plan.done_count,
+                            plan.step_count
+                        ),
+                    }
+                })
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -3761,7 +4342,10 @@ mod tests {
         seed_project(&m, "Canonical", "CAN");
         let project_id = project_id_for(&m, "CAN");
 
-        assert_eq!(canonical_project_identifier(&m.db, project_id).unwrap(), "CAN");
+        assert_eq!(
+            canonical_project_identifier(&m.db, project_id).unwrap(),
+            "CAN"
+        );
     }
 
     fn issue_id_for(mcp: &LificMcp, identifier: &str) -> i64 {
@@ -4382,18 +4966,16 @@ mod tests {
         let m = mcp();
         seed_project(&m, "Test", "DEL");
         seed_issue(&m, "DEL", "Doomed");
-        let context =
-            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let result =
-            crate::mcp::with_request_context(None, false, Some(context), || async {
-                m.delete(Parameters(DeleteInput {
-                    resource_type: "issue".into(),
-                    identifier: "DEL-01".into(),
-                    project: None,
-                }))
-            })
-            .await;
+        let result = crate::mcp::with_request_context(None, false, Some(context), || async {
+            m.delete(Parameters(DeleteInput {
+                resource_type: "issue".into(),
+                identifier: "DEL-01".into(),
+                project: None,
+            }))
+        })
+        .await;
 
         assert_eq!(result, "Deleted issue DEL-1");
     }
@@ -5060,14 +5642,10 @@ mod tests {
             display_name: author.display_name,
             is_admin: author.is_admin,
         };
-        let context =
-            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let result = crate::mcp::with_request_context(
-            Some(auth_user),
-            false,
-            Some(context),
-            || async {
+        let result =
+            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
                 m.add_comment(Parameters(AddCommentInput {
                     identifier: "SRC-1".into(),
                     content: "Unique comment needle".into(),
@@ -5077,9 +5655,8 @@ mod tests {
                     result_type: Some("comment".into()),
                     ..Default::default()
                 }))
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert!(
             result.contains(
@@ -5510,10 +6087,30 @@ mod tests {
         }
     }
 
-    // ── fmt_issue ──
+    // ── write_issue ──
+
+    struct FailingWriter;
+
+    impl fmt::Write for FailingWriter {
+        fn write_str(&mut self, _: &str) -> fmt::Result {
+            Err(fmt::Error)
+        }
+    }
 
     #[test]
-    fn fmt_issue_formats_relations_with_one_context_read() {
+    fn issue_relations_propagate_formatter_failures() {
+        let identifiers = vec!["T-2".into()];
+        let relations = IssueRelations {
+            label: " blocks:",
+            identifiers: &identifiers,
+            context: None,
+        };
+
+        assert!(write!(FailingWriter, "{relations}").is_err());
+    }
+
+    #[test]
+    fn write_issue_formats_relations_with_one_context_read() {
         let issue = models::Issue {
             id: 1,
             project_id: 1,
@@ -5538,7 +6135,17 @@ mod tests {
             duplicated_by: vec!["T-4".into()],
         };
         crate::mcp::reset_issue_link_context_reads();
-        let s = fmt_issue(&issue);
+        let context = current_issue_link_context();
+        let s = render_response(|output| {
+            write!(
+                output,
+                "{}",
+                IssueLine {
+                    issue: &issue,
+                    context: context.as_deref(),
+                }
+            )
+        });
         assert!(s.contains("[bug]"), "got: {s}");
         assert!(s.contains("blocks:T-2"), "got: {s}");
         assert!(s.contains("duplicates:T-3"), "got: {s}");
@@ -7625,14 +8232,10 @@ mod tests {
             display_name: author.display_name,
             is_admin: author.is_admin,
         };
-        let context =
-            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let (comment_id, edited, deleted) = crate::mcp::with_request_context(
-            Some(auth_user),
-            false,
-            Some(context),
-            || async {
+        let (comment_id, edited, deleted) =
+            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
                 let added = m.add_comment(Parameters(AddCommentInput {
                     identifier: "PRJ-1".into(),
                     content: "original".into(),
@@ -7642,12 +8245,10 @@ mod tests {
                     comment_id,
                     content: "revised".into(),
                 }));
-                let deleted =
-                    m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
+                let deleted = m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
                 (comment_id, edited, deleted)
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert!(
             edited.contains(&format!(
@@ -7978,8 +8579,7 @@ mod tests {
             display_name: author.display_name,
             is_admin: author.is_admin,
         };
-        let context =
-            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
         let (project, page, issue) =
             crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
@@ -8005,15 +8605,11 @@ mod tests {
             .await;
 
         assert!(
-            project.contains(
-                "activity entries for [TST](https://tracker.example/TST/overview):"
-            ),
+            project.contains("activity entries for [TST](https://tracker.example/TST/overview):"),
             "got: {project}"
         );
         assert!(
-            page.contains(
-                "activity entries for [TST-DOC-1](https://tracker.example/TST/pages/1):"
-            ),
+            page.contains("activity entries for [TST-DOC-1](https://tracker.example/TST/pages/1):"),
             "got: {page}"
         );
         for expected in [
@@ -8024,9 +8620,7 @@ mod tests {
             assert!(project.contains(expected), "missing {expected}: {project}");
         }
         assert!(
-            issue.contains(
-                "[comment #1](https://tracker.example/TST/issues/TST-1#comment-1)"
-            ),
+            issue.contains("[comment #1](https://tracker.example/TST/issues/TST-1#comment-1)"),
             "got: {issue}"
         );
     }
@@ -8318,6 +8912,7 @@ mod tests {
         assert!(created.contains("Backend"));
         assert!(created.contains("schema"));
 
+        crate::mcp::reset_issue_link_context_reads();
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
         }));
@@ -8326,6 +8921,7 @@ mod tests {
             "get_plan should rehydrate tree: {got}"
         );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
+        assert_eq!(crate::mcp::issue_link_context_reads(), 1);
     }
 
     #[tokio::test]
@@ -8348,19 +8944,17 @@ mod tests {
             .and_then(|value| value.split(|c: char| !c.is_ascii_digit()).next())
             .and_then(|value| value.parse().ok())
             .expect("step id in output");
-        let context =
-            crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
+        let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let output =
-            crate::mcp::with_request_context(None, false, Some(context), || async {
-                m.update_plan_step(Parameters(UpdatePlanStepInput {
-                    plan: "PLN-PLAN-1".into(),
-                    step_id: Some(step_id),
-                    attach_issue: Some("PLN-01".into()),
-                    ..Default::default()
-                }))
-            })
-            .await;
+        let output = crate::mcp::with_request_context(None, false, Some(context), || async {
+            m.update_plan_step(Parameters(UpdatePlanStepInput {
+                plan: "PLN-PLAN-1".into(),
+                step_id: Some(step_id),
+                attach_issue: Some("PLN-01".into()),
+                ..Default::default()
+            }))
+        })
+        .await;
 
         assert!(
             output.contains("[PLN-1](https://tracker.example/PLN/issues/PLN-1)"),
