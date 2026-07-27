@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.4.0 (2026-07-27)
+
+Projects can be filed into named groups in the sidebar, and the grouping belongs to you rather than to the instance. Alongside it, the last hover-only controls become reachable on touch, and the test suite stops depending on whatever is exported in your shell.
+
+### Project groups in the sidebar (PR #17 by [@lardissone](https://github.com/lardissone))
+
+A long project list had exactly one organizing tool: drag to reorder. Projects can now be collected into named, collapsible groups that render above the ungrouped list.
+
+- **Create, rename, delete, and fill** from the sidebar itself. The Projects header offers New project or New group; right-clicking a project lists the groups it can move into, plus Remove from group when it is already in one; right-clicking a group row offers Rename and Delete. Deleting a group returns its projects to the ungrouped list rather than deleting anything.
+- **The group is also a field on the project.** Both the create form and Project Settings carry a group selector, so filing a project does not require a trip to the sidebar. Settings treats it as one more autosaved field and rolls the selection back if the server rejects it.
+- **Grouping is per-user, not instance-wide.** Project visibility is already per-user through project membership once authorization is enforced, so a shared group would render empty for anyone without access to the projects inside it. Your grouping is invisible to everyone else and never rearranges their sidebar.
+- **A project belongs to at most one group**, and collapse state is remembered per browser, the same class of local preference as the sidebar width.
+- **The API is identity-scoped.** `GET`/`POST /api/project-groups`, `PUT /api/project-groups/assign`, and `PATCH`/`DELETE /api/project-groups/{id}` filter every query on the caller. A group belonging to someone else returns 404 rather than 403, so the endpoint never confirms the id exists. Assignment is the one exception: its body names a project, so it takes the standard Viewer gate.
+- **Revoked access does not leave debris.** The group listing drops project ids the caller can no longer view, so losing membership on a grouped project removes it from the sidebar instead of leaving an entry that 403s on click.
+- **Reordering stays correct.** Projects sort by a single global rank, so a reorder payload derived from the grouped sidebar would have written one user's private arrangement into the order everyone else reads, and colliding ranks made the list fall back to name order. Reorder now sends the canonical order with exactly one project moved.
+
+### Web UI
+
+- **Five hover-only controls are reachable on touch.** The pinned-page unpin control had no alternative path at all on a touch device, making pinned pages permanently pinned; the Project Settings name and description pencils, the copy-identifier icons in Project Settings and the peek panel were cosmetic but equally invisible. A sweep for the same pattern elsewhere now reports none left.
+
+### Contributing
+
+- **`cargo test` no longer fails on a clean checkout** when `LIFIC_API_KEY` or `LIFIC_URL` is exported, which is the normal state for anyone running an instance. The CLI parse tests read those through clap's environment fallback and now isolate themselves. CI has a clean environment, so this only ever bit contributors.
+- **Coverage for paths that had none**: invalid-but-well-formed API keys on REST, an issue driven through create/read/update/delete over the router, the MCP project/module/folder resolvers pinned to their real case sensitivity, and the two project-group paths that only existed at the query layer. The suite stands at 1,195 tests.
+
+### Upgrading
+
+- One new migration, applied automatically on first launch. Upgrading from any 2.x needs no manual steps.
+- Project groups start empty for every user; the sidebar renders exactly as before until you create one.
+
 ## v2.3.0 (2026-07-20)
 
 The CLI learns to talk to a running server over HTTP instead of requiring the database file, OAuth discovery works out of the box on localhost instances, and the documentation got a full contributed overhaul with a CI check that keeps it honest.
