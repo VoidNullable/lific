@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.5.0 (2026-07-28)
+
+Every identifier Lific prints is now something you can click. Windows gets a prebuilt binary and the same CI treatment Linux has always had. On a phone the web UI navigates like an application instead of a desktop layout squeezed sideways.
+
+### Links to everything (PR #19 by [@mjc](https://github.com/mjc))
+
+Issue ids, projects, pages, modules, plans, comments, search hits, activity entries, and relations render as Markdown links in MCP tool output, CLI output, and REST responses. An agent that reads `[PRO-42](https://tracker.example/PRO/issues/PRO-42)` can hand you something to click instead of an identifier you then have to go find.
+
+- **A comment links to the comment.** The destination carries a `#comment-7` anchor and the browser scrolls to it, rather than dropping you at the top of a long issue.
+- **The canonical id wins.** Ask for `pro-042` and the link still points at `PRO-42`.
+- **Setting the base.** `server.public_url` in `lific.toml` pins it. Over HTTP, Lific otherwise derives the base from the request's own host, provided that host is allowlisted.
+- **Instances behind a path prefix work.** A Lific served from `example.com/tracker/` produces links that resolve.
+
+### Security
+
+- **A hostile `public_url` can no longer inject a second link into every reference Lific generates.** A base path ending in the right punctuation could close the Markdown destination early and append an attacker-controlled `[label](javascript:...)` to the output. Bases carrying credentials, queries, or fragments are now rejected too, along with malformed `Host` headers and hosts outside the allowlist. This is operator-configuration hardening: reaching it requires someone who can already edit your config or terminate your requests.
+
+### Windows
+
+- **There is a Windows binary.** `lific-windows-x86_64.exe` ships on the releases page, checksummed in `sha256sums.txt` alongside the Linux and macOS builds.
+- **CI runs the full suite on Windows**, the same clippy-with-warnings-as-errors and `cargo test --all-targets` that Linux gets. Nothing in CI or the release matrix had ever touched the platform, which is how v2.4.0 shipped unable to compile there at all: `service.rs` called the unix-only `libc::getuid()` with no platform guard. Reported in [#20](https://github.com/VoidNullable/lific/issues/20) by [@cuqz](https://github.com/cuqz).
+- **`lific service` no longer fails with "HOME is not set"** in environments that do not export `HOME`, which includes some cron and service contexts on Linux. It resolves your home directory the way the rest of the CLI already did.
+
+### Web UI
+
+- **Navigation on a phone is a full-screen drilldown**, with swipe, back-button and Escape dismissal, safe-area insets, and 44px touch targets.
+- **Search and the issue picker go full-screen**, so the on-screen keyboard stops covering the thing you are typing into. Filters and the shortcut help open as bottom sheets.
+- **Detail and module topbars no longer overflow the screen.** Edit/Preview rendered twice at some widths and now renders once; breadcrumbs and export stay reachable when the bar compacts.
+
+### Upgrading
+
+- No migrations. Upgrading from any 2.x needs no manual steps.
+
 ## v2.4.0 (2026-07-27)
 
 Projects can be filed into named groups in the sidebar, and the grouping belongs to you rather than to the instance. Alongside it, the last hover-only controls become reachable on touch, and the test suite stops depending on whatever is exported in your shell.
