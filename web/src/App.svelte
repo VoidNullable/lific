@@ -22,26 +22,43 @@
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
   import { hasSession, getInstance, autoLogin, saveSession, clearSession, me } from "./lib/api";
   import { REALTIME_INVALIDATE_EVENT, type RealtimeEvent } from "./lib/autoRefresh.svelte";
+  import {
+    commentTargetFromHash,
+    routeForCommentHash,
+    routeWithCommentTarget,
+    splitResourcePath,
+  } from "./lib/commentLinks";
   import { motionReduced } from "./lib/theme";
   import { fade } from "svelte/transition";
   import { onDestroy, onMount } from "svelte";
 
   // Path-style deep links (LIF-247): external tools (e.g. the Dashboard)
   // link to plain paths like /LIF/overview or /LIF/issues/LIF-42. The server
-  // SPA-fallbacks those to index.html, but this app is hash-routed — so a
-  // path-only URL would silently land on Home. Translate the path into the
-  // hash route once at boot and clean the address bar. Runs before the
-  // initial `route` read below so the very first render targets the right
-  // page. Unknown paths fall through to the SPA's own 404, which is correct.
-  if (window.location.pathname !== "/" && !window.location.hash) {
+  // SPA-fallbacks those to index.html, but this app is hash-routed. Keep the
+  // path as the initial route when it carries a comment fragment; otherwise
+  // translate it into the hash route once at boot. A fragment already uses
+  // the browser's hash, so replacing it would make the router see only
+  // `comment-123` and render its 404 page.
+  const resourcePath = splitResourcePath(window.location.pathname);
+  const pathRoute =
+    window.location.pathname !== "/" && !window.location.hash.startsWith("#/")
+      ? (resourcePath?.route ?? window.location.pathname) +
+        window.location.search
+      : null;
+  const appBasePath =
+    resourcePath?.basePath ??
+    (window.location.hash.startsWith("#/")
+      ? window.location.pathname.replace(/\/$/, "")
+      : "");
+  if (pathRoute && !window.location.hash) {
     history.replaceState(
       null,
       "",
-      "/#" + window.location.pathname + window.location.search,
+      appBasePath + "/#" + pathRoute,
     );
   }
 
-  let route = $state(window.location.hash.slice(1) || "/");
+  let route = $state(pathRoute ?? (window.location.hash.slice(1) || "/"));
 
   // LIF-215: single-user mode. On a cold load with no session, ask the
   // instance whether web auto-login is enabled; if so, silently mint an admin
@@ -79,8 +96,20 @@
   }
 
   $effect(() => {
-    function onHash() {
-      route = window.location.hash.slice(1) || "/";
+    function onHash(event: HashChangeEvent) {
+      const hash = new URL(event.newURL).hash;
+      const commentTarget = commentTargetFromHash(hash);
+      if (commentTarget) {
+        const nextRoute = routeForCommentHash(hash, route);
+        if (hash.startsWith("#/")) route = nextRoute;
+        history.replaceState(
+          null,
+          "",
+          appBasePath + "/#" + routeWithCommentTarget(nextRoute, commentTarget),
+        );
+      } else if (hash === "" || hash.startsWith("#/")) {
+        route = hash.slice(1) || "/";
+      }
     }
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);

@@ -14,6 +14,8 @@ use reqwest::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::links::{IssueLinkContext, MarkdownReference, ResourceUrl};
+
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
     PageAction, ProjectAction, borrowed_labels,
@@ -22,6 +24,12 @@ use super::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ERROR_BODY_LIMIT: usize = 64 * 1024;
 type QueryParam<'a> = (&'a str, Cow<'a, str>);
+
+#[derive(Debug)]
+struct ResolvedResource {
+    id: i64,
+    identifier: String,
+}
 
 #[derive(Serialize)]
 struct IssueCreate<'a> {
@@ -150,7 +158,12 @@ pub async fn run(
     json_output: bool,
 ) -> Result<()> {
     let backend = HttpBackend::new(base_url, api_key)?;
-    let output = backend.execute(command).await?;
+    let link_output = if json_output {
+        IssueLinkOutput::Url
+    } else {
+        IssueLinkOutput::Markdown
+    };
+    let output = backend.execute(command, link_output).await?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -162,6 +175,7 @@ pub async fn run(
 struct HttpBackend {
     client: Client,
     base_url: String,
+    link_context: IssueLinkContext,
     api_key: Option<String>,
 }
 
@@ -176,6 +190,9 @@ impl HttpBackend {
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             bail!("HTTP backend URL must use http:// or https://");
         }
+        let link_context = IssueLinkContext::parse(base_url).ok_or_else(|| {
+            anyhow!("HTTP backend URL must not contain credentials, a query, or a fragment")
+        })?;
         if parsed.scheme() == "http"
             && parsed
                 .host_str()
@@ -192,15 +209,22 @@ impl HttpBackend {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             base_url: base_url.to_owned(),
+            link_context,
             api_key: api_key.map(str::to_owned),
         })
     }
 
-    async fn execute(&self, command: &Command) -> Result<Value> {
+    async fn execute(&self, command: &Command, output: IssueLinkOutput) -> Result<Value> {
         match command {
-            Command::Issue { action } => self.issue(action).await,
-            Command::Project { action } => self.project(action).await,
-            Command::Page { action } => self.page(action).await,
+            Command::Issue { action } => self.issue(action).await.map(|value| {
+                linked_resources(value, &self.link_context, output, ResourceKind::Issue)
+            }),
+            Command::Project { action } => self.project(action).await.map(|value| {
+                linked_resources(value, &self.link_context, output, ResourceKind::Project)
+            }),
+            Command::Page { action } => self.page(action).await.map(|value| {
+                linked_resources(value, &self.link_context, output, ResourceKind::Page)
+            }),
             Command::Export { action } => self.export(action).await,
             Command::Search {
                 query,
@@ -219,10 +243,16 @@ impl HttpBackend {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-                self.get_json("/api/search", &params).await
+                self.get_json("/api/search", &params).await.map(|value| {
+                    linked_resources(value, &self.link_context, output, ResourceKind::Search)
+                })
             }
-            Command::Comment { action } => self.comment(action).await,
-            Command::Module { action } => self.module(action).await,
+            Command::Comment { action } => self.comment(action).await.map(|(value, identifier)| {
+                linked_comments(value, &self.link_context, output, &identifier)
+            }),
+            Command::Module { action } => self.module(action).await.map(|(value, project)| {
+                linked_modules(value, &self.link_context, output, &project)
+            }),
             Command::Label { action } => self.label(action).await,
             Command::Folder { action } => self.folder(action).await,
             _ => bail!("the HTTP backend does not support this command yet"),
@@ -453,43 +483,46 @@ impl HttpBackend {
         }
     }
 
-    async fn comment(&self, action: &CommentAction) -> Result<Value> {
+    async fn comment(&self, action: &CommentAction) -> Result<(Value, String)> {
         match action {
             CommentAction::List { identifier } => {
-                let id = self.issue_id(identifier).await?;
-                self.get_json(&format!("/api/issues/{id}/comments"), &[])
+                let issue = self.issue_identity(identifier).await?;
+                self.get_json(&format!("/api/issues/{}/comments", issue.id), &[])
                     .await
+                    .map(|value| (value, issue.identifier))
             }
             CommentAction::Add {
                 identifier,
                 content,
                 user,
             } => {
-                if user.is_some() {
-                    bail!(
+                user.as_ref().map_or(Ok(()), |_| {
+                    Err(anyhow!(
                         "--user cannot be used with the HTTP backend; the server uses the API credential's user"
-                    );
-                }
-                let id = self.issue_id(identifier).await?;
+                    ))
+                })?;
+                let issue = self.issue_identity(identifier).await?;
                 self.send_json(
                     Method::POST,
-                    &format!("/api/issues/{id}/comments"),
+                    &format!("/api/issues/{}/comments", issue.id),
                     &CommentCreate { content },
                 )
                 .await
+                .map(|value| (value, issue.identifier))
             }
         }
     }
 
-    async fn module(&self, action: &ModuleAction) -> Result<Value> {
+    async fn module(&self, action: &ModuleAction) -> Result<(Value, String)> {
         match action {
             ModuleAction::List { project } => {
-                let id = self.project_id(project).await?;
+                let project = self.project_identity(project).await?;
                 self.get_json(
                     "/api/modules",
-                    &[("project_id", Cow::Owned(id.to_string()))],
+                    &[("project_id", Cow::Owned(project.id.to_string()))],
                 )
                 .await
+                .map(|value| (value, project.identifier))
             }
             ModuleAction::Create {
                 project,
@@ -497,12 +530,12 @@ impl HttpBackend {
                 description,
                 status,
             } => {
-                let project_id = self.project_id(project).await?;
+                let project = self.project_identity(project).await?;
                 self.send_json(
                     Method::POST,
                     "/api/modules",
                     &ModuleCreate {
-                        project_id,
+                        project_id: project.id,
                         name,
                         description,
                         status,
@@ -510,6 +543,7 @@ impl HttpBackend {
                     },
                 )
                 .await
+                .map(|value| (value, project.identifier))
             }
             ModuleAction::Update {
                 project,
@@ -518,8 +552,8 @@ impl HttpBackend {
                 description,
                 status,
             } => {
-                let project_id = self.project_id(project).await?;
-                let id = self.module_id(project_id, name).await?;
+                let project = self.project_identity(project).await?;
+                let id = self.module_id(project.id, name).await?;
                 let body = ModuleUpdate {
                     name: new_name.as_deref(),
                     description: description.as_deref(),
@@ -527,13 +561,14 @@ impl HttpBackend {
                 };
                 self.send_json(Method::PUT, &format!("/api/modules/{id}"), &body)
                     .await
+                    .map(|value| (value, project.identifier))
             }
             ModuleAction::Delete { project, name } => {
-                let id = self
-                    .module_id(self.project_id(project).await?, name)
-                    .await?;
+                let project = self.project_identity(project).await?;
+                let id = self.module_id(project.id, name).await?;
                 self.send_empty(Method::DELETE, &format!("/api/modules/{id}"))
                     .await
+                    .map(|value| (value, project.identifier))
             }
         }
     }
@@ -657,7 +692,13 @@ impl HttpBackend {
     }
 
     async fn project_id(&self, identifier: &str) -> Result<i64> {
-        self.resolve_id("/api/projects", "identifier", identifier, "project", &[])
+        self.project_identity(identifier)
+            .await
+            .map(|project| project.id)
+    }
+
+    async fn project_identity(&self, identifier: &str) -> Result<ResolvedResource> {
+        self.resolve_resource("/api/projects", "identifier", identifier, "project", &[])
             .await
     }
 
@@ -678,10 +719,14 @@ impl HttpBackend {
     }
 
     async fn issue_id(&self, identifier: &str) -> Result<i64> {
-        self.get_json(&format!("/api/issues/resolve/{}", segment(identifier)), &[])
-            .await?["id"]
-            .as_i64()
-            .ok_or_else(|| anyhow!("issue '{identifier}' response had no id"))
+        self.issue_identity(identifier).await.map(|issue| issue.id)
+    }
+
+    async fn issue_identity(&self, identifier: &str) -> Result<ResolvedResource> {
+        let value = self
+            .get_json(&format!("/api/issues/resolve/{}", segment(identifier)), &[])
+            .await?;
+        resource_from_object(value, "identifier", identifier, "issue")
     }
 
     async fn issue_project_id(&self, id: i64) -> Result<i64> {
@@ -731,6 +776,19 @@ impl HttpBackend {
         kind: &str,
         params: &[QueryParam<'_>],
     ) -> Result<i64> {
+        self.resolve_resource(path, key, expected, kind, params)
+            .await
+            .map(|resource| resource.id)
+    }
+
+    async fn resolve_resource(
+        &self,
+        path: &str,
+        key: &str,
+        expected: &str,
+        kind: &str,
+        params: &[QueryParam<'_>],
+    ) -> Result<ResolvedResource> {
         find_resource(self.get_json(path, params).await?, key, expected, kind)
     }
 
@@ -793,18 +851,51 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
-fn find_resource(value: Value, key: &str, expected: &str, kind: &str) -> Result<i64> {
-    value
-        .as_array()
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item[key]
-                    .as_str()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(expected))
-            })
-        })
-        .and_then(|item| item["id"].as_i64())
-        .ok_or_else(|| anyhow!("{kind} '{expected}' not found"))
+fn find_resource(value: Value, key: &str, expected: &str, kind: &str) -> Result<ResolvedResource> {
+    match value {
+        Value::Array(items) => items.into_iter().find_map(|item| match item {
+            Value::Object(object)
+                if object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(expected)) =>
+            {
+                object.get("id").and_then(Value::as_i64).map(|_| object)
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow!("{kind} '{expected}' not found"))
+    .and_then(|object| resource_from_map(object, key, expected, kind))
+}
+
+fn resource_from_object(
+    value: Value,
+    key: &str,
+    expected: &str,
+    kind: &str,
+) -> Result<ResolvedResource> {
+    match value {
+        Value::Object(object) => resource_from_map(object, key, expected, kind),
+        _ => Err(anyhow!("{kind} '{expected}' response was not an object")),
+    }
+}
+
+fn resource_from_map(
+    mut object: serde_json::Map<String, Value>,
+    key: &str,
+    expected: &str,
+    kind: &str,
+) -> Result<ResolvedResource> {
+    let id = object
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("{kind} '{expected}' response had no id"))?;
+    match object.remove(key) {
+        Some(Value::String(identifier)) => Ok(ResolvedResource { id, identifier }),
+        _ => Err(anyhow!("{kind} '{expected}' response had no {key}")),
+    }
 }
 
 fn segment(value: &str) -> String {
@@ -868,6 +959,210 @@ fn print_human(value: &Value) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum IssueLinkOutput {
+    Url,
+    Markdown,
+}
+
+#[derive(Clone, Copy)]
+enum ResourceKind {
+    Issue,
+    Project,
+    Page,
+    Search,
+}
+
+#[derive(Clone, Copy)]
+enum CommentLocation {
+    Issue,
+    Page(i64),
+}
+
+impl CommentLocation {
+    fn url<'a>(
+        self,
+        context: &'a IssueLinkContext,
+        identifier: &'a str,
+        comment_id: i64,
+    ) -> Option<ResourceUrl<'a>> {
+        match self {
+            Self::Issue => context.issue_comment_url(identifier, comment_id),
+            Self::Page(page_id) => context.page_comment_url(identifier, page_id, comment_id),
+        }
+    }
+
+    fn markdown<'a>(
+        self,
+        context: &'a IssueLinkContext,
+        identifier: &'a str,
+        comment_id: i64,
+    ) -> MarkdownReference<'a> {
+        match self {
+            Self::Issue => context.issue_comment_markdown(identifier, comment_id),
+            Self::Page(page_id) => context.page_comment_markdown(identifier, page_id, comment_id),
+        }
+    }
+}
+
+fn linked_resources(
+    value: Value,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+    kind: ResourceKind,
+) -> Value {
+    map_output_objects(value, |object| {
+        linked_resource(object, context, output, kind)
+    })
+}
+
+fn map_output_objects(
+    value: Value,
+    mut map: impl FnMut(serde_json::Map<String, Value>) -> serde_json::Map<String, Value>,
+) -> Value {
+    fn map_object(
+        value: Value,
+        map: &mut impl FnMut(serde_json::Map<String, Value>) -> serde_json::Map<String, Value>,
+    ) -> Value {
+        match value {
+            Value::Object(object) => Value::Object(map(object)),
+            value => value,
+        }
+    }
+
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| map_object(value, &mut map))
+                .collect(),
+        ),
+        value => map_object(value, &mut map),
+    }
+}
+
+fn linked_resource(
+    object: serde_json::Map<String, Value>,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+    kind: ResourceKind,
+) -> serde_json::Map<String, Value> {
+    let linked_field = object
+        .get("identifier")
+        .and_then(Value::as_str)
+        .and_then(|identifier| {
+            resource_url(&object, context, identifier, kind).map(|url| match output {
+                IssueLinkOutput::Url => ("web_url", url.to_string()),
+                IssueLinkOutput::Markdown => (
+                    "identifier",
+                    MarkdownReference::linked(identifier, url).to_string(),
+                ),
+            })
+        });
+    match linked_field {
+        Some((field, value)) => with_string_field(object, field, value),
+        None => object,
+    }
+}
+
+fn resource_url<'a>(
+    object: &serde_json::Map<String, Value>,
+    context: &'a IssueLinkContext,
+    identifier: &'a str,
+    kind: ResourceKind,
+) -> Option<ResourceUrl<'a>> {
+    let id = object.get("id").and_then(Value::as_i64);
+    match kind {
+        ResourceKind::Issue => context.issue_url(identifier),
+        ResourceKind::Project => context.project_url(identifier),
+        ResourceKind::Page => context.page_url(identifier, id?),
+        ResourceKind::Search => match object.get("result_type").and_then(Value::as_str)? {
+            "issue" => context.issue_url(identifier),
+            "page" => context.page_url(identifier, id?),
+            "comment" => object
+                .get("parent_page_id")
+                .and_then(Value::as_i64)
+                .map_or(CommentLocation::Issue, CommentLocation::Page)
+                .url(context, identifier, id?),
+            _ => None,
+        },
+    }
+}
+
+fn linked_comments(
+    value: Value,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+    identifier: &str,
+) -> Value {
+    map_output_objects(value, |object| {
+        let linked_field = object
+            .get("id")
+            .and_then(Value::as_i64)
+            .and_then(|comment_id| {
+                let location = object
+                    .get("page_id")
+                    .and_then(Value::as_i64)
+                    .map_or(CommentLocation::Issue, CommentLocation::Page);
+                location
+                    .url(context, identifier, comment_id)
+                    .map(|url| match output {
+                        IssueLinkOutput::Url => ("web_url", url.to_string()),
+                        IssueLinkOutput::Markdown => (
+                            "comment",
+                            location
+                                .markdown(context, identifier, comment_id)
+                                .to_string(),
+                        ),
+                    })
+            });
+        match linked_field {
+            Some((field, value)) => with_string_field(object, field, value),
+            None => object,
+        }
+    })
+}
+
+fn linked_modules(
+    value: Value,
+    context: &IssueLinkContext,
+    output: IssueLinkOutput,
+    project: &str,
+) -> Value {
+    map_output_objects(value, |object| {
+        let linked_field = object
+            .get("id")
+            .and_then(Value::as_i64)
+            .zip(object.get("name").and_then(Value::as_str))
+            .and_then(|(module_id, name)| {
+                context
+                    .module_url(project, module_id)
+                    .map(|url| match output {
+                        IssueLinkOutput::Url => ("web_url", url.to_string()),
+                        IssueLinkOutput::Markdown => (
+                            "name",
+                            context
+                                .module_markdown(project, module_id, name)
+                                .to_string(),
+                        ),
+                    })
+            });
+        match linked_field {
+            Some((field, value)) => with_string_field(object, field, value),
+            None => object,
+        }
+    })
+}
+
+fn with_string_field(
+    mut object: serde_json::Map<String, Value>,
+    field: &str,
+    value: String,
+) -> serde_json::Map<String, Value> {
+    object.insert(field.into(), Value::String(value));
+    object
+}
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -903,10 +1198,12 @@ mod tests {
     };
 
     use super::{
-        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueUpdate, PageCreate, ProjectCreate,
-        error_detail, export_filename, find_resource, is_loopback_host, safe_filename,
-        sanitize_error_detail, segment,
+        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueLinkOutput, IssueUpdate, PageCreate,
+        ProjectCreate, ResourceKind, error_detail, export_filename, find_resource,
+        is_loopback_host, linked_comments, linked_modules, linked_resources, resource_from_object,
+        resource_url, safe_filename, sanitize_error_detail, segment,
     };
+    use crate::links::IssueLinkContext;
 
     type CapturedRequest = Arc<Mutex<Option<(String, Option<String>)>>>;
 
@@ -965,10 +1262,9 @@ mod tests {
             .await,
         )
         .await;
-        let workspace_page = parse_json(
-            json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await,
-        )
-        .await;
+        let workspace_page =
+            parse_json(json_post(&app, "/api/pages", json!({"title": "Workspace page"})).await)
+                .await;
         let issue = parse_json(
             json_post(
                 &app,
@@ -1044,6 +1340,14 @@ mod tests {
         Json(value)
     }
 
+    async fn issue_response() -> Json<serde_json::Value> {
+        Json(json!({
+            "id": 42,
+            "identifier": "LIF-42",
+            "title": "Construct links with HTTP results"
+        }))
+    }
+
     #[test]
     fn rejects_non_http_backend_urls() {
         let error = match HttpBackend::new("file://invalid", None) {
@@ -1081,6 +1385,27 @@ mod tests {
     fn trims_backend_url_whitespace_before_trailing_slashes() {
         let backend = HttpBackend::new("  https://tracker.invalid///  ", None).unwrap();
         assert_eq!(backend.base_url, "https://tracker.invalid");
+    }
+
+    #[test]
+    fn normalized_backend_url_constructs_links() {
+        let backend = HttpBackend::new("  https://tracker.invalid/lific/  ", None).unwrap();
+
+        assert_eq!(
+            backend.link_context.issue_markdown("LIF-42").to_string(),
+            "[LIF-42](https://tracker.invalid/lific/LIF/issues/LIF-42)"
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_backend_urls() {
+        for base_url in [
+            "https://user:password@tracker.invalid",
+            "https://tracker.invalid?tenant=one",
+            "https://tracker.invalid#fragment",
+        ] {
+            assert!(HttpBackend::new(base_url, None).is_err(), "{base_url}");
+        }
     }
 
     #[test]
@@ -1170,11 +1495,14 @@ mod tests {
         let backend = HttpBackend::new(&url, Some("test-key")).unwrap();
 
         let output = backend
-            .execute(&Command::Search {
-                query: "term".into(),
-                project: None,
-                limit: Some(7),
-            })
+            .execute(
+                &Command::Search {
+                    query: "term".into(),
+                    project: None,
+                    limit: Some(7),
+                },
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1190,19 +1518,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_constructs_linked_issue_results() {
+        let router = Router::new().route("/api/issues/resolve/{identifier}", get(issue_response));
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+
+        let output = backend
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Get {
+                        identifier: "LIF-42".into(),
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["web_url"], format!("{url}/LIF/issues/LIF-42"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn executes_page_list_with_project_and_folder_resolution() {
         let router = Router::new().route("/api/{*path}", any(page_scope_request));
         let (url, server) = spawn_server(router).await;
         let backend = HttpBackend::new(&url, None).unwrap();
 
         let output = backend
-            .execute(&Command::Page {
-                action: PageAction::List {
-                    project: Some("LIF".into()),
-                    folder: Some("Docs".into()),
-                    label: None,
+            .execute(
+                &Command::Page {
+                    action: PageAction::List {
+                        project: Some("LIF".into()),
+                        folder: Some("Docs".into()),
+                        label: None,
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1217,9 +1570,12 @@ mod tests {
         let backend = HttpBackend::new(&url, None).unwrap();
 
         let error = backend
-            .execute(&Command::Project {
-                action: ProjectAction::List,
-            })
+            .execute(
+                &Command::Project {
+                    action: ProjectAction::List,
+                },
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap_err();
 
@@ -1255,9 +1611,11 @@ mod tests {
 
         let error = backend.get_json("/api/redirect", &[]).await.unwrap_err();
 
-        assert!(error
-            .to_string()
-            .starts_with("HTTP backend request failed (302 Found):"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("HTTP backend request failed (302 Found):")
+        );
         assert!(captured.lock().await.is_none());
         server.abort();
     }
@@ -1272,12 +1630,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&output_dir);
 
         let output = backend
-            .execute(&Command::Export {
-                action: ExportAction::Issue {
-                    identifier: "LIF-1".into(),
-                    output: PathBuf::from(&output_dir),
+            .execute(
+                &Command::Export {
+                    action: ExportAction::Issue {
+                        identifier: "LIF-1".into(),
+                        output: PathBuf::from(&output_dir),
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1285,7 +1646,10 @@ mod tests {
             std::fs::read_to_string(output_dir.join("report.txt")).unwrap(),
             "export contents"
         );
-        assert_eq!(output, json!([output_dir.join("report.txt").display().to_string()]));
+        assert_eq!(
+            output,
+            json!([output_dir.join("report.txt").display().to_string()])
+        );
         std::fs::remove_dir_all(output_dir).unwrap();
         server.abort();
     }
@@ -1296,11 +1660,14 @@ mod tests {
         let backend = HttpBackend::new(&fixture.url, None).unwrap();
 
         let page = backend
-            .execute(&Command::Page {
-                action: PageAction::Get {
-                    identifier: fixture.project_page_identifier,
+            .execute(
+                &Command::Page {
+                    action: PageAction::Get {
+                        identifier: fixture.project_page_identifier,
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1315,11 +1682,14 @@ mod tests {
         let backend = HttpBackend::new(&fixture.url, None).unwrap();
 
         let page = backend
-            .execute(&Command::Page {
-                action: PageAction::Get {
-                    identifier: fixture.workspace_page_identifier,
+            .execute(
+                &Command::Page {
+                    action: PageAction::Get {
+                        identifier: fixture.workspace_page_identifier,
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1334,11 +1704,14 @@ mod tests {
         let backend = HttpBackend::new(&fixture.url, None).unwrap();
 
         let issue = backend
-            .execute(&Command::Issue {
-                action: IssueAction::Get {
-                    identifier: fixture.issue_identifier,
+            .execute(
+                &Command::Issue {
+                    action: IssueAction::Get {
+                        identifier: fixture.issue_identifier,
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap();
 
@@ -1353,11 +1726,14 @@ mod tests {
         let backend = HttpBackend::new(&fixture.url, None).unwrap();
 
         let error = backend
-            .execute(&Command::Page {
-                action: PageAction::Get {
-                    identifier: "TST-DOC-\u{1b}[31m".into(),
+            .execute(
+                &Command::Page {
+                    action: PageAction::Get {
+                        identifier: "TST-DOC-\u{1b}[31m".into(),
+                    },
                 },
-            })
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap_err();
         let error = error.to_string();
@@ -1428,10 +1804,23 @@ mod tests {
             {"id": 4, "name": "Backend"},
             {"id": 9, "name": "Docs"}
         ]);
-        assert_eq!(
-            find_resource(resources, "name", "backend", "module").unwrap(),
-            4
-        );
+        let resource = find_resource(resources, "name", "backend", "module").unwrap();
+        assert_eq!(resource.id, 4);
+        assert_eq!(resource.identifier, "Backend");
+    }
+
+    #[test]
+    fn preserves_canonical_identity_from_resolved_object() {
+        let resource = resource_from_object(
+            json!({"id": 42, "identifier": "LIF-42"}),
+            "identifier",
+            "lif-042",
+            "issue",
+        )
+        .unwrap();
+
+        assert_eq!(resource.id, 42);
+        assert_eq!(resource.identifier, "LIF-42");
     }
 
     #[test]
@@ -1591,15 +1980,203 @@ mod tests {
     async fn rejects_commands_outside_http_data_scope() {
         let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
         let error = backend
-            .execute(&Command::Start {
-                port: None,
-                host: None,
-            })
+            .execute(
+                &Command::Start {
+                    port: None,
+                    host: None,
+                },
+                IssueLinkOutput::Url,
+            )
             .await
             .unwrap_err();
         assert_eq!(
             error.to_string(),
             "the HTTP backend does not support this command yet"
         );
+    }
+
+    #[test]
+    fn constructs_http_resource_results_with_links() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let issues = linked_resources(
+            json!([{"identifier": "LIF-42", "title": "Fix"}]),
+            &context,
+            IssueLinkOutput::Url,
+            ResourceKind::Issue,
+        );
+        let pages = linked_resources(
+            json!([{"identifier": "LIF-DOC-3", "id": 17, "title": "Page"}]),
+            &context,
+            IssueLinkOutput::Url,
+            ResourceKind::Page,
+        );
+        let projects = linked_resources(
+            json!([
+            {"identifier": "LIF", "id": 23, "name": "Project"},
+            {"identifier": "OPS", "name": "Project without id"}
+            ]),
+            &context,
+            IssueLinkOutput::Url,
+            ResourceKind::Project,
+        );
+
+        assert_eq!(
+            issues[0]["web_url"],
+            "https://tracker.example/lific/LIF/issues/LIF-42"
+        );
+        assert_eq!(
+            pages[0]["web_url"],
+            "https://tracker.example/lific/LIF/pages/17"
+        );
+        assert_eq!(
+            projects[0]["web_url"],
+            "https://tracker.example/lific/LIF/overview"
+        );
+        assert_eq!(
+            projects[1]["web_url"],
+            "https://tracker.example/lific/OPS/overview"
+        );
+        assert_eq!(
+            resource_url(
+                pages[0].as_object().unwrap(),
+                &context,
+                "LIF-DOC-3",
+                ResourceKind::Page,
+            )
+            .map(|url| url.to_string()),
+            Some("https://tracker.example/lific/LIF/pages/17".into())
+        );
+        let markdown = linked_resources(
+            json!([
+                {"identifier": "LIF-42", "title": "Fix"},
+                {"identifier": "LIF-43", "title": "Another fix"}
+            ]),
+            &context,
+            IssueLinkOutput::Markdown,
+            ResourceKind::Issue,
+        );
+        assert_eq!(
+            markdown[0]["identifier"],
+            "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
+        );
+        assert_eq!(
+            markdown[1]["identifier"],
+            "[LIF-43](https://tracker.example/lific/LIF/issues/LIF-43)"
+        );
+    }
+
+    #[test]
+    fn constructs_http_search_comments_with_comment_anchors() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let value = serde_json::to_value([
+            crate::db::models::SearchResult {
+                result_type: "comment".into(),
+                id: 7,
+                identifier: Some("LIF-42".into()),
+                title: "Fix".into(),
+                snippet: "Issue comment".into(),
+                project_id: Some(1),
+                parent_page_id: None,
+            },
+            crate::db::models::SearchResult {
+                result_type: "comment".into(),
+                id: 8,
+                identifier: Some("LIF-DOC-3".into()),
+                title: "Page".into(),
+                snippet: "Page comment".into(),
+                project_id: Some(1),
+                parent_page_id: Some(17),
+            },
+        ])
+        .unwrap();
+        let markdown = linked_resources(
+            value.clone(),
+            &context,
+            IssueLinkOutput::Markdown,
+            ResourceKind::Search,
+        );
+        let value = linked_resources(value, &context, IssueLinkOutput::Url, ResourceKind::Search);
+
+        assert_eq!(
+            [value[0]["web_url"].as_str(), value[1]["web_url"].as_str()],
+            [
+                Some("https://tracker.example/lific/LIF/issues/LIF-42#comment-7"),
+                Some("https://tracker.example/lific/LIF/pages/17#comment-8")
+            ]
+        );
+        assert_eq!(
+            [
+                markdown[0]["identifier"].as_str(),
+                markdown[1]["identifier"].as_str()
+            ],
+            [
+                Some("[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42#comment-7)"),
+                Some("[LIF-DOC-3](https://tracker.example/lific/LIF/pages/17#comment-8)")
+            ]
+        );
+    }
+
+    #[test]
+    fn constructs_http_comment_results_with_issue_anchor() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let value = linked_comments(
+            json!([{
+                "id": 7,
+                "content": "Looks good",
+                "author_record": {"id": 99, "name": "Ada"}
+            }]),
+            &context,
+            IssueLinkOutput::Markdown,
+            "LIF-42",
+        );
+
+        assert_eq!(
+            value[0]["comment"],
+            "[comment #7](https://tracker.example/lific/LIF/issues/LIF-42#comment-7)"
+        );
+        assert!(value[0]["author_record"].get("comment").is_none());
+    }
+
+    #[test]
+    fn constructs_http_comment_results_with_page_anchor() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let value = linked_comments(
+            json!([{
+                "id": 8,
+                "page_id": 17,
+                "content": "Page comment"
+            }]),
+            &context,
+            IssueLinkOutput::Markdown,
+            "LIF-DOC-3",
+        );
+
+        assert_eq!(
+            value[0]["comment"],
+            "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
+        );
+    }
+
+    #[test]
+    fn constructs_http_module_results_with_project_route() {
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let value = linked_modules(
+            json!([{
+                "id": 23,
+                "project_id": 1,
+                "name": "Backend [internal]",
+                "owner": {"id": 99, "name": "Ada"}
+            }]),
+            &context,
+            IssueLinkOutput::Markdown,
+            "LIF",
+        );
+
+        assert_eq!(
+            value[0]["name"],
+            "[Backend \\[internal\\]](https://tracker.example/lific/LIF/modules/23)"
+        );
+        assert_eq!(value[0]["owner"]["name"], "Ada");
+        assert!(value[0]["owner"].get("web_url").is_none());
     }
 }

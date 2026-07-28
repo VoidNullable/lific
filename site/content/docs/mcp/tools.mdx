@@ -5,6 +5,8 @@ description: Reference for the MCP tools exposed by Lific.
 
 Lific exposes 27 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
+When MCP is reached over HTTP and its origin is known, issue, project, page, plan, module, and comment references are rendered as Markdown links to their canonical web routes. Comment links include an anchor that scrolls the issue or page thread to that comment. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain references.
+
 ## Issues
 
 ### `list_issues`

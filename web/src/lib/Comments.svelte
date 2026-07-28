@@ -23,7 +23,12 @@
   import { MENTION_RE } from "./mentions";
   import { MessageSquare, CornerDownLeft, Paperclip } from "lucide-svelte";
   import { fly } from "svelte/transition";
-  import { tick, onDestroy } from "svelte";
+  import { tick, onDestroy, onMount } from "svelte";
+  import {
+    commentTargetFromHash,
+    routeWithCommentTarget,
+    splitResourcePath,
+  } from "./commentLinks";
   import { filesFromClipboard, insertAtCaret } from "./attachments/compose";
   import { createUploadController } from "./attachments/uploads.svelte";
   import DropOverlay from "./attachments/DropOverlay.svelte";
@@ -59,6 +64,48 @@
   let fileInputEl = $state<HTMLInputElement | null>(null);
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
+
+  let pendingCommentTarget = $state(commentTargetFromHash(window.location.hash));
+  let scrollingTarget: string | null = null;
+
+  onMount(() => {
+    function onHashChange(event: HashChangeEvent) {
+      pendingCommentTarget = commentTargetFromHash(new URL(event.newURL).hash);
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  });
+
+  $effect(() => {
+    const target = pendingCommentTarget;
+    if (!target || scrollingTarget === target || comments.length === 0) return;
+    scrollingTarget = target;
+    void tick().then(() => {
+      if (pendingCommentTarget !== target) {
+        if (scrollingTarget === target) scrollingTarget = null;
+        return;
+      }
+      const comment = document.getElementById(target);
+      if (!comment) {
+        scrollingTarget = null;
+        return;
+      }
+      comment.scrollIntoView({ block: "center" });
+      const resourcePath = splitResourcePath(window.location.pathname);
+      if (resourcePath && window.location.hash === `#${target}`) {
+        const route = resourcePath.route + window.location.search;
+        history.replaceState(
+          null,
+          "",
+          resourcePath.basePath +
+            "/#" +
+            routeWithCommentTarget(route, target),
+        );
+      }
+      pendingCommentTarget = null;
+      scrollingTarget = null;
+    });
+  });
 
   // ── @mention autocomplete (LIF-263) ─────────────────────
   //
@@ -315,7 +362,7 @@
     <ol class="cmt__thread">
       {#each comments as comment (comment.id)}
         {@const author = comment.author_display_name || comment.author}
-        <li class="cmt__item" in:fly={{ y: 6, duration: 180 }}>
+        <li id={`comment-${comment.id}`} class="cmt__item" in:fly={{ y: 6, duration: 180 }}>
           <div class="cmt__avatar" aria-hidden="true">{initials(author)}</div>
           <div class="cmt__body">
             <div class="cmt__meta">

@@ -1,6 +1,8 @@
 pub(crate) mod schemas;
 pub(crate) mod tools;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -12,6 +14,7 @@ use rmcp::{
 
 use crate::db::DbPool;
 use crate::db::models::AuthUser;
+use crate::links::IssueLinkContext;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 /// Serialization lock for MCP request handling.
@@ -34,6 +37,20 @@ static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
 /// (which also resolves to `AuthUser = None`).
 static MCP_REQUEST_OPERATOR: Mutex<bool> = Mutex::new(false);
 
+/// Per-request external origin used for structured resource links.
+/// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
+static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<Arc<IssueLinkContext>>> = Mutex::new(None);
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_REQUEST_ISSUE_LINKS: Option<Arc<IssueLinkContext>>;
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ISSUE_LINK_CONTEXT_READS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// Acquire the MCP handler lock, set the user, run the provided future,
 /// then clean up. Guarantees no identity confusion between concurrent requests.
 ///
@@ -41,12 +58,13 @@ static MCP_REQUEST_OPERATOR: Mutex<bool> = Mutex::new(false);
 /// the handler so every DB write a tool performs is attributed to this
 /// user via MCP — both the OAuth /mcp route and the authless /mcp/<token>
 /// route funnel through here.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn with_request_user<F, Fut, R>(user: Option<AuthUser>, f: F) -> R
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = R>,
 {
-    with_request_identity(user, false, f).await
+    with_request_context(user, false, None, f).await
 }
 
 /// LIF-261: like [`with_request_user`] but also records whether the request's
@@ -55,12 +73,32 @@ where
 /// OAuth/session tokens), so `authz` can treat it as admin-equivalent in
 /// enforced mode. `with_request_user` keeps the old signature (operator =
 /// false) for every non-unbound-key caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn with_request_identity<F, Fut, R>(user: Option<AuthUser>, is_operator: bool, f: F) -> R
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = R>,
 {
+    with_request_context(user, is_operator, None, f).await
+}
+
+/// Run an MCP request with its authenticated identity and optional external
+/// origin. The origin is transport metadata: stdio callers pass `None`, while
+/// HTTP callers pass the validated browser-facing base URL.
+pub async fn with_request_context<F, Fut, R>(
+    user: Option<AuthUser>,
+    is_operator: bool,
+    issue_links: Option<IssueLinkContext>,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
     let _guard = MCP_HANDLER_LOCK.lock().await;
+    let issue_links = issue_links.map(Arc::new);
+    #[cfg(test)]
+    let test_issue_links = issue_links.clone();
     let actor = crate::actor::ActorCtx {
         user_id: user.as_ref().map(|u| u.id),
         transport: crate::actor::Transport::Mcp,
@@ -71,6 +109,14 @@ where
     *MCP_REQUEST_OPERATOR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = is_operator;
+    *MCP_REQUEST_ISSUE_LINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = issue_links;
+    #[cfg(test)]
+    let result = TEST_REQUEST_ISSUE_LINKS
+        .scope(test_issue_links, crate::actor::scope(actor, f()))
+        .await;
+    #[cfg(not(test))]
     let result = crate::actor::scope(actor, f()).await;
     *MCP_REQUEST_USER
         .lock()
@@ -78,6 +124,9 @@ where
     *MCP_REQUEST_OPERATOR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+    *MCP_REQUEST_ISSUE_LINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     result
 }
 
@@ -95,6 +144,33 @@ pub(crate) fn current_is_operator() -> bool {
     *MCP_REQUEST_OPERATOR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Get the validated external origin for structured resource links, if this MCP
+/// request arrived through an HTTP transport that knows it.
+pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
+    #[cfg(test)]
+    {
+        TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
+        TEST_REQUEST_ISSUE_LINKS
+            .try_with(Clone::clone)
+            .unwrap_or(None)
+    }
+    #[cfg(not(test))]
+    MCP_REQUEST_ISSUE_LINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_issue_link_context_reads() {
+    TEST_ISSUE_LINK_CONTEXT_READS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn issue_link_context_reads() -> usize {
+    TEST_ISSUE_LINK_CONTEXT_READS.get()
 }
 
 /// Per-session instructions handed to every connected MCP agent via
@@ -379,6 +455,39 @@ mod tests {
         assert!(
             !seen,
             "with_request_user (non-unbound-key callers) must never set the operator flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_request_context_scopes_issue_link_origin() {
+        let context = IssueLinkContext::parse("https://tracker.example/base");
+        let (seen, global_seen) = with_request_context(None, false, context, || async {
+            let scoped = current_issue_link_context()
+                .expect("request origin should be visible")
+                .issue_markdown("LIF-1")
+                .to_string();
+            let global = MCP_REQUEST_ISSUE_LINKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("production request context should also be populated")
+                .issue_markdown("LIF-1")
+                .to_string();
+            (scoped, global)
+        })
+        .await;
+
+        assert_eq!(
+            seen,
+            "[LIF-1](https://tracker.example/base/LIF/issues/LIF-1)"
+        );
+        assert_eq!(global_seen, seen);
+        assert!(current_issue_link_context().is_none());
+        assert!(
+            MCP_REQUEST_ISSUE_LINKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none()
         );
     }
 

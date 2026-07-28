@@ -142,31 +142,25 @@ fn effective_issuer(state: &OAuthState, headers: &HeaderMap) -> String {
     else {
         return state.issuer.clone();
     };
-    match host_header.parse::<axum::http::uri::Authority>() {
-        Ok(authority) if authority.as_str() == host_header => {
-            // Authority.host() keeps IPv6 brackets ("[::1]"); the allowlist
-            // stores bare addresses ("::1").
-            let host = authority.host().trim_start_matches('[').trim_end_matches(']');
-            if state
-                .allowed_hosts
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(host))
-            {
-                // Allowlisted hosts are loopback names (a proxy host only
-                // enters the allowlist via public_url, which makes the issuer
-                // explicit), so plain http matches what the client dialed.
-                format!("http://{host_header}")
-            } else {
-                warn!(
-                    host = %host_header,
-                    issuer = %state.issuer,
-                    "request Host does not match the advertised OAuth issuer; \
-                     set server.public_url for proxied deployments"
-                );
-                state.issuer.clone()
-            }
+    match crate::links::parse_http_authority(host_header) {
+        Some(authority)
+            if crate::links::authority_is_allowlisted(&authority, &state.allowed_hosts) =>
+        {
+            // Allowlisted hosts are loopback names (a proxy host only enters
+            // the allowlist via public_url, which makes the issuer explicit),
+            // so plain http matches what the client dialed.
+            format!("http://{authority}")
         }
-        _ => state.issuer.clone(),
+        Some(_) => {
+            warn!(
+                host = %host_header,
+                issuer = %state.issuer,
+                "request Host does not match the advertised OAuth issuer; \
+                 set server.public_url for proxied deployments"
+            );
+            state.issuer.clone()
+        }
+        None => state.issuer.clone(),
     }
 }
 
