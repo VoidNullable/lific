@@ -21,14 +21,15 @@
     type Page,
     type Plan,
   } from "./api";
-  import { loadCollapsedGroups, saveCollapsedGroups } from "./projectGroups";
+  import { loadCollapsedGroups, saveCollapsedGroups, NEW_GROUP } from "./projectGroups";
   import ProjectIcon from "./ProjectIcon.svelte";
+  import MobileNav from "./MobileNav.svelte";
   import CommandPalette from "./CommandPalette.svelte";
   import ShortcutHelp from "./ShortcutHelp.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, X, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2 } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2 } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
@@ -53,12 +54,13 @@
   // summon it (LIF-192).
   let palette = $state<{ openPalette: () => void } | null>(null);
 
-  // LIF-223: below md the sidebar is an off-canvas drawer. This tracks its
-  // open state; it's meaningless at md+ (the sidebar is statically docked).
-  let drawerOpen = $state(false);
-  function closeDrawer() {
-    drawerOpen = false;
-  }
+  // LIF-349: below md, navigation is a separate full-screen surface
+  // (MobileNav) rather than this sidebar squeezed into a 230px drawer.
+  // Layout still owns the open flag so route changes can dismiss it, and
+  // holds the instance so the header can open it already drilled into the
+  // current project.
+  let navOpen = $state(false);
+  let mobileNav = $state<{ openAt: (p: Project | null) => void } | null>(null);
 
   // LIF-309: only the md+ docked sidebar is resizable; the mobile drawer
   // always remains 230px. Width changes stay in memory until a drag ends.
@@ -150,21 +152,11 @@
 
   onDestroy(restoreSidebarResizeStyles);
 
-  // LIF-272: while the drawer is open, project taps expand/collapse sub-navs
-  // in place instead of navigating (navigation would close the drawer and
-  // dump you on Overview before you ever saw the sub-nav). This tracks which
-  // project is unfolded inside the drawer; it's seeded with the active
-  // project on open so the drawer comes up matching the docked sidebar.
-  let drawerExpandedProject = $state<string | null>(null);
-  function openDrawer() {
-    drawerExpandedProject = activeProject;
-    drawerOpen = true;
-  }
-
-  // Escape dismisses the drawer, and "?" summons the Shortcut Help overlay
-  // from anywhere in the app (LIF-245) — registered as a window listener
-  // via effect because <svelte:window> may only appear at the component's
-  // top level, and our markup is gated behind {#if user}.
+  // "?" summons the Shortcut Help overlay from anywhere in the app
+  // (LIF-245) — registered as a window listener via effect because
+  // <svelte:window> may only appear at the component's top level, and our
+  // markup is gated behind {#if user}. (Escape for the mobile nav is
+  // handled inside MobileNav, which needs to pop a level before closing.)
   //
   // The "?" guard deliberately checks typing/peek/palette directly rather
   // than calling `shortcutsSuppressed()` — that helper also folds in
@@ -173,7 +165,6 @@
   // that), and this toggle works both ways.
   $effect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && drawerOpen) closeDrawer();
       if (
         e.key === "?" &&
         !isTypingContext() &&
@@ -269,7 +260,6 @@
 
   // ── Managing groups ────────────────────────────────────────
   // The id being renamed, or NEW_GROUP while creating one.
-  const NEW_GROUP = -1;
   let editingGroupId = $state<number | null>(null);
   let draftGroupName = $state("");
   // Set when "New group…" came from a project's menu: the project to file
@@ -398,12 +388,12 @@
   });
 
   // Re-fetch projects whenever route changes (catches new/deleted projects).
-  // Also dismiss the mobile drawer on navigation so it never lingers over the
+  // Also dismiss the mobile nav on navigation so it never lingers over the
   // newly-loaded route (LIF-223).
   $effect(() => {
     route; // track route changes
     refreshProjects();
-    closeDrawer();
+    navOpen = false;
   });
 
   $effect(() =>
@@ -667,34 +657,54 @@
   // drag is in flight (collapsing every tree keeps the reorder list compact and
   // unambiguous) and while the user has manually folded it.
   //
-  // LIF-272: in drawer mode the expansion is driven by drawerExpandedProject
-  // instead of route activeness, so any project can be unfolded for browsing
-  // without navigating.
+  // LIF-349: this is now purely the docked sidebar's concern. The mobile
+  // surface pushes to a dedicated pane per project, so LIF-272's
+  // drawer-expansion branch is gone from here.
   function subnavOpen(project: Project): boolean {
     if (dragActive) return false;
-    if (drawerOpen) return drawerExpandedProject === project.identifier;
     return activeProject === project.identifier && !manuallyCollapsed;
   }
 
   // Clicking a project: if it's already the active one, toggle its sub-nav
   // (collapse/expand) in place rather than re-navigating. Otherwise navigate
   // into it, which makes it active and — via the reset effect — expands it.
-  //
-  // LIF-272: while the mobile drawer is open, a project tap NEVER navigates —
-  // it toggles that project's sub-nav so the user can pick the page they
-  // actually want. The drawer stays open until a leaf item is chosen.
   function onProjectClick(project: Project) {
-    if (drawerOpen) {
-      drawerExpandedProject =
-        drawerExpandedProject === project.identifier ? null : project.identifier;
-      return;
-    }
     if (activeProject === project.identifier) {
       manuallyCollapsed = !manuallyCollapsed;
     } else {
       navigate(`/${project.identifier}/overview`);
     }
   }
+
+  // ── Mobile header context (LIF-349) ─────────────────────────
+  // The phone header states where you are rather than repeating the
+  // wordmark, and doubles as a second way into the nav — tapping it opens
+  // MobileNav already showing this project's destinations.
+  let activeProjectRecord = $derived(
+    projects.find(
+      (p) => p.identifier.toLowerCase() === (activeProject ?? "").toLowerCase(),
+    ) ?? null,
+  );
+  let mobileSection = $derived.by(() => {
+    if (route === "/") return "Home";
+    if (isActive("/settings")) return "Settings";
+    if (route === "/projects/new") return "New project";
+    if (!activeProject) return null;
+    const rest = route.slice(activeProject.length + 1);
+    const slug = rest.split("/")[1] ?? "";
+    const labels: Record<string, string> = {
+      overview: "Overview",
+      settings: "Overview",
+      issues: "Issues",
+      board: "Board",
+      modules: "Modules",
+      pages: "Pages",
+      plans: "Plans",
+      activity: "Activity",
+      insights: "Insights",
+    };
+    return labels[slug] ?? null;
+  });
 </script>
 
 {#if loading}
@@ -711,25 +721,13 @@
        INSIDE the content), so in-content elements never merge with the
        chrome surrounding them. -->
   <div class="h-dvh flex overflow-hidden bg-[var(--chrome)]">
-    <!-- Mobile drawer backdrop. Only rendered below md while the drawer is
-         open; tapping it dismisses the drawer (LIF-223). -->
-    {#if drawerOpen}
-      <button
-        class="md:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]"
-        aria-label="Close menu"
-        onclick={closeDrawer}
-      ></button>
-    {/if}
-
     <!-- ── SIDEBAR (LIF-192 redesign) ──────────────────────────
-         Below md it's a fixed off-canvas drawer that slides in over the
-         backdrop; at md+ it docks statically into the flex row as before
-         (LIF-223). -->
+         Desktop only. Below md, navigation is MobileNav — a full-screen
+         drilldown surface with its own structure, not this tree at a
+         narrower width (LIF-349). -->
     <aside
-      class="w-[230px] md:w-[var(--sidebar-w)] shrink-0 flex flex-col bg-[var(--chrome)] select-none
-              fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
-              {drawerOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}
-              md:relative md:z-auto md:translate-x-0 md:shadow-none md:transition-none"
+      class="hidden md:flex w-[var(--sidebar-w)] shrink-0 relative flex-col
+             bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
       <!-- Brand header -->
@@ -753,15 +751,6 @@
             v{__APP_VERSION__}
           </span>
         </a>
-        <!-- Drawer close affordance (mobile only). -->
-        <button
-          class="md:hidden size-9 shrink-0 grid place-items-center rounded-md
-                 text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-          aria-label="Close menu"
-          onclick={closeDrawer}
-        >
-          <X size={18} />
-        </button>
       </div>
 
       <!-- Jump-to / command palette trigger -->
@@ -814,7 +803,7 @@
                      {isProjectActive
                 ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                 : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              aria-expanded={drawerOpen || isProjectActive ? open : undefined}
+              aria-expanded={isProjectActive ? open : undefined}
               onclick={() => onProjectClick(project)}
               oncontextmenu={(e) => openProjectMenu(e, project)}
             >
@@ -1124,24 +1113,65 @@
 
     <!-- Right column: chrome topbar (continuous with sidebar) + inset panel -->
     <div class="flex-1 min-w-0 flex flex-col">
-      <!-- Mobile header (below md only): hamburger summons the drawer, since
-           the sidebar is off-canvas at this width (LIF-223). -->
+      <!-- Mobile header (below md only). The hamburger opens the nav at the
+           project list; the title beside it states where you currently are
+           and opens the nav already showing THAT project's destinations, so
+           moving between a project's sections is one tap plus one, not a
+           trip back through the root (LIF-349). -->
       <header
-        class="md:hidden shrink-0 flex items-center gap-2 h-12 px-2 bg-[var(--chrome)]"
+        class="md:hidden shrink-0 flex items-center gap-1 h-12 px-1
+               pt-[env(safe-area-inset-top)] box-content bg-[var(--chrome)]"
       >
         <button
-          class="size-10 grid place-items-center rounded-md
-                 text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-          aria-label="Open menu"
-          aria-expanded={drawerOpen}
-          onclick={openDrawer}
+          class="size-11 shrink-0 grid place-items-center rounded-lg
+                 text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Open navigation"
+          aria-expanded={navOpen}
+          onclick={() => mobileNav?.openAt(null)}
         >
           <Menu size={20} />
         </button>
-        <img src="/logo.webp" alt="" width="22" height="22" class="rounded-md shrink-0" />
-        <span class="font-display text-heading tracking-tight text-[var(--text)] leading-none">
-          Lific
-        </span>
+        {#if activeProjectRecord}
+          <button
+            class="min-w-0 flex-1 h-11 flex items-center gap-2 px-1.5 rounded-lg text-left
+                   active:bg-[var(--bg-subtle)] transition-colors"
+            onclick={() => mobileNav?.openAt(activeProjectRecord)}
+          >
+            {#if activeProjectRecord.emoji}
+              <span class="size-6 grid place-items-center shrink-0">
+                <ProjectIcon value={activeProjectRecord.emoji} size={18} />
+              </span>
+            {:else}
+              <span
+                class="size-6 rounded-md border border-[var(--border)] bg-[var(--bg-subtle)]
+                       grid place-items-center text-micro font-semibold tracking-tight
+                       shrink-0 text-[var(--text-muted)]"
+              >
+                {activeProjectRecord.identifier.slice(0, 2)}
+              </span>
+            {/if}
+            <span class="min-w-0 flex items-baseline gap-1.5">
+              <span class="truncate font-display text-body-lg tracking-tight text-[var(--text)]">
+                {activeProjectRecord.name}
+              </span>
+              {#if mobileSection}
+                <span class="shrink-0 text-body-sm text-[var(--text-faint)]">
+                  {mobileSection}
+                </span>
+              {/if}
+            </span>
+            <ChevronRight size={14} class="shrink-0 text-[var(--text-faint)]" />
+          </button>
+        {:else}
+          <span class="flex-1 min-w-0 px-1.5 flex items-center gap-2">
+            <img src="/logo.webp" alt="" width="22" height="22" class="rounded-md shrink-0" />
+            <span
+              class="truncate font-display text-heading tracking-tight text-[var(--text)] leading-none"
+            >
+              {mobileSection ?? "Lific"}
+            </span>
+          </span>
+        {/if}
       </header>
 
       <!-- Chrome topbar slot. Routes pass a `topbar` snippet for breadcrumb,
@@ -1192,6 +1222,35 @@
       </div>
     </div>
   </div>
+
+  <!-- LIF-349: the phone's navigation surface. Mounted as a sibling of the
+       app shell (not inside it) because it covers the whole viewport rather
+       than occupying a column, and it lazily mounts itself on first open so
+       desktop sessions never build a second project tree. -->
+  <MobileNav
+    bind:this={mobileNav}
+    bind:open={navOpen}
+    bind:editingGroupId
+    bind:draftGroupName
+    {route}
+    {navigate}
+    {user}
+    {projects}
+    {groups}
+    {projectsIn}
+    ungrouped={ungroupedItems}
+    {collapsedGroups}
+    onToggleGroup={toggleGroup}
+    onOpenPalette={() => palette?.openPalette()}
+    onOpenCreateMenu={openCreateMenu}
+    onProjectMenu={openProjectMenu}
+    onGroupMenu={openGroupMenu}
+    onCommitGroupName={commitGroupName}
+    onCancelGroupEdit={cancelGroupEdit}
+    {themePref}
+    {themeResolved}
+    onCycleTheme={cycleTheme}
+  />
 
   <!-- LIF-159: cmd+k / ctrl+p jump-anywhere. Mounted here (once, above
        routes) so its session catalog cache survives navigation. -->

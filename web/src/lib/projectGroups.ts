@@ -5,6 +5,11 @@
 
 const storageKey = "lific:sidebar:collapsed-groups";
 
+/** Sentinel id standing in for "the group being created but not yet saved".
+ *  Shared by the docked sidebar and the mobile nav, which both render the
+ *  same inline name field against it. */
+export const NEW_GROUP = -1;
+
 export function loadCollapsedGroups(): Set<number> {
   try {
     const raw = localStorage.getItem(storageKey);

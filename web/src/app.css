@@ -344,6 +344,22 @@ html[data-motion="reduced"] *::after {
   scroll-behavior: auto !important;
 }
 
+/* ── Mobile nav swipe surface (LIF-349) ────────────────
+ * The nav's back/dismiss swipe needs the horizontal component of a touch
+ * to reach the page. `touch-action` is not inherited, and the browser
+ * decides what to do with a gesture from the touch-action of the element
+ * actually hit — so setting `pan-y` on the panel alone was not enough:
+ * a touch landing on the inner scroller (touch-action `auto`) let Chrome
+ * claim the horizontal drag for overscroll history navigation and fire
+ * `pointercancel` one move in, killing the gesture. Measured, not
+ * guessed: the probe logged pointerdown → pointermove → pointercancel →
+ * a navigation to about:blank. Declaring it on every descendant leaves
+ * vertical scrolling to the browser and the horizontal axis to us. */
+[data-mobile-nav],
+[data-mobile-nav] * {
+  touch-action: pan-y;
+}
+
 /* ── Base layer ──────────────────────────────────────── */
 
 @layer base {
