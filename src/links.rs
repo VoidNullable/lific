@@ -360,6 +360,23 @@ fn valid_base_url(base_url: &Url) -> bool {
         && base_url.password().is_none()
         && base_url.query().is_none()
         && base_url.fragment().is_none()
+        && markdown_safe_path(base_url.path())
+}
+
+/// A configured base path is written verbatim into a Markdown link
+/// destination. `Url` percent-encodes whitespace and angle brackets there, but
+/// it leaves parentheses alone, so a base path of `/)[x](javascript:0` would
+/// close our destination and open an attacker-chosen second link. Fail closed
+/// to plain text instead, which is how every other malformed input in this
+/// module already degrades.
+///
+/// Only the path is inspected: IPv6 authorities legitimately carry square
+/// brackets (`http://[::1]:8080`), and those never reach a position where they
+/// can terminate the destination.
+fn markdown_safe_path(path: &str) -> bool {
+    !path
+        .chars()
+        .any(|c| matches!(c, '(' | ')' | '[' | ']') || c.is_whitespace() || c.is_control())
 }
 
 fn valid_issue_identifier(project: &str, sequence: &str) -> bool {
@@ -408,6 +425,35 @@ mod tests {
                 "[LIF-42](https://tracker.example/lific/LIF/issues/LIF-42)"
             );
         }
+    }
+
+    #[test]
+    fn base_path_cannot_break_out_of_the_markdown_destination() {
+        // Parentheses survive `Url::parse` unescaped, so without the path
+        // guard this base renders as
+        // `[LIF-42](https://tracker.example/)[evil](javascript:...)`
+        // and smuggles a second, attacker-chosen link past the reader.
+        for hostile in [
+            "https://tracker.example/)[evil](javascript:alert(1",
+            "https://tracker.example/a(b",
+            "https://tracker.example/a[b]c",
+        ] {
+            assert!(
+                IssueLinkContext::parse(hostile).is_none(),
+                "expected {hostile} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_authorities_still_produce_links() {
+        // The path guard must not reject the square brackets an IPv6
+        // authority legitimately carries.
+        let context = IssueLinkContext::parse("http://[::1]:8080").unwrap();
+        assert_eq!(
+            context.issue_markdown("LIF-42").to_string(),
+            "[LIF-42](http://[::1]:8080/LIF/issues/LIF-42)"
+        );
     }
 
     #[test]
