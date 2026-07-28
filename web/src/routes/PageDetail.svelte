@@ -310,7 +310,8 @@
   let breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
     const crumbs: import("../lib/Breadcrumbs.svelte").Crumb[] = [
       { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
-      { label: "Pages", href: `#/${projectIdentifier}/pages` },
+      // Collapsed below sm — the app header already states the section.
+      { label: "Pages", href: `#/${projectIdentifier}/pages`, hideBelowSm: true },
     ];
     if (page?.folder_id != null) {
       const name = folders.find((f) => f.id === page!.folder_id)?.name;

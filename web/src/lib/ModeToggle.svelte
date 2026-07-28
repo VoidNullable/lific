@@ -60,12 +60,13 @@
     data-active={mode === "edit"}
     role="radio"
     aria-checked={mode === "edit"}
+    aria-label="Edit"
     title="Edit (E)"
     {disabled}
     onclick={() => pick("edit")}
   >
     <Pencil size={14} />
-    <span>Edit</span>
+    <span class="mt__label">Edit</span>
   </button>
 
   <button
@@ -74,12 +75,13 @@
     data-active={mode === "read"}
     role="radio"
     aria-checked={mode === "read"}
+    aria-label="Preview"
     title="Preview"
     {disabled}
     onclick={() => pick("read")}
   >
     <Eye size={14} />
-    <span>Preview</span>
+    <span class="mt__label">Preview</span>
   </button>
 </div>
 
@@ -168,6 +170,28 @@
     padding: 0.4375rem 1rem;
     font-size: 0.8125rem;
     letter-spacing: 0.005em;
+  }
+
+  /*
+   * Phones: icon only. At 208px wide with both labels, the toolbar
+   * variant was the single largest item in the detail topbar and shoved
+   * Export, the delete menu, and the props-panel toggle clean off a
+   * 360px screen — measured at 597px of content in a 360px row, with
+   * "Preview" itself sliced in half at the viewport edge.
+   *
+   * Icon-only takes it to ~84px. The accessible name moves to
+   * aria-label on each option so hiding the text costs nothing to a
+   * screen reader, and the pill + active color still carry the state.
+   * Scoped to --sm: the floating variant fixes itself to a corner with
+   * a whole viewport to spare and keeps its labels.
+   */
+  @media (max-width: 639px) {
+    .mt--sm .mt__opt {
+      padding: 0.4375rem 0.75rem;
+    }
+    .mt--sm .mt__label {
+      display: none;
+    }
   }
 
   /* ── Floating variant ─────────────────────────────────

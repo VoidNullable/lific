@@ -447,6 +447,7 @@
     {@render bodyContent()}
   {:else}
     <EditableMarkdown
+      floatingToggle={false}
       bind:this={bodyRef}
       bind:mode={bodyMode}
       value={body}
@@ -495,12 +496,19 @@
 
 {#snippet topbar()}
   {#if !loading && !error}
-    <div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+    <!-- `flex-wrap` below sm is a safety net, not the plan: the zones below
+         are compacted so this row fits a 360px phone, but an unusually long
+         breadcrumb must push controls onto a second line rather than off the
+         screen. Before this, the row was nowrap with `shrink-0` on both
+         zones, so 597px of content in a 360px box simply overflowed and
+         Export, the delete menu, and the props toggle became unreachable
+         with no way to scroll to them. -->
+    <div class="flex flex-wrap sm:flex-nowrap items-center gap-y-1 gap-x-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
       <!-- Left zone: scope. LIF-286: the shared breadcrumb trail replaces the
            back-arrow + "/" + identifier crumb. The trail's parent segment
            links to the list the back-arrow used to target, so the arrow is
            redundant here and dropped; Escape-to-list still works. -->
-      <div class="flex items-center gap-1.5 shrink-0 min-w-0">
+      <div class="flex items-center gap-1.5 min-w-0">
         {#if breadcrumbSegments}
           <Breadcrumbs segments={breadcrumbSegments} />
         {:else}
@@ -512,7 +520,7 @@
       </div>
 
       <!-- Right zone: mode toggle + save indicator + export + menu -->
-      <div class="ml-auto flex items-center gap-2 shrink-0">
+      <div class="ml-auto flex items-center gap-1 sm:gap-2 shrink-0">
         {#if exportError}
           <span class="hidden sm:inline text-caption text-[var(--error)]">{exportError}</span>
         {/if}
@@ -535,9 +543,16 @@
         </span>
 
         {#if onExport}
-          <button class="toolbar-pill" onclick={onExport} disabled={exporting}>
+          <!-- Label collapses below sm; the icon alone is 59px cheaper and
+               this is a secondary action on a phone. -->
+          <button
+            class="toolbar-pill max-sm:px-2"
+            onclick={onExport}
+            disabled={exporting}
+            aria-label={exporting ? "Exporting" : "Export"}
+          >
             <Download size={14} />
-            {exporting ? "Exporting..." : "Export"}
+            <span class="hidden sm:inline">{exporting ? "Exporting..." : "Export"}</span>
           </button>
         {/if}
 

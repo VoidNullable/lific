@@ -33,6 +33,18 @@
   import { ChevronRight } from "lucide-svelte";
 
   let { segments }: { segments: Crumb[] } = $props();
+
+  // A separator belongs between two VISIBLE crumbs. Keying it off its own
+  // segment's `hideBelowSm` alone left a dangling leading "›" below sm
+  // whenever the first crumb was collapsed — visible in every detail
+  // topbar as `› ALP-1`, and costing ~20px in a row that had none to
+  // spare. So a separator also hides below sm when every crumb before it
+  // does: at that point it is not separating anything.
+  let sepHiddenBelowSm = $derived(
+    segments.map((seg, i) =>
+      Boolean(seg.hideBelowSm) || segments.slice(0, i).every((s) => s.hideBelowSm),
+    ),
+  );
 </script>
 
 <nav aria-label="Breadcrumb" class="min-w-0">
@@ -42,7 +54,7 @@
       {#if i > 0}
         <li
           aria-hidden="true"
-          class="shrink-0 flex items-center {seg.hideBelowSm ? 'hidden sm:flex' : ''}"
+          class="shrink-0 flex items-center {sepHiddenBelowSm[i] ? 'hidden sm:flex' : ''}"
         >
           <ChevronRight size={12} class="text-[var(--text-faint)]" />
         </li>

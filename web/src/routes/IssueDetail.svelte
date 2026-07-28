@@ -460,7 +460,10 @@
   backLabel={backText()}
   breadcrumbSegments={[
     { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
-    { label: backText(), href: `#${backHref()}` },
+    // Collapsed below sm: since LIF-349 the app header already reads
+    // "<project>  Issues", so this crumb is duplicated text on a phone and
+    // the detail topbar has no room to spare.
+    { label: backText(), href: `#${backHref()}`, hideBelowSm: true },
     { label: issue?.identifier ?? issueIdentifier, mono: true },
   ]}
   {editable}

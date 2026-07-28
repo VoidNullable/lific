@@ -273,7 +273,10 @@
 
 {#snippet topbarContent()}
   {#if mod}
-    <div class="flex items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+    <!-- Wrap below sm for the same reason as DocumentDetail's topbar: a
+         long module name must push controls to a second line, never off
+         the screen. -->
+    <div class="flex flex-wrap sm:flex-nowrap items-center gap-y-1 gap-x-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
       <!-- LIF-286: shared breadcrumb trail replaces the back-arrow + name.
            The Modules segment links where the back-arrow used to go. -->
       <div class="flex items-center gap-1.5 shrink-0 min-w-0">
@@ -286,7 +289,7 @@
         />
       </div>
 
-      <div class="ml-auto flex items-center gap-2 shrink-0">
+      <div class="ml-auto flex items-center gap-1 sm:gap-2 shrink-0">
         {#if editable && mod.description.trim()}
           <ModeToggle
             mode={descriptionMode}
@@ -505,6 +508,7 @@
           <!-- Description -->
           <section class="mb-10">
             <EditableMarkdown
+              floatingToggle={false}
               bind:this={descriptionRef}
               bind:mode={descriptionMode}
               value={mod.description}

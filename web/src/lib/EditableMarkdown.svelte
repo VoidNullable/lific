@@ -86,6 +86,14 @@
     // straight to this entity. When omitted (e.g. a not-yet-created issue),
     // uploads stay unlinked until the body is saved and re-scanned server-side.
     attachTo = null,
+    // Every current call site pairs this editor with its own ModeToggle in
+    // the route's topbar, and that topbar never scrolls away — so the
+    // floating twin was pure duplication, drawing a second identical
+    // Edit/Preview control over the content at every viewport (verified at
+    // 360, 390 and 1440). On a phone it landed squarely on top of the
+    // comment box. Callers that own a toggle pass false; the default stays
+    // true so a future bare call site is not left with no way to switch.
+    floatingToggle = true,
   }: {
     value: string;
     editable?: boolean;
@@ -98,6 +106,7 @@
     mode?: "read" | "edit";
     saving?: boolean;
     attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
+    floatingToggle?: boolean;
   } = $props();
 
   let fileInputEl = $state<HTMLInputElement | null>(null);
@@ -805,7 +814,7 @@
   -->
 </div>
 
-{#if editable && hasContent}
+{#if editable && hasContent && floatingToggle}
   <ModeToggle
     {mode}
     size="floating"
