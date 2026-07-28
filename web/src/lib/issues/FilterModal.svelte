@@ -53,21 +53,34 @@
 {#if view.filterOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
-    class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center
-           pt-[9dvh] px-4"
+    class="fixed inset-0 z-[100] bg-black/25 flex items-end justify-center
+           sm:items-start sm:pt-[9dvh] sm:px-4"
     onclick={close}
     onkeydown={onKeydown}
   >
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- LIF-227: a bottom sheet on phones. Unlike the search overlays this
+         one has no text input to be buried by the keyboard, and its content
+         is a stack of toggles — so anchoring it to the bottom puts every
+         control inside thumb reach instead of stranding them at the top of
+         a 6-inch screen. -->
     <div
-      class="w-full max-w-[640px] max-h-[82dvh] flex flex-col
-             bg-[var(--surface)] border border-[var(--border)]
-             rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden"
+      class="w-full max-h-[85dvh] flex flex-col
+             bg-[var(--surface)] border-t border-[var(--border)]
+             rounded-t-2xl shadow-[0_-8px_48px_rgba(0,0,0,0.28)] overflow-hidden
+             sm:max-w-[640px] sm:max-h-[82dvh] sm:border sm:rounded-xl
+             sm:shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
       onclick={(e) => e.stopPropagation()}
     >
+      <!-- Grab-handle affordance (phones only; the scrim is the close
+           gesture, this just signals "sheet"). Mirrors PeekPanel. -->
+      <div class="sm:hidden flex justify-center pt-2 pb-0.5 shrink-0">
+        <div class="h-1 w-9 rounded-full bg-[var(--border)]"></div>
+      </div>
+
       <!-- Header -->
       <div
-        class="flex items-center gap-3 px-5 py-3.5 border-b border-[var(--border)]"
+        class="shrink-0 flex items-center gap-3 px-5 py-3.5 border-b border-[var(--border)]"
       >
         <h2 class="text-body-lg font-semibold text-[var(--text)]">Filters</h2>
         {#if filterCount > 0}
@@ -87,7 +100,7 @@
           </button>
         {/if}
         <button
-          class="ml-auto size-7 grid place-items-center rounded-md
+          class="ml-auto size-11 sm:size-7 grid place-items-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
           aria-label="Close filters"
@@ -98,7 +111,10 @@
       </div>
 
       <!-- Body -->
-      <div class="overflow-y-auto px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
+      <div
+        class="flex-1 min-h-0 overflow-y-auto overscroll-contain
+               px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5"
+      >
 
         <!-- STATUS -->
         <section>
@@ -280,8 +296,9 @@
 
       <!-- Footer -->
       <div
-        class="flex items-center gap-3 px-5 py-2.5 border-t border-[var(--border)]
-               text-micro text-[var(--text-faint)]"
+        class="shrink-0 flex items-center gap-3 px-5 py-2.5 border-t border-[var(--border)]
+               text-micro text-[var(--text-faint)]
+               pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:pb-2.5"
       >
         <span class="inline-flex items-center gap-1">
           <kbd class="font-mono">esc</kbd> close

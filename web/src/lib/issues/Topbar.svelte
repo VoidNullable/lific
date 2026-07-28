@@ -408,7 +408,7 @@
     <div class="relative">
       <Tooltip content={view.displayOpen ? null : "Display options"} placement="bottom">
         <button
-          class="size-7 flex items-center justify-center rounded-md
+          class="touch-target size-7 flex items-center justify-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors
                  {view.displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
@@ -503,7 +503,7 @@
     {:else}
       <Tooltip content="Search  ·  /" placement="bottom">
         <button
-          class="size-7 flex items-center justify-center rounded-md
+          class="touch-target size-7 flex items-center justify-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
           onclick={(e) => { e.stopPropagation(); onOpenSearch(); }}

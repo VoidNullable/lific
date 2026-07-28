@@ -47,6 +47,11 @@
     onClear?: () => void;
   } = $props();
 
+  // Same reasoning as CommandPalette: the long form of this placeholder
+  // clips on a phone, where the overlay goes full-screen (LIF-227).
+  let innerWidth = $state(1024);
+  let narrow = $derived(innerWidth < 640);
+
   let query = $state("");
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
@@ -194,21 +199,30 @@
   }
 </script>
 
+<svelte:window bind:innerWidth />
+
 {#if open}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
     class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center
-           pt-[14dvh] px-4"
+           sm:pt-[14dvh] sm:px-4"
     onclick={close}
   >
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- LIF-227: full-screen on phones for the same reason as the command
+         palette — this opens straight into a focused search field, and a
+         bottom sheet would sit under the software keyboard. -->
     <div
-      class="w-full max-w-[520px] bg-[var(--surface)] border border-[var(--border)]
-             rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden"
+      class="w-full h-full flex flex-col bg-[var(--surface)]
+             border-[var(--border)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden
+             sm:h-auto sm:max-w-[520px] sm:border sm:rounded-xl"
       onclick={(e) => e.stopPropagation()}
     >
       <!-- Header / input row -->
-      <div class="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
+      <div
+        class="shrink-0 flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]
+               pt-[max(0.75rem,env(safe-area-inset-top))] sm:pt-3"
+      >
         <Search size={15} class="shrink-0 text-[var(--text-faint)]" />
         <input
           bind:this={inputEl}
@@ -216,17 +230,27 @@
           type="text"
           class="flex-1 bg-transparent border-0 outline-none text-body-lg
                  text-[var(--text)] placeholder:text-[var(--text-faint)]"
-          placeholder={`Search ${projectIdentifier} issues or type ${projectIdentifier}-42…`}
+          placeholder={narrow
+            ? `Search ${projectIdentifier} issues…`
+            : `Search ${projectIdentifier} issues or type ${projectIdentifier}-42…`}
           oninput={onInput}
           onkeydown={onKeydown}
         />
         <kbd
-          class="px-1.5 py-0.5 rounded border border-[var(--border)]
+          class="hidden sm:block px-1.5 py-0.5 rounded border border-[var(--border)]
                  bg-[var(--bg-subtle)] text-[var(--text-faint)]
                  font-mono text-micro leading-none shrink-0"
         >
           esc
         </kbd>
+        <button
+          class="sm:hidden size-11 -mr-2 shrink-0 grid place-items-center rounded-lg
+                 text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Close issue search"
+          onclick={close}
+        >
+          <X size={20} />
+        </button>
       </div>
 
       <!-- Context line: what this modal acts on -->
@@ -249,7 +273,11 @@
       {/if}
 
       <!-- Results -->
-      <div class="max-h-[360px] overflow-y-auto py-1.5" bind:this={listEl}>
+      <div
+        class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1.5
+               sm:flex-none sm:max-h-[360px]"
+        bind:this={listEl}
+      >
         {#if hits.length === 0}
           <p class="px-4 py-6 text-center text-body-sm text-[var(--text-faint)]">
             {searching
@@ -292,8 +320,9 @@
 
       <!-- Footer -->
       <div
-        class="flex items-center gap-3 px-4 py-2.5 border-t border-[var(--border)]
-               text-micro text-[var(--text-faint)]"
+        class="shrink-0 flex items-center gap-3 px-4 py-2.5 border-t border-[var(--border)]
+               text-micro text-[var(--text-faint)]
+               pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:pb-2.5"
       >
         <span class="inline-flex items-center gap-1">
           <kbd class="font-mono">↑↓</kbd> navigate

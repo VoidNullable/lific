@@ -360,6 +360,35 @@ html[data-motion="reduced"] *::after {
   touch-action: pan-y;
 }
 
+/* ── Touch targets (LIF-227) ───────────────────────────
+ * Grows a control's HIT area to the 44px minimum without touching its
+ * visual size or the layout around it: a centred, transparent ::after
+ * that is at least 44x44 and never smaller than the control itself.
+ *
+ * Coarse pointers only. On a mouse a 28px icon button is a fine target,
+ * and inflating every one of them on the desktop would make adjacent
+ * controls in dense toolbars steal each other's clicks for no gain.
+ *
+ * Apply this only to controls with real whitespace around them. Two
+ * 16px controls sitting 8px apart would each claim 44px and overlap by
+ * more than half, so whichever paints last silently eats the other —
+ * a worse outcome than a small but honest target. Dense clusters need
+ * spacing or a different interaction, not this. */
+@media (pointer: coarse) {
+  .touch-target {
+    position: relative;
+  }
+  .touch-target::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+}
+
 /* ── Base layer ──────────────────────────────────────── */
 
 @layer base {

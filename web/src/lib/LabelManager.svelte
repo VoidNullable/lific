@@ -498,7 +498,7 @@
             {/if}
 
             <button
-              class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] shrink-0
+              class="touch-target size-7 grid place-items-center rounded-md text-[var(--text-muted)] shrink-0
                      hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-colors"
               onclick={() => startConfirm(l)}
               aria-label="Delete {l.name}"

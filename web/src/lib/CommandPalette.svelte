@@ -30,7 +30,7 @@
   import ProjectIcon from "./ProjectIcon.svelte";
   import {
     Search, CircleDot, FileText, Layers, FolderClosed, Box, CornerDownLeft,
-    Zap, ChevronRight,
+    Zap, ChevronRight, X,
   } from "lucide-svelte";
   import { tick } from "svelte";
   import StatusIcon from "./StatusIcon.svelte";
@@ -59,6 +59,10 @@
     | { type: "prompt"; action: PaletteAction };
 
   let open = $state(false);
+  // The full placeholder is a 45-character sentence that clips on a phone,
+  // where the overlay is full-screen and the field has no card to sit in.
+  let innerWidth = $state(1024);
+  let narrow = $derived(innerWidth < 640);
   let mode = $state<Mode>({ type: "root" });
   let query = $state("");
   let inputEl = $state<HTMLInputElement | null>(null);
@@ -592,23 +596,34 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} bind:innerWidth />
 
 {#if open}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
     class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center
-           pt-[14dvh] px-4"
+           sm:pt-[14dvh] sm:px-4"
     onclick={hide}
   >
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- LIF-227: full-screen on phones rather than a bottom sheet. The sheet
+         shape is wrong for anything whose first act is to focus a text field:
+         `position: fixed` is anchored to the layout viewport, so the software
+         keyboard slides straight over a bottom-anchored panel and hides the
+         results the user is typing to filter. Taking the whole screen puts
+         the input at the top, above the keyboard, with the results between
+         them — which is also what every native search surface does. -->
     <div
-      class="w-full max-w-[580px] bg-[var(--surface)] border border-[var(--border)]
-             rounded-xl shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden"
+      class="w-full h-full flex flex-col bg-[var(--surface)]
+             border-[var(--border)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden
+             sm:h-auto sm:max-w-[580px] sm:border sm:rounded-xl"
       onclick={(e) => e.stopPropagation()}
     >
       <!-- Input row -->
-      <div class="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
+      <div
+        class="shrink-0 flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]
+               pt-[max(0.75rem,env(safe-area-inset-top))] sm:pt-3"
+      >
         {#if mode.type === "root"}
           <Search size={15} class="shrink-0 text-[var(--text-faint)]" />
         {:else}
@@ -632,17 +647,29 @@
             ? (mode.action.prompt?.placeholder ?? "Type a value…")
             : mode.type === "submenu"
               ? "Filter…"
-              : "Jump or act… (try OMN156, doc 3, or “status”)"}
+              : narrow
+                ? "Jump or act…"
+                : "Jump or act… (try OMN156, doc 3, or “status”)"}
           oninput={onInput}
           onkeydown={onInputKeydown}
         />
+        <!-- The `esc` hint means nothing without a keyboard, so on phones it
+             is swapped for a real close control (LIF-227). -->
         <kbd
-          class="px-1.5 py-0.5 rounded border border-[var(--border)]
+          class="hidden sm:block px-1.5 py-0.5 rounded border border-[var(--border)]
                  bg-[var(--bg-subtle)] text-[var(--text-faint)]
                  font-mono text-micro leading-none shrink-0"
         >
           esc
         </kbd>
+        <button
+          class="sm:hidden size-11 -mr-2 shrink-0 grid place-items-center rounded-lg
+                 text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
+          aria-label="Close search"
+          onclick={hide}
+        >
+          <X size={20} />
+        </button>
       </div>
 
       <!-- Results -->
@@ -651,7 +678,11 @@
           Enter to save · Esc to cancel
         </p>
       {:else}
-      <div class="max-h-[420px] overflow-y-auto py-1.5" bind:this={listEl}>
+      <div
+        class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-1.5
+               pb-[env(safe-area-inset-bottom)] sm:flex-none sm:pb-1.5 sm:max-h-[420px]"
+        bind:this={listEl}
+      >
         {#if flatItems.length === 0}
           <p class="px-4 py-6 text-center text-body-sm text-[var(--text-faint)]">
             {searching

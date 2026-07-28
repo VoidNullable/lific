@@ -39,20 +39,27 @@
 {#if shortcutHelpState.open}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div
-    class="fixed inset-0 z-[100] bg-black/25 flex items-start justify-center
-           pt-[10dvh] px-4"
+    class="fixed inset-0 z-[100] bg-black/25 flex items-end justify-center
+           sm:items-start sm:pt-[10dvh] sm:px-4"
     onclick={closeShortcutHelp}
   >
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+    <!-- LIF-227: bottom sheet on phones. Read-only reference content, no
+         input, so nothing here fights the keyboard. -->
     <div
-      class="w-full max-w-[560px] max-h-[76dvh] flex flex-col bg-[var(--surface)]
-             border border-[var(--border)] rounded-xl
-             shadow-[0_16px_48px_rgba(0,0,0,0.28)] overflow-hidden"
+      class="w-full max-h-[85dvh] flex flex-col bg-[var(--surface)]
+             border-t border-[var(--border)] rounded-t-2xl
+             shadow-[0_-8px_48px_rgba(0,0,0,0.28)] overflow-hidden
+             sm:max-w-[560px] sm:max-h-[76dvh] sm:border sm:rounded-xl
+             sm:shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
       onclick={(e) => e.stopPropagation()}
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"
     >
+      <div class="sm:hidden flex justify-center pt-2 pb-0.5 shrink-0">
+        <div class="h-1 w-9 rounded-full bg-[var(--border)]"></div>
+      </div>
       <div class="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border)] shrink-0">
         <span class="flex-1 text-body-lg font-medium text-[var(--text)]">
           Keyboard shortcuts
@@ -65,7 +72,7 @@
           esc
         </kbd>
         <button
-          class="size-6 flex items-center justify-center rounded-md
+          class="size-11 sm:size-6 flex items-center justify-center rounded-md
                  text-[var(--text-faint)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
           aria-label="Close"
@@ -75,7 +82,11 @@
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-4 grid sm:grid-cols-2 gap-x-6 gap-y-5">
+      <div
+        class="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4
+               grid sm:grid-cols-2 gap-x-6 gap-y-5
+               pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-4"
+      >
         {#each grouped as group (group.scope)}
           <div>
             <div

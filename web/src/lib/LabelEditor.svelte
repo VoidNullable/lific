@@ -154,7 +154,7 @@
 
     {#if editable}
       <button
-        class="size-5 rounded border border-dashed border-[var(--border)]
+        class="touch-target size-5 rounded border border-dashed border-[var(--border)]
                text-[var(--text-faint)] hover:border-[var(--accent)]
                hover:text-[var(--accent)] flex items-center justify-center
                transition-colors"

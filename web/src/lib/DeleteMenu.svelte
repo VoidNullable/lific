@@ -51,7 +51,7 @@
 
 <div class="relative">
   <button
-    class="size-7 flex items-center justify-center rounded-md
+    class="touch-target size-7 flex items-center justify-center rounded-md
            text-[var(--text-faint)] hover:text-[var(--text)]
            hover:bg-[var(--bg-subtle)] transition-colors"
     title="More actions"

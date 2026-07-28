@@ -1628,7 +1628,7 @@
               {#if canEdit}
                 <Tooltip content="New {status} issue" placement="bottom">
                   <button
-                    class="size-5 flex items-center justify-center rounded
+                    class="touch-target size-5 flex items-center justify-center rounded
                            text-[var(--text-faint)] hover:text-[var(--accent)]
                            hover:bg-[var(--bg-subtle)] transition-colors"
                     onclick={() =>
