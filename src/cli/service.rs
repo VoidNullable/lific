@@ -208,6 +208,50 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// The launchd domain every `launchctl` invocation below is addressed to:
+/// `gui/<uid>`, the current user's GUI session.
+///
+/// This is the crate's only use of `libc` outside the `#[cfg(unix)]` SIGPIPE
+/// setup in `main.rs`, and `libc` is declared as a unix-only dependency. The
+/// non-unix arm exists so the crate still *typechecks* on Windows, where
+/// `detect()` never yields `Manager::Launchd` and none of this can run
+/// (reported as GitHub #20: v2.4.0 failed to compile on Windows because five
+/// `libc::getuid()` call sites were spread through this module unguarded).
+///
+/// It returns an error rather than `unreachable!()` because `Manager` is a
+/// public enum: a caller can construct `Launchd` on any platform, and a
+/// wrong-platform request deserves a message, not a panic.
+#[cfg(unix)]
+fn launchd_domain() -> Result<String, String> {
+    // POSIX guarantees getuid() always succeeds and sets no errno.
+    Ok(format!("gui/{}", unsafe { libc::getuid() }))
+}
+
+#[cfg(not(unix))]
+fn launchd_domain() -> Result<String, String> {
+    Err("launchd services are only available on macOS".to_string())
+}
+
+/// Load (or reload) the LaunchAgent at `path` into the user's GUI domain.
+///
+/// Shared by [`install`] and [`restart`], which perform an identical dance:
+/// boot out any already-loaded copy, bootstrap the new one, and fall back to
+/// the legacy `launchctl load -w` on macOS versions without `bootstrap`.
+fn launchd_bootstrap(path: &Path) -> Result<(), String> {
+    let domain = launchd_domain()?;
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
+        .output();
+    let boot = Command::new("launchctl")
+        .args(["bootstrap", &domain, &path.display().to_string()])
+        .output()
+        .map_err(|e| format!("launchctl failed to run: {e}"))?;
+    if !boot.status.success() {
+        run_ok("launchctl", &["load", "-w", &path.display().to_string()])?;
+    }
+    Ok(())
+}
+
 /// Outcome of an install, for both human and JSON output.
 #[derive(Debug, serde::Serialize)]
 pub struct InstallReport {
@@ -253,20 +297,7 @@ pub fn install(manager: Manager, plan: &ServicePlan) -> Result<InstallReport, St
         Manager::Launchd => {
             std::fs::write(&path, launchd_plist(plan))
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            let uid = unsafe { libc::getuid() };
-            let domain = format!("gui/{uid}");
-            // Modern bootstrap; if the agent is already loaded, re-bootstrap by
-            // booting out first. Fall back to legacy `load -w` on older macOS.
-            let _ = Command::new("launchctl")
-                .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
-                .output();
-            let boot = Command::new("launchctl")
-                .args(["bootstrap", &domain, &path.display().to_string()])
-                .output()
-                .map_err(|e| format!("launchctl failed to run: {e}"))?;
-            if !boot.status.success() {
-                run_ok("launchctl", &["load", "-w", &path.display().to_string()])?;
-            }
+            launchd_bootstrap(&path)?;
             Ok(InstallReport {
                 manager: manager.label().into(),
                 definition: path.display().to_string(),
@@ -296,9 +327,9 @@ pub fn uninstall(manager: Manager) -> Result<String, String> {
                 .output();
         }
         Manager::Launchd => {
-            let uid = unsafe { libc::getuid() };
+            let domain = launchd_domain()?;
             let _ = Command::new("launchctl")
-                .args(["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+                .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
                 .output();
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -326,14 +357,11 @@ pub fn status(manager: Manager) -> Result<StatusReport, String> {
             .status()
             .map(|s| s.success())
             .unwrap_or(false),
-        Manager::Launchd => {
-            let uid = unsafe { libc::getuid() };
-            Command::new("launchctl")
-                .args(["print", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
+        Manager::Launchd => Command::new("launchctl")
+            .args(["print", &format!("{}/{LAUNCHD_LABEL}", launchd_domain()?)])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false),
     };
     Ok(StatusReport {
         manager: manager.label().into(),
@@ -348,10 +376,10 @@ pub fn stop(manager: Manager) -> Result<(), String> {
     match manager {
         Manager::SystemdUser => run_ok("systemctl", &["--user", "stop", SYSTEMD_UNIT_NAME]),
         Manager::Launchd => {
-            let uid = unsafe { libc::getuid() };
+            let domain = launchd_domain()?;
             run_ok(
                 "launchctl",
-                &["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")],
+                &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
             )
         }
     }
@@ -361,22 +389,7 @@ pub fn stop(manager: Manager) -> Result<(), String> {
 pub fn restart(manager: Manager) -> Result<(), String> {
     match manager {
         Manager::SystemdUser => run_ok("systemctl", &["--user", "restart", SYSTEMD_UNIT_NAME]),
-        Manager::Launchd => {
-            let path = definition_path(manager)?;
-            let uid = unsafe { libc::getuid() };
-            let domain = format!("gui/{uid}");
-            let _ = Command::new("launchctl")
-                .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
-                .output();
-            let boot = Command::new("launchctl")
-                .args(["bootstrap", &domain, &path.display().to_string()])
-                .output()
-                .map_err(|e| format!("launchctl failed to run: {e}"))?;
-            if !boot.status.success() {
-                run_ok("launchctl", &["load", "-w", &path.display().to_string()])?;
-            }
-            Ok(())
-        }
+        Manager::Launchd => launchd_bootstrap(&definition_path(manager)?),
     }
 }
 
@@ -490,6 +503,23 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("cannot resolve config path"), "got: {err}");
+    }
+
+    // The five launchctl call sites used to inline `gui/{uid}` themselves; they
+    // now share this one helper, so its shape is what keeps `launchctl` able to
+    // address the agent. (The non-unix arm is what makes the crate compile on
+    // Windows at all - GitHub #20 - and is covered by CI's windows job.)
+    #[cfg(unix)]
+    #[test]
+    fn launchd_domain_addresses_the_current_users_gui_session() {
+        let domain = launchd_domain().unwrap();
+        let uid = domain
+            .strip_prefix("gui/")
+            .unwrap_or_else(|| panic!("expected gui/<uid>, got: {domain}"));
+        assert!(
+            !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()),
+            "expected gui/<uid>, got: {domain}"
+        );
     }
 
     #[test]
