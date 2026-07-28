@@ -1,28 +1,37 @@
 ---
 title: Windows
-description: Run Lific on Windows natively with Cargo, or under WSL 2.
+description: Run Lific on Windows from a release binary, with Cargo, or under WSL 2.
 ---
 
-Lific runs natively on Windows. The server, web UI, CLI, REST API, MCP server, and backups all work. SQLite is bundled into the binary. Credentials are stored in the Windows Credential Manager.
+Lific runs natively on Windows. The server, web UI, CLI, REST API, MCP server, and backups all work. SQLite is bundled into the binary. Credentials are stored in the Windows Credential Manager. Every release ships a Windows binary, and CI runs the full test suite on Windows.
 
-Two features are not available on native Windows:
-
-- There is no prebuilt Windows binary on GitHub Releases. Install with Cargo instead.
-- There is no Windows service integration. `lific service` commands require systemd or launchd. Use Task Scheduler or a terminal to keep the server running.
+One feature is not available on native Windows: there is no Windows service integration. `lific service` commands require systemd or launchd. Use Task Scheduler or a terminal to keep the server running.
 
 There are two setup paths. Native setup runs Lific directly on Windows. WSL 2 runs the Linux binary and adds systemd service support.
 
 ## Native setup
 
-### Install the Rust toolchain
+### Install Lific
 
-Install rustup from [rustup.rs](https://rustup.rs). Use the default MSVC host toolchain (`stable-x86_64-pc-windows-msvc`).
+Download `lific-windows-x86_64.exe` from [GitHub Releases](https://github.com/VoidNullable/lific/releases), rename it to `lific.exe`, and put it in a directory on your `PATH`. Each release also publishes `sha256sums.txt`; verify the download against it:
 
-The MSVC toolchain needs the Visual Studio Build Tools. The rustup installer offers to install them. If you skip that step, install the "Desktop development with C++" workload from the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) installer.
+```powershell
+Get-FileHash lific-windows-x86_64.exe -Algorithm SHA256
+```
+
+Confirm the install:
+
+```powershell
+lific --version
+```
+
+### Install with Cargo instead
+
+Building from crates.io works too, and is the path to take if you want a binary for an architecture the releases do not cover.
+
+Install rustup from [rustup.rs](https://rustup.rs). Use the default MSVC host toolchain (`stable-x86_64-pc-windows-msvc`), which needs the Visual Studio Build Tools. The rustup installer offers to install them; if you skip that step, install the "Desktop development with C++" workload from the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) installer.
 
 Lific requires Rust 1.88 or later.
-
-### Install Lific
 
 ```powershell
 cargo install lific
@@ -30,11 +39,7 @@ cargo install lific
 
 The crates.io package includes the prebuilt web UI. Bun is not required for this step. Compilation takes several minutes.
 
-The binary is installed to `%USERPROFILE%\.cargo\bin\lific.exe`. rustup adds that directory to `PATH`. Confirm the install:
-
-```powershell
-lific --version
-```
+The binary is installed to `%USERPROFILE%\.cargo\bin\lific.exe`. rustup adds that directory to `PATH`.
 
 ### Initialize the instance
 
@@ -76,7 +81,7 @@ From here the [Quickstart](/docs/quickstart) applies unchanged: create an accoun
 Lific does not register a Windows service. Task Scheduler can start the server at logon. In PowerShell:
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "$env:USERPROFILE\.cargo\bin\lific.exe" -Argument "start"
+$action = New-ScheduledTaskAction -Execute (Get-Command lific).Source -Argument "start"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName "Lific" -Action $action -Trigger $trigger
 ```

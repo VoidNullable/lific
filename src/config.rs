@@ -330,6 +330,21 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// An absolute `database.path` literal for the host platform.
+    ///
+    /// Anchoring only rewrites *relative* paths, so any test asserting that an
+    /// absolute path survives untouched has to spell one the host actually
+    /// considers absolute. `/srv/lific/lific.db` qualifies on unix but is
+    /// merely drive-relative on Windows, where anchoring correctly resolves it
+    /// against the config file's drive and the assertion would fail on a
+    /// fixture detail rather than on behavior.
+    #[cfg(unix)]
+    const ABSOLUTE_DB_PATH: &str = "/srv/lific/lific.db";
+    /// Forward slashes on purpose: Windows accepts them as separators, and a
+    /// backslash would need escaping inside the TOML fixtures below.
+    #[cfg(not(unix))]
+    const ABSOLUTE_DB_PATH: &str = "C:/srv/lific/lific.db";
+
     #[test]
     fn defaults_are_sensible() {
         let config = Config::default();
@@ -360,7 +375,7 @@ port = 9999
 host = "127.0.0.1"
 
 [database]
-path = "/tmp/custom.db"
+path = "{ABSOLUTE_DB_PATH}"
 
 [backup]
 enabled = false
@@ -371,7 +386,7 @@ enabled = false
         let config = Config::load(Some(&path));
         assert_eq!(config.server.port, 9999);
         assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.database.path, PathBuf::from("/tmp/custom.db"));
+        assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
         assert!(!config.backup.enabled);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -399,10 +414,10 @@ enabled = false
         let dir = std::env::temp_dir().join(format!("lific_cfg_abs_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lific.toml");
-        std::fs::write(&path, "[database]\npath = \"/srv/lific/lific.db\"\n").unwrap();
+        std::fs::write(&path, format!("[database]\npath = \"{ABSOLUTE_DB_PATH}\"\n")).unwrap();
 
         let config = Config::load(Some(&path));
-        assert_eq!(config.database.path, PathBuf::from("/srv/lific/lific.db"));
+        assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
 
         std::fs::remove_dir_all(&dir).ok();
     }

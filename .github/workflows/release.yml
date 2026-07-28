@@ -112,6 +112,14 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: lific-macos-aarch64
+          # MSVC rather than GNU: it is rustup's default host toolchain on
+          # Windows and carries no mingw runtime dependency. `cross` cannot
+          # target MSVC, so this builds natively on a Windows runner. `ext`
+          # is empty on every other entry and renders as nothing.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: lific-windows-x86_64
+            ext: .exe
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -144,13 +152,14 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/lific ${{ matrix.name }}
+        run: cp target/${{ matrix.target }}/release/lific${{ matrix.ext }} ${{ matrix.name }}${{ matrix.ext }}
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}
+          path: ${{ matrix.name }}${{ matrix.ext }}
 
   release:
     needs: [verify, build]
@@ -200,6 +209,7 @@ jobs:
             binaries/lific-linux-aarch64 \
             binaries/lific-macos-x86_64 \
             binaries/lific-macos-aarch64 \
+            binaries/lific-windows-x86_64.exe \
             binaries/sha256sums.txt
 
       # Belt-and-suspenders against gh's occasional draft-fallback at create

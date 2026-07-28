@@ -15,8 +15,7 @@ Release binaries are published on [GitHub Releases](https://github.com/VoidNulla
 | Linux aarch64 | `lific-linux-aarch64` |
 | macOS x86_64 | `lific-macos-x86_64` |
 | macOS aarch64 | `lific-macos-aarch64` |
-
-There is no prebuilt Windows binary. Windows is supported through `cargo install` or WSL 2. [Windows](/docs/windows) covers both paths step by step.
+| Windows x86_64 | `lific-windows-x86_64.exe` |
 
 Download the file for your platform. Compare it with the matching entry in `sha256sums.txt`. On Unix systems, make the downloaded file executable and place it in a directory on your `PATH`.
 
@@ -24,6 +23,8 @@ Download the file for your platform. Compare it with the matching entry in `sha2
 chmod +x lific-linux-x86_64
 ./lific-linux-x86_64 --help
 ```
+
+On Windows, put `lific-windows-x86_64.exe` somewhere on your `PATH` and rename it to `lific.exe`. [Windows](/docs/windows) covers that platform in full, including WSL 2.
 
 ## Install with Cargo
 

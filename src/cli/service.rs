@@ -113,9 +113,12 @@ pub fn detect() -> Option<Manager> {
 
 /// Where the service definition file lives for this user.
 pub fn definition_path(manager: Manager) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HOME is not set".to_string())?;
+    // `dirs::home_dir()` rather than a raw `HOME` read: it is what the rest of
+    // the crate uses (config.rs, credentials.rs, connect), it falls back to the
+    // passwd entry when `HOME` is unset (which happens in some service and cron
+    // contexts, where "HOME is not set" was a confusing way to fail), and it
+    // resolves on Windows too, where a raw `HOME` read always came up empty.
+    let home = dirs::home_dir().ok_or_else(|| "cannot determine your home directory".to_string())?;
     Ok(match manager {
         Manager::SystemdUser => home
             .join(".config")

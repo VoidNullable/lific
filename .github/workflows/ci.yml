@@ -33,28 +33,31 @@ jobs:
         run: cargo test --all-targets
 
   windows:
-    # The docs tell Windows users to `cargo install lific` (service integration
-    # aside), but nothing verified that claim: the release matrix builds only
-    # Linux and macOS. v2.4.0 shipped unable to compile on Windows at all,
-    # because `src/cli/service.rs` called the unix-only `libc::getuid()`
-    # without a cfg guard (GitHub #20). This job exists solely to keep the
-    # crate typechecking for that target.
-    #
-    # `cargo check`, not `cargo test`: the test suite assumes unix conventions
-    # (HOME, `/`-rooted fixture paths), so making it pass on Windows is a
-    # separate piece of work. Compilation is the regression being guarded.
+    # Windows ships a release binary, so it gets the same gate as Linux rather
+    # than a compile-only smoke check. Nothing verified the platform at all
+    # until v2.4.0 turned out not to compile there: `src/cli/service.rs` called
+    # the unix-only `libc::getuid()` with no cfg guard, and the release matrix
+    # built only Linux and macOS, so no job would ever have noticed (GitHub
+    # #20). A `cargo check` would have caught that one bug and nothing about
+    # runtime behavior, which is the more interesting half on a platform none
+    # of the maintainers develop on.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
 
       - name: Ensure web/dist exists for rust-embed
         run: mkdir -p web/dist
         shell: bash
 
-      - name: Check
-        run: cargo check --all-targets
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets
 
   docs:
     runs-on: ubuntu-latest
