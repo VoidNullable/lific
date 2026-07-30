@@ -29,7 +29,7 @@
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2 } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
@@ -45,6 +45,8 @@
     clampSidebarWidth,
     loadSidebarWidth,
     saveSidebarWidth,
+    loadSidebarCollapsed,
+    saveSidebarCollapsed,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MAX_WIDTH,
     SIDEBAR_MIN_WIDTH,
@@ -152,6 +154,17 @@
 
   onDestroy(restoreSidebarResizeStyles);
 
+  // LIF-360: the docked sidebar can be folded away on desktop. It stays
+  // mounted (display:none) rather than being torn down, so the project tree,
+  // its scroll position, and the collapsed-group state all survive a toggle.
+  // Below md this flag is inert: navigation there is MobileNav, which the
+  // sidebar's `hidden` base class already defers to.
+  let sidebarCollapsed = $state(loadSidebarCollapsed());
+  function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    saveSidebarCollapsed(sidebarCollapsed);
+  }
+
   // "?" summons the Shortcut Help overlay from anywhere in the app
   // (LIF-245) — registered as a window listener via effect because
   // <svelte:window> may only appear at the component's top level, and our
@@ -174,6 +187,15 @@
       ) {
         e.preventDefault();
         toggleShortcutHelp();
+        return;
+      }
+
+      // LIF-360: ⌘/Ctrl + \ folds the desktop sidebar away. It's a modifier
+      // chord, so unlike the bare "?" it stays live while typing. That's the
+      // contract every editor gives its sidebar toggle.
+      if (e.key === "\\" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        toggleSidebar();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -726,8 +748,8 @@
          drilldown surface with its own structure, not this tree at a
          narrower width (LIF-349). -->
     <aside
-      class="hidden md:flex w-[var(--sidebar-w)] shrink-0 relative flex-col
-             bg-[var(--chrome)] select-none"
+      class="{sidebarCollapsed ? 'hidden' : 'hidden md:flex'} w-[var(--sidebar-w)]
+             shrink-0 relative flex-col bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
       <!-- Brand header -->
@@ -751,6 +773,19 @@
             v{__APP_VERSION__}
           </span>
         </a>
+        <!-- LIF-360: collapse control. Sits beside the brand rather than in
+             the footer so its position mirrors the expand control that takes
+             its place in the topbar. -->
+        <button
+          class="size-7 shrink-0 grid place-items-center rounded-md
+                 text-[var(--text-faint)] hover:text-[var(--text)]
+                 hover:bg-[var(--bg-subtle)] transition-colors"
+          onclick={toggleSidebar}
+          title="Collapse sidebar  ·  ⌘\\"
+          aria-label="Collapse sidebar"
+        >
+          <PanelLeftClose size={15} />
+        </button>
       </div>
 
       <!-- Jump-to / command palette trigger -->
@@ -1177,14 +1212,37 @@
       <!-- Chrome topbar slot. Routes pass a `topbar` snippet for breadcrumb,
            filters, search, etc. Background matches the sidebar so the L is
            visually seamless. -->
-      {#if topbarSnippet}
+      {#if topbarSnippet || sidebarCollapsed}
         <!-- The topbar deliberately uses muted text/icon colors so it
              reads as quieter than the content panel below. We avoid
              `opacity` for the dimming effect because it creates a CSS
              stacking context that traps absolutely-positioned dropdowns
              (filters, display, help popovers) BEHIND the content panel. -->
         <div class="shrink-0 flex items-stretch min-h-0 bg-[var(--chrome)]">
-          {@render topbarSnippet()}
+          {#if sidebarCollapsed}
+            <!-- LIF-360: with the sidebar folded away this is the only way
+                 back to it besides the shortcut, so it leads the topbar. It
+                 renders even on routes that supply no topbar snippet, which
+                 is why the row above is no longer gated on the snippet
+                 alone. -->
+            <div class="hidden md:flex items-center shrink-0 pl-2 pr-0.5 py-2">
+              <button
+                class="size-7 grid place-items-center rounded-md
+                       text-[var(--text-faint)] hover:text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors"
+                onclick={toggleSidebar}
+                title="Expand sidebar  ·  ⌘\\"
+                aria-label="Expand sidebar"
+              >
+                <PanelLeftOpen size={15} />
+              </button>
+            </div>
+          {/if}
+          {#if topbarSnippet}
+            <div class="flex-1 min-w-0 flex items-stretch">
+              {@render topbarSnippet()}
+            </div>
+          {/if}
         </div>
       {/if}
 
@@ -1214,11 +1272,15 @@
                  bg-gradient-to-b from-[var(--shadow-recess)] to-transparent"
         ></div>
         <!-- Left edge: TL → BL. Only meaningful at md+ where the sidebar is
-             docked to cast the shadow; on mobile there's nothing to its left. -->
-        <div
-          class="hidden md:block pointer-events-none absolute top-0 left-0 bottom-0 w-6 z-10
-                 bg-gradient-to-r from-[var(--shadow-recess)] to-transparent"
-        ></div>
+             docked to cast the shadow; on mobile there's nothing to its left,
+             and neither is there once the sidebar is collapsed (LIF-360), so
+             the gradient would read as a vignette against the viewport edge. -->
+        {#if !sidebarCollapsed}
+          <div
+            class="hidden md:block pointer-events-none absolute top-0 left-0 bottom-0 w-6 z-10
+                   bg-gradient-to-r from-[var(--shadow-recess)] to-transparent"
+          ></div>
+        {/if}
       </div>
     </div>
   </div>

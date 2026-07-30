@@ -45,6 +45,7 @@ export const SHORTCUTS: ShortcutEntry[] = [
   // ── Global (Layout.svelte) ───────────────────────────────
   { keys: "⌘ K", label: "Open command palette", scope: "global" },
   { keys: "⌘ P", label: "Open command palette", scope: "global" },
+  { keys: "⌘ \\", label: "Collapse or expand the sidebar", scope: "global" },
   { keys: "?", label: "Show this shortcut list", scope: "global" },
   { keys: "Esc", label: "Close the open dialog", scope: "global" },
 
