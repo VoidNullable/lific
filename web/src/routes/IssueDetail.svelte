@@ -28,7 +28,7 @@
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
-  import { ArrowUpRight } from "lucide-svelte";
+  import { ArrowUpRight, ChevronDown } from "lucide-svelte";
 
   let {
     navigate,
@@ -84,6 +84,10 @@
   // lives inside DocumentDetail).
   let bodyMode = $state<"read" | "edit">("read");
   let statusOpen = $state(false);
+  // LIF-359: the topbar's status chip is its own picker. It shares STATUSES
+  // and setStatus with the sidebar field but needs a separate open flag so
+  // the two menus can't be open at once.
+  let headerStatusOpen = $state(false);
   let priorityOpen = $state(false);
   let moduleOpen = $state(false);
   let labelsOpen = $state(false);
@@ -115,6 +119,7 @@
   $effect(() => {
     const id = issueIdentifier;
     statusOpen = false;
+    headerStatusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
@@ -182,6 +187,7 @@
   // DeleteMenu manage their own outside-click close.)
   function handleWindowClick() {
     statusOpen = false;
+    headerStatusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
     labelsOpen = false;
@@ -189,6 +195,7 @@
 
   function closeOtherDropdowns() {
     statusOpen = false;
+    headerStatusOpen = false;
     priorityOpen = false;
     moduleOpen = false;
   }
@@ -269,6 +276,7 @@
 
   async function setStatus(value: string) {
     statusOpen = false;
+    headerStatusOpen = false;
     if (issue && value !== issue.status) {
       await saveFieldWithUndo({ status: value }, { status: issue.status });
     }
@@ -497,12 +505,48 @@
   {#snippet breadcrumbExtra()}
     {#if issue}
       <span class="text-[var(--text-faint)]">/</span>
-      <span class="flex items-center gap-1.5 text-body-sm">
-        <StatusIcon status={issue.status} size={13} />
-        <span class="capitalize" style="color: {statusCssColor(issue.status)}">
-          {issue.status}
-        </span>
-      </span>
+      <!-- LIF-359: everywhere else in the app a visible status is also the
+           control that changes it, so this chip is a picker rather than a
+           read-only echo of the sidebar field. Viewers keep the plain chip. -->
+      <div class="relative shrink-0">
+        <button
+          class="flex items-center gap-1.5 text-body-sm rounded-md px-1.5 py-0.5 -mx-1.5
+                 transition-colors
+                 {editable ? 'hover:bg-[var(--bg-subtle)] cursor-pointer' : 'cursor-default'}"
+          aria-haspopup={editable ? "menu" : undefined}
+          aria-expanded={editable ? headerStatusOpen : undefined}
+          title={editable ? "Change status" : `Status: ${issue.status}`}
+          onclick={(e) => {
+            if (!editable) return;
+            e.stopPropagation();
+            headerStatusOpen = !headerStatusOpen;
+            statusOpen = false;
+            priorityOpen = false;
+            moduleOpen = false;
+            labelsOpen = false;
+          }}
+        >
+          <StatusIcon status={issue.status} size={13} />
+          <span class="capitalize" style="color: {statusCssColor(issue.status)}">
+            {issue.status}
+          </span>
+          {#if editable}
+            <ChevronDown size={11} class="text-[var(--text-faint)] shrink-0" />
+          {/if}
+        </button>
+        {#if headerStatusOpen}
+          <div
+            class="absolute left-0 top-full mt-1.5 z-30 w-[180px]
+                   bg-[var(--surface)] border border-[var(--border)]
+                   rounded-md shadow-lg py-1"
+            role="presentation"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => e.stopPropagation()}
+          >
+            {@render statusOptions()}
+          </div>
+        {/if}
+      </div>
       {#if !editable && projectRole.enforced}
         <!-- LIF-234: viewer read-only cue, in the topbar breadcrumb. -->
         <span class="text-micro font-medium px-1.5 py-0.5 rounded-full text-[var(--text-muted)] bg-[var(--bg-subtle)]"
@@ -544,19 +588,7 @@
                 onclick={(e) => e.stopPropagation()}
                 onkeydown={(e) => e.stopPropagation()}
               >
-                {#each STATUSES as s}
-                  <button
-                    class="w-full flex items-center gap-2 px-3 py-1.5 text-left
-                           text-body-sm transition-colors
-                           {s.value === issue.status
-                      ? 'text-[var(--accent)] bg-[var(--accent-subtle)]'
-                      : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                    onclick={() => setStatus(s.value)}
-                  >
-                    <StatusIcon status={s.value} size={14} />
-                    {s.label}
-                  </button>
-                {/each}
+                {@render statusOptions()}
               </div>
             {/if}
           </div>
@@ -786,6 +818,24 @@
 
 {#snippet sidebarField(label: string)}
   <p class="issue-meta-field-label">{label}</p>
+{/snippet}
+
+<!-- LIF-359: one option list, rendered into both the topbar chip's menu and
+     the sidebar field's menu, so the two pickers can't drift apart. -->
+{#snippet statusOptions()}
+  {#each STATUSES as s (s.value)}
+    <button
+      class="w-full flex items-center gap-2 px-3 py-1.5 text-left
+             text-body-sm transition-colors
+             {s.value === issue?.status
+        ? 'text-[var(--accent)] bg-[var(--accent-subtle)]'
+        : 'text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+      onclick={() => setStatus(s.value)}
+    >
+      <StatusIcon status={s.value} size={14} />
+      {s.label}
+    </button>
+  {/each}
 {/snippet}
 
 <script lang="ts" module>
