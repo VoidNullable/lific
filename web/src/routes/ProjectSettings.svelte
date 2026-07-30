@@ -33,17 +33,17 @@
   import { formatDate } from "../lib/format";
   import TimeAgo from "../lib/TimeAgo.svelte";
   import {
-    ChevronRight, Download, Pencil, Copy, Check, ArrowRight, History,
+    ChevronRight, Download, Pencil, Check, ArrowRight, History,
     AlertTriangle, ChevronDown,
   } from "lucide-svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
+  import CopyIdButton from "../lib/CopyIdButton.svelte";
   import { getContext } from "svelte";
   // LIF-234: role-aware affordance gating. `canManage` = lead/admin (or
   // enforcement off) — settings edits, danger zone, members, and import are
   // all lead-level. `canEdit` = maintainer/admin — label management.
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
-  import { copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast/toast.svelte";
 
   const topbarCtx = getContext<{
@@ -79,7 +79,6 @@
   let editingDesc = $state(false);
   let draftDesc = $state("");
   let savedAt = $state(0); // ms timestamp of last successful field save
-  let copied = $state(false);
 
   // Danger zone
   let dangerOpen = $state(false);
@@ -227,17 +226,6 @@
     onProjectChange?.();
     savedAt = Date.now();
     window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
-  }
-
-  async function copyIdentifier() {
-    if (!project) return;
-    // Inline checkmark flip stays as the success cue; the helper still toasts
-    // on failure so a blocked clipboard no longer no-ops silently.
-    const ok = await copyToClipboard(project.identifier, { silentSuccess: true });
-    if (ok) {
-      copied = true;
-      window.setTimeout(() => { copied = false; }, 1500);
-    }
   }
 
   // ── Importance heuristic ─────────────────────────────
@@ -450,16 +438,16 @@
                   <Pencil size={14} class="text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />
                 </button>
               {/if}
-              <button
+              <CopyIdButton
+                value={project.identifier}
+                iconSize={11}
+                iconClass="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity"
                 class="group inline-flex items-center gap-1 text-micro font-mono font-semibold
                        px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--text-muted)]
                        hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
-                onclick={copyIdentifier}
-                title="Copy identifier"
               >
                 {project.identifier}
-                {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />{/if}
-              </button>
+              </CopyIdButton>
               {#if savedAt}
                 <span class="inline-flex items-center gap-1 text-micro text-[var(--success)]" aria-live="polite">
                   <Check size={11} /> Saved

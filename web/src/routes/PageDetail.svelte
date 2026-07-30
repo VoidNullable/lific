@@ -309,7 +309,7 @@
   // otherwise never surfaced in the shell.
   let breadcrumbSegments = $derived.by<import("../lib/Breadcrumbs.svelte").Crumb[]>(() => {
     const crumbs: import("../lib/Breadcrumbs.svelte").Crumb[] = [
-      { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
+      { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
       // Collapsed below sm — the app header already states the section.
       { label: "Pages", href: `#/${projectIdentifier}/pages`, hideBelowSm: true },
     ];
@@ -317,7 +317,9 @@
       const name = folders.find((f) => f.id === page!.folder_id)?.name;
       if (name) crumbs.push({ label: name, href: `#/${projectIdentifier}/pages` });
     }
-    crumbs.push({ label: page?.identifier || "Page", mono: true });
+    // `copy` stays unset until the page loads, so nobody can copy the
+    // placeholder "Page" label.
+    crumbs.push({ label: page?.identifier || "Page", mono: true, copy: page?.identifier });
     return crumbs;
   });
 

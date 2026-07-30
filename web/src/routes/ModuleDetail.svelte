@@ -282,7 +282,7 @@
       <div class="flex items-center gap-1.5 shrink-0 min-w-0">
         <Breadcrumbs
           segments={[
-            { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
+            { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
             { label: "Modules", href: `#/${projectIdentifier}/modules` },
             { label: mod.name },
           ]}
