@@ -138,28 +138,34 @@ fn open_read_connection(path: &Path) -> Result<Connection, LificError> {
     Ok(conn)
 }
 
-/// Create an in-memory database for testing.
-/// Uses a single connection for both reads and writes since :memory:
-/// databases are not shared across connections.
+/// Hands out a distinct name to every test database. See the comment at the
+/// `name` binding in `open_memory` for why this is a counter and not a clock.
+#[cfg(test)]
+static TEST_DB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Create an in-memory database for testing, with the same writer + reader
+/// pool shape as [`open`]. An anonymous `:memory:` database cannot be shared
+/// across connections, so this opens a uniquely *named* one in shared-cache
+/// mode instead, which every connection in the returned pool can reach.
 #[cfg(test)]
 pub fn open_memory() -> Result<DbPool, LificError> {
     disable_sqlite_memstatus();
-    let conn = Connection::open_in_memory()?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA foreign_keys = ON;",
-    )?;
-    migrate::run(&conn)?;
-
-    drop(conn);
 
     // Use a unique named in-memory DB so all connections share the same data.
+    //
+    // LIF-362: the name must be unique per pool, and a clock read is not a
+    // safe way to get that. `cache=shared` means two pools that pick the same
+    // name get the SAME database rather than two isolated ones, so a
+    // collision has one test migrating while another prepares statements
+    // against it: `DatabaseLocked` / "database schema is locked: main". This
+    // was previously seeded from `SystemTime::now().as_nanos()`, which is
+    // fine-grained enough on Linux to hide the problem and coarse enough on
+    // Windows to lose the race in CI. Shared-cache in-memory databases are
+    // scoped to the process, and every test in a binary shares one process,
+    // so a process-local counter is collision-free by construction.
     let name = format!(
         "file:lific_test_{}?mode=memory&cache=shared",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
 
     let writer = Connection::open_with_flags(
