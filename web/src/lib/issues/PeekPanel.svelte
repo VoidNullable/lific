@@ -265,8 +265,12 @@
          scrolls. -->
     <div class="shrink-0 flex items-center gap-2 px-4 pt-2 pb-2 md:pt-4 border-b border-[var(--border)]">
       {#if issue}
+        <!-- `label` echoes the visible identifier so the accessible name is
+             "Copy LIF-42", keeping the pill's visible text inside its name
+             (WCAG 2.5.3) rather than the generic "Copy identifier". -->
         <CopyIdButton
           value={issue.identifier}
+          label={issue.identifier}
           iconSize={11}
           iconClass="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity"
           class="group inline-flex items-center gap-1 text-caption font-mono font-semibold

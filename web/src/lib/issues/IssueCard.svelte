@@ -88,7 +88,9 @@
          Copying without opening the card costs no layout here: the flex-1
          spacer below absorbs the button's box, so the peek and priority
          affordances stay put. Pointer devices only — the touch path to an
-         identifier is the peek sheet. -->
+         identifier is the peek sheet. focus-visible re-reveals it (as it
+         does the peek trigger below): the hover-device rules would
+         otherwise leave a keyboard-focused control at opacity 0. -->
     <div class="flex items-center gap-1">
       <span class="text-micro font-mono text-[var(--text-faint)]">
         {issue.identifier}
@@ -101,7 +103,8 @@
                text-[var(--text-faint)] hover:text-[var(--accent)]
                hover:bg-[var(--bg-subtle)] transition-colors
                [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
-               [@media(hover:hover)]:group-hover:opacity-100"
+               [@media(hover:hover)]:group-hover:opacity-100
+               focus-visible:opacity-100"
       />
     </div>
     <div class="flex-1"></div>
@@ -116,6 +119,7 @@
                hover:bg-[var(--bg-subtle)] transition-colors
                [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
                [@media(hover:hover)]:group-hover:opacity-100
+               focus-visible:opacity-100
                pointer-coarse:flex pointer-coarse:opacity-100 pointer-coarse:size-7"
         onclick={(e) => {
           e.stopPropagation();

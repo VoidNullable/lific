@@ -438,8 +438,11 @@
                   <Pencil size={14} class="text-[var(--text-faint)] opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />
                 </button>
               {/if}
+              <!-- `label` echoes the visible identifier: the pill's visible
+                   text belongs in its accessible name (WCAG 2.5.3). -->
               <CopyIdButton
                 value={project.identifier}
+                label={project.identifier}
                 iconSize={11}
                 iconClass="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity"
                 class="group inline-flex items-center gap-1 text-micro font-mono font-semibold
