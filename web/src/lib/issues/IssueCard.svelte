@@ -6,9 +6,11 @@
   import PriorityIcon from "../PriorityIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
   import TimeAgo from "../TimeAgo.svelte";
-  import { PanelRight, ExternalLink } from "lucide-svelte";
+  import { PanelRight, ExternalLink, Copy } from "lucide-svelte";
   import { openContextMenu } from "../contextMenuState.svelte"; // LIF-248
   import { projectCodeOf } from "../references"; // LIF-248
+  import { copyToClipboard } from "../clipboard";
+  import CopyIdButton from "../CopyIdButton.svelte";
 
   let {
     issue,
@@ -48,6 +50,13 @@
             "noopener",
           ),
       },
+      {
+        // Toasts rather than flipping a checkmark: the menu closes on
+        // action, so there is nothing left on screen to confirm on.
+        label: "Copy identifier",
+        icon: Copy,
+        action: () => copyToClipboard(issue.identifier),
+      },
     ]);
   }
 </script>
@@ -74,6 +83,20 @@
     <span class="text-micro font-mono text-[var(--text-faint)]">
       {issue.identifier}
     </span>
+    <!-- Copy the identifier without opening the card. Reserving the box
+         costs nothing here: the flex-1 spacer below absorbs it, so the peek
+         and priority affordances stay put. Pointer devices only — the touch
+         path to an identifier is the peek sheet. -->
+    <CopyIdButton
+      value={issue.identifier}
+      label={issue.identifier}
+      iconSize={11}
+      class="hidden shrink-0 size-5 items-center justify-center rounded
+             text-[var(--text-faint)] hover:text-[var(--accent)]
+             hover:bg-[var(--bg-subtle)] transition-colors
+             [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
+             [@media(hover:hover)]:group-hover:opacity-100"
+    />
     <div class="flex-1"></div>
     <!-- LIF-244: hover-revealed peek trigger on pointer devices. On touch
          it's always visible (LIF-275) — with drag being the only other
