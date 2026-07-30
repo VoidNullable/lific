@@ -37,20 +37,20 @@
   import { peekState, closePeek, notifyPeekSync } from "./peek.svelte";
   import { updateIssueWithUndo } from "./state.svelte";
   import { toast } from "../toast/toast.svelte";
-  import { copyToClipboard } from "../clipboard";
   import { STATUSES, PRIORITIES } from "./grouping";
   import { projectCodeOf } from "../references";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
   import Skeleton from "../Skeleton.svelte"; // LIF-281
+  import CopyIdButton from "../CopyIdButton.svelte";
   import InlineTitle from "../InlineTitle.svelte";
   import Markdown from "../Markdown.svelte";
   import Select from "../Select.svelte";
   import { formatDate } from "../format";
   import { motionReduced } from "../theme";
   import { fly, fade } from "svelte/transition";
-  import { X, Copy, Check, ArrowUpRight, MessageSquare, Layers } from "lucide-svelte";
+  import { X, ArrowUpRight, MessageSquare, Layers } from "lucide-svelte";
 
   let {
     navigate,
@@ -64,7 +64,6 @@
   let commentCount = $state<number | null>(null);
   let loading = $state(false);
   let error = $state("");
-  let copied = $state(false);
 
   // Guards against a stale fetch (for a since-superseded identifier)
   // landing after a newer one — "opening another issue while open swaps
@@ -172,17 +171,6 @@
     }
   }
 
-  async function copyIdentifier() {
-    if (!issue) return;
-    // Keep the inline checkmark flip on success (nicer than a toast for a
-    // one-tap copy); the helper still surfaces an error toast on failure.
-    const ok = await copyToClipboard(issue.identifier, { silentSuccess: true });
-    if (ok) {
-      copied = true;
-      window.setTimeout(() => { copied = false; }, 1500);
-    }
-  }
-
   function openFullView() {
     if (!issue) return;
     const path = `/${projectCodeOf(issue.identifier)}/issues/${issue.identifier}`;
@@ -277,16 +265,16 @@
          scrolls. -->
     <div class="shrink-0 flex items-center gap-2 px-4 pt-2 pb-2 md:pt-4 border-b border-[var(--border)]">
       {#if issue}
-        <button
+        <CopyIdButton
+          value={issue.identifier}
+          iconSize={11}
+          iconClass="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity"
           class="group inline-flex items-center gap-1 text-caption font-mono font-semibold
                  px-1.5 py-0.5 rounded border border-[var(--border)] text-[var(--text-muted)]
                  hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
-          onclick={copyIdentifier}
-          title="Copy identifier"
         >
           {issue.identifier}
-          {#if copied}<Check size={11} />{:else}<Copy size={11} class="opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 transition-opacity" />{/if}
-        </button>
+        </CopyIdButton>
         {#if commentCount !== null && commentCount > 0}
           <span class="inline-flex items-center gap-1 text-caption text-[var(--text-faint)]">
             <MessageSquare size={12} />
@@ -490,14 +478,16 @@
          cover. -->
     {#if issue}
       <div class="shrink-0 border-t border-[var(--border)] px-4 py-3 flex items-center justify-between gap-2">
-        <button
-          class="inline-flex items-center gap-1 text-body-sm text-[var(--text-muted)]
-                 hover:text-[var(--text)] transition-colors"
-          onclick={copyIdentifier}
+        <!-- flex-row-reverse keeps the icon ahead of the label here, where the
+             button reads as an action rather than as an identifier pill. -->
+        <CopyIdButton
+          value={issue.identifier}
+          iconSize={13}
+          class="inline-flex flex-row-reverse items-center gap-1 text-body-sm
+                 text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
         >
-          {#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}
           Copy identifier
-        </button>
+        </CopyIdButton>
         <button
           class="inline-flex items-center gap-1.5 text-body-sm font-medium
                  text-[var(--accent)] hover:underline transition-colors"

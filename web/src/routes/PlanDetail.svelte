@@ -352,9 +352,13 @@
   backRoute={`/${projectIdentifier}/plans`}
   backLabel="Plans"
   breadcrumbSegments={[
-    { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
+    { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true, copy: projectIdentifier },
     { label: "Plans", href: `#/${projectIdentifier}/plans` },
-    { label: plan?.title || plan?.identifier || `PLAN-${planId}` },
+    // The trail ends in the identifier, not the title, matching issues and
+    // pages: the title already reads as the heading directly below, while the
+    // identifier had nowhere else to surface. `copy` stays unset until the
+    // plan loads so nobody copies the `PLAN-3` placeholder.
+    { label: plan?.identifier ?? `PLAN-${planId}`, mono: true, copy: plan?.identifier },
   ]}
   editable={canEdit}
   title={plan?.title ?? ""}

@@ -16,6 +16,11 @@
      *  breakpoint — matches Topbar hiding the project scope on phones,
      *  where the app header already shows the project. */
     hideBelowSm?: boolean;
+    /** The identifier to copy. When set, a copy button appears after the
+     *  label on hover or keyboard focus. It carries the value rather than a
+     *  flag because `label` is truncated for display while the copy has to
+     *  land the whole identifier. */
+    copy?: string;
   }
 </script>
 
@@ -31,6 +36,7 @@
   // this stays a pure presentational component.
 
   import { ChevronRight } from "lucide-svelte";
+  import CopyIdButton from "./CopyIdButton.svelte";
 
   let { segments }: { segments: Crumb[] } = $props();
 
@@ -59,7 +65,11 @@
           <ChevronRight size={12} class="text-[var(--text-faint)]" />
         </li>
       {/if}
-      <li class="min-w-0 flex items-center {seg.hideBelowSm ? 'hidden sm:flex' : ''}">
+      <li
+        class="group min-w-0 flex items-center {seg.hideBelowSm
+          ? 'hidden sm:flex'
+          : ''}"
+      >
         {#if seg.href && !isLast}
           <a
             href={seg.href}
@@ -87,6 +97,27 @@
             {/if}
             <span class="truncate max-w-[9rem] sm:max-w-[14rem]">{seg.label}</span>
           </span>
+        {/if}
+        {#if seg.copy}
+          <!-- Sibling of the crumb, never a wrapper: a linked crumb still
+               navigates across its whole hit area. Hidden below `sm` because
+               there is no hover on touch, and an invisible-but-tappable
+               button next to the label would be a trap there.
+
+               Width collapses to zero at rest so an idle trail reads as if
+               the button weren't there — reserving the box left odd gaps
+               between crumbs. It grows on hover, which nudges everything to
+               its right; `display: none` would avoid that too but drops the
+               button out of the tab order entirely. -->
+          <CopyIdButton
+            value={seg.copy}
+            label={seg.copy}
+            class="shrink-0 hidden sm:grid place-items-center overflow-hidden
+                   w-0 opacity-0 group-hover:w-5 group-hover:opacity-100
+                   focus-visible:w-5 focus-visible:opacity-100
+                   rounded text-[var(--text-faint)] hover:text-[var(--accent)]
+                   transition-all"
+          />
         {/if}
       </li>
     {/each}

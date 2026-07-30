@@ -10,7 +10,7 @@
   // state instance; keeping them explicit here first makes the seam
   // reviewable and build-verifiable.
   import type { Issue, Label, Module } from "../api";
-  import { Check, Signal, Layers, PanelRight, ExternalLink } from "lucide-svelte";
+  import { Check, Signal, Layers, PanelRight, ExternalLink, Copy } from "lucide-svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
@@ -18,6 +18,7 @@
   import TimeAgo from "../TimeAgo.svelte";
   import { STATUSES, PRIORITIES, descriptionPreview } from "./grouping";
   import { openContextMenu } from "../contextMenuState.svelte"; // LIF-248
+  import { copyToClipboard } from "../clipboard";
   import { projectCodeOf } from "../references"; // LIF-248
 
   let {
@@ -135,6 +136,16 @@
             "_blank",
             "noopener",
           ),
+      },
+      {
+        // The row's identifier column is a fixed 72px butted against the
+        // title, so a hover-revealed button there would squeeze one or
+        // shove the other on every row the pointer crosses. The menu that
+        // already exists costs no pixels. Toasts rather than flipping a
+        // checkmark: the menu closes on action.
+        label: "Copy identifier",
+        icon: Copy,
+        action: () => copyToClipboard(issue.identifier),
       },
     ]);
   }
