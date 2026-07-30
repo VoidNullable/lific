@@ -129,6 +129,20 @@
     loading = false;
   }
 
+  // LIF-357: LabelManager only needs the parent to resync label *usage*, and
+  // usage comes from `issues` alone. Pointing its onChange at `loadAll` meant
+  // every label create, rename, recolor, delete, and merge flipped `loading`,
+  // which tore down the whole settings body (LabelManager included) and
+  // rebuilt it from five requests. That skeleton flash mid-edit is the
+  // "adding a label refreshes the page" behavior; it also reset the
+  // component's local state on every keystroke-sized action. Refetch the one
+  // list that can actually change, and leave `loading` alone.
+  async function refreshLabelUsage() {
+    if (!project) return;
+    const res = await listIssues({ project_id: project.id, limit: 1000 });
+    if (res.ok) issues = res.data;
+  }
+
   // ── Field-level autosave (no Save button) ────────────
   async function saveField(field: string, value: unknown) {
     if (!project) return;
@@ -594,7 +608,7 @@
           projectId={project.id}
           {issues}
           canEdit={projectRole.canEdit}
-          onChange={() => loadAll(projectIdentifier)}
+          onChange={refreshLabelUsage}
           onOpenLabel={openLabelInIssues}
         />
 

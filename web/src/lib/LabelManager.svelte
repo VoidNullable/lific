@@ -21,7 +21,7 @@
     type Issue,
     type Page,
   } from "./api";
-  import { Tag, Trash2, Plus, ArrowRight, Search, X } from "lucide-svelte";
+  import { Tag, Trash2, Plus, ArrowRight, Search } from "lucide-svelte";
   import ColorPicker from "./ColorPicker.svelte";
   import Skeleton from "./Skeleton.svelte";
   import { colorForName, DEFAULT_LABEL_COLOR } from "./labelColors";
@@ -84,8 +84,6 @@
     { name: "blocked", color: "#D97706" },
     { name: "design", color: "#7C3AED" },
   ];
-  let startedEmpty = $state(false);
-  let presetsDismissed = $state(false);
 
   $effect(() => {
     projectId;
@@ -98,8 +96,6 @@
     const [lr, pr] = await Promise.all([listLabels(projectId), listPages(projectId)]);
     if (lr.ok) labels = lr.data;
     else err = lr.error;
-    startedEmpty = labels.length === 0;
-    presetsDismissed = false;
     if (pr.ok) pages = pr.data;
     loading = false;
   }
@@ -513,10 +509,12 @@
           {/if}
         </div>
       {/each}
-      <!-- Presets are a setup affordance: persist through setup, never reappear for an established project. -->
-      {#if canEdit && startedEmpty && !presetsDismissed && labels.length > 0 && remainingPresets.length > 0}
+      <!-- These six are common enough to be worth one click from any project,
+           not just an empty one, so the row is permanent. It shrinks as they
+           get added and disappears once all six exist. -->
+      {#if canEdit && remainingPresets.length > 0}
         <div class="px-4 py-3 border-t border-[var(--border)] flex items-center gap-2 flex-wrap">
-          <span class="text-caption text-[var(--text-muted)]">Add more:</span>
+          <span class="text-caption text-[var(--text-muted)]">Common:</span>
           {#each remainingPresets as p (p.name)}
             <button
               class="inline-flex items-center gap-1.5 text-caption font-medium px-2 py-1 rounded-full border
@@ -533,14 +531,6 @@
             onclick={addAllPresets}
           >
             Add all
-          </button>
-          <button
-            class="ml-auto size-6 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Hide label suggestions"
-            title="Hide suggestions"
-            onclick={() => (presetsDismissed = true)}
-          >
-            <X size={13} />
           </button>
         </div>
       {/if}
