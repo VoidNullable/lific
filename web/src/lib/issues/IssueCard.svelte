@@ -80,23 +80,30 @@
 >
   <!-- Top row: identifier + peek affordance + priority -->
   <div class="flex items-center gap-2 mb-1.5">
-    <span class="text-micro font-mono text-[var(--text-faint)]">
-      {issue.identifier}
-    </span>
-    <!-- Copy the identifier without opening the card. Reserving the box
-         costs nothing here: the flex-1 spacer below absorbs it, so the peek
-         and priority affordances stay put. Pointer devices only — the touch
-         path to an identifier is the peek sheet. -->
-    <CopyIdButton
-      value={issue.identifier}
-      label={issue.identifier}
-      iconSize={11}
-      class="hidden shrink-0 size-5 items-center justify-center rounded
-             text-[var(--text-faint)] hover:text-[var(--accent)]
-             hover:bg-[var(--bg-subtle)] transition-colors
-             [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
-             [@media(hover:hover)]:group-hover:opacity-100"
-    />
+    <!-- Identifier and its copy button pair up in their own flex so the
+         button stays close to the identifier it copies, while the row's
+         gap-2 keeps separating the affordances on the right. The small gap
+         is deliberate: at zero the button's hover background bleeds into
+         the identifier text.
+         Copying without opening the card costs no layout here: the flex-1
+         spacer below absorbs the button's box, so the peek and priority
+         affordances stay put. Pointer devices only — the touch path to an
+         identifier is the peek sheet. -->
+    <div class="flex items-center gap-1">
+      <span class="text-micro font-mono text-[var(--text-faint)]">
+        {issue.identifier}
+      </span>
+      <CopyIdButton
+        value={issue.identifier}
+        label={issue.identifier}
+        iconSize={11}
+        class="hidden shrink-0 size-5 items-center justify-center rounded
+               text-[var(--text-faint)] hover:text-[var(--accent)]
+               hover:bg-[var(--bg-subtle)] transition-colors
+               [@media(hover:hover)]:flex [@media(hover:hover)]:opacity-0
+               [@media(hover:hover)]:group-hover:opacity-100"
+      />
+    </div>
     <div class="flex-1"></div>
     <!-- LIF-244: hover-revealed peek trigger on pointer devices. On touch
          it's always visible (LIF-275) — with drag being the only other
