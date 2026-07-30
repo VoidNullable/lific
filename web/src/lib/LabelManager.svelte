@@ -21,7 +21,7 @@
     type Issue,
     type Page,
   } from "./api";
-  import { Tag, Trash2, Plus, ArrowRight, Search } from "lucide-svelte";
+  import { Tag, Trash2, Plus, ArrowRight, Search, X } from "lucide-svelte";
   import ColorPicker from "./ColorPicker.svelte";
   import Skeleton from "./Skeleton.svelte";
   import { colorForName, DEFAULT_LABEL_COLOR } from "./labelColors";
@@ -84,6 +84,8 @@
     { name: "blocked", color: "#D97706" },
     { name: "design", color: "#7C3AED" },
   ];
+  let startedEmpty = $state(false);
+  let presetsDismissed = $state(false);
 
   $effect(() => {
     projectId;
@@ -96,6 +98,8 @@
     const [lr, pr] = await Promise.all([listLabels(projectId), listPages(projectId)]);
     if (lr.ok) labels = lr.data;
     else err = lr.error;
+    startedEmpty = labels.length === 0;
+    presetsDismissed = false;
     if (pr.ok) pages = pr.data;
     loading = false;
   }
@@ -146,6 +150,7 @@
     const lc = name.trim().toLowerCase();
     return labels.some((l) => l.name.toLowerCase() === lc && l.id !== exceptId);
   }
+  let remainingPresets = $derived(PRESETS.filter((p) => !nameTaken(p.name)));
   // Live duplicate hint for the create form (#6).
   let createDup = $derived(newName.trim().length > 0 && nameTaken(newName));
 
@@ -170,7 +175,7 @@
   }
 
   async function addAllPresets() {
-    for (const p of PRESETS) {
+    for (const p of remainingPresets) {
       if (!nameTaken(p.name)) await create(p.name, p.color);
     }
   }
@@ -359,7 +364,7 @@
           No labels yet. Start from a common set, or create your own above.
         </p>
         <div class="flex items-center gap-2 flex-wrap">
-          {#each PRESETS as p (p.name)}
+          {#each remainingPresets as p (p.name)}
             <button
               class="inline-flex items-center gap-1.5 text-caption font-medium px-2 py-1 rounded-full border
                      hover:brightness-110 transition"
@@ -508,6 +513,37 @@
           {/if}
         </div>
       {/each}
+      <!-- Presets are a setup affordance: persist through setup, never reappear for an established project. -->
+      {#if canEdit && startedEmpty && !presetsDismissed && labels.length > 0 && remainingPresets.length > 0}
+        <div class="px-4 py-3 border-t border-[var(--border)] flex items-center gap-2 flex-wrap">
+          <span class="text-caption text-[var(--text-muted)]">Add more:</span>
+          {#each remainingPresets as p (p.name)}
+            <button
+              class="inline-flex items-center gap-1.5 text-caption font-medium px-2 py-1 rounded-full border
+                     hover:brightness-110 transition"
+              style="color: {p.color}; border-color: {p.color}55; background: {p.color}12;"
+              onclick={() => create(p.name, p.color)}
+            >
+              <Plus size={11} />
+              {p.name}
+            </button>
+          {/each}
+          <button
+            class="text-caption font-medium text-[var(--accent)] hover:underline px-1"
+            onclick={addAllPresets}
+          >
+            Add all
+          </button>
+          <button
+            class="ml-auto size-6 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+            aria-label="Hide label suggestions"
+            title="Hide suggestions"
+            onclick={() => (presetsDismissed = true)}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      {/if}
     {/if}
   </div>
 </section>
