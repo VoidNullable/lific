@@ -1,24 +1,25 @@
 <script lang="ts">
-  // LIF-111 — quote-in-comment selection helper.
+  // LIF-111, LIF-361: selection actions helper.
   //
   // When the user selects text inside a rendered markdown surface
   // (`container`), a small floating toolbar appears centered above the
-  // selection with a single "Quote in comment" button. Clicking it hands
-  // the selected plaintext up via `onQuote`, which the comment composer
-  // turns into a markdown blockquote.
+  // selection. Copy is always offered, so the toolbar now mounts for
+  // read-only viewers too; Quote is gated on `canQuote` because it needs a
+  // comment composer to push a blockquote into.
   //
-  // v1 uses window.getSelection().toString() — rendered plaintext, not the
-  // source markdown. Source reconstruction / inline anchored comments are
-  // out of scope.
+  // Selections use rendered plaintext, not source markdown.
 
-  import { Quote } from "lucide-svelte";
+  import { Copy, Quote } from "lucide-svelte";
+  import { copyToClipboard } from "./clipboard";
 
   let {
     container,
+    canQuote = true,
     onQuote,
   }: {
     container: HTMLElement | null;
-    onQuote: (text: string) => void;
+    canQuote?: boolean;
+    onQuote?: (text: string) => void;
   } = $props();
 
   let visible = $state(false);
@@ -114,7 +115,17 @@
 
   function quote() {
     const text = selectedText;
-    if (text) onQuote(text);
+    if (!text || !onQuote) return;
+    onQuote(text);
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    sel?.removeAllRanges();
+    hide();
+  }
+
+  async function copy() {
+    const text = selectedText;
+    if (!text) return;
+    await copyToClipboard(text, { label: "selection" });
     const sel = typeof window !== "undefined" ? window.getSelection() : null;
     sel?.removeAllRanges();
     hide();
@@ -144,10 +155,17 @@
     tabindex="-1"
     aria-label="Selection actions"
   >
-    <button type="button" class="qsel__btn" onclick={quote}>
-      <Quote size={13} />
-      Quote in comment
+    <button type="button" class="qsel__btn" onclick={copy}>
+      <Copy size={13} />
+      Copy
     </button>
+    {#if canQuote && onQuote}
+      <span class="qsel__sep" aria-hidden="true"></span>
+      <button type="button" class="qsel__btn" onclick={quote}>
+        <Quote size={13} />
+        Quote in comment
+      </button>
+    {/if}
   </div>
 {/if}
 
@@ -185,5 +203,12 @@
   }
   .qsel__btn:hover {
     background: var(--bg-subtle);
+  }
+
+  .qsel__sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 0.125rem 0.1875rem;
+    background: var(--border);
   }
 </style>

@@ -430,9 +430,10 @@
     </div>
   </div>
 
-  {#if commentsEnabled && onNewComment && bodyMode === "read"}
+  {#if bodyMode === "read"}
     <QuoteSelectionToolbar
       container={contentEl}
+      canQuote={commentsEnabled && !!onNewComment}
       onQuote={(t) => commentsRef?.insertQuote(t)}
     />
   {/if}
