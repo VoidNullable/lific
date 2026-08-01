@@ -16,6 +16,7 @@ mod links;
 mod mcp;
 mod oauth;
 mod ratelimit;
+mod resolve_caller;
 mod realtime;
 mod storage;
 
@@ -1076,9 +1077,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         display_name: u.display_name,
                                         is_admin: u.is_admin,
                                     }),
-                                None => db::queries::users::first_admin(&conn)
-                                    .ok()
-                                    .flatten(),
+                                // LIFIC-8: the "no credential → first admin"
+                                // fallback is consolidated in `resolve_caller`.
+                                None => resolve_caller::resolve_caller_conn(
+                                    &conn,
+                                    None,
+                                    actor::Transport::Mcp,
+                                )
+                                .ok()
+                                .flatten()
+                                .map(|i| i.user),
                             },
                             Err(_) => None,
                         }

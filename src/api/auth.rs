@@ -254,8 +254,16 @@ pub(super) async fn auth_auto_login(
         ));
     }
 
-    let admin = crate::db::queries::users::first_admin(&conn)?
-        .ok_or_else(|| LificError::BadRequest("no admin account exists to sign in as".into()))?;
+    // LIFIC-8: the "no credential → first admin" fallback is consolidated in
+    // `resolve_caller`. Auto-login has no credential (it is the thing that
+    // *produces* a session), so the passwordless fallback applies.
+    let admin = crate::resolve_caller::resolve_caller_conn(
+        &conn,
+        None,
+        crate::actor::Transport::Web,
+    )?
+    .ok_or_else(|| LificError::BadRequest("no admin account exists to sign in as".into()))?;
+    let admin = admin.user;
 
     let session = crate::db::queries::users::create_session(
         &conn,

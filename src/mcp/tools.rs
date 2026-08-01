@@ -1318,14 +1318,20 @@ impl LificMcp {
     /// the task-local, else fall back to the first admin for stdio/local
     /// sessions. Returns `(user_id, is_admin)` for the author-or-admin
     /// ownership check.
+    ///
+    /// LIFIC-8: the fallback now routes through `resolve_caller`, the single
+    /// place that decides "no credential → first admin" — replacing the
+    /// direct `first_admin` read.
     fn resolve_comment_actor(&self) -> Result<(i64, bool), String> {
-        match super::current_auth_user() {
-            Some(u) => Ok((u.id, u.is_admin)),
-            None => match self.read(queries::users::first_admin)? {
-                Some(admin) => Ok((admin.id, admin.is_admin)),
-                None => Err("no admin user exists to attribute comment edits to.".into()),
-            },
-        }
+        let identity = self.read(|conn| {
+            crate::resolve_caller::resolve_caller_conn(
+                conn,
+                super::current_auth_user(),
+                crate::actor::Transport::Mcp,
+            )
+        })?
+        .ok_or_else(|| "no admin user exists to attribute comment edits to.".to_string())?;
+        Ok((identity.user.id, identity.user.is_admin))
     }
 
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
@@ -3553,15 +3559,21 @@ impl LificMcp {
 
         // Resolve the authenticated user from the task-local set by the HTTP handler.
         // For stdio/local MCP sessions (no HTTP auth), fall back to the first admin user.
-        let user_id = match super::current_auth_user() {
-            Some(u) => u.id,
-            None => match self.read(queries::users::first_admin) {
-                Ok(Some(admin)) => admin.id,
-                Ok(None) => {
-                    return "Error: no admin user exists to attribute comments to.".into();
-                }
-                Err(e) => return format!("Error: {e}"),
-            },
+        //
+        // LIFIC-8: the fallback routes through `resolve_caller`, consolidating the
+        // "no credential → first admin" decision that was previously inline here.
+        let user_id = match self.read(|conn| {
+            crate::resolve_caller::resolve_caller_conn(
+                conn,
+                super::current_auth_user(),
+                crate::actor::Transport::Mcp,
+            )
+        }) {
+            Ok(Some(identity)) => identity.user.id,
+            Ok(None) => {
+                return "Error: no admin user exists to attribute comments to.".into();
+            }
+            Err(e) => return format!("Error: {e}"),
         };
 
         // LIF-263: resolve the parent's project + the enforcement flag up
