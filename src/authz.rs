@@ -29,7 +29,7 @@
 //! owner (`007_bot_owners.sql`) before either check runs, in both modes — an
 //! agent can never exceed the human that owns it.
 //!
-//! ## Operator-key trust (LIF-261 → LIFIC-7/8/10/11)
+//! ## Operator-key trust (LIF-261 → LIFIC-7/8/10/11/14)
 //!
 //! Enforced mode is default-deny for a `None` effective user. That alone would
 //! brick the zero-user agent-first flow (`lific init` → `start` → `connect`),
@@ -46,10 +46,11 @@
 //! session) falls back to the **first admin**. The gates then read
 //! `identity.user.is_admin`, which short-circuits to allow — so the operator
 //! bypass is just "the first admin is trusted," applied identically across
-//! REST, MCP, and CLI. The old credential-type-specific operator carriers
-//! (`operator_context`, `operator_scope`, `OPERATOR`, MCP's operator flag) are
-//! gone or vestigial; LIFIC-14 deletes the last of them. **Audit unbound keys
-//! with `lific key list`.**
+//! REST, MCP, and CLI. LIFIC-14 deleted the last credential-type-specific
+//! operator carriers (`operator_context`, `operator_scope`, the `OPERATOR`
+//! task-local, `OperatorCredential`, MCP's operator flag); the signal now
+//! lives entirely in the resolved identity. **Audit unbound keys with `lific
+//! key list`.**
 
 use std::collections::HashSet;
 
@@ -59,26 +60,6 @@ use crate::db::models::{AuthUser, Role};
 use crate::db::{DbPool, queries};
 use crate::error::LificError;
 use crate::resolve_caller::ResolvedIdentity;
-
-// ── Operator-key trust signal (LIF-261) ─────────────────────────
-
-tokio::task_local! {
-    /// REST-side, request-scoped operator flag (LIF-261). Vestigial after
-    /// LIFIC-10/11: the gates read `identity.user.is_admin` instead, so this
-    /// task-local is write-only (set by [`operator_scope`], read by nobody).
-    /// LIFIC-14 deletes it along with the rest of the carrier mechanism.
-    static OPERATOR: bool;
-}
-
-/// Run `fut` with the REST operator flag in scope. `auth::require_api_key`
-/// wraps the unbound-API-key request path in this. LIFIC-11 deleted the reader
-/// (`operator_context`); the flag the task-local carries is now unread — the
-/// operator bypass lives in `identity.user.is_admin` instead (set by
-/// `resolve_caller`). LIFIC-14 deletes this setter and the `OPERATOR`
-/// task-local together.
-pub async fn operator_scope<F: std::future::Future>(is_operator: bool, fut: F) -> F::Output {
-    OPERATOR.scope(is_operator, fut).await
-}
 
 // ── Bot → owner resolution ──────────────────────────────────────
 
@@ -158,12 +139,11 @@ fn insufficient_role(min: Role) -> LificError {
 /// `Ok(())` = allowed. See the module docs for the legacy-vs-enforced
 /// semantics; `is_admin` always short-circuits to allow in both modes.
 ///
-/// LIFIC-10: consumes [`ResolvedIdentity`] instead of `Option<AuthUser>`. The
+/// LIFIC-10/14: consumes [`ResolvedIdentity`] instead of `Option<AuthUser>`. The
 /// LIF-261 operator bypass is gone as a separate signal — an operator-trusted
 /// unbound API key now resolves (via [`resolve_caller`]) to the first admin, so
 /// `identity.user.is_admin` catches it in the same `is_admin` short-circuit
-/// below. The legacy carrier mechanisms (`operator_context`, `operator_scope`)
-/// stay defined until LIFIC-14 deletes them.
+/// below.
 pub fn require_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -346,9 +326,9 @@ pub fn require_project_delete_role(
 /// at all (no `require_*` call existed on the pre-LIF-194 page handlers), so
 /// flag-off stays a no-op here to avoid a behavior change.
 ///
-/// LIFIC-10: consumes [`ResolvedIdentity`]; the operator bypass is now
+/// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
 /// `identity.user.is_admin` (an unbound key resolves to the first admin),
-/// not the separate [`operator_context`] signal — which is now unread here.
+/// not a separate carrier signal.
 pub fn require_workspace_admin(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -377,9 +357,9 @@ pub fn require_workspace_admin(
 /// effective caller's memberships (any role), or the empty set for a `None`
 /// auth user / a member of nothing.
 ///
-/// LIFIC-10: consumes [`ResolvedIdentity`]; the operator bypass is now
+/// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
 /// `identity.user.is_admin` (an unbound key resolves to the first admin and
-/// short-circuits below), not [`operator_context`].
+/// short-circuits below).
 pub fn visible_project_ids(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -853,10 +833,10 @@ mod tests {
         assert_eq!(visible_project_ids(&pool, &None).unwrap(), Some(HashSet::new()));
     }
 
-    // LIF-261 / LIFIC-10: an operator-trusted unbound key now resolves (via
+    // LIF-261 / LIFIC-10/14: an operator-trusted unbound key resolves (via
     // `resolve_caller`) to the first admin, so its resolved identity is
-    // `is_admin` and `visible_project_ids` returns `None` (unrestricted) —
-    // the same outcome the old ambient `operator_scope` carrier produced.
+    // `is_admin` and `visible_project_ids` returns `None` (unrestricted). The
+    // old ambient `operator_scope` carrier that produced this outcome is gone.
     #[tokio::test]
     async fn visible_project_ids_resolved_first_admin_returns_none() {
         let pool = test_db();

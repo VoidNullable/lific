@@ -349,17 +349,13 @@ pub async fn require_api_key(
                 transport: default,
             };
             // LIFIC-8: resolve the passwordless identity (first-admin
-            // fallback) alongside the legacy None / operator marker.
+            // fallback). resolve_caller handles the operator bypass — no
+            // separate carrier needed (LIFIC-14 deleted the last of them).
             insert_resolved_identity(&mut request, &auth.db, None, is_mcp_request, default);
             request
                 .extensions_mut()
                 .insert(Option::<crate::db::models::AuthUser>::None);
-            request.extensions_mut().insert(OperatorCredential);
-            return crate::actor::scope(
-                actor,
-                crate::authz::operator_scope(true, next.run(request)),
-            )
-            .await;
+            return crate::actor::scope(actor, next.run(request)).await;
         }
 
         if is_mcp_request {
@@ -577,17 +573,13 @@ pub async fn require_api_key(
                         is_admin: u.is_admin,
                     })
             });
-            // LIF-261: an API key with NO user binding is operator-trusted —
-            // it can only be minted with shell access to the server, so it's
-            // admin-equivalent in enforced mode. This is the ONE credential
-            // path that sets the operator signal; OAuth/session tokens never
-            // do, so a legacy unbound OAuth token (also `AuthUser = None`)
-            // stays default-denied. Keyed off the DB binding, not the resolved
-            // `auth_user`, so a key bound to a since-deleted user does NOT
-            // silently become an operator.
-            let is_operator = key.user_id.is_none();
             // LIF-155: API keys are programmatic — 'mcp' on the /mcp
-            // path, 'api' for direct REST usage.
+            // path, 'api' for direct REST usage. The LIF-261 operator bypass
+            // for an unbound key (user_id = None) now lives entirely in
+            // `resolve_caller` (inserted above), which falls back to the first
+            // admin — read as `identity.user.is_admin` by the gates. The old
+            // credential-type-specific `OperatorCredential` marker and
+            // `operator_scope` task-local are gone (LIFIC-14).
             let actor = crate::actor::ActorCtx {
                 user_id: auth_user.as_ref().map(|u| u.id),
                 transport: if is_mcp_request {
@@ -604,18 +596,7 @@ pub async fn require_api_key(
                 crate::actor::Transport::Api,
             );
             request.extensions_mut().insert(auth_user);
-            // LIF-261 marker for an operator-trusted unbound API key. LIFIC-11
-            // removed its only reader (the /mcp route no longer forwards an
-            // operator flag); LIFIC-14 deletes OperatorCredential, this insert,
-            // and the `operator_scope` task-local below together.
-            if is_operator {
-                request.extensions_mut().insert(OperatorCredential);
-            }
-            crate::actor::scope(
-                actor,
-                crate::authz::operator_scope(is_operator, next.run(request)),
-            )
-            .await
+            crate::actor::scope(actor, next.run(request)).await
         }
         _ => {
             warn!("API key hash verification failed");
@@ -628,15 +609,6 @@ pub async fn require_api_key(
         }
     }
 }
-
-/// LIF-261: request-extension marker inserted by [`require_api_key`] when the
-/// authenticated credential is an operator-trusted unbound API key. LIFIC-11
-/// removed its only reader — the `/mcp` route no longer forwards an operator
-/// flag, since `resolve_caller` now resolves unbound keys to the first admin
-/// (read as `identity.user.is_admin`). This marker and the `operator_scope`
-/// task-local are vestigial; LIFIC-14 deletes them.
-#[derive(Clone, Copy)]
-pub struct OperatorCredential;
 
 /// Internal struct for loading API key rows during auth.
 #[derive(Debug)]
@@ -1322,14 +1294,14 @@ mod tests {
         assert_eq!(stored.as_deref(), Some("2030-06-01"));
     }
 
-    // ── LIF-261: operator-key trust rule, end-to-end through the middleware ──
+    // ── LIF-261 / LIFIC-7: operator-key trust rule, end-to-end through the middleware ──
     //
-    // The auth middleware sets `authz::operator_scope(true, ..)` ONLY on the
-    // unbound-API-key path. These drive a real route that runs
+    // resolve_caller maps any credential that authenticates but resolves no
+    // user (unbound API key, legacy unbound OAuth token, "auth off" request)
+    // to the first admin — so an unbound key passes the gate via
+    // `identity.user.is_admin`. These drive a real route that runs
     // `authz::require_role(.., Viewer)` in enforced mode behind the real
-    // `require_api_key`, so a 200 means the gate passed and a 403 means it
-    // denied — proving the credential-type signal reaches authz and that a
-    // legacy unbound OAuth token (also `None`) does NOT get the bypass.
+    // `require_api_key`: a 200 means the gate passed, a 403 means it denied.
 
     fn enable_enforcement(pool: &db::DbPool) {
         let conn = pool.write().unwrap();
@@ -1419,13 +1391,17 @@ mod tests {
         let project = seed_project_id(&pool, "OAM");
         enable_enforcement(&pool);
         // Unbound OAuth token (user_id = None) — the LIF-204 legacy case.
+        // No admin is seeded, so resolve_caller returns None and the enforced
+        // gate default-denies. (With an admin present, resolve_caller would
+        // resolve it to first_admin — the operator bypass is "the first admin
+        // is trusted," not credential-type-specific.)
         let token = insert_oauth_token(&pool, "legacy-unbound", None);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(
             gate_status(app, &token).await,
             StatusCode::FORBIDDEN,
-            "a legacy unbound OAuth token must NOT gain operator power — it stays default-denied"
+            "with no admin to resolve to, a credential-less request stays default-denied"
         );
     }
 
