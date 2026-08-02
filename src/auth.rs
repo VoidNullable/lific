@@ -1038,15 +1038,19 @@ mod tests {
         Router::new()
             .route(
                 "/probe",
-                get(move || {
-                    let pool = pool.clone();
-                    async move {
-                        match crate::authz::visible_project_ids(&pool, &None).unwrap() {
-                            None => "unrestricted".to_string(),
-                            Some(ids) => format!("restricted:{}", ids.len()),
+                get(
+                    move |Extension(identity): Extension<
+                        Option<crate::resolve_caller::ResolvedIdentity>,
+                    >| {
+                        let pool = pool.clone();
+                        async move {
+                            match crate::authz::visible_project_ids(&pool, &identity).unwrap() {
+                                None => "unrestricted".to_string(),
+                                Some(ids) => format!("restricted:{}", ids.len()),
+                            }
                         }
-                    }
-                }),
+                    },
+                ),
             )
             .layer(middleware::from_fn_with_state(auth_state, require_api_key))
     }
@@ -1054,6 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn auth_not_required_credentialless_request_passes_as_operator() {
         let pool = test_db();
+        seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         enable_enforcement(&pool);
         let mut state = test_auth_state(&pool);
         state.required = false;
@@ -1357,11 +1362,11 @@ mod tests {
     fn gate_app(auth_state: AuthState, pool: db::DbPool, project_id: i64) -> Router {
         async fn gate(
             State((pool, project_id)): State<(db::DbPool, i64)>,
-            Extension(auth_user): Extension<Option<crate::db::models::AuthUser>>,
+            Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
         ) -> Result<String, crate::error::LificError> {
             crate::authz::require_role(
                 &pool,
-                &auth_user,
+                &identity,
                 project_id,
                 crate::db::models::Role::Viewer,
             )?;
@@ -1389,6 +1394,7 @@ mod tests {
     #[tokio::test]
     async fn enforced_operator_unbound_key_passes_viewer_gate_via_middleware() {
         let pool = test_db();
+        seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         let manager = create_key_manager().unwrap();
         let key = create_api_key(&pool, &manager, "operator").unwrap(); // unbound
         let project = seed_project_id(&pool, "OPM");

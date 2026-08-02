@@ -376,9 +376,9 @@ fn settings_json(s: &crate::db::queries::settings::InstanceSettings) -> serde_js
 /// GET /api/instance/settings — full settings, admin only.
 pub(super) async fn instance_settings_get(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    require_admin(&auth_user)?;
+    require_admin(&identity)?;
     let s = with_read(&db, crate::db::queries::settings::get)?;
     Ok(Json(settings_json(&s)))
 }
@@ -401,10 +401,10 @@ pub(super) struct InstanceSettingsPatchReq {
 pub(super) async fn instance_settings_patch(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<InstanceSettingsPatchReq>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    require_admin(&auth_user)?;
+    require_admin(&identity)?;
     let patch = crate::db::queries::settings::InstanceSettingsPatch {
         allow_signup: input.allow_signup,
         instance_name: input.instance_name,
@@ -430,9 +430,11 @@ pub(super) async fn instance_settings_patch(
 
 pub(super) async fn auth_me(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user
+    let user = identity
+        .as_ref()
+        .map(|i| i.user.clone())
         .ok_or_else(|| LificError::BadRequest("no user associated with this token".into()))?;
 
     // Fetch full user from DB to get all fields (email, etc.)
@@ -459,10 +461,10 @@ pub(super) struct UpdateMeRequest {
 /// email). LIF-190.
 pub(super) async fn update_me(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<UpdateMeRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
     let full = with_write(&db, |conn| {
         crate::db::queries::users::update_profile(
             conn,
@@ -497,10 +499,10 @@ pub(super) struct ChangePasswordRequest {
 pub(super) async fn change_password(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
     let session = with_write(&db, |conn| {
         let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
         let ok = crate::db::queries::users::verify_password(
@@ -542,9 +544,9 @@ pub(super) async fn change_password(
 pub(super) async fn revoke_all_sessions(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<impl IntoResponse, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
     with_write(&db, |conn| {
         crate::db::queries::users::delete_all_sessions(conn, user.id)
     })?;
@@ -560,9 +562,9 @@ pub(super) async fn revoke_all_sessions(
 
 pub(super) async fn list_keys(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<UserApiKey>>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     with_read(&db, |conn| {
         crate::db::queries::users::list_user_keys(conn, user.id)
@@ -577,11 +579,11 @@ pub(super) struct CreateKeyRequest {
 
 pub(super) async fn create_key(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -602,9 +604,9 @@ pub(super) async fn create_key(
 pub(super) async fn revoke_key(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     crate::db::queries::users::revoke_user_key(&conn, id, user.id, user.is_admin)?;
@@ -616,9 +618,9 @@ pub(super) async fn revoke_key(
 
 pub(super) async fn list_bots(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<Bot>>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     with_read(&db, |conn| {
         crate::db::queries::users::list_bots(conn, user.id)
@@ -635,11 +637,11 @@ pub(super) struct CreateBotRequest {
 
 pub(super) async fn create_bot(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let tool = input.tool.trim().to_lowercase();
     let display_name = match tool.as_str() {
@@ -704,9 +706,9 @@ pub(super) async fn create_bot(
 pub(super) async fn disconnect_bot(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     crate::db::queries::users::disconnect_bot(&conn, id, user.id, user.is_admin)?;
@@ -717,9 +719,9 @@ pub(super) async fn disconnect_bot(
 pub(super) async fn delete_bot(
     State(db): State<DbPool>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     let conn = db.write()?;
     crate::db::queries::users::delete_bot(&conn, id, user.id, user.is_admin)?;

@@ -1211,7 +1211,7 @@ fn mcp_gate(
 /// Require the caller hold at least `min` role on `project_id`.
 fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Result<(), String> {
     mcp_gate(db, || {
-        crate::authz::require_role(db, &super::current_auth_user(), project_id, min)
+        crate::authz::require_role(db, &super::current_identity(db), project_id, min)
     })
 }
 
@@ -1219,7 +1219,7 @@ fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Res
 /// enforcement is on; a no-op (MCP's historical behavior) in legacy mode.
 fn require_structure_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
     mcp_gate(db, || {
-        crate::authz::require_structure_role(db, &super::current_auth_user(), project_id)
+        crate::authz::require_structure_role(db, &super::current_identity(db), project_id)
     })
 }
 
@@ -1227,7 +1227,7 @@ fn require_structure_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), S
 /// (design decision #6); a no-op (MCP's historical behavior) in legacy mode.
 fn require_project_delete_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
     mcp_gate(db, || {
-        crate::authz::require_project_delete_role(db, &super::current_auth_user(), project_id)
+        crate::authz::require_project_delete_role(db, &super::current_identity(db), project_id)
     })
 }
 
@@ -1237,7 +1237,7 @@ fn require_project_delete_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<
 /// short-circuit here is redundant but harmless).
 fn require_workspace_admin_mcp(db: &Arc<DbPool>) -> Result<(), String> {
     mcp_gate(db, || {
-        crate::authz::require_workspace_admin(db, &super::current_auth_user())
+        crate::authz::require_workspace_admin(db, &super::current_identity(db))
     })
 }
 
@@ -1276,7 +1276,7 @@ fn filter_visible<T>(
 fn visible_project_ids_mcp(
     db: &Arc<DbPool>,
 ) -> Result<Option<std::collections::HashSet<i64>>, String> {
-    crate::authz::visible_project_ids(db, &super::current_auth_user()).map_err(|e| e.to_string())
+    crate::authz::visible_project_ids(db, &super::current_identity(db)).map_err(|e| e.to_string())
 }
 
 impl LificMcp {

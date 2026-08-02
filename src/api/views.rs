@@ -42,20 +42,24 @@ use super::{with_read, with_write};
 /// saved views are inherently per-user, so there is no sensible "anonymous
 /// owner" to attribute a view to. Every handler below requires a resolved
 /// user on top of the role gate.
-fn require_user(auth_user: Option<AuthUser>) -> Result<AuthUser, LificError> {
-    auth_user.ok_or_else(|| {
-        LificError::Forbidden("authentication required to manage saved views".into())
-    })
+fn require_user(
+    identity: Option<crate::resolve_caller::ResolvedIdentity>,
+) -> Result<AuthUser, LificError> {
+    identity
+        .map(|i| i.user)
+        .ok_or_else(|| {
+            LificError::Forbidden("authentication required to manage saved views".into())
+        })
 }
 
 /// GET /api/projects/{id}/views — the caller's own views only.
 pub(super) async fn list_views(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<SavedView>>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
-    let user = require_user(auth_user)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let user = require_user(identity)?;
     with_read(&db, |conn| views::list_views(conn, project_id, user.id)).map(Json)
 }
 
@@ -67,12 +71,12 @@ pub(super) async fn list_views(
 pub(super) async fn create_view(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
     Json(input): Json<CreateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
-    let user = require_user(auth_user)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let user = require_user(identity)?;
     let view = with_write(&db, |conn| {
         views::create_view(conn, project_id, user.id, &input)
     })?;
@@ -87,12 +91,12 @@ pub(super) async fn create_view(
 pub(super) async fn update_view(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((project_id, view_id)): Path<(i64, i64)>,
     Json(input): Json<UpdateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
-    let user = require_user(auth_user)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let user = require_user(identity)?;
     let view = with_write(&db, |conn| {
         views::update_view(conn, view_id, project_id, user.id, &input)
     })?;
@@ -104,11 +108,11 @@ pub(super) async fn update_view(
 pub(super) async fn delete_view(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((project_id, view_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
-    let user = require_user(auth_user)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let user = require_user(identity)?;
     with_write(&db, |conn| {
         views::delete_view(conn, view_id, project_id, user.id)
     })?;

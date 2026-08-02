@@ -15,37 +15,37 @@ use super::{
 
 pub(super) async fn list_projects(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<Project>>, LificError> {
     // Cross-project list (LIF-197 scope item 2): filter, don't deny.
-    let visible = authz::visible_project_ids(&db, &auth_user)?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
     let projects = with_read(&db, crate::db::queries::list_projects)?;
     Ok(Json(filter_visible(projects, &visible, |p| Some(p.id))))
 }
 
 pub(super) async fn get_project(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Project>, LificError> {
     let project = with_read(&db, |conn| crate::db::queries::get_project(conn, id))?;
-    authz::require_role(&db, &auth_user, project.id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project.id, Role::Viewer)?;
     Ok(Json(project))
 }
 
 pub(super) async fn create_project(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(mut input): Json<CreateProject>,
 ) -> Result<Json<Project>, LificError> {
     // LIF-102 fix #1: if no lead was supplied, default to the authenticated
     // creator. This prevents the "unowned project" trap where require_project_lead
     // rejects everyone except admins.
     if input.lead_user_id.is_none()
-        && let Some(user) = &auth_user
+        && let Some(i) = &identity
     {
-        input.lead_user_id = Some(user.id);
+        input.lead_user_id = Some(i.user.id);
     }
     let project = with_write(&db, |conn| crate::db::queries::create_project(conn, &input))?;
     realtime.send(RealtimeEvent::ProjectCreated {
@@ -58,10 +58,10 @@ pub(super) async fn update_project(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, LificError> {
-    require_project_lead(&db, &auth_user, id)?;
+    require_project_lead(&db, &identity, id)?;
     let project = with_write(&db, |conn| {
         crate::db::queries::update_project(conn, id, &input)
     })?;
@@ -79,10 +79,10 @@ pub(super) async fn update_project(
 pub(super) async fn reorder_projects(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<ReorderProjects>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    require_authenticated(&auth_user)?;
+    require_authenticated(&identity)?;
     let projects = with_write(&db, |conn| {
         crate::db::queries::reorder_projects(conn, &input.ids)
     })?;
@@ -94,9 +94,9 @@ pub(super) async fn delete_project_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    require_project_delete(&db, &auth_user, id)?;
+    require_project_delete(&db, &identity, id)?;
     let (project, audience) = with_write(&db, |conn| {
         crate::db::queries::delete_project_with_audience(conn, id)
     })?;
@@ -115,10 +115,10 @@ pub(super) async fn delete_project_handler(
 /// client-side silently undercounts past the cap.
 pub(super) async fn issue_counts(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<IssueStatusCounts>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
     with_read(&db, |conn| {
         crate::db::queries::count_issues_by_status(conn, project_id)
     })
@@ -137,11 +137,11 @@ fn default_group_by() -> String {
 
 pub(super) async fn get_board(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
     Query(q): Query<BoardQuery>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
     let issues = with_read(&db, |conn| {
         crate::db::queries::list_issues(
             conn,
@@ -236,16 +236,16 @@ fn default_map_closed() -> String {
 pub(super) async fn import_github(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
     Json(req): Json<GithubImportRequest>,
 ) -> Result<Json<crate::import::ImportSummary>, LificError> {
-    require_project_lead(&db, &auth_user, project_id)?;
+    require_project_lead(&db, &identity, project_id)?;
 
     // Resolve the import-bot owner from the authenticated user (the bot is
     // owned by whoever ran the import), so audit provenance is correct. On a
     // dry run we skip bot creation entirely.
-    let owner_id = auth_user.as_ref().map(|u| u.id);
+    let owner_id = identity.as_ref().map(|i| i.user.id);
     let dry_run = req.dry_run;
 
     let db2 = db.clone();
@@ -529,6 +529,24 @@ mod tests {
                 username: "test-admin".into(),
                 display_name: "Test Admin".into(),
                 is_admin: true,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
         let (project_id, _) = seed_project(&app).await;
 

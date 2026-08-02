@@ -138,6 +138,36 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
         .clone()
 }
 
+/// LIFIC-10: the resolved identity for the current MCP request, bridging the
+/// legacy `Option<AuthUser>` + operator flag into the `ResolvedIdentity` shape
+/// the authz gates now consume. When the operator flag is set (an unbound API
+/// key), and no user was bound, the first admin is resolved — mirroring what
+/// `resolve_caller` does for REST. Full migration of MCP onto `ResolvedIdentity`
+/// is LIFIC-11; this bridge keeps the gates compiling and behavior identical.
+pub(crate) fn current_identity(db: &crate::db::DbPool) -> Option<crate::resolve_caller::ResolvedIdentity> {
+    let user = current_auth_user();
+    if user.is_some() || !current_is_operator() {
+        // Bound user (OAuth/session/bot) or non-operator request: carry the
+        // user through; a None non-operator stays None (default-deny in
+        // enforced mode), matching the pre-LIFIC-10 behavior.
+        return user.map(|u| crate::resolve_caller::ResolvedIdentity {
+            user: u,
+            transport: crate::actor::Transport::Mcp,
+        });
+    }
+    // Operator path with no bound user (an unbound API key): resolve the
+    // first admin so the gate's `identity.user.is_admin` admits it, exactly
+    // as `resolve_caller` does on the REST side.
+    let conn = db.read().ok()?;
+    crate::resolve_caller::resolve_caller_conn(
+        &conn,
+        None,
+        crate::actor::Transport::Mcp,
+    )
+    .ok()
+    .flatten()
+}
+
 /// LIF-261: whether the current MCP request's credential is an operator-trusted
 /// unbound API key. Read by `authz::operator_context`.
 pub(crate) fn current_is_operator() -> bool {
@@ -501,6 +531,22 @@ mod tests {
         use axum::response::IntoResponse;
 
         let pool = crate::db::open_memory().expect("test db");
+        // resolve_caller needs a first_admin to resolve unbound keys to
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "admin".into(),
+                    email: "admin@test.local".into(),
+                    password: "adminpass123".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+        }
         let manager = crate::auth::create_key_manager().unwrap();
         let unbound_key = crate::auth::create_api_key(&pool, &manager, "mcp-operator").unwrap();
         let project = {
@@ -545,7 +591,7 @@ mod tests {
                 let db = std::sync::Arc::new(pool);
                 match crate::authz::require_role(
                     &db,
-                    &crate::mcp::current_auth_user(),
+                    &crate::mcp::current_identity(&db),
                     project_id,
                     crate::db::models::Role::Viewer,
                 ) {
