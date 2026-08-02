@@ -1177,68 +1177,39 @@ impl Display for ActivityLine<'_> {
 
 // ── LIF-198: MCP authorization gates ────────────────────────────
 //
-// Same enforcement primitives as REST (LIF-197): `crate::authz`. But unlike
-// the REST wrappers in `api/mod.rs` / `api/pages.rs` / `api/resources.rs`
-// (which forward straight into `authz::require_structure_role` /
-// `require_project_delete_role` / `require_role(.., Lead)` and rely on
-// *those* functions' legacy branches to reproduce REST's pre-existing
-// behavior), MCP never had ANY project-scoped gate before this issue — every
-// tool was wide open. Those legacy branches reproduce specifically REST's
-// history (e.g. structure endpoints were Lead-gated pre-LIF-194, project
-// delete was admin-only), which is a *regression* if borrowed verbatim by
-// MCP: it would newly deny calls that MCP always allowed.
-//
-// So every MCP gate below checks `authz_enforced` itself first and
-// short-circuits to an unconditional allow while the flag is off —
-// reproducing MCP's actual historical behavior (fully open), not REST's.
-// Once `authz_enforced` is on, each gate delegates to the exact same
-// `crate::authz` primitive REST uses, so enforced-mode semantics are
-// identical across both transports. `mcp_gate` centralizes that flag check;
-// `LificError` denials translate to the `String` error type
-// `self.read`/`self.write` already use, so a denial renders as the same
+// LIFIC-11: MCP gates now call the exact same `crate::authz` primitives REST
+// does — one seam, one behavior, no transport-specific divergence. The old
+// `mcp_gate` short-circuit that kept MCP wide-open in legacy mode is gone:
+// `authz::*` carry their own legacy-mode branches, so MCP inherits identical
+// semantics to REST. The `LificError` denials translate to the `String` error
+// type `self.read`/`self.write` use, rendering as the same
 // `Error: Forbidden: <msg>` shape every other MCP error uses.
-fn mcp_gate(
-    db: &Arc<DbPool>,
-    check: impl FnOnce() -> Result<(), crate::error::LificError>,
-) -> Result<(), String> {
-    match crate::authz::authz_enforced(db) {
-        Ok(false) => Ok(()),
-        Ok(true) => check().map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
-    }
-}
 
 /// Require the caller hold at least `min` role on `project_id`.
 fn require_role_mcp(db: &Arc<DbPool>, project_id: i64, min: models::Role) -> Result<(), String> {
-    mcp_gate(db, || {
-        crate::authz::require_role(db, &super::current_identity(db), project_id, min)
-    })
+    crate::authz::require_role(db, &super::current_identity(db), project_id, min)
+        .map_err(|e| e.to_string())
 }
 
 /// Gate for module/label/folder ("structure") mutations — Maintainer once
-/// enforcement is on; a no-op (MCP's historical behavior) in legacy mode.
+/// enforcement is on, Lead in legacy mode (matches REST).
 fn require_structure_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
-    mcp_gate(db, || {
-        crate::authz::require_structure_role(db, &super::current_identity(db), project_id)
-    })
+    crate::authz::require_structure_role(db, &super::current_identity(db), project_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Gate for `delete(resource_type="project")` — Lead once enforcement is on
-/// (design decision #6); a no-op (MCP's historical behavior) in legacy mode.
+/// (design decision #6), admin-only in legacy mode (matches REST).
 fn require_project_delete_role_mcp(db: &Arc<DbPool>, project_id: i64) -> Result<(), String> {
-    mcp_gate(db, || {
-        crate::authz::require_project_delete_role(db, &super::current_identity(db), project_id)
-    })
+    crate::authz::require_project_delete_role(db, &super::current_identity(db), project_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Gate for workspace-level (project-less) pages/comments — admin-only once
-/// enforcement is on, a no-op in legacy mode either way (matches
-/// `authz::require_workspace_admin`'s own legacy branch, so `mcp_gate`'s
-/// short-circuit here is redundant but harmless).
+/// enforcement is on, a no-op in legacy mode (matches REST).
 fn require_workspace_admin_mcp(db: &Arc<DbPool>) -> Result<(), String> {
-    mcp_gate(db, || {
-        crate::authz::require_workspace_admin(db, &super::current_identity(db))
-    })
+    crate::authz::require_workspace_admin(db, &super::current_identity(db))
+        .map_err(|e| e.to_string())
 }
 
 /// Gate for a page/comment target whose `project_id` may be `None`
@@ -4285,19 +4256,64 @@ mod tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
-    fn mcp() -> LificMcp {
+    /// LIFIC-11: a fresh install has a first admin (LIFIC-9), and MCP gates now
+    /// resolve the caller via `resolve_caller` — a credential-less request falls
+    /// back to that admin. Seed one so the structure/project mutations these
+    /// tests perform (Lead/admin-gated in legacy mode, like REST) resolve to an
+    /// admin identity instead of default-denying.
+    fn seed_first_admin(db: &crate::db::DbPool) {
+        let conn = db.write().unwrap();
+        crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: "admin".into(),
+                email: "admin@test.local".into(),
+                password: "adminpass123".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .expect("seed first admin");
+    }
+
+    /// LIFIC-11: process-wide serialization lock for MCP tests. `MCP_REQUEST_USER`
+    /// is a static shared across every concurrently-running test; before
+    /// `mcp_gate`'s legacy short-circuit was removed, gated mutations never
+    /// read it, so the sharing was harmless. Now they do (gates resolve the
+    /// caller via `resolve_caller`), so a direct-call test reading `None` can
+    /// race a concurrent `with_request_user`/`seed_user` test writing some other
+    /// user. Holding this lock for the whole test serializes the MCP suite and
+    /// removes the race. It's deliberately a *different* lock from
+    /// `MCP_HANDLER_LOCK` so `seed_user`/`with_request_context` (which acquire
+    /// that one) don't deadlock. Wrapped in a newtype so clippy's
+    /// `await_holding_lock` lint (which would reject a raw `MutexGuard` held
+    /// across `.await` in `#[tokio::test]`) leaves it alone — safe here because
+    /// each test owns its runtime/thread and tests never depend on each other.
+    static TEST_MCP_SERIALIZATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(super) struct McpTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    pub(super) fn acquire_test_guard() -> McpTestGuard {
+        McpTestGuard(TEST_MCP_SERIALIZATION_LOCK.lock().unwrap())
+    }
+
+    fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
-        LificMcp::new(db)
+        seed_first_admin(&db);
+        (LificMcp::new(db), acquire_test_guard())
     }
 
     fn mcp_with_realtime() -> (
         LificMcp,
         tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>,
+        McpTestGuard,
     ) {
         let db = crate::db::open_memory().expect("test db");
+        seed_first_admin(&db);
         let realtime = crate::realtime::RealtimeHub::new();
         let rx = realtime.subscribe();
-        (LificMcp::with_realtime(db, realtime), rx)
+        (LificMcp::with_realtime(db, realtime), rx, acquire_test_guard())
     }
 
     fn drain_realtime(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>) {
@@ -4350,7 +4366,7 @@ mod tests {
 
     #[test]
     fn canonical_project_identifier_comes_from_project_record() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Canonical", "CAN");
         let project_id = project_id_for(&m, "CAN");
 
@@ -4379,6 +4395,7 @@ mod tests {
         models::AuthUser,
         models::AuthUser,
         i64,
+        McpTestGuard,
     ) {
         let (db, admin, lead, maintainer, viewer, non_member, project_id) =
             crate::api::test_helpers::setup_membership_test();
@@ -4397,12 +4414,13 @@ mod tests {
             au(viewer),
             au(non_member),
             project_id,
+            acquire_test_guard(),
         )
     }
 
     #[test]
     fn project_resolver_matches_exact_identifiers_only() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Resolver Project", "RSL");
 
         assert!(resolve_project(&m.db, "RSL").expect("exact identifier should resolve") > 0);
@@ -4419,7 +4437,8 @@ mod tests {
 
     #[test]
     fn module_resolver_matches_names_case_insensitively_without_substrings() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Resolver Project", "MOD");
         let project_id = resolve_project(&m.db, "MOD").expect("project should resolve");
         let created = m.manage_resource(Parameters(ManageResourceInput {
@@ -4451,7 +4470,8 @@ mod tests {
 
     #[test]
     fn folder_resolver_matches_names_case_insensitively_without_substrings() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Resolver Project", "FLD");
         let project_id = resolve_project(&m.db, "FLD").expect("project should resolve");
         let created = m.manage_resource(Parameters(ManageResourceInput {
@@ -4485,14 +4505,15 @@ mod tests {
 
     #[test]
     fn manage_create_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = seed_project(&m, "Alpha", "ALP");
         assert_eq!(result, "ALP");
     }
 
     #[test]
     fn manage_update_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Old", "UPD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
@@ -4511,7 +4532,8 @@ mod tests {
 
     #[test]
     fn manage_update_project_description_persists() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Project", "DSC");
         let project_id = project_id_for(&m, "DSC");
 
@@ -4537,7 +4559,8 @@ mod tests {
 
     #[test]
     fn manage_update_project_identifier_persists() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Project", "OLD");
         let project_id = project_id_for(&m, "OLD");
 
@@ -4564,7 +4587,8 @@ mod tests {
 
     #[test]
     fn manage_update_project_with_current_name_requires_project_identifier() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Original", "ORG");
         let project_id = project_id_for(&m, "ORG");
 
@@ -4595,7 +4619,8 @@ mod tests {
 
     #[test]
     fn manage_create_module() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "MOD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "module".into(),
@@ -4614,7 +4639,8 @@ mod tests {
 
     #[test]
     fn manage_create_label() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "LBL");
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "label".into(),
@@ -4634,7 +4660,8 @@ mod tests {
 
     #[test]
     fn manage_create_folder() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "FLD");
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -4653,7 +4680,7 @@ mod tests {
 
     #[test]
     fn manage_missing_name_errors() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -4671,7 +4698,7 @@ mod tests {
 
     #[test]
     fn manage_unknown_type() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "widget".into(),
             action: "create".into(),
@@ -4691,7 +4718,7 @@ mod tests {
 
     #[test]
     fn issue_create_and_get() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "TST");
         let created = seed_issue(&m, "TST", "First issue");
         assert!(created.contains("TST-1"), "got: {created}");
@@ -4706,7 +4733,8 @@ mod tests {
 
     #[test]
     fn issue_create_with_options() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "OPT");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "label".into(),
@@ -4744,7 +4772,7 @@ mod tests {
 
     #[test]
     fn issue_update() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "UPI");
         seed_issue(&m, "UPI", "Original");
 
@@ -4765,7 +4793,7 @@ mod tests {
 
     #[test]
     fn update_issue_without_linked_plan_steps_has_plain_response() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "PLN");
         seed_issue(&m, "PLN", "Standalone");
 
@@ -4785,7 +4813,7 @@ mod tests {
 
     #[test]
     fn create_issue_persists_target_date() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "SCH");
 
         let result = m.create_issue(Parameters(CreateIssueInput {
@@ -4805,7 +4833,7 @@ mod tests {
 
     #[test]
     fn update_issue_sets_start_date() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "STD");
         seed_issue(&m, "STD", "Original");
 
@@ -4824,7 +4852,7 @@ mod tests {
 
     #[test]
     fn update_issue_omitting_dates_leaves_them_unchanged() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "UNC");
 
         m.create_issue(Parameters(CreateIssueInput {
@@ -4854,7 +4882,8 @@ mod tests {
 
     #[test]
     fn bulk_update_sets_status_on_module_matches_only() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Bulk", "BLK");
         // Module to target.
         m.manage_resource(Parameters(ManageResourceInput {
@@ -4921,7 +4950,7 @@ mod tests {
 
     #[test]
     fn bulk_update_emits_issue_updates() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
         seed_project(&m, "Bulk Events", "BLE");
         seed_issue(&m, "BLE", "One");
         seed_issue(&m, "BLE", "Two");
@@ -4954,7 +4983,8 @@ mod tests {
 
     #[test]
     fn issue_delete() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "DEL");
         seed_issue(&m, "DEL", "Doomed");
 
@@ -4975,12 +5005,12 @@ mod tests {
 
     #[tokio::test]
     async fn issue_delete_keeps_the_deleted_resource_reference_plain() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "DEL");
         seed_issue(&m, "DEL", "Doomed");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let result = crate::mcp::with_request_context(None, false, Some(context), || async {
+        let result = crate::mcp::with_request_context(None, Some(context), || async {
             m.delete(Parameters(DeleteInput {
                 resource_type: "issue".into(),
                 identifier: "DEL-01".into(),
@@ -4994,7 +5024,7 @@ mod tests {
 
     #[test]
     fn get_nonexistent_issue_errors() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.get_issue(Parameters(GetIssueInput {
             identifier: "NOPE-999".into(),
             ..Default::default()
@@ -5006,7 +5036,8 @@ mod tests {
 
     #[test]
     fn list_issues_with_filters() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "LST");
 
         m.create_issue(Parameters(CreateIssueInput {
@@ -5048,7 +5079,7 @@ mod tests {
 
     #[test]
     fn list_issues_reads_link_context_once() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Context", "CTX");
         seed_issue(&m, "CTX", "First");
         seed_issue(&m, "CTX", "Second");
@@ -5065,7 +5096,7 @@ mod tests {
 
     #[test]
     fn list_issues_empty() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Empty", "EMP");
         let result = m.list_issues(Parameters(ListIssuesInput {
             project: "EMP".into(),
@@ -5083,7 +5114,7 @@ mod tests {
 
     #[test]
     fn list_issues_bad_project_errors() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         // A project must exist, else the LIF-257 onboarding nudge fires
         // before the (bad) project identifier is ever resolved.
         seed_project(&m, "Alpha", "AAA");
@@ -5103,7 +5134,7 @@ mod tests {
 
     #[test]
     fn list_issues_pagination_emits_has_more_hint() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Pages", "PAG");
         // Seed 5 issues; ask for 2 — should report has_more with offset=2.
         for i in 0..5 {
@@ -5165,7 +5196,7 @@ mod tests {
 
     #[test]
     fn list_issues_no_hint_when_under_limit() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Small", "SML");
         seed_issue(&m, "SML", "Only one");
         let result = m.list_issues(Parameters(ListIssuesInput {
@@ -5187,7 +5218,7 @@ mod tests {
 
     #[test]
     fn link_and_unlink_issues() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "LNK");
         seed_issue(&m, "LNK", "Blocker");
         seed_issue(&m, "LNK", "Blocked");
@@ -5219,7 +5250,7 @@ mod tests {
     // status, not a shared one.
     #[test]
     fn get_issue_relations_carry_status() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Rel", "REL");
         seed_issue(&m, "REL", "target"); // REL-1
         seed_issue(&m, "REL", "blocker-a"); // REL-2
@@ -5254,7 +5285,7 @@ mod tests {
 
     #[test]
     fn list_issues_blocked_filter_surfaces_blocked_by() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "BLK");
         seed_issue(&m, "BLK", "Blocker"); // BLK-1
         seed_issue(&m, "BLK", "Blocked"); // BLK-2
@@ -5280,7 +5311,8 @@ mod tests {
 
     #[test]
     fn board_groups_by_status() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "BRD");
         m.create_issue(Parameters(CreateIssueInput {
             project: "BRD".into(),
@@ -5315,7 +5347,8 @@ mod tests {
     // LIF-140: board columns follow workflow order, not alphabetical order.
     #[test]
     fn board_status_columns_in_workflow_order() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Board Order", "BRO");
         for status in ["done", "active", "backlog", "todo", "cancelled"] {
             m.create_issue(Parameters(CreateIssueInput {
@@ -5353,7 +5386,8 @@ mod tests {
 
     #[test]
     fn board_priority_columns_in_severity_order() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Board Prio", "BRP");
         for priority in ["none", "medium", "urgent", "low", "high"] {
             m.create_issue(Parameters(CreateIssueInput {
@@ -5409,7 +5443,7 @@ mod tests {
 
     #[test]
     fn board_default_omits_closed_contents_but_shows_counts() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_board_mix(&m, "BCA");
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BCA".into(),
@@ -5434,7 +5468,7 @@ mod tests {
 
     #[test]
     fn board_include_closed_shows_closed_issues() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_board_mix(&m, "BCB");
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BCB".into(),
@@ -5449,7 +5483,7 @@ mod tests {
 
     #[test]
     fn board_priority_grouping_excludes_closed_with_trailing_note() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_board_mix(&m, "BCC");
         let result = m.get_board(Parameters(GetBoardInput {
             project: "BCC".into(),
@@ -5472,7 +5506,7 @@ mod tests {
 
     #[test]
     fn board_max_per_column_truncates_with_tail() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Capped Board", "BCD");
         for i in 0..4 {
             m.create_issue(Parameters(CreateIssueInput {
@@ -5499,7 +5533,7 @@ mod tests {
 
     #[test]
     fn board_empty_done_group_produces_no_stub() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "No Done", "BCE");
         m.create_issue(Parameters(CreateIssueInput {
             project: "BCE".into(),
@@ -5521,7 +5555,8 @@ mod tests {
 
     #[test]
     fn page_create_get_update() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "PG");
 
         let created = m.create_page(Parameters(CreatePageInput {
@@ -5554,7 +5589,8 @@ mod tests {
 
     #[test]
     fn workspace_page_no_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         let created = m.create_page(Parameters(CreatePageInput {
             project: None,
             title: "Global Note".into(),
@@ -5568,7 +5604,8 @@ mod tests {
 
     #[test]
     fn page_delete() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "PGD");
         m.create_page(Parameters(CreatePageInput {
             project: Some("PGD".into()),
@@ -5590,7 +5627,7 @@ mod tests {
 
     #[test]
     fn search_finds_issue() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "SRC");
         seed_issue(&m, "SRC", "Unique searchterm xyz");
 
@@ -5606,7 +5643,7 @@ mod tests {
 
     #[test]
     fn search_formats_issue_page_and_comment_results_distinctly() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let _guard = seed_user(&m);
         seed_project(&m, "Formatting", "FMT");
         seed_issue(&m, "FMT", "Issue mixedformatneedle");
@@ -5644,7 +5681,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_renders_a_comment_as_one_direct_link() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "SRC");
         seed_issue(&m, "SRC", "Search comments");
         let author = make_user(&m, "author", false);
@@ -5657,7 +5694,7 @@ mod tests {
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
         let result =
-            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
+            crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 m.add_comment(Parameters(AddCommentInput {
                     identifier: "SRC-1".into(),
                     content: "Unique comment needle".into(),
@@ -5683,7 +5720,7 @@ mod tests {
     // away, and passes the snippet (with **needle**) through the MCP layer.
     #[test]
     fn mcp_search_literal_mode_finds_punctuation_needle() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "SRC");
         seed_issue(&m, "SRC", "wire up core:sodom pipeline");
 
@@ -5699,7 +5736,7 @@ mod tests {
 
     #[test]
     fn mcp_search_invalid_mode_errors() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "SRC");
         let result = m.search(Parameters(SearchInput {
             query: "anything".into(),
@@ -5711,7 +5748,7 @@ mod tests {
 
     #[test]
     fn search_no_results() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         // A project must exist, else the LIF-257 onboarding nudge fires
         // before the query is ever run.
         seed_project(&m, "Alpha", "AAA");
@@ -5728,7 +5765,7 @@ mod tests {
 
     #[test]
     fn list_resources_projects() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Alpha", "AAA");
         seed_project(&m, "Beta", "BBB");
 
@@ -5748,7 +5785,7 @@ mod tests {
 
     #[test]
     fn list_resources_projects_shows_agent_stats_and_recent_work_first() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Stale", "STA");
         seed_project(&m, "Recent", "REC");
         seed_project(&m, "Empty", "EMP");
@@ -5802,7 +5839,7 @@ mod tests {
 
     #[test]
     fn nudge_list_resources_project_on_empty_db() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.list_resources(Parameters(ListResourcesInput {
             resource_type: "project".into(),
             ..Default::default()
@@ -5812,7 +5849,7 @@ mod tests {
 
     #[test]
     fn nudge_list_issues_on_empty_db() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         // Even with a bogus project filter, an empty DB nudges rather than
         // returning "project not found".
         let result = m.list_issues(Parameters(ListIssuesInput {
@@ -5824,7 +5861,7 @@ mod tests {
 
     #[test]
     fn nudge_search_on_empty_db() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.search(Parameters(SearchInput {
             query: "anything".into(),
             ..Default::default()
@@ -5834,7 +5871,7 @@ mod tests {
 
     #[test]
     fn nudge_get_board_on_empty_db() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.get_board(Parameters(GetBoardInput {
             project: "ANY".into(),
             ..Default::default()
@@ -5844,7 +5881,7 @@ mod tests {
 
     #[test]
     fn no_nudge_once_a_project_exists() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Alpha", "AAA");
 
         let listed = m.list_resources(Parameters(ListResourcesInput {
@@ -5875,7 +5912,7 @@ mod tests {
 
     #[test]
     fn list_resources_requires_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         for rt in ["module", "label", "folder", "issue"] {
             let result = m.list_resources(Parameters(ListResourcesInput {
                 resource_type: rt.into(),
@@ -5892,7 +5929,7 @@ mod tests {
 
     #[test]
     fn list_resources_unknown_type() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let result = m.list_resources(Parameters(ListResourcesInput {
             resource_type: "widget".into(),
             project: None,
@@ -5907,7 +5944,7 @@ mod tests {
 
     #[test]
     fn list_resources_issues_pagination() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Bulk", "BLK");
         for i in 0..4 {
             seed_issue(&m, "BLK", &format!("Issue {i}"));
@@ -5929,7 +5966,8 @@ mod tests {
 
     #[test]
     fn delete_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Doomed", "DPJ");
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "project".into(),
@@ -5941,7 +5979,8 @@ mod tests {
 
     #[test]
     fn delete_module_requires_project() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "module".into(),
             identifier: "Backend".into(),
@@ -5952,7 +5991,8 @@ mod tests {
 
     #[test]
     fn delete_module_reports_the_canonical_module_name() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Modules", "MOD");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "module".into(),
@@ -5973,7 +6013,8 @@ mod tests {
 
     #[test]
     fn delete_unknown_type() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         let result = m.delete(Parameters(DeleteInput {
             resource_type: "widget".into(),
             identifier: "x".into(),
@@ -5986,7 +6027,8 @@ mod tests {
 
     #[test]
     fn manage_update_label() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "UPL");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "label".into(),
@@ -6018,7 +6060,8 @@ mod tests {
 
     #[test]
     fn manage_update_folder() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "UPF");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -6049,7 +6092,8 @@ mod tests {
 
     #[test]
     fn manage_resource_structure_mutations_emit_project_updates() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
+        let _ag = first_admin_guard();
         seed_project(&m, "Structure Events", "STR");
         let project_id = project_id_for(&m, "STR");
         drain_realtime(&mut rx);
@@ -6209,9 +6253,27 @@ mod tests {
         guard
     }
 
+    /// LIFIC-11: hold `MCP_HANDLER_LOCK` (the *production* serialization lock
+    /// that every `with_request_user`/`with_request_context` across BOTH
+    /// `mcp/mod.rs` and `mcp/tools.rs` acquires) with no request-user set, so a
+    /// direct-call test resolves to the first admin (seeded by `mcp()`) via
+    /// `resolve_caller` — mirroring a credential-less operator MCP request.
+    /// Holding THIS lock (not a test-only one) is what serializes the test with
+    /// every other global writer, eliminating the read/write race that
+    /// `mcp_gate`'s legacy short-circuit used to mask. Only safe in tests that
+    /// do NOT themselves call `with_request_user`/`with_request_context`/
+    /// `seed_user` (they'd re-acquire the non-reentrant lock and deadlock).
+    fn first_admin_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = crate::mcp::MCP_HANDLER_LOCK.blocking_lock();
+        *crate::mcp::MCP_REQUEST_USER
+            .lock()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner()) = None;
+        guard
+    }
+
     #[test]
     fn add_and_list_comments() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Test issue");
         let _guard = seed_user(&m);
@@ -6250,7 +6312,7 @@ mod tests {
     // fixture, so all non-bot users are candidates).
     #[test]
     fn add_comment_records_mentions() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Mention issue");
         let _guard = seed_user(&m);
@@ -6294,7 +6356,7 @@ mod tests {
 
     #[test]
     fn get_issue_includes_comments() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Commented issue");
         let _guard = seed_user(&m);
@@ -6326,7 +6388,7 @@ mod tests {
 
     #[test]
     fn get_issue_recent_truncates_over_three_comments() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Chatty issue");
         let _guard = seed_user(&m);
@@ -6351,7 +6413,7 @@ mod tests {
 
     #[test]
     fn get_issue_recent_unchanged_at_three_or_fewer() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Few comments");
         let _guard = seed_user(&m);
@@ -6368,7 +6430,7 @@ mod tests {
 
     #[test]
     fn get_issue_all_shows_every_comment() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Full history");
         let _guard = seed_user(&m);
@@ -6389,7 +6451,7 @@ mod tests {
 
     #[test]
     fn get_issue_none_emits_stub_only() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Suppressed");
         let _guard = seed_user(&m);
@@ -6408,7 +6470,7 @@ mod tests {
 
     #[test]
     fn get_issue_none_with_zero_comments_shows_nothing() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Quiet");
 
@@ -6421,7 +6483,7 @@ mod tests {
 
     #[test]
     fn get_issue_invalid_include_comments_errors() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Bad mode");
 
@@ -6437,7 +6499,7 @@ mod tests {
 
     #[test]
     fn list_comments_limit_paginates_with_hint() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Limited");
         let _guard = seed_user(&m);
@@ -6464,7 +6526,7 @@ mod tests {
 
     #[test]
     fn list_comments_limit_desc_returns_newest_first() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Newest N");
         let _guard = seed_user(&m);
@@ -6488,7 +6550,7 @@ mod tests {
 
     #[test]
     fn list_comments_offset_returns_next_page() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Paged");
         let _guard = seed_user(&m);
@@ -6516,7 +6578,7 @@ mod tests {
 
     #[test]
     fn list_comments_no_limit_keeps_plain_header() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Unlimited");
         let _guard = seed_user(&m);
@@ -6542,7 +6604,7 @@ mod tests {
 
     #[test]
     fn list_comments_offset_without_limit_returns_unbounded_remainder() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Offset remainder");
         let _guard = seed_user(&m);
@@ -6569,7 +6631,7 @@ mod tests {
 
     #[test]
     fn list_comments_offset_past_end_reports_total() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Exhausted");
         let _guard = seed_user(&m);
@@ -6587,7 +6649,7 @@ mod tests {
 
     #[test]
     fn list_comments_with_zero_comments_reports_empty_thread() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "No comments");
 
@@ -6600,7 +6662,7 @@ mod tests {
 
     #[test]
     fn add_comment_bad_identifier() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let _guard = seed_user(&m);
 
         let result = m.add_comment(Parameters(AddCommentInput {
@@ -6612,29 +6674,15 @@ mod tests {
 
     #[test]
     fn add_comment_falls_back_to_first_admin() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Test issue");
 
-        // Create an admin user but do NOT set MCP_REQUEST_USER — simulates stdio/local auth.
-        let conn = m.db.write().unwrap();
-        queries::users::create_user(
-            &conn,
-            &models::CreateUser {
-                username: "admin".into(),
-                email: "admin@local.test".into(),
-                password: "adminpass123".into(),
-                display_name: Some("Admin User".into()),
-                is_admin: true,
-                is_bot: false,
-            },
-        )
-        .unwrap();
-        drop(conn);
-
-        // Clear any leftover auth context. Holds MCP_HANDLER_LOCK (see
-        // `seed_user`'s doc comment) so this "clear, then rely on it staying
-        // None" window can't be raced by a concurrently-running
+        // mcp() already seeded the first admin; here we deliberately do NOT set
+        // MCP_REQUEST_USER — simulating a stdio/local-auth session with no
+        // bound user. Clear any leftover auth context. Holds MCP_HANDLER_LOCK
+        // (see `seed_user`'s doc comment) so this "clear, then rely on it
+        // staying None" window can't be raced by a concurrently-running
         // `with_request_user` caller in another test.
         let _guard = crate::mcp::MCP_HANDLER_LOCK.blocking_lock();
         *crate::mcp::MCP_REQUEST_USER
@@ -6653,7 +6701,7 @@ mod tests {
 
     #[test]
     fn add_comment_on_page_identifier_creates_page_comment() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Pages", "PGC");
         m.create_page(Parameters(CreatePageInput {
             project: Some("PGC".into()),
@@ -6686,7 +6734,7 @@ mod tests {
 
     #[test]
     fn project_page_comment_mutations_emit_project_updates() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
         seed_project(&m, "Page Comments", "PCO");
         let project_id = project_id_for(&m, "PCO");
         m.create_page(Parameters(CreatePageInput {
@@ -6730,7 +6778,7 @@ mod tests {
 
     #[test]
     fn page_and_issue_comments_do_not_cross_contaminate_via_mcp() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Mix", "MIX");
         seed_issue(&m, "MIX", "An issue");
         m.create_page(Parameters(CreatePageInput {
@@ -6778,7 +6826,7 @@ mod tests {
 
     #[test]
     fn add_comment_on_workspace_page() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         // Workspace pages have no project prefix: identifier is DOC-N.
         m.create_page(Parameters(CreatePageInput {
             project: None,
@@ -6881,7 +6929,7 @@ mod tests {
 
     #[test]
     fn edit_issue_unique_match_succeeds() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDI");
         seed_issue_with_description(&m, "EDI", "T", "The quick brown fox");
 
@@ -6904,7 +6952,7 @@ mod tests {
 
     #[test]
     fn export_dispatches_on_identifier_shape() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EXP");
         seed_issue_with_description(&m, "EXP", "Ship it", "issue body here");
         let created = m.create_page(Parameters(CreatePageInput {
@@ -6945,7 +6993,7 @@ mod tests {
 
     #[test]
     fn create_and_edit_issue_preserves_literal_escapes_in_multiline_code() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "ESC");
         let description = "Example:\n```c\nprintf(\"\\n\");\n```\n";
         let created = m.create_issue(Parameters(CreateIssueInput {
@@ -6995,7 +7043,7 @@ mod tests {
 
     #[test]
     fn edit_issue_emits_issue_update() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
         seed_project(&m, "Edit Events", "EDE");
         seed_issue_with_description(&m, "EDE", "T", "hello world");
         let project_id = project_id_for(&m, "EDE");
@@ -7022,7 +7070,7 @@ mod tests {
 
     #[test]
     fn edit_issue_no_match_fails_with_clear_error() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDN");
         seed_issue_with_description(&m, "EDN", "T", "hello world");
 
@@ -7046,7 +7094,7 @@ mod tests {
 
     #[test]
     fn edit_issue_multiple_match_fails_without_replace_all() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDM");
         seed_issue_with_description(&m, "EDM", "T", "foo foo foo");
 
@@ -7064,7 +7112,7 @@ mod tests {
 
     #[test]
     fn edit_issue_replace_all_succeeds_when_set() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDA");
         seed_issue_with_description(&m, "EDA", "T", "foo foo foo");
 
@@ -7086,7 +7134,7 @@ mod tests {
 
     #[test]
     fn edit_issue_empty_old_string_fails() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDE");
         seed_issue_with_description(&m, "EDE", "T", "anything");
 
@@ -7103,7 +7151,7 @@ mod tests {
 
     #[test]
     fn edit_issue_identical_old_new_fails() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDS");
         seed_issue_with_description(&m, "EDS", "T", "hello");
 
@@ -7120,7 +7168,7 @@ mod tests {
 
     #[test]
     fn edit_issue_title_field_works() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDT");
         seed_issue_with_description(&m, "EDT", "Old name here", "body");
 
@@ -7144,7 +7192,7 @@ mod tests {
 
     #[test]
     fn edit_issue_invalid_field_fails() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Test", "EDX");
         seed_issue_with_description(&m, "EDX", "T", "body");
 
@@ -7161,7 +7209,8 @@ mod tests {
 
     #[test]
     fn edit_issue_preserves_other_fields() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EDP");
         m.create_issue(Parameters(CreateIssueInput {
             project: "EDP".into(),
@@ -7199,7 +7248,8 @@ mod tests {
 
     #[test]
     fn edit_page_content_works() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPC");
         m.create_page(Parameters(CreatePageInput {
             project: Some("EPC".into()),
@@ -7228,7 +7278,8 @@ mod tests {
 
     #[test]
     fn project_scoped_page_mutations_emit_project_updates() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
+        let _ag = first_admin_guard();
         seed_project(&m, "Page Events", "PGE");
         let project_id = project_id_for(&m, "PGE");
         drain_realtime(&mut rx);
@@ -7274,7 +7325,8 @@ mod tests {
 
     #[test]
     fn edit_page_title_field_works() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPT");
         m.create_page(Parameters(CreatePageInput {
             project: Some("EPT".into()),
@@ -7298,7 +7350,8 @@ mod tests {
 
     #[test]
     fn edit_page_preserves_other_fields() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPP");
         // Folder so we can verify it's preserved.
         m.manage_resource(Parameters(ManageResourceInput {
@@ -7358,7 +7411,8 @@ mod tests {
 
     #[test]
     fn edit_page_no_match_fails() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPN");
         m.create_page(Parameters(CreatePageInput {
             project: Some("EPN".into()),
@@ -7382,7 +7436,8 @@ mod tests {
 
     #[test]
     fn edit_page_invalid_field_fails() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Test", "EPX");
         m.create_page(Parameters(CreatePageInput {
             project: Some("EPX".into()),
@@ -7427,7 +7482,8 @@ mod tests {
 
     #[test]
     fn mcp_create_page_with_labels_returns_them_in_get() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PGL", "Pages with Labels");
 
         let created = m.create_page(Parameters(CreatePageInput {
@@ -7449,7 +7505,8 @@ mod tests {
 
     #[test]
     fn mcp_update_page_replaces_labels() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PUL", "Page Update Labels");
         m.create_page(Parameters(CreatePageInput {
             project: Some("PUL".into()),
@@ -7479,7 +7536,8 @@ mod tests {
 
     #[test]
     fn mcp_update_issue_clears_module_with_empty_string() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Clear Module", "CLM");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "module".into(),
@@ -7541,7 +7599,8 @@ mod tests {
     /// empty-string sentinel (folder_id = NULL).
     #[test]
     fn mcp_update_page_clears_folder_with_empty_string() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Clear Folder", "CLF");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -7601,7 +7660,8 @@ mod tests {
     /// sentinel (emoji = NULL).
     #[test]
     fn mcp_manage_resource_sets_then_clears_project_emoji() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Emoji Project", "EMP");
 
         // Set emoji.
@@ -7648,7 +7708,8 @@ mod tests {
 
     #[test]
     fn mcp_manage_resource_sets_module_emoji() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Module Emoji", "MEM");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "module".into(),
@@ -7692,7 +7753,8 @@ mod tests {
         // `- {id} | {status} | {title}[ [labels]][ (folder: F)] — updated {date}`
         // — matches the issue list formatter so an agent reading both
         // surfaces sees one mental model.
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PLI", "Page List");
         m.create_page(Parameters(CreatePageInput {
             project: Some("PLI".into()),
@@ -7729,7 +7791,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_label_filter() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_labels_for_pages(&m, "PLF", "Page Label Filter");
         m.create_page(Parameters(CreatePageInput {
             project: Some("PLF".into()),
@@ -7763,7 +7826,8 @@ mod tests {
 
     #[test]
     fn mcp_workspace_page_create_with_labels_silently_drops_them() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         // No seed_project: workspace pages live outside any project. The
         // labels list is silently ignored (project-scoped labels can't
         // attach without a project).
@@ -7788,7 +7852,8 @@ mod tests {
 
     #[test]
     fn mcp_get_page_surfaces_status_folder_and_timestamps() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Meta", "MET");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -7831,7 +7896,8 @@ mod tests {
 
     #[test]
     fn mcp_get_page_without_folder_says_none() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Meta", "MET");
         m.create_page(Parameters(CreatePageInput {
             project: Some("MET".into()),
@@ -7853,7 +7919,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_filters_by_status() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Stat", "STA");
         m.create_page(Parameters(CreatePageInput {
             project: Some("STA".into()),
@@ -7886,7 +7953,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_orders_by_title_desc() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Ord", "ORD");
         for title in ["Alpha", "Zulu", "Mike"] {
             m.create_page(Parameters(CreatePageInput {
@@ -7914,7 +7982,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_shows_folder_name() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Fold", "FOL");
         m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
@@ -7949,7 +8018,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_respects_limit() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Pag", "PAG");
         for title in ["P1", "P2", "P3", "P4", "P5"] {
             m.create_page(Parameters(CreatePageInput {
@@ -7984,7 +8054,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_offset_pages_correctly() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Off", "OFF");
         // Deterministic order: sort by title asc so we know which page lands
         // on which offset.
@@ -8017,7 +8088,8 @@ mod tests {
 
     #[test]
     fn mcp_list_resources_pages_hint_absent_on_last_page() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Last", "LST");
         for title in ["X", "Y", "Z"] {
             m.create_page(Parameters(CreatePageInput {
@@ -8048,7 +8120,7 @@ mod tests {
 
     #[test]
     fn mcp_list_comments_author_filter() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Authored");
         let _guard = seed_user(&m);
@@ -8078,7 +8150,7 @@ mod tests {
 
     #[test]
     fn mcp_list_comments_desc_order() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Threaded");
         let _guard = seed_user(&m);
@@ -8164,7 +8236,7 @@ mod tests {
 
     #[test]
     fn edit_comment_author_can_edit_own() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Editable");
         let author = make_user(&m, "author", false);
@@ -8204,7 +8276,7 @@ mod tests {
 
     #[test]
     fn delete_comment_author_can_delete_own() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Deletable");
         let author = make_user(&m, "author", false);
@@ -8234,7 +8306,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_mutations_link_the_live_comment_or_parent() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Linked comments");
         let author = make_user(&m, "author", false);
@@ -8247,7 +8319,7 @@ mod tests {
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
         let (comment_id, edited, deleted) =
-            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
+            crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 let added = m.add_comment(Parameters(AddCommentInput {
                     identifier: "PRJ-1".into(),
                     content: "original".into(),
@@ -8278,7 +8350,7 @@ mod tests {
 
     #[test]
     fn issue_comment_edit_and_delete_emit_updates() {
-        let (m, mut events) = mcp_with_realtime();
+        let (m, mut events, _guard) = mcp_with_realtime();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Realtime comments");
         let project_id = project_id_for(&m, "PRJ");
@@ -8317,7 +8389,7 @@ mod tests {
 
     #[test]
     fn edit_and_delete_comment_refuse_non_author_non_admin() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Guarded");
         let author = make_user(&m, "author", false);
@@ -8360,7 +8432,7 @@ mod tests {
 
     #[test]
     fn admin_can_delete_another_users_comment() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "AdminTarget");
         let author = make_user(&m, "author", false);
@@ -8385,7 +8457,7 @@ mod tests {
 
     #[test]
     fn edit_and_delete_comment_unknown_id_errors_cleanly() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Empty");
         let author = make_user(&m, "author", false);
@@ -8407,7 +8479,8 @@ mod tests {
 
     #[test]
     fn mcp_search_result_type_filter() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "findable widget issue");
         m.create_page(Parameters(CreatePageInput {
@@ -8437,7 +8510,7 @@ mod tests {
 
     #[test]
     fn mcp_search_pagination_emits_has_more_hint() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         for i in 0..3 {
             seed_issue(&m, "PRJ", &format!("paginated result {i}"));
@@ -8463,7 +8536,7 @@ mod tests {
 
     #[test]
     fn mcp_list_issues_date_filters() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let ident = seed_project(&m, "Dated", "DAT");
         seed_issue(&m, &ident, "Recent issue");
 
@@ -8486,7 +8559,7 @@ mod tests {
 
     #[test]
     fn mcp_list_issues_order_by_sequence_desc() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         let ident = seed_project(&m, "Sorted", "SRT");
         seed_issue(&m, &ident, "Oldest");
         seed_issue(&m, &ident, "Newest");
@@ -8513,7 +8586,7 @@ mod tests {
 
     #[test]
     fn get_activity_renders_issue_history() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         seed_issue(&m, "TST", "Watched issue");
 
@@ -8534,7 +8607,7 @@ mod tests {
 
     #[test]
     fn get_activity_project_feed_pages_with_hint() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         for i in 0..4 {
             seed_issue(&m, "TST", &format!("issue {i}"));
@@ -8560,30 +8633,35 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_links_the_resolved_resource_type() {
-        let m = mcp();
-        seed_project(&m, "Audit", "TST");
-        seed_issue(&m, "TST", "Audit issue");
-        m.create_page(Parameters(CreatePageInput {
-            project: Some("TST".into()),
-            title: "Audit page".into(),
-            content: None,
-            folder: None,
-            status: None,
-            labels: None,
-        }));
-        m.create_plan(Parameters(CreatePlanInput {
-            project: "TST".into(),
-            title: "Audit plan".into(),
-            anchor_issue: None,
-            steps: None,
-        }));
-        m.manage_resource(Parameters(ManageResourceInput {
-            resource_type: "module".into(),
-            action: "create".into(),
-            project: Some("TST".into()),
-            name: Some("Backend".into()),
-            ..Default::default()
-        }));
+        let (m, _guard) = mcp();
+        // Setup as the first admin (credential-less → resolve_caller fallback),
+        // holding the handler lock so the Lead-gated module create is stable.
+        crate::mcp::with_request_context(None, None, || async {
+            seed_project(&m, "Audit", "TST");
+            seed_issue(&m, "TST", "Audit issue");
+            m.create_page(Parameters(CreatePageInput {
+                project: Some("TST".into()),
+                title: "Audit Page".into(),
+                content: None,
+                folder: None,
+                status: None,
+                labels: None,
+            }));
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "TST".into(),
+                title: "Audit plan".into(),
+                anchor_issue: None,
+                steps: None,
+            }));
+            m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: "module".into(),
+                action: "create".into(),
+                project: Some("TST".into()),
+                name: Some("Backend".into()),
+                ..Default::default()
+            }));
+        })
+        .await;
         let author = make_user(&m, "author", false);
         let auth_user = models::AuthUser {
             id: author.id,
@@ -8594,7 +8672,7 @@ mod tests {
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
         let (project, page, issue) =
-            crate::mcp::with_request_context(Some(auth_user), false, Some(context), || async {
+            crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
                 m.add_comment(Parameters(AddCommentInput {
                     identifier: "TST-1".into(),
                     content: "Audit comment".into(),
@@ -8639,20 +8717,25 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_leaves_stale_identifiers_unlinked_after_project_rename() {
-        let m = mcp();
-        seed_project(&m, "Audit", "TST");
-        seed_issue(&m, "TST", "Historical issue");
-        let updated = m.manage_resource(Parameters(ManageResourceInput {
-            resource_type: "project".into(),
-            action: "update".into(),
-            project: Some("TST".into()),
-            identifier: Some("NEW".into()),
-            ..Default::default()
-        }));
+        let (m, _guard) = mcp();
+        // Setup as the first admin (credential-less → resolve_caller fallback),
+        // holding the handler lock so the Lead-gated project rename is stable.
+        let updated = crate::mcp::with_request_context(None, None, || async {
+            seed_project(&m, "Audit", "TST");
+            seed_issue(&m, "TST", "Historical issue");
+            m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: "project".into(),
+                action: "update".into(),
+                project: Some("TST".into()),
+                identifier: Some("NEW".into()),
+                ..Default::default()
+            }))
+        })
+        .await;
         assert!(updated.contains("Updated project NEW"), "got: {updated}");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+        let out = crate::mcp::with_request_context(None, Some(context), || async {
             m.get_activity(Parameters(GetActivityInput {
                 identifier: "NEW".into(),
                 ..Default::default()
@@ -8666,7 +8749,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_leaves_stale_relation_targets_unlinked_after_project_rename() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         seed_issue(&m, "TST", "Source");
         seed_issue(&m, "TST", "Target");
@@ -8679,7 +8762,7 @@ mod tests {
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
         let (live, stale) =
-            crate::mcp::with_request_context(None, false, Some(context), || async {
+            crate::mcp::with_request_context(None, Some(context), || async {
                 let live = m.get_activity(Parameters(GetActivityInput {
                     identifier: "TST".into(),
                     ..Default::default()
@@ -8714,7 +8797,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_links_plan_steps_to_their_parent_plan() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         let created = m.create_plan(Parameters(CreatePlanInput {
             project: "TST".into(),
@@ -8728,7 +8811,7 @@ mod tests {
         assert!(created.contains("Created TST-PLAN-1"), "got: {created}");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+        let out = crate::mcp::with_request_context(None, Some(context), || async {
             m.get_activity(Parameters(GetActivityInput {
                 identifier: "TST".into(),
                 ..Default::default()
@@ -8746,7 +8829,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_links_plan_step_issue_values() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         seed_issue(&m, "TST", "Linked issue");
         m.create_plan(Parameters(CreatePlanInput {
@@ -8767,7 +8850,7 @@ mod tests {
         assert!(updated.contains("Attached TST-1"), "got: {updated}");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let out = crate::mcp::with_request_context(None, false, Some(context), || async {
+        let out = crate::mcp::with_request_context(None, Some(context), || async {
             m.get_activity(Parameters(GetActivityInput {
                 identifier: "TST".into(),
                 ..Default::default()
@@ -8785,7 +8868,7 @@ mod tests {
 
     #[test]
     fn get_activity_rejects_unknown_identifier() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         let out = m.get_activity(Parameters(GetActivityInput {
             identifier: "NOPE-999".into(),
@@ -8796,7 +8879,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_activity_attributes_mcp_actor() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
 
         // Seed a bot user, then act through the production MCP identity
@@ -8837,7 +8920,7 @@ mod tests {
     /// This test reproduces the boundary with a literal tokio::spawn.
     #[tokio::test]
     async fn mcp_attribution_survives_task_spawn() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
 
         let bot_id = {
@@ -8892,7 +8975,7 @@ mod tests {
 
     #[test]
     fn create_plan_authors_nested_tree_and_get_plan_rehydrates() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
 
         let created = m.create_plan(Parameters(CreatePlanInput {
@@ -8938,7 +9021,7 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_an_issue_to_a_plan_step_links_its_canonical_identifier() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Real work");
         let created = m.create_plan(Parameters(CreatePlanInput {
@@ -8958,7 +9041,7 @@ mod tests {
             .expect("step id in output");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let output = crate::mcp::with_request_context(None, false, Some(context), || async {
+        let output = crate::mcp::with_request_context(None, Some(context), || async {
             m.update_plan_step(Parameters(UpdatePlanStepInput {
                 plan: "PLN-PLAN-1".into(),
                 step_id: Some(step_id),
@@ -8977,7 +9060,7 @@ mod tests {
 
     #[test]
     fn update_plan_step_done_closes_linked_issue_and_narrates() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Real work"); // PLN-1
 
@@ -9032,7 +9115,7 @@ mod tests {
     // LIF-302: echo_tree=true restores the full re-rendered plan tree.
     #[test]
     fn update_plan_step_echo_tree_returns_full_tree() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PET");
         let created = m.create_plan(Parameters(CreatePlanInput {
             project: "PET".into(),
@@ -9076,7 +9159,7 @@ mod tests {
     // receipt, not the tree.
     #[test]
     fn update_plan_step_plan_level_returns_receipt() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PPR");
         m.create_plan(Parameters(CreatePlanInput {
             project: "PPR".into(),
@@ -9107,7 +9190,7 @@ mod tests {
 
     #[test]
     fn update_plan_step_done_emits_issue_update() {
-        let (m, mut rx) = mcp_with_realtime();
+        let (m, mut rx, _guard) = mcp_with_realtime();
         seed_project(&m, "Plan Events", "PLE");
         seed_issue(&m, "PLE", "Real work");
         let project_id = project_id_for(&m, "PLE");
@@ -9152,7 +9235,7 @@ mod tests {
 
     #[test]
     fn edit_plan_step_find_replace() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         let created = m.create_plan(Parameters(CreatePlanInput {
             project: "PLN".into(),
@@ -9188,7 +9271,7 @@ mod tests {
 
     #[test]
     fn plan_level_update_archives_and_lists() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         m.create_plan(Parameters(CreatePlanInput {
             project: "PLN".into(),
@@ -9232,7 +9315,7 @@ mod tests {
     // with provenance when the plan is rehydrated.
     #[test]
     fn closing_issue_autocompletes_step_visible_in_get_plan() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Mirrored work"); // PLN-1
         let created = m.create_plan(Parameters(CreatePlanInput {
@@ -9274,7 +9357,7 @@ mod tests {
 
     #[test]
     fn reopening_issue_narrates_reopened_plan_step() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "RPN");
         seed_issue(&m, "RPN", "Mirrored work"); // RPN-1
         let created = m.create_plan(Parameters(CreatePlanInput {
@@ -9313,7 +9396,7 @@ mod tests {
 
     #[test]
     fn closing_issue_skips_steps_in_archived_plans_without_note() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Plans", "ARC");
         seed_issue(&m, "ARC", "Mirrored work"); // ARC-1
         m.create_plan(Parameters(CreatePlanInput {
@@ -9353,7 +9436,8 @@ mod tests {
 
     #[test]
     fn delete_plan_via_delete_tool() {
-        let m = mcp();
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
         seed_project(&m, "Plans", "PLN");
         m.create_plan(Parameters(CreatePlanInput {
             project: "PLN".into(),
@@ -9401,7 +9485,7 @@ mod tests {
 
     #[test]
     fn no_html_escape_across_issue_read_surfaces() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Escape", "ESC");
         let created = m.create_issue(Parameters(CreateIssueInput {
             project: "ESC".into(),
@@ -9457,7 +9541,7 @@ mod tests {
 
     #[test]
     fn no_html_escape_in_comment_surfaces() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Escape", "ESC");
         seed_issue(&m, "ESC", "Host issue");
         let _guard = seed_user(&m);
@@ -9485,7 +9569,7 @@ mod tests {
 
     #[test]
     fn no_html_escape_in_plan_step_title() {
-        let m = mcp();
+        let (m, _guard) = mcp();
         seed_project(&m, "Escape", "ESC");
         let raw_step = r#"land A & B <fast> "now""#;
         let created = m.create_plan(Parameters(CreatePlanInput {
@@ -9545,7 +9629,7 @@ mod authz_gating_tests {
 
     #[test]
     fn bulk_update_denies_non_member_when_enforced() {
-        let (m, _admin, _lead, maintainer, _viewer, non_member, _project_id) =
+        let (m, _admin, _lead, maintainer, _viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         // Seed an active issue as a permitted member.
         let created = as_user(&maintainer, || {
@@ -9589,7 +9673,7 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_read_denies_non_member_allows_viewer() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, project_id) = setup_membership_mcp();
+        let (m, _admin, lead, _maintainer, viewer, non_member, project_id, _guard) = setup_membership_mcp();
         let _ = project_id;
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -9625,7 +9709,7 @@ mod authz_gating_tests {
 
     #[test]
     fn page_and_plan_reads_follow_the_same_viewer_gate() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id) =
+        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         let page = as_user(&lead, || {
             m.create_page(Parameters(CreatePageInput {
@@ -9679,7 +9763,7 @@ mod authz_gating_tests {
 
     #[test]
     fn search_and_list_resources_project_filter_instead_of_denying() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id) =
+        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -9740,7 +9824,7 @@ mod authz_gating_tests {
     /// projects exist and mislead a real member.
     #[test]
     fn nudge_not_shown_when_projects_exist_but_none_visible() {
-        let (m, _admin, _lead, _maintainer, _viewer, non_member, _project_id) =
+        let (m, _admin, _lead, _maintainer, _viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
 
         let projects = as_user(&non_member, || {
@@ -9771,7 +9855,7 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_create_gated_by_maintainer_role() {
-        let (m, admin, lead, maintainer, viewer, non_member, _project_id) = setup_membership_mcp();
+        let (m, admin, lead, maintainer, viewer, non_member, _project_id, _guard) = setup_membership_mcp();
 
         for (user, expect_ok) in [
             (&non_member, false),
@@ -9803,7 +9887,7 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_update_and_delete_gated_by_maintainer_role() {
-        let (m, _admin, lead, maintainer, viewer, non_member, _project_id) = setup_membership_mcp();
+        let (m, _admin, lead, maintainer, viewer, non_member, _project_id, _guard) = setup_membership_mcp();
         let created = as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
                 project: "MEM".into(),
@@ -9867,7 +9951,7 @@ mod authz_gating_tests {
 
     #[test]
     fn comment_create_allows_viewer_denies_non_member() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id) =
+        let (m, _admin, lead, _maintainer, viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -9907,7 +9991,7 @@ mod authz_gating_tests {
 
     #[test]
     fn structure_endpoints_viewer_denied_maintainer_allowed() {
-        let (m, _admin, _lead, maintainer, viewer, non_member, _project_id) =
+        let (m, _admin, _lead, maintainer, viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
 
         let denied = as_user(&viewer, || {
@@ -10005,7 +10089,7 @@ mod authz_gating_tests {
 
     #[test]
     fn project_settings_update_maintainer_denied_lead_allowed() {
-        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id) =
+        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
 
         let denied = as_user(&maintainer, || {
@@ -10043,7 +10127,7 @@ mod authz_gating_tests {
 
     #[test]
     fn project_delete_maintainer_denied_lead_allowed_when_enforced() {
-        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id) =
+        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
 
         let denied = as_user(&maintainer, || {
@@ -10069,7 +10153,7 @@ mod authz_gating_tests {
 
     #[test]
     fn relation_link_requires_maintainer_on_both_projects() {
-        let (m, _admin, lead, maintainer, _viewer, _non_member, project_id) =
+        let (m, _admin, lead, maintainer, _viewer, _non_member, project_id, _guard) =
             setup_membership_mcp();
         let issue_a = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -10155,7 +10239,7 @@ mod authz_gating_tests {
     /// step requires Maintainer on that issue's project too.
     #[test]
     fn plan_step_attach_issue_requires_maintainer_on_issue_project() {
-        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id) =
+        let (m, _admin, lead, maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
         let plan = as_user(&maintainer, || {
             m.create_plan(Parameters(CreatePlanInput {
@@ -10244,7 +10328,7 @@ mod authz_gating_tests {
 
     #[test]
     fn workspace_page_mutation_requires_admin() {
-        let (m, admin, _lead, maintainer, _viewer, _non_member, _project_id) =
+        let (m, admin, _lead, maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
 
         let denied = as_user(&maintainer, || {
@@ -10276,7 +10360,7 @@ mod authz_gating_tests {
 
     #[test]
     fn bot_owned_by_maintainer_inherits_role() {
-        let (m, _admin, _lead, maintainer, _viewer, _non_member, _project_id) =
+        let (m, _admin, _lead, maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
         let bot = {
             let conn = m.db.write().unwrap();
@@ -10324,7 +10408,7 @@ mod authz_gating_tests {
 
     #[test]
     fn non_member_denied_on_reads_mutations_and_delete() {
-        let (m, _admin, lead, _maintainer, _viewer, non_member, _project_id) =
+        let (m, _admin, lead, _maintainer, _viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -10377,7 +10461,7 @@ mod authz_gating_tests {
         // write side through a tool call; this adds the READ side through
         // an actual tool call on a project the admin holds no membership
         // row on at all.
-        let (m, admin, lead, _maintainer, _viewer, _non_member, _project_id) =
+        let (m, admin, lead, _maintainer, _viewer, _non_member, _project_id, _guard) =
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -10449,7 +10533,7 @@ mod authz_gating_tests {
         use sha2::{Digest, Sha256};
         use tower::ServiceExt;
 
-        let (m, _admin, lead, maintainer, _viewer, non_member, _project_id) =
+        let (m, _admin, lead, maintainer, _viewer, non_member, _project_id, _guard) =
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -10670,6 +10754,7 @@ mod authz_gating_tests {
             (lead, outsider)
         };
         let m = LificMcp::new(db);
+        let _sguard = super::tests::acquire_test_guard();
         let outsider_user = models::AuthUser {
             id: outsider.id,
             username: outsider.username,

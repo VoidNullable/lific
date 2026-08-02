@@ -29,7 +29,7 @@
 //! owner (`007_bot_owners.sql`) before either check runs, in both modes — an
 //! agent can never exceed the human that owns it.
 //!
-//! ## Operator-key trust (LIF-261)
+//! ## Operator-key trust (LIF-261 → LIFIC-7/8/10/11)
 //!
 //! Enforced mode is default-deny for a `None` effective user. That alone would
 //! brick the zero-user agent-first flow (`lific init` → `start` → `connect`),
@@ -40,14 +40,16 @@
 //! guards against is a web-signup stranger with a session/OAuth token, not the
 //! operator's own shell-minted key.
 //!
-//! So enforced mode treats an **unbound API key** as admin-equivalent. The
-//! signal is credential-type-specific and comes only from the auth layer's
-//! unbound-API-key path — it is deliberately NOT "any `None`," because a legacy
-//! pre-binding OAuth token (`src/auth.rs`) also resolves to `None` and must
-//! stay default-denied. The auth middleware sets [`operator_scope`] (REST) or
-//! `mcp::with_request_user`'s operator flag (MCP); [`operator_context`] reads
-//! whichever surface is active. **Unbound API keys therefore bypass authz by
-//! design; audit them with `lific key list`.**
+//! LIFIC-7 unified this on [`resolve_caller`]: any credential that
+//! authenticates but resolves no specific user (an unbound API key, a legacy
+//! unbound OAuth token, a credential-less "auth off" request, or a stdio MCP
+//! session) falls back to the **first admin**. The gates then read
+//! `identity.user.is_admin`, which short-circuits to allow — so the operator
+//! bypass is just "the first admin is trusted," applied identically across
+//! REST, MCP, and CLI. The old credential-type-specific operator carriers
+//! (`operator_context`, `operator_scope`, `OPERATOR`, MCP's operator flag) are
+//! gone or vestigial; LIFIC-14 deletes the last of them. **Audit unbound keys
+//! with `lific key list`.**
 
 use std::collections::HashSet;
 
@@ -61,36 +63,21 @@ use crate::resolve_caller::ResolvedIdentity;
 // ── Operator-key trust signal (LIF-261) ─────────────────────────
 
 tokio::task_local! {
-    /// REST-side, request-scoped "the credential is an operator-trusted
-    /// unbound API key" flag. Set by `auth::require_api_key` via
-    /// [`operator_scope`] around the downstream handler, which runs in the
-    /// same task — so ambient reads in `require_role` see it. MCP can't use a
-    /// task-local (rmcp spawns internal tasks that drop it), so it mirrors the
-    /// flag into `mcp::current_is_operator()` instead.
+    /// REST-side, request-scoped operator flag (LIF-261). Vestigial after
+    /// LIFIC-10/11: the gates read `identity.user.is_admin` instead, so this
+    /// task-local is write-only (set by [`operator_scope`], read by nobody).
+    /// LIFIC-14 deletes it along with the rest of the carrier mechanism.
     static OPERATOR: bool;
 }
 
 /// Run `fut` with the REST operator flag in scope. `auth::require_api_key`
-/// wraps the unbound-API-key request path in this so `authz`'s ambient
-/// [`operator_context`] reads `true` for the duration of the request.
+/// wraps the unbound-API-key request path in this. LIFIC-11 deleted the reader
+/// (`operator_context`); the flag the task-local carries is now unread — the
+/// operator bypass lives in `identity.user.is_admin` instead (set by
+/// `resolve_caller`). LIFIC-14 deletes this setter and the `OPERATOR`
+/// task-local together.
 pub async fn operator_scope<F: std::future::Future>(is_operator: bool, fut: F) -> F::Output {
     OPERATOR.scope(is_operator, fut).await
-}
-
-/// Whether the current request's credential is an operator-trusted unbound
-/// API key. Checks the REST task-local first, then the MCP request global —
-/// exactly one is ever set for a given request. Defaults to `false`
-/// (including every synchronous / CLI / test context that sets neither), so
-/// no code path silently gains operator power without an explicit signal.
-///
-/// LIFIC-10: unread after the gates migrated to [`ResolvedIdentity`] (the
-/// operator now resolves to the first admin, so `identity.user.is_admin`
-/// replaces this signal). Kept here because [`operator_scope`] and the MCP
-/// global are still wired by the auth layer; LIFIC-14 deletes all four
-/// carrier mechanisms together.
-#[allow(dead_code)]
-fn operator_context() -> bool {
-    OPERATOR.try_with(|o| *o).unwrap_or(false) || crate::mcp::current_is_operator()
 }
 
 // ── Bot → owner resolution ──────────────────────────────────────

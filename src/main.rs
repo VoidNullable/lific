@@ -996,15 +996,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .flatten();
 
-                        // LIF-261: the auth middleware marks an operator-trusted
-                        // unbound API key with the OperatorCredential extension.
-                        // Forward it so MCP tools' authz gates treat it as
-                        // admin-equivalent in enforced mode.
-                        let is_operator = request
-                            .extensions()
-                            .get::<auth::OperatorCredential>()
-                            .is_some();
-
                         let issue_links = links::IssueLinkContext::for_http_request(
                             mcp_public_url.as_deref(),
                             request
@@ -1014,7 +1005,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mcp_allowed_hosts_for_links,
                         );
 
-                        mcp::with_request_context(auth_user, is_operator, issue_links, || async {
+                        mcp::with_request_context(auth_user, issue_links, || async {
                             mcp_service.handle(request).await.into_response()
                         })
                         .await
@@ -1864,7 +1855,7 @@ fn build_authless_mcp_router(
                     .and_then(|value| value.to_str().ok()),
                 &allowed_hosts_for_links,
             );
-            mcp::with_request_context(user, false, issue_links, || async {
+            mcp::with_request_context(user, issue_links, || async {
                 service.handle(request).await.into_response()
             })
             .await

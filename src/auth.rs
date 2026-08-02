@@ -604,8 +604,10 @@ pub async fn require_api_key(
                 crate::actor::Transport::Api,
             );
             request.extensions_mut().insert(auth_user);
-            // The /mcp route reads this marker to pass the operator flag into
-            // `with_request_identity`; REST reads the task-local scoped below.
+            // LIF-261 marker for an operator-trusted unbound API key. LIFIC-11
+            // removed its only reader (the /mcp route no longer forwards an
+            // operator flag); LIFIC-14 deletes OperatorCredential, this insert,
+            // and the `operator_scope` task-local below together.
             if is_operator {
                 request.extensions_mut().insert(OperatorCredential);
             }
@@ -628,11 +630,11 @@ pub async fn require_api_key(
 }
 
 /// LIF-261: request-extension marker inserted by [`require_api_key`] when the
-/// authenticated credential is an operator-trusted unbound API key. The `/mcp`
-/// route reads it (via `request.extensions().get::<OperatorCredential>()`) to
-/// forward the operator flag into `mcp::with_request_identity`. REST handlers
-/// don't read it — they see the operator signal through the task-local scoped
-/// by `authz::operator_scope` around the same request.
+/// authenticated credential is an operator-trusted unbound API key. LIFIC-11
+/// removed its only reader — the `/mcp` route no longer forwards an operator
+/// flag, since `resolve_caller` now resolves unbound keys to the first admin
+/// (read as `identity.user.is_admin`). This marker and the `operator_scope`
+/// task-local are vestigial; LIFIC-14 deletes them.
 #[derive(Clone, Copy)]
 pub struct OperatorCredential;
 
