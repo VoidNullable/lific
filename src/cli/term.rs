@@ -92,7 +92,6 @@ pub fn confirm_inner<R: std::io::BufRead, W: std::io::Write>(
 /// a TTY, and names `bypass_flag` — the flag a non-interactive caller should
 /// pass to supply the value without a prompt. Returns the trimmed input; errors
 /// on empty input or no-TTY.
-#[allow(dead_code)]
 pub fn prompt_text(prompt: &str, bypass_flag: &str) -> Result<String, String> {
     prompt_text_inner(
         prompt,
@@ -105,7 +104,6 @@ pub fn prompt_text(prompt: &str, bypass_flag: &str) -> Result<String, String> {
 
 /// Pure/injected implementation of [`prompt_text`], factored out so the non-TTY
 /// refusal branch and the reader plumbing are testable.
-#[allow(dead_code)]
 pub fn prompt_text_inner<R: std::io::BufRead, W: std::io::Write>(
     prompt: &str,
     bypass_flag: &str,

@@ -339,11 +339,9 @@ pub fn create_passwordless_admin(
         ));
     }
     let username = derive_username(conn, display_name)?;
-    // Random hash: never arithmetically a login password, just fills the NOT
-    // NULL column. Mirrors `create_bot_user`, minus the bot flags.
-    let random_pw: [u8; 32] = rand::random();
-    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
-    let password_hash = hash_password(&random_pw_hex)?;
+    // Unusable hash: never arithmetically a login password, just fills the NOT
+    // NULL column. Same guarantee as `create_bot_user`.
+    let password_hash = unusable_password_hash()?;
 
     conn.execute(
         "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
@@ -509,16 +507,24 @@ pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<Use
 /// Create a bot user owned by the given human user.
 /// Returns the bot user. API key creation is handled separately by the caller
 /// using `auth::create_api_key` + `assign_key_to_user`.
+/// Generate an unusable password hash: a random value with no known plaintext.
+///
+/// Used for identities that must never be signed into by password (passwordless
+/// human admins, and bots) to satisfy the NOT NULL `password_hash` column while
+/// guaranteeing `authenticate` can never succeed against it.
+fn unusable_password_hash() -> Result<String, LificError> {
+    let random_pw: [u8; 32] = rand::random();
+    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
+    hash_password(&random_pw_hex)
+}
+
 pub fn create_bot_user(
     conn: &Connection,
     owner_id: i64,
     bot_username: &str,
     display_name: &str,
 ) -> Result<crate::db::models::User, LificError> {
-    // Bot users get a random password (never used for login)
-    let random_pw: [u8; 32] = rand::random();
-    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
-    let password_hash = hash_password(&random_pw_hex)?;
+    let password_hash = unusable_password_hash()?;
 
     conn.execute(
         "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id)

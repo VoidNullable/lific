@@ -886,12 +886,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Auto-generate a key if none exist and no human operator exists
             // yet (LIFIC-9: once a human exists we stop auto-minting the
-            // unbound "default" key — keys are minted on demand).
+            // unbound "default" key — keys are minted on demand). The three
+            // branches are mutually exclusive by construction:
+            //   1. empty bootstrap (no human, no keys) → mint the default key
+            //   2. human present, still no keys → passwordless mode
+            //   3. keys exist → plain count
             if auth::should_mint_initial_key(&pool) {
                 let key = auth::create_api_key(&pool, &manager, "default")?;
                 info!("no API keys found, auto-generated initial key");
                 print_initial_key(&key);
-            } else if auth::has_human_operator(&pool) {
+            } else if !auth::has_any_keys(&pool) {
+                // A human operator exists (should_mint was false for lack of
+                // keys alone) but no key has been created yet: keys are minted
+                // on demand via `lific key create`.
                 info!("human operator present — passwordless mode; mint keys on demand with `lific key create`");
             } else {
                 let count = auth::list_api_keys(&pool)?

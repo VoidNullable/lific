@@ -37,6 +37,11 @@ cargo test
 The whole suite runs in seconds. Every new MCP tool and REST endpoint ships with tests. Conventions:
 
 - All tests use in-memory SQLite via `crate::db::open_memory()`.
+- **Exception:** full-command tests of `lific init` (_`cmd_init`_) exercise the
+  real filesystem and a genuine on-disk DB, because init writes a config file
+  and opens the DB from a path — it cannot run against an in-memory database.
+  These use a self-cleaning temp dir (`TempDir` in `init_target_tests`) and
+  stay out of the repo tree.
 - MCP tool tests call methods directly via `Parameters(...)` on a `LificMcp` instance.
 - REST API tests use `tower::ServiceExt::oneshot` against the axum router.
 - Test names describe behavior, not implementation.
