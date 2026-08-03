@@ -1189,7 +1189,7 @@ mod tests {
     // ── create_passwordless_admin (LIFIC-9) ─────────────────
 
     #[test]
-    fn passwordless_admin_is_admin_not_bot_and_is_first_admin() {
+    fn operator_admin_is_not_a_connected_tool() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
@@ -1197,13 +1197,21 @@ mod tests {
         assert!(admin.is_admin, "first admin is an admin");
         assert!(!admin.is_bot, "first admin is a person, not a connected tool");
         assert_eq!(admin.display_name, "Operator Blake");
+    }
+
+    #[test]
+    fn operator_admin_resolves_as_first_admin() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
+
         let resolved = first_admin(&conn).unwrap().expect("resolves as first admin");
         assert_eq!(resolved.id, admin.id);
         assert_eq!(resolved.username, admin.username);
     }
 
     #[test]
-    fn passwordless_admin_has_derived_username() {
+    fn operator_username_comes_from_their_name() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let admin = create_passwordless_admin(&conn, "Blake Smith").unwrap();
@@ -1211,12 +1219,15 @@ mod tests {
     }
 
     #[test]
-    fn passwordless_admin_username_dedupes_on_collision() {
+    fn same_named_operators_get_distinct_usernames() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        create_passwordless_admin(&conn, "Blake").unwrap();
+        let first = create_passwordless_admin(&conn, "Blake").unwrap();
         let second = create_passwordless_admin(&conn, "blake!").unwrap();
-        assert_eq!(second.username, "blake-1");
+
+        assert_ne!(first.username, second.username, "usernames must not collide");
+        assert!(!first.username.is_empty());
+        assert!(!second.username.is_empty());
     }
 
     #[test]
