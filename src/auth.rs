@@ -164,6 +164,29 @@ pub fn has_any_keys(db: &DbPool) -> bool {
     }
 }
 
+/// Whether a first human (non-bot) operator exists yet.
+pub fn has_human_operator(db: &DbPool) -> bool {
+    if let Ok(conn) = db.read() {
+        crate::db::queries::users::has_human_users(&conn).unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// LIFIC-9: whether to auto-mint the "default" unbound API key at startup.
+///
+/// This is the single decision both `lific init` and `lific start` share. Under
+/// the new design a human operator is created at `init` (passwordless mode), so
+/// an unbound operator-style key should no longer be minted as the default path
+/// — the operator *is* a real user now. The "default" key is still available on
+/// demand via `lific key create`. We mint it only for the genuinely empty
+/// bootstrap (no users at all, no keys) so a headless/agent-first install can
+/// still get a credential before any human exists — and once a human exists we
+/// never auto-mint it again, even if all keys were later revoked.
+pub fn should_mint_initial_key(db: &DbPool) -> bool {
+    !has_any_keys(db) && !has_human_operator(db)
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ApiKeyInfo {
@@ -793,6 +816,32 @@ mod tests {
         let manager = create_key_manager().unwrap();
         create_api_key(&pool, &manager, "first").unwrap();
         assert!(has_any_keys(&pool));
+    }
+
+    // LIFIC-9: the initial-key decision is shared by `init` and `start`.
+    #[test]
+    fn should_mint_initial_key_empty_bootstrap_mints() {
+        let pool = test_db();
+        // No humans, no keys: the genuinely empty bootstrap.
+        assert!(should_mint_initial_key(&pool));
+    }
+
+    #[test]
+    fn should_mint_initial_key_false_once_a_human_operator_exists() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        crate::db::queries::users::create_passwordless_admin(&conn, "Blake").unwrap();
+        drop(conn);
+        // A human exists even with zero keys: passwordless mode, no mint.
+        assert!(!should_mint_initial_key(&pool));
+    }
+
+    #[test]
+    fn should_mint_initial_key_false_when_any_key_exists() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "first").unwrap();
+        assert!(!should_mint_initial_key(&pool));
     }
 
     #[test]

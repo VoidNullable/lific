@@ -292,6 +292,82 @@ pub fn first_admin(conn: &Connection) -> Result<Option<AuthUser>, LificError> {
     }
 }
 
+// ── Passwordless admin (LIFIC-9) ────────────────────────────
+
+/// Derive a usable, unique username from a display name. Keeps [a-z0-9-],
+/// collapses runs of non-alphanumerics to a single `-`, and falls back to
+/// `admin` if nothing survives; appends `-N` when the raw slug is taken.
+fn derive_username(conn: &Connection, display_name: &str) -> Result<String, LificError> {
+    let slug: String = display_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if slug.is_empty() { "admin".to_string() } else { slug };
+    let mut candidate = base.clone();
+    let mut n = 1;
+    while get_user_by_username(conn, &candidate).is_ok() {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    Ok(candidate)
+}
+
+/// Create the first human admin on a fresh install — a passwordless operator.
+///
+/// "Passwordless" means it can never be signed into by password: the stored
+/// hash is a random value with no known plaintext, and the email is a synthetic
+/// placeholder that satisfies the NOT NULL UNIQUE schema. The operator reaches
+/// this identity through the browser auto-login / passwordless fallback in
+/// `resolve_caller`, never through a password prompt.
+///
+/// LIFIC-9: this is what makes `[auth] required = false` "passwordless mode"
+/// instead of "half-broken anonymous" — there is always a real admin to resolve
+/// to from the moment the instance exists.
+pub fn create_passwordless_admin(
+    conn: &Connection,
+    display_name: &str,
+) -> Result<User, LificError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator name cannot be empty".into(),
+        ));
+    }
+    let username = derive_username(conn, display_name)?;
+    // Random hash: never arithmetically a login password, just fills the NOT
+    // NULL column. Mirrors `create_bot_user`, minus the bot flags.
+    let random_pw: [u8; 32] = rand::random();
+    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
+    let password_hash = hash_password(&random_pw_hex)?;
+
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+         VALUES (?1, ?2, ?3, ?4, 1, 0)",
+        params![
+            username,
+            format!("{username}@local"),
+            password_hash,
+            display_name,
+        ],
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            LificError::Internal("failed to create first admin (constraint)".into())
+        }
+        other => other.into(),
+    })?;
+
+    let id = conn.last_insert_rowid();
+    get_user_by_id(conn, id)
+}
+
 // ── Sessions ─────────────────────────────────────────────────
 
 /// Hash a session token with SHA-256 for storage.
@@ -1108,5 +1184,52 @@ mod tests {
 
         let result = assign_key_to_user(&conn, "nope", user.id);
         assert!(result.is_err());
+    }
+
+    // ── create_passwordless_admin (LIFIC-9) ─────────────────
+
+    #[test]
+    fn passwordless_admin_is_admin_not_bot_and_is_first_admin() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
+
+        assert!(admin.is_admin, "first admin is an admin");
+        assert!(!admin.is_bot, "first admin is a person, not a connected tool");
+        assert_eq!(admin.display_name, "Operator Blake");
+        let resolved = first_admin(&conn).unwrap().expect("resolves as first admin");
+        assert_eq!(resolved.id, admin.id);
+        assert_eq!(resolved.username, admin.username);
+    }
+
+    #[test]
+    fn passwordless_admin_has_derived_username() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Blake Smith").unwrap();
+        assert_eq!(admin.username, "blake-smith");
+    }
+
+    #[test]
+    fn passwordless_admin_username_dedupes_on_collision() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_passwordless_admin(&conn, "Blake").unwrap();
+        let second = create_passwordless_admin(&conn, "blake!").unwrap();
+        assert_eq!(second.username, "blake-1");
+    }
+
+    #[test]
+    fn passwordless_admin_cannot_be_logged_into_by_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_passwordless_admin(&conn, "Blake").unwrap();
+        // The random stored hash has no known plaintext, so password login
+        // must always fail — there is no password, only passwordless identity.
+        let result = authenticate(&conn, "blake", "anypassword123");
+        assert!(
+            result.is_err(),
+            "passwordless admin must never authenticate by password"
+        );
     }
 }
