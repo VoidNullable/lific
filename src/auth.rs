@@ -1027,6 +1027,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_token_bound_to_bot_resolves_to_the_bot_identity() {
+        // LIFIC-13: at OAuth approval Lific mints a per-tool bot and binds the
+        // issued token to it. The middleware must resolve that token to the bot
+        // (which authz then raises to the bot's owner for permissions).
+        let pool = test_db();
+        let bot_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "claude-code-blake".into(),
+                    email: "claude-code-blake@bot.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: Some("Claude Code".into()),
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let token = insert_oauth_token(&pool, "bot", Some(bot_id));
+
+        let resp = identity_echo_app(test_auth_state(&pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.as_ref().to_vec()).unwrap();
+        assert!(
+            body.contains(&format!("id:{bot_id}:claude-code-blake")),
+            "OAuth token must resolve to the per-tool bot, got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_api_key_without_user_resolves_to_none_via_middleware() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();

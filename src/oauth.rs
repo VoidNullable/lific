@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::db::DbPool;
+use crate::error::LificError;
 use crate::ratelimit::RateLimiter;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -409,6 +410,13 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
     // page (sent on the top-level GET navigation under SameSite=Lax). The POST
     // approval must carry the same session for the token to validate.
     let csrf_token = generate_csrf_token(&session_credential(&headers));
+
+    // LIFIC-13: the approval screen asks which tool is connecting so the audit
+    // log can attribute requests to a per-tool bot. Options come from the same
+    // Connected Tools registry `lific connect` uses; a free-text field covers
+    // unrecognized tools.
+    let options = tool_options_html();
+
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -420,8 +428,10 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
         h1 {{ font-size: 1.4em; margin-bottom: 0.5em; }}
         p {{ color: #888; line-height: 1.5; }}
         .client {{ color: #fff; font-weight: 600; }}
+        label {{ display: block; margin-top: 1em; color: #aaa; font-size: 0.9em; }}
+        select, input {{ width: 100%%; padding: 10px; margin-top: 4px; border-radius: 6px; border: 1px solid #333; background: #141414; color: #e0e0e0; box-sizing: border-box; }}
         form {{ margin-top: 2em; }}
-        button {{ background: #2563eb; color: white; border: none; padding: 12px 32px; border-radius: 6px; font-size: 1em; cursor: pointer; width: 100%; }}
+        button {{ background: #2563eb; color: white; border: none; padding: 12px 32px; border-radius: 6px; font-size: 1em; cursor: pointer; width: 100%; margin-top: 1.5em; }}
         button:hover {{ background: #1d4ed8; }}
     </style>
 </head>
@@ -437,6 +447,13 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
         <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
         <input type="hidden" name="scope" value="{scope}">
         <input type="hidden" name="csrf_token" value="{csrf_token}">
+        <label for="tool">Which tool is connecting?</label>
+        <select name="tool" id="tool">
+            <option value="" selected>Custom (type below)</option>
+            {options}
+        </select>
+        <label for="tool_custom">Custom tool name</label>
+        <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
         <button type="submit">Approve</button>
     </form>
 </body>
@@ -450,6 +467,7 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
             html_escape(params.code_challenge_method.as_deref().unwrap_or("S256")),
         scope = html_escape(params.scope.as_deref().unwrap_or("mcp")),
         csrf_token = html_escape(&csrf_token),
+        options = options,
     ))
 }
 
@@ -465,6 +483,11 @@ struct ApproveForm {
     #[allow(dead_code)]
     scope: Option<String>,
     csrf_token: Option<String>,
+    /// LIFIC-13: which tool is connecting — a Connected Tools registry id, or
+    /// empty meaning `tool_custom` holds a free-text name.
+    tool: Option<String>,
+    /// Free-text tool name when `tool` is unset (an unrecognized tool).
+    tool_custom: Option<String>,
 }
 
 async fn authorize_approve(
@@ -565,6 +588,21 @@ async fn authorize_approve(
             .into_response();
     }
 
+    // LIFIC-13: pick which tool is connecting, then ensure (or reuse) its bot
+    // so the issued credential attributes to the tool, not the approving human.
+    // The bot inherits the human's permissions via authz's bot→owner resolution.
+    let bot_id = match resolve_approval_bot(
+        &oauth,
+        &form.tool,
+        &form.tool_custom,
+        approving_user_id,
+    ) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Html(msg)).into_response();
+        }
+    };
+
     let code = uuid_v4();
     let expires = chrono::Utc::now() + chrono::Duration::minutes(10);
     let scope = form.scope.as_deref().unwrap_or("mcp");
@@ -584,7 +622,7 @@ async fn authorize_approve(
             form.code_challenge_method.unwrap_or_else(|| "S256".into()),
             expires.to_rfc3339(),
             scope,
-            approving_user_id,
+            bot_id,
         ],
     ) {
         tracing::error!(error = %e, "failed to store OAuth authorization code");
@@ -633,6 +671,106 @@ fn generate_user_code() -> String {
     out.push('-');
     pick(&mut out);
     out
+}
+
+/// Tool ids that a human can't claim as a free-text tool — they'd collide with
+/// real internal identities (`admin`, `system`) or are meaningless.
+const RESERVED_TOOL_IDS: &[&str] = &["admin", "system"];
+
+/// Resolve the connecting tool from the approval form's choice, returning its
+/// `(tool_id, display_name)`.
+///
+/// LIFIC-13: known tools come from the Connected Tools registry
+/// (`cli::connect::clients::all_clients`) so the approval pick-list and the
+/// bot's display name match what `lific connect` writes. Unknown tools fall to
+/// free text: lowercased, non-alphanumerics collapsed to `-`, then rejected if
+/// they hit a reserved id.
+fn resolve_tool(raw: &str) -> Result<(String, String), LificError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(LificError::BadRequest("tool cannot be empty".into()));
+    }
+    // Known registry client: keep its canonical display name.
+    if let Some(client) = crate::cli::connect::clients::find_client(trimmed) {
+        return Ok((client.id.to_string(), client.display.to_string()));
+    }
+
+    // Free text: sanitize down to a slug id, fall back to the humanized text.
+    let slug: String = trimmed
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        return Err(LificError::BadRequest("tool id cannot be empty".into()));
+    }
+    if RESERVED_TOOL_IDS.contains(&slug.as_str()) {
+        return Err(LificError::BadRequest(format!(
+            "tool id '{slug}' is reserved"
+        )));
+    }
+    Ok((slug.clone(), trimmed.to_string()))
+}
+
+/// Render the Connected Tools `<option>` elements for the approval pick-lists
+/// (shared by the auth-code and device pages). Sourced from the same registry
+/// `lific connect` writes, so the two UIs never drift.
+fn tool_options_html() -> String {
+    let mut options = String::new();
+    for c in crate::cli::connect::clients::all_clients() {
+        options.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            html_escape(c.id),
+            html_escape(c.display)
+        ));
+    }
+    options
+}
+
+/// The shared LIFIC-13 tool-resolution + bot-mint step used by both the
+/// auth-code and device approval doors.
+///
+/// Resolves which tool is connecting from the form's `(tool, tool_custom)`
+/// pair, validates it, then mints (or reuses) the per-tool bot owned by the
+/// approving human. Returns the bot's user id on success, or a small
+/// `(StatusCode, message)` the caller renders as its error page (missing tool,
+/// unsanitizable/reserved id, no resolvable owner, or DB failure).
+fn resolve_approval_bot(
+    oauth: &OAuthState,
+    tool: &Option<String>,
+    tool_custom: &Option<String>,
+    approving_user_id: Option<i64>,
+) -> Result<i64, (StatusCode, String)> {
+    let tool_text = match (tool, tool_custom) {
+        (Some(id), _) if !id.trim().is_empty() => id.clone(),
+        (_, Some(name)) if !name.trim().is_empty() => name.clone(),
+        _ => return Err((StatusCode::BAD_REQUEST, "Pick which tool is connecting".into())),
+    };
+    let (tool_id, display_name) = match resolve_tool(&tool_text) {
+        Ok(v) => v,
+        Err(e) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
+    };
+    let Some(owner_id) = approving_user_id else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No operator to attribute to — sign in as a human first".into(),
+        ));
+    };
+    let conn = match oauth.db.write() {
+        Ok(c) => c,
+        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "database error".into())),
+    };
+    match crate::db::queries::users::ensure_bot(&conn, owner_id, &tool_id, &display_name) {
+        Ok(bot) => Ok(bot.id),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to mint OAuth tool bot");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "database error".into()))
+        }
+    }
 }
 
 /// Normalize a user code the human may have typed with lowercase letters,
@@ -804,6 +942,8 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
         .as_deref()
         .map(normalize_user_code)
         .unwrap_or_default();
+    // LIFIC-13: same Connected Tools pick-list as the authorize screen.
+    let options = tool_options_html();
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -815,7 +955,8 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
         h1 {{ font-size: 1.4em; margin-bottom: 0.5em; }}
         p {{ color: #888; line-height: 1.5; }}
         label {{ display: block; margin-top: 1.5em; color: #aaa; font-size: 0.9em; }}
-        input[type=text] {{ width: 100%; box-sizing: border-box; margin-top: 0.4em; padding: 12px; border-radius: 6px; border: 1px solid #333; background: #111; color: #fff; font-size: 1.2em; letter-spacing: 0.15em; text-align: center; text-transform: uppercase; }}
+        input[type=text], select {{ width: 100%%; box-sizing: border-box; margin-top: 0.4em; padding: 12px; border-radius: 6px; border: 1px solid #333; background: #111; color: #fff; }}
+        input[type=text] {{ font-size: 1.2em; letter-spacing: 0.15em; text-align: center; text-transform: uppercase; }}
         .buttons {{ display: flex; gap: 12px; margin-top: 2em; }}
         button {{ flex: 1; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 1em; cursor: pointer; }}
         button.approve {{ background: #2563eb; }}
@@ -830,6 +971,13 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
     <form method="POST" action="/oauth/device">
         <label for="user_code">Device code</label>
         <input type="text" id="user_code" name="user_code" value="{user_code}" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+        <label for="tool">Which tool is connecting?</label>
+        <select name="tool" id="tool">
+            <option value="" selected>Custom (type below)</option>
+            {options}
+        </select>
+        <label for="tool_custom">Custom tool name</label>
+        <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
         <input type="hidden" name="csrf_token" value="{csrf_token}">
         <div class="buttons">
             <button type="submit" name="decision" value="approve" class="approve">Approve</button>
@@ -840,6 +988,7 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
 </html>"#,
         user_code = html_escape(&prefill),
         csrf_token = html_escape(&csrf_token),
+        options = options,
     ))
 }
 
@@ -848,6 +997,11 @@ struct DeviceApproveForm {
     user_code: String,
     decision: Option<String>,
     csrf_token: Option<String>,
+    /// LIFIC-13: which tool is connecting — a registry id, or empty meaning
+    /// `tool_custom` holds a free-text name.
+    tool: Option<String>,
+    /// Free-text tool name when `tool` is unset.
+    tool_custom: Option<String>,
 }
 
 /// `POST /oauth/device` — validate CSRF + session, then mark the device code
@@ -909,19 +1063,34 @@ async fn device_approve(
     let normalized = normalize_user_code(&form.user_code);
     let deny = form.decision.as_deref() == Some("deny");
 
+    // Originally pending, unexpired codes only get acted on below. Defer the
+    // write-lock acquisition until after LIFIC-13 bot resolution, because
+    // resolve_approval_bot also takes a write lock — acquiring it here first
+    // would self-deadlock the pool.
+    let new_status = if deny { "denied" } else { "approved" };
+
+    // LIFIC-13: on approval, pick which tool is connecting and mint (or reuse)
+    // its bot, binding the device code to the bot so the exchanged token
+    // attributes to the tool. Deny needs no tool resolution.
+    let target_user_id: Option<i64> = if deny {
+        approving_user_id
+    } else {
+        match resolve_approval_bot(&oauth, &form.tool, &form.tool_custom, approving_user_id) {
+            Ok(id) => Some(id),
+            Err((status, msg)) => return (status, Html(msg)).into_response(),
+        }
+    };
+
     let conn = match oauth.db.write() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
-
-    // Only pending, unexpired codes can be acted on.
-    let new_status = if deny { "denied" } else { "approved" };
     let updated = conn
         .execute(
             "UPDATE oauth_device_codes
              SET status = ?1, user_id = ?2
              WHERE user_code = ?3 AND status = 'pending' AND expires_at > datetime('now')",
-            params![new_status, approving_user_id, normalized],
+            params![new_status, target_user_id, normalized],
         )
         .unwrap_or(0);
 
@@ -1567,7 +1736,7 @@ mod tests {
     fn authorize_body(client_id: &str, redirect_uri: &str, binding: &str) -> String {
         let csrf = generate_csrf_token(binding);
         format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
             client_id,
             urlencoding::encode(redirect_uri),
             urlencoding::encode(&csrf),
@@ -2381,7 +2550,7 @@ mod tests {
         // CSRF bound to the session presented on the approval (cookie below).
         let csrf = generate_csrf_token(&session_token);
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
             client_id,
             urlencoding::encode("http://localhost/callback"),
             urlencoding::encode(&challenge),
@@ -2423,7 +2592,18 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // The authorization code carries the approver's id.
+        // LIFIC-13: the issued credential binds to the per-tool BOT, not the
+        // approving human, so the audit log distinguishes which tool acted.
+        let (bot_id, bot_username): (i64, String) = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id, username FROM users WHERE username = 'claude-code-oauthtest'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert!(!bot_username.is_empty());
         {
             let conn = db.read().unwrap();
             let code_user: Option<i64> = conn
@@ -2433,7 +2613,11 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(code_user, Some(user_id), "code should bind the approver");
+            assert_eq!(
+                code_user,
+                Some(bot_id),
+                "code should bind the tool bot, not the approver"
+            );
         }
 
         // Exchange the code; the issued token must carry the same identity.
@@ -2465,8 +2649,125 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let access_token = val["access_token"].as_str().unwrap();
 
-        // The middleware will resolve this token to the approving user.
-        assert_eq!(oauth_token_user_id(&db, access_token), Some(user_id));
+        // The middleware resolves this token to the tool bot, not the human.
+        assert_eq!(oauth_token_user_id(&db, access_token), Some(bot_id));
+        assert_ne!(bot_id, user_id, "bot must differ from the approving human");
+    }
+
+    #[tokio::test]
+    async fn reapproval_reuses_the_same_tool_bot() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db); // user "oauthtest"
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        let approve = |app: Router, csrf: &str| {
+            let body = format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=opencode",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(csrf),
+            );
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+        };
+
+        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
+            .await
+            .unwrap()
+            .status()
+            .is_redirection());
+        let first_id: i64 = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE username = 'opencode-oauthtest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // Re-approval of the same tool+owner must reuse the same bot.
+        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
+            .await
+            .unwrap()
+            .status()
+            .is_redirection());
+        let second_id: i64 = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE username = 'opencode-oauthtest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            first_id, second_id,
+            "re-approval must reuse the same bot, not mint a duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_requires_a_tool_choice() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let csrf = generate_csrf_token(&session_token);
+        // No tool, no tool_custom → must be rejected, not silently attributed.
+        let body = format!(
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}",
+            client_id,
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_reserved_free_text_tool() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let csrf = generate_csrf_token(&session_token);
+        let body = format!(
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool_custom=admin",
+            client_id,
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -2671,7 +2972,7 @@ mod tests {
         // Approve via the verification page (signed-in session, CSRF-bound).
         let csrf = generate_csrf_token(&session_token);
         let approve_body = format!(
-            "user_code={}&decision=approve&csrf_token={}",
+            "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
             urlencoding::encode(&user_code),
             urlencoding::encode(&csrf),
         );
@@ -2690,7 +2991,16 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "approval should succeed");
 
-        // The device row now binds the approver.
+        // LIFIC-13: the device row binds the per-tool BOT, not the approver.
+        let bot_id: i64 = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT id FROM users WHERE username = 'claude-code-oauthtest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
         {
             let conn = db.read().unwrap();
             let (st, uid): (String, Option<i64>) = conn
@@ -2701,16 +3011,17 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(st, "approved");
-            assert_eq!(uid, Some(user_id));
+            assert_eq!(uid, Some(bot_id));
         }
 
-        // Next poll: approved → returns a token bound to the approver.
+        // Next poll: approved → returns a token bound to the tool bot.
         reset_last_poll(&db);
         let (status, body) = poll_device_token(&app, &device_code).await;
         assert_eq!(status, StatusCode::OK, "expected token, got {body}");
         let access_token = body["access_token"].as_str().unwrap();
         assert!(access_token.starts_with("lific_at_"));
-        assert_eq!(oauth_token_user_id(&db, access_token), Some(user_id));
+        assert_eq!(oauth_token_user_id(&db, access_token), Some(bot_id));
+        assert_ne!(bot_id, user_id, "bot must differ from the approving human");
 
         // Single-use: a replay poll now fails (consumed → invalid_grant).
         reset_last_poll(&db);
@@ -2923,5 +3234,40 @@ mod tests {
                 assert!(USER_CODE_ALPHABET.contains(&(ch as u8)));
             }
         }
+    }
+
+    // ── resolve_tool (LIFIC-13) ────────────────────────────────
+
+    #[test]
+    fn resolve_tool_known_registry_id_keeps_display_name() {
+        // A pick from the Connected Tools registry maps to its display name.
+        let (id, display) = resolve_tool("claude-code").unwrap();
+        assert_eq!(id, "claude-code");
+        assert_eq!(display, "Claude Code");
+    }
+
+    #[test]
+    fn resolve_tool_unregistered_tool_is_sanitized() {
+        // Free text gets lowercased and stripped to the id, display falls back
+        // to the same humanized text.
+        let (id, display) = resolve_tool("My Editor").unwrap();
+        assert_eq!(id, "my-editor");
+        assert_eq!(display, "My Editor");
+    }
+
+    #[test]
+    fn resolve_tool_rejects_reserved_words() {
+        for reserved in ["admin", "system"] {
+            assert!(
+                resolve_tool(reserved).is_err(),
+                "{reserved} is a reserved tool id"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_tool_rejects_empty_or_only_symbols() {
+        assert!(resolve_tool("").is_err());
+        assert!(resolve_tool("   ").is_err());
     }
 }

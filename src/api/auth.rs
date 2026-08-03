@@ -658,32 +658,22 @@ pub(super) async fn create_bot(
 
     let bot_username = format!("{tool}-{}", user.username);
 
-    // Check if a disconnected bot already exists — reconnect it instead of creating new
-    let existing_bot = with_read(&db, |conn| {
-        crate::db::queries::users::find_bot_by_username(conn, &bot_username)
-    })
-    .ok()
-    .flatten();
+    // Reuse the shared find-or-create seam (LIFIC-13) so a web-connected bot is
+    // indistinguishable from one minted at OAuth approval or via `lific connect`.
+    let bot_user = with_write(&db, |conn| {
+        crate::db::queries::users::ensure_bot(conn, user.id, &tool, display_name)
+    })?;
 
-    let bot_user = if let Some(existing) = existing_bot {
-        // Bot exists — check if it already has an active key
-        let has_key = with_read(&db, |conn| {
-            crate::db::queries::users::bot_has_active_key(conn, existing.id)
-        })?;
-
-        if has_key {
-            return Err(LificError::BadRequest(format!(
-                "{display_name} is already connected"
-            )));
-        }
-
-        existing
-    } else {
-        // Create fresh bot user
-        with_write(&db, |conn| {
-            crate::db::queries::users::create_bot_user(conn, user.id, &bot_username, display_name)
-        })?
-    };
+    // If the bot already has an active key it's already connected — refuse
+    // rather than silently minting a fresh credential for an active tool.
+    let has_key = with_read(&db, |conn| {
+        crate::db::queries::users::bot_has_active_key(conn, bot_user.id)
+    })?;
+    if has_key {
+        return Err(LificError::BadRequest(format!(
+            "{display_name} is already connected"
+        )));
+    }
 
     // Generate a new API key for the bot
     let plaintext_key = crate::auth::create_api_key(&db, &manager, &bot_username)?;

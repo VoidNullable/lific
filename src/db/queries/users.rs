@@ -593,6 +593,28 @@ pub fn bot_has_active_key(conn: &Connection, bot_id: i64) -> Result<bool, LificE
     Ok(has)
 }
 
+/// Ensure a per-tool bot exists for `owner_id`, reusing an existing one rather
+/// than minting a duplicate. The bot username is `{tool_id}-{owner.username}`
+/// — the same convention `lific connect` and the web UI's Connected Tools use,
+/// so a bot minted at OAuth approval is indistinguishable from one connected
+/// another way. Returns the bot user.
+///
+/// LIFIC-13: the single find-or-create decision all three doors (OAuth
+/// approval, `lific connect`, web create_bot) share.
+pub fn ensure_bot(
+    conn: &Connection,
+    owner_id: i64,
+    tool_id: &str,
+    display_name: &str,
+) -> Result<User, LificError> {
+    let owner_username = get_user_by_id(conn, owner_id)?.username;
+    let bot_username = format!("{tool_id}-{owner_username}");
+    match find_bot_by_username(conn, &bot_username)? {
+        Some(existing) => Ok(existing),
+        None => create_bot_user(conn, owner_id, &bot_username, display_name),
+    }
+}
+
 /// List all bots owned by a specific user.
 pub fn list_bots(
     conn: &Connection,
@@ -797,6 +819,60 @@ mod tests {
             !has_human_users(&conn).unwrap(),
             "a bot-only instance still reads as having no human accounts"
         );
+    }
+
+    // ── ensure_bot (LIFIC-13) ────────────────────────────────
+
+    #[test]
+    fn ensure_bot_creates_a_new_bot_for_the_owner() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+
+        let bot_id = ensure_bot(&conn, owner.id, "claude-code", "Claude Code")
+            .unwrap()
+            .id;
+        let bot = get_user_by_id(&conn, bot_id).unwrap();
+        assert!(bot.is_bot, "minted user is a bot");
+        assert_eq!(bot.username, "claude-code-blake");
+        assert_eq!(bot.display_name, "Claude Code");
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert_eq!(listed.len(), 1, "one bot owned by this user");
+        assert_eq!(listed[0].owner_id, Some(owner.id));
+    }
+
+    #[test]
+    fn ensure_bot_reuses_existing_bot_for_same_tool_and_owner() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        assert_eq!(first, second, "re-approval must reuse, not duplicate");
+    }
+
+    #[test]
+    fn ensure_bot_distinguishes_owners() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner_a = test_create_user(&conn);
+        let owner_b = create_user(
+            &conn,
+            &CreateUser {
+                username: "ada".into(),
+                email: "ada@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode").unwrap().id;
+        let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode").unwrap().id;
+        assert_ne!(a, b, "each owner gets its own bot for the same tool");
     }
 
     // ── LIF-190: profile + password updates ─────────────────
