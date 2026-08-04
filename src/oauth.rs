@@ -415,7 +415,7 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
     // log can attribute requests to a per-tool bot. Options come from the same
     // Connected Tools registry `lific connect` uses; a free-text field covers
     // unrecognized tools.
-    let options = tool_options_html();
+    let tool_pick_list = tool_pick_list_html();
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -447,24 +447,9 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
         <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
         <input type="hidden" name="scope" value="{scope}">
         <input type="hidden" name="csrf_token" value="{csrf_token}">
-        <label for="tool">Which tool is connecting?</label>
-        <select name="tool" id="tool">
-            <option value="" selected disabled>Select a tool&hellip;</option>
-            {options}
-        </select>
-        <div id="custom_tool" style="display:none;">
-            <label for="tool_custom">Custom tool name</label>
-            <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
-        </div>
+        {tool_pick_list}
         <button type="submit">Approve</button>
     </form>
-    <script>
-        var tool = document.getElementById('tool');
-        var custom = document.getElementById('custom_tool');
-        tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '__custom__' ? 'block' : 'none';
-        }});
-    </script>
 </body>
 </html>"#,
         client_id = html_escape(&params.client_id),
@@ -476,7 +461,7 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
             html_escape(params.code_challenge_method.as_deref().unwrap_or("S256")),
         scope = html_escape(params.scope.as_deref().unwrap_or("mcp")),
         csrf_token = html_escape(&csrf_token),
-        options = options,
+        tool_pick_list = tool_pick_list,
     ))
 }
 
@@ -729,13 +714,16 @@ fn resolve_tool(raw: &str) -> Result<(String, String), LificError> {
 /// The approval form selects this to reveal the free-text tool-name field.
 const CUSTOM_TOOL_OPTION: &str = "__custom__";
 
-/// Render the Connected Tools `<option>` elements for the approval pick-lists
-/// (shared by the auth-code and device pages). Sourced from the same registry
-/// `lific connect` writes, so the two UIs never drift. Known tools come first;
-/// a final `Custom tool…` entry (value [`CUSTOM_TOOL_OPTION`]) reveals a
-/// free-text field for unrecognized tools, so a pick-list and a free-text input
-/// are never both live at once.
-fn tool_options_html() -> String {
+/// Render the whole "Which tool is connecting?" widget shared by the auth-code
+/// and device approval pages: the Connected Tools pick-list (from the same
+/// registry `lific connect` writes), a hidden free-text field for unrecognized
+/// tools, and the small inline script that reveals that field when the
+/// `Custom tool…` option is chosen. Known tools come first; the pick-list and
+/// the free-text input are never both live at once.
+///
+/// The reveal script compares against [`CUSTOM_TOOL_OPTION`] interpolated from
+/// the Rust constant, so the option value lives in exactly one place.
+fn tool_pick_list_html() -> String {
     let mut options = String::new();
     for c in crate::cli::connect::clients::all_clients() {
         options.push_str(&format!(
@@ -748,7 +736,25 @@ fn tool_options_html() -> String {
         "<option value=\"{}\">Custom tool&hellip;</option>",
         CUSTOM_TOOL_OPTION
     ));
-    options
+    format!(
+        "<label for=\"tool\">Which tool is connecting?</label>
+        <select name=\"tool\" id=\"tool\">
+            <option value=\"\" selected disabled>Select a tool&hellip;</option>
+            {options}
+        </select>
+        <div id=\"custom_tool\" style=\"display:none;\">
+            <label for=\"tool_custom\">Custom tool name</label>
+            <input type=\"text\" name=\"tool_custom\" id=\"tool_custom\" placeholder=\"e.g. my-agent\">
+        </div>
+        <script>
+        var tool = document.getElementById('tool');
+        var custom = document.getElementById('custom_tool');
+        tool.addEventListener('change', function () {{
+            custom.style.display = tool.value === '{custom_value}' ? 'block' : 'none';
+        }});
+        </script>",
+        custom_value = CUSTOM_TOOL_OPTION,
+    )
 }
 
 /// The shared LIFIC-13 tool-resolution + bot-mint step used by both the
@@ -973,7 +979,7 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
         .map(normalize_user_code)
         .unwrap_or_default();
     // LIFIC-13: same Connected Tools pick-list as the authorize screen.
-    let options = tool_options_html();
+    let tool_pick_list = tool_pick_list_html();
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -1001,33 +1007,18 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
     <form method="POST" action="/oauth/device">
         <label for="user_code">Device code</label>
         <input type="text" id="user_code" name="user_code" value="{user_code}" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
-        <label for="tool">Which tool is connecting?</label>
-        <select name="tool" id="tool">
-            <option value="" selected disabled>Select a tool&hellip;</option>
-            {options}
-        </select>
-        <div id="custom_tool" style="display:none;">
-            <label for="tool_custom">Custom tool name</label>
-            <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
-        </div>
+        {tool_pick_list}
         <input type="hidden" name="csrf_token" value="{csrf_token}">
         <div class="buttons">
             <button type="submit" name="decision" value="approve" class="approve">Approve</button>
             <button type="submit" name="decision" value="deny" class="deny">Deny</button>
         </div>
     </form>
-    <script>
-        var tool = document.getElementById('tool');
-        var custom = document.getElementById('custom_tool');
-        tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '__custom__' ? 'block' : 'none';
-        }});
-    </script>
 </body>
 </html>"#,
         user_code = html_escape(&prefill),
         csrf_token = html_escape(&csrf_token),
-        options = options,
+        tool_pick_list = tool_pick_list,
     ))
 }
 
