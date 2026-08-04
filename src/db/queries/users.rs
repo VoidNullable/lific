@@ -640,62 +640,75 @@ pub fn list_bots(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// Disconnect a bot: revoke its API key(s). Only the owner or admin can do this.
+/// Verify a bot both exists and is owned by `requester_id` (or the requester
+/// is admin). Returns the bot's id on success. Shared by [`disconnect_bot`]
+/// and [`delete_bot`], whose ownership rules are identical.
+fn verify_bot_owner(
+    conn: &Connection,
+    bot_id: i64,
+    requester_id: i64,
+    is_admin: bool,
+    action: &str,
+) -> Result<(), LificError> {
+    let owner_id: Option<i64> = conn
+        .query_row(
+            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
+            params![bot_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| LificError::NotFound("bot not found".into()))?;
+
+    if owner_id != Some(requester_id) && !is_admin {
+        return Err(LificError::BadRequest(format!(
+            "you can only {action} your own bots"
+        )));
+    }
+    Ok(())
+}
+
+/// Disconnect a bot: revoke its credentials (API keys and OAuth tokens) so the
+/// bot can no longer act. The bot's identity is kept — reconnecting later
+/// reuses it. Only the owner or admin can do this.
 pub fn disconnect_bot(
     conn: &Connection,
     bot_id: i64,
     requester_id: i64,
     is_admin: bool,
 ) -> Result<(), LificError> {
-    // Verify ownership
-    let owner_id: Option<i64> = conn
-        .query_row(
-            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
-            params![bot_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| LificError::NotFound("bot not found".into()))?;
-
-    if owner_id != Some(requester_id) && !is_admin {
-        return Err(LificError::BadRequest(
-            "you can only disconnect your own bots".into(),
-        ));
-    }
+    verify_bot_owner(conn, bot_id, requester_id, is_admin, "disconnect")?;
 
     // Revoke all API keys for this bot
     conn.execute(
         "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
         params![bot_id],
     )?;
+    // Revoke all OAuth tokens for this bot (LIFIC-13 follow-up): an
+    // OAuth-connected agent has no API key, so without this "Disconnect"
+    // would leave its access token live. Rows are kept — reconnectable bot.
+    conn.execute(
+        "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+        params![bot_id],
+    )?;
 
     Ok(())
 }
 
-/// Permanently delete a bot user and all its API keys.
-/// Only the owner or an admin can do this.
+/// Permanently delete a bot user, its API keys, its OAuth tokens, and the
+/// comments it made. The identity is gone, so any OAuth token rows are shred
+/// rather than revoked. Only the owner or an admin can do this.
 pub fn delete_bot(
     conn: &Connection,
     bot_id: i64,
     requester_id: i64,
     is_admin: bool,
 ) -> Result<(), LificError> {
-    // Verify ownership
-    let owner_id: Option<i64> = conn
-        .query_row(
-            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
-            params![bot_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| LificError::NotFound("bot not found".into()))?;
-
-    if owner_id != Some(requester_id) && !is_admin {
-        return Err(LificError::BadRequest(
-            "you can only delete your own bots".into(),
-        ));
-    }
+    verify_bot_owner(conn, bot_id, requester_id, is_admin, "delete")?;
 
     // Delete API keys first (FK constraint)
     conn.execute("DELETE FROM api_keys WHERE user_id = ?1", params![bot_id])?;
+    // Delete the bot's OAuth tokens (LIFIC-13 follow-up): leaves no dangling
+    // rows pointing at a removed identity.
+    conn.execute("DELETE FROM oauth_tokens WHERE user_id = ?1", params![bot_id])?;
 
     // Delete any comments made by this bot (or reassign — deleting for now)
     conn.execute("DELETE FROM comments WHERE user_id = ?1", params![bot_id])?;
@@ -873,6 +886,98 @@ mod tests {
         let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode").unwrap().id;
         let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode").unwrap().id;
         assert_ne!(a, b, "each owner gets its own bot for the same tool");
+    }
+
+    // ── disconnect/delete bot credential revocation (LIFIC-13 follow-up) ──
+
+    /// Insert an active (non-revoked) `oauth_tokens` row bound to `user_id`.
+    fn insert_oauth_token_for(conn: &Connection, user_id: i64) -> i64 {
+        let token_hash = format!("testtoken-{user_id}-{}", user_id);
+        let client_id = "test-client";
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, 'Test', '[\"http://localhost\"]')",
+            params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+             VALUES (?1, ?2, datetime('now', '+1 hour'), 'mcp', ?3)",
+            params![token_hash, client_id, user_id],
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT rowid FROM oauth_tokens WHERE access_token = ?1",
+                params![token_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn disconnect_bot_revokes_bots_oauth_tokens_but_keeps_bot() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "claude-code", "Claude Code").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+
+        disconnect_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        // The bot and its OAuth tokens still exist (reconnectable), but tokens revoked.
+        let revoked: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1 AND revoked = 1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1, "bot's OAuth token revoked");
+        let still_there: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_there, 1, "token row kept — reconnectable bot");
+        let bot_exists: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE id = ?1 AND is_bot = 1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bot_exists, 1, "bot identity kept after disconnect");
+    }
+
+    #[test]
+    fn delete_bot_removes_its_oauth_token_rows() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+
+        delete_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        let tokens: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tokens, 0, "delete shreds the bot's OAuth token rows");
+        let bot_rows: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bot_rows, 0, "bot identity removed");
     }
 
     // ── LIF-190: profile + password updates ─────────────────
