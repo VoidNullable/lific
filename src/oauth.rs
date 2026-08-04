@@ -392,6 +392,24 @@ async fn register_client(
         .into_response()
 }
 
+/// LIFIC-15: read the tool a registered client has been mapped to, if any.
+///
+/// Remembering the tool per client means a reconnect pre-fills (or skips) the
+/// approval pick-list instead of re-asking — the choice is a stable attribute
+/// of the persistent DCR client, not re-derived on every visit. Returns `None`
+/// for clients that have never been approved. (Writing happens inside
+/// [`resolve_approval_bot`], which owns the same DB handle.)
+fn client_tool_id(db: &DbPool, client_id: &str) -> Option<String> {
+    let conn = db.read().ok()?;
+    conn.query_row(
+        "SELECT tool_id FROM oauth_clients WHERE client_id = ?1",
+        params![client_id],
+        |row| row.get(0),
+    )
+    .ok()
+    .flatten()
+}
+
 // ── Authorization ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -405,7 +423,11 @@ struct AuthorizeParams {
     scope: Option<String>,
 }
 
-async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams>) -> Html<String> {
+async fn authorize_page(
+    State(oauth): State<OAuthState>,
+    headers: HeaderMap,
+    Query(params): Query<AuthorizeParams>,
+) -> Html<String> {
     // Bind the CSRF token to the session the browser presents when loading this
     // page (sent on the top-level GET navigation under SameSite=Lax). The POST
     // approval must carry the same session for the token to validate.
@@ -414,8 +436,10 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
     // LIFIC-13: the approval screen asks which tool is connecting so the audit
     // log can attribute requests to a per-tool bot. Options come from the same
     // Connected Tools registry `lific connect` uses; a free-text field covers
-    // unrecognized tools.
-    let tool_pick_list = tool_pick_list_html();
+    // unrecognized tools. LIFIC-15: if this client is already remembered,
+    // pre-select that tool instead of re-asking on a reconnect.
+    let preset_id = client_tool_id(&oauth.db, &params.client_id);
+    let tool_pick_list = tool_pick_list_html(preset_id.as_deref());
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -590,6 +614,7 @@ async fn authorize_approve(
         &form.tool,
         &form.tool_custom,
         approving_user_id,
+        Some(&form.client_id),
     ) {
         Ok(id) => id,
         Err((status, msg)) => {
@@ -723,37 +748,66 @@ const CUSTOM_TOOL_OPTION: &str = "__custom__";
 ///
 /// The reveal script compares against [`CUSTOM_TOOL_OPTION`] interpolated from
 /// the Rust constant, so the option value lives in exactly one place.
-fn tool_pick_list_html() -> String {
+/// Render the shared Connected Tools pick-list widget, pre-selecting the given
+/// remembered tool when present (LIFIC-15).
+///
+/// `preset_id` is the `tool_id` a registered client already maps to, from
+/// [`client_tool_id`]. When it's a known registry tool, that option is
+/// pre-selected; when it's a free-text tool (a slug not in the registry), the
+/// `Custom tool…` option is pre-selected and the free-text field revealed and
+/// pre-filled. When `preset_id` is `None` (new client, or the device flow which
+/// keys no persistent client), the pick-list starts blank for a fresh choice.
+fn tool_pick_list_html(preset_id: Option<&str>) -> String {
+    // A remembered tool is "custom" iff it isn't a known Connected Tool (and
+    // isn't the sentinel itself). One guard, used for both the option and the
+    // reveal+fill decision, so they can't diverge.
+    let is_custom = preset_id.is_some_and(|id| {
+        id != CUSTOM_TOOL_OPTION && crate::cli::connect::clients::find_client(id).is_none()
+    });
+
     let mut options = String::new();
     for c in crate::cli::connect::clients::all_clients() {
+        let selected = preset_id == Some(c.id);
+        let sel_attr = if selected { " selected" } else { "" };
         options.push_str(&format!(
-            "<option value=\"{}\">{}</option>",
+            "<option value=\"{}\"{sel_attr}>{}</option>",
             html_escape(c.id),
             html_escape(c.display)
         ));
     }
+    let custom_option = if is_custom { " selected" } else { "" };
     options.push_str(&format!(
-        "<option value=\"{}\">Custom tool&hellip;</option>",
+        "<option value=\"{}\"{custom_option}>Custom tool&hellip;</option>",
         CUSTOM_TOOL_OPTION
     ));
+
+    // The placeholder is only the selected placeholder when there's no remembered
+    // tool — the remembered option (or Custom) must win, not the placeholder.
+    let placeholder_sel = if preset_id.is_some() { "" } else { " selected" };
+    let (custom_visible, custom_value) = if is_custom {
+        ("block", html_escape(preset_id.unwrap_or_default()))
+    } else {
+        ("none", String::new())
+    };
+
     format!(
         "<label for=\"tool\">Which tool is connecting?</label>
         <select name=\"tool\" id=\"tool\">
-            <option value=\"\" selected disabled>Select a tool&hellip;</option>
+            <option value=\"\"{placeholder_sel} disabled>Select a tool&hellip;</option>
             {options}
         </select>
-        <div id=\"custom_tool\" style=\"display:none;\">
+        <div id=\"custom_tool\" style=\"display:{custom_visible};\">
             <label for=\"tool_custom\">Custom tool name</label>
-            <input type=\"text\" name=\"tool_custom\" id=\"tool_custom\" placeholder=\"e.g. my-agent\">
+            <input type=\"text\" name=\"tool_custom\" id=\"tool_custom\" placeholder=\"e.g. my-agent\" value=\"{custom_value}\">
         </div>
         <script>
         var tool = document.getElementById('tool');
         var custom = document.getElementById('custom_tool');
         tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '{custom_value}' ? 'block' : 'none';
+            custom.style.display = tool.value === '{custom_option_value}' ? 'block' : 'none';
         }});
         </script>",
-        custom_value = CUSTOM_TOOL_OPTION,
+        custom_option_value = CUSTOM_TOOL_OPTION,
     )
 }
 
@@ -765,11 +819,16 @@ fn tool_pick_list_html() -> String {
 /// approving human. Returns the bot's user id on success, or a small
 /// `(StatusCode, message)` the caller renders as its error page (missing tool,
 /// unsanitizable/reserved id, no resolvable owner, or DB failure).
+///
+/// When `client_id` is `Some`, the resolved `tool_id` is remembered on that
+/// client (LIFIC-15) so a reconnect pre-fills the pick-list instead of
+/// re-asking. The device flow passes `None` — it has no persistent client.
 fn resolve_approval_bot(
     oauth: &OAuthState,
     tool: &Option<String>,
     tool_custom: &Option<String>,
     approving_user_id: Option<i64>,
+    client_id: Option<&str>,
 ) -> Result<i64, (StatusCode, String)> {
     let tool_text = match (tool, tool_custom) {
         // A specific known tool chosen from the pick-list.
@@ -800,6 +859,15 @@ fn resolve_approval_bot(
         Ok(c) => c,
         Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "database error".into())),
     };
+    // LIFIC-15: remember the tool on the client (same conn, best-effort).
+    if let Some(client_id) = client_id
+        && let Err(e) = conn.execute(
+            "UPDATE oauth_clients SET tool_id = ?1 WHERE client_id = ?2",
+            params![tool_id, client_id],
+        )
+    {
+        tracing::error!(error = %e, client_id, "failed to remember client tool");
+    }
     match crate::db::queries::users::ensure_bot(&conn, owner_id, &tool_id, &display_name) {
         Ok(bot) => Ok(bot.id),
         Err(e) => {
@@ -978,8 +1046,10 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
         .as_deref()
         .map(normalize_user_code)
         .unwrap_or_default();
-    // LIFIC-13: same Connected Tools pick-list as the authorize screen.
-    let tool_pick_list = tool_pick_list_html();
+    // LIFIC-13: same Connected Tools pick-list as the authorize screen. The
+    // device flow has no persistent client to key a remembered tool on (device
+    // codes are one-time handshakes), so it always asks.
+    let tool_pick_list = tool_pick_list_html(None);
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -1105,7 +1175,7 @@ async fn device_approve(
     let target_user_id: Option<i64> = if deny {
         approving_user_id
     } else {
-        match resolve_approval_bot(&oauth, &form.tool, &form.tool_custom, approving_user_id) {
+        match resolve_approval_bot(&oauth, &form.tool, &form.tool_custom, approving_user_id, None) {
             Ok(id) => Some(id),
             Err((status, msg)) => return (status, Html(msg)).into_response(),
         }
@@ -2740,6 +2810,122 @@ mod tests {
         assert_eq!(
             first_id, second_id,
             "re-approval must reuse the same bot, not mint a duplicate"
+        );
+    }
+
+    // ── LIFIC-15: remember tool per client, pre-fill on reconnect ──
+
+    #[tokio::test]
+    async fn approve_persists_remembered_tool_on_client() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        let body = authorize_body(&client_id, "http://localhost/callback", &session_token);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_redirection());
+
+        // The approved tool choice is remembered on the registered client.
+        let tool_id: Option<String> = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT tool_id FROM oauth_clients WHERE client_id = ?1",
+                params![client_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(tool_id.as_deref(), Some("claude-code"));
+    }
+
+    #[tokio::test]
+    async fn authorize_page_prefills_remembered_known_tool() {
+        let (app, db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        // Remember the tool on the client directly (as an approval would).
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE oauth_clients SET tool_id = 'opencode' WHERE client_id = ?1",
+                params![client_id],
+            )
+            .unwrap();
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        // Reconnect: the known tool is pre-selected (real browser behavior —
+        // the placeholder must NOT also carry selected, or it wins in tree order).
+        assert!(
+            html.contains("value=\"opencode\" selected"),
+            "known tool should be pre-selected, html={html}"
+        );
+        assert!(
+            !html.contains("value=\"\" selected"),
+            "placeholder must not also be selected when a tool is remembered, html={html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_page_prefills_remembered_custom_tool() {
+        let (app, db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        // A free-text tool: stored tool_id is a slug not in the registry.
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE oauth_clients SET tool_id = 'my-editor' WHERE client_id = ?1",
+                params![client_id],
+            )
+            .unwrap();
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        // Reconnect: the custom field is revealed and pre-filled with the slug.
+        assert!(
+            html.contains("display:block"),
+            "custom tool field should be revealed, html={html}"
+        );
+        assert!(
+            html.contains("value=\"my-editor\""),
+            "custom field should prefill the remembered slug, html={html}"
         );
     }
 
