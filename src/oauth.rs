@@ -449,13 +449,22 @@ async fn authorize_page(headers: HeaderMap, Query(params): Query<AuthorizeParams
         <input type="hidden" name="csrf_token" value="{csrf_token}">
         <label for="tool">Which tool is connecting?</label>
         <select name="tool" id="tool">
-            <option value="" selected>Custom (type below)</option>
+            <option value="" selected disabled>Select a tool&hellip;</option>
             {options}
         </select>
-        <label for="tool_custom">Custom tool name</label>
-        <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
+        <div id="custom_tool" style="display:none;">
+            <label for="tool_custom">Custom tool name</label>
+            <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
+        </div>
         <button type="submit">Approve</button>
     </form>
+    <script>
+        var tool = document.getElementById('tool');
+        var custom = document.getElementById('custom_tool');
+        tool.addEventListener('change', function () {{
+            custom.style.display = tool.value === '__custom__' ? 'block' : 'none';
+        }});
+    </script>
 </body>
 </html>"#,
         client_id = html_escape(&params.client_id),
@@ -716,9 +725,16 @@ fn resolve_tool(raw: &str) -> Result<(String, String), LificError> {
     Ok((slug.clone(), trimmed.to_string()))
 }
 
+/// HTML `<option>` value that means "this isn't a known tool — let me type it".
+/// The approval form selects this to reveal the free-text tool-name field.
+const CUSTOM_TOOL_OPTION: &str = "__custom__";
+
 /// Render the Connected Tools `<option>` elements for the approval pick-lists
 /// (shared by the auth-code and device pages). Sourced from the same registry
-/// `lific connect` writes, so the two UIs never drift.
+/// `lific connect` writes, so the two UIs never drift. Known tools come first;
+/// a final `Custom tool…` entry (value [`CUSTOM_TOOL_OPTION`]) reveals a
+/// free-text field for unrecognized tools, so a pick-list and a free-text input
+/// are never both live at once.
 fn tool_options_html() -> String {
     let mut options = String::new();
     for c in crate::cli::connect::clients::all_clients() {
@@ -728,6 +744,10 @@ fn tool_options_html() -> String {
             html_escape(c.display)
         ));
     }
+    options.push_str(&format!(
+        "<option value=\"{}\">Custom tool&hellip;</option>",
+        CUSTOM_TOOL_OPTION
+    ));
     options
 }
 
@@ -746,8 +766,18 @@ fn resolve_approval_bot(
     approving_user_id: Option<i64>,
 ) -> Result<i64, (StatusCode, String)> {
     let tool_text = match (tool, tool_custom) {
-        (Some(id), _) if !id.trim().is_empty() => id.clone(),
-        (_, Some(name)) if !name.trim().is_empty() => name.clone(),
+        // A specific known tool chosen from the pick-list.
+        (Some(id), _)
+            if !id.trim().is_empty() && id.trim() != CUSTOM_TOOL_OPTION =>
+        {
+            id.clone()
+        }
+        // "Custom tool…" chosen — the free-text name is required.
+        (Some(id), Some(name))
+            if id.trim() == CUSTOM_TOOL_OPTION && !name.trim().is_empty() =>
+        {
+            name.clone()
+        }
         _ => return Err((StatusCode::BAD_REQUEST, "Pick which tool is connecting".into())),
     };
     let (tool_id, display_name) = match resolve_tool(&tool_text) {
@@ -973,17 +1003,26 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
         <input type="text" id="user_code" name="user_code" value="{user_code}" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
         <label for="tool">Which tool is connecting?</label>
         <select name="tool" id="tool">
-            <option value="" selected>Custom (type below)</option>
+            <option value="" selected disabled>Select a tool&hellip;</option>
             {options}
         </select>
-        <label for="tool_custom">Custom tool name</label>
-        <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
+        <div id="custom_tool" style="display:none;">
+            <label for="tool_custom">Custom tool name</label>
+            <input type="text" name="tool_custom" id="tool_custom" placeholder="e.g. my-agent">
+        </div>
         <input type="hidden" name="csrf_token" value="{csrf_token}">
         <div class="buttons">
             <button type="submit" name="decision" value="approve" class="approve">Approve</button>
             <button type="submit" name="decision" value="deny" class="deny">Deny</button>
         </div>
     </form>
+    <script>
+        var tool = document.getElementById('tool');
+        var custom = document.getElementById('custom_tool');
+        tool.addEventListener('change', function () {{
+            custom.style.display = tool.value === '__custom__' ? 'block' : 'none';
+        }});
+    </script>
 </body>
 </html>"#,
         user_code = html_escape(&prefill),
@@ -2749,7 +2788,7 @@ mod tests {
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
         let csrf = generate_csrf_token(&session_token);
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool_custom=admin",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=admin",
             client_id,
             urlencoding::encode("http://localhost/callback"),
             urlencoding::encode(&csrf),
@@ -2768,6 +2807,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_custom_tool_choice_mints_a_sanitized_bot() {
+        // Selecting "Custom tool…" reveals a free-text field; a real custom
+        // tool name sanitizes into the bot's username and mints it.
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let csrf = generate_csrf_token(&session_token);
+        let body = format!(
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=My Editor",
+            client_id,
+            urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&csrf),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "custom free-text tool should approve, got {}",
+            resp.status()
+        );
+        let bot: (String, String) = {
+            let conn = db.read().unwrap();
+            conn.query_row(
+                "SELECT username, display_name FROM users WHERE username = 'my-editor-oauthtest'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(bot.0, "my-editor-oauthtest");
+        assert_eq!(bot.1, "My Editor");
     }
 
     #[tokio::test]
