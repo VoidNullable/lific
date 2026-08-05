@@ -17,13 +17,13 @@ use super::{filter_visible, with_read, with_write};
 /// (design decision #10).
 fn require_page_role(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: Option<i64>,
     min: Role,
 ) -> Result<(), LificError> {
     match project_id {
-        Some(pid) => authz::require_role(db, auth_user, pid, min),
-        None => authz::require_workspace_admin(db, auth_user),
+        Some(pid) => authz::require_role(db, identity, pid, min),
+        None => authz::require_workspace_admin(db, identity),
     }
 }
 
@@ -50,11 +50,11 @@ pub(super) struct PageQuery {
 
 pub(super) async fn list_pages_handler(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<Page>>, LificError> {
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &auth_user, pid, Role::Viewer)?;
+        authz::require_role(&db, &identity, pid, Role::Viewer)?;
         return with_read(&db, |conn| {
             crate::db::queries::list_pages(
                 conn,
@@ -73,7 +73,7 @@ pub(super) async fn list_pages_handler(
     // Cross-project list (LIF-197 scope item 2): filter, don't deny. A
     // workspace page (project_id None) is excluded for any non-admin once
     // enforcement is on — see `filter_visible`'s doc comment.
-    let visible = authz::visible_project_ids(&db, &auth_user)?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
     let pages = with_read(&db, |conn| {
         crate::db::queries::list_pages(
             conn,
@@ -92,34 +92,34 @@ pub(super) async fn list_pages_handler(
 
 pub(super) async fn get_page(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Page>, LificError> {
     let page = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?;
-    require_page_role(&db, &auth_user, page.project_id, Role::Viewer)?;
+    require_page_role(&db, &identity, page.project_id, Role::Viewer)?;
     Ok(Json(page))
 }
 
 pub(super) async fn resolve_page(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(identifier): Path<String>,
 ) -> Result<Json<Page>, LificError> {
     let page = with_read(&db, |conn| {
         let id = crate::db::queries::resolve_page_identifier(conn, &identifier)?;
         crate::db::queries::get_page(conn, id)
     })?;
-    require_page_role(&db, &auth_user, page.project_id, Role::Viewer)?;
+    require_page_role(&db, &identity, page.project_id, Role::Viewer)?;
     Ok(Json(page))
 }
 
 pub(super) async fn create_page(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreatePage>,
 ) -> Result<Json<Page>, LificError> {
-    require_page_role(&db, &auth_user, input.project_id, Role::Maintainer)?;
+    require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::create_page(conn, &input)?;
         // LIF-262: link any attachments the content references.
@@ -135,12 +135,12 @@ pub(super) async fn create_page(
 pub(super) async fn update_page(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Json(input): Json<UpdatePage>,
 ) -> Result<Json<Page>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
-    require_page_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    require_page_role(&db, &identity, project_id, Role::Maintainer)?;
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::update_page(conn, id, &input)?;
         // LIF-262: re-scan the (possibly edited) content and reconcile links.
@@ -156,11 +156,11 @@ pub(super) async fn update_page(
 pub(super) async fn delete_page_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
-    require_page_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    require_page_role(&db, &identity, project_id, Role::Maintainer)?;
     with_write(&db, |conn| crate::db::queries::delete_page(conn, id))?;
     if let Some(project_id) = project_id {
         realtime.send(RealtimeEvent::ProjectUpdated { project_id });

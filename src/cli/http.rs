@@ -1251,7 +1251,25 @@ mod tests {
             username: "test-admin".into(),
             display_name: "Test Admin".into(),
             is_admin: true,
-        })));
+        })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })));
         let (project_id, _) = seed_project(&app).await;
         let project_page = parse_json(
             json_post(

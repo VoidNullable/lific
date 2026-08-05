@@ -86,6 +86,50 @@ pub fn confirm_inner<R: std::io::BufRead, W: std::io::Write>(
     Ok(answer == "y" || answer == "yes")
 }
 
+/// Ask the user for a short (single-line) piece of text, e.g. an operator name.
+///
+/// Same contract as [`confirm`]: refuses, rather than hangs, when stdin is not
+/// a TTY, and names `bypass_flag` — the flag a non-interactive caller should
+/// pass to supply the value without a prompt. Returns the trimmed input; errors
+/// on empty input or no-TTY.
+pub fn prompt_text(prompt: &str, bypass_flag: &str) -> Result<String, String> {
+    prompt_text_inner(
+        prompt,
+        bypass_flag,
+        stdin_is_tty(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+    )
+}
+
+/// Pure/injected implementation of [`prompt_text`], factored out so the non-TTY
+/// refusal branch and the reader plumbing are testable.
+pub fn prompt_text_inner<R: std::io::BufRead, W: std::io::Write>(
+    prompt: &str,
+    bypass_flag: &str,
+    stdin_tty: bool,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<String, String> {
+    if !stdin_tty {
+        return Err(format!(
+            "interactive input required; re-run with {bypass_flag} to supply it non-interactively"
+        ));
+    }
+    let _ = write!(writer, "{prompt} ");
+    let _ = writer.flush();
+
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("failed to read input: {e}"))?;
+    let value = line.trim().to_string();
+    if value.is_empty() {
+        return Err("input cannot be empty".into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +188,36 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let ok = confirm_inner("Proceed?", "--yes", true, &mut input, &mut out).unwrap();
         assert!(!ok);
+    }
+
+    // LIFIC-9: the operator-name prompt shares confirm's non-TTY contract.
+    #[test]
+    fn prompt_text_refuses_without_tty_and_names_bypass_flag() {
+        let mut input: &[u8] = b"";
+        let err = prompt_text_inner("What's your name?", "--name", false, &mut input, &mut Vec::new())
+            .expect_err("must refuse when stdin is not a TTY");
+        assert!(
+            err.contains("--name"),
+            "error should name the bypass flag, got: {err}"
+        );
+        assert!(err.contains("interactive"), "error should explain why: {err}");
+    }
+
+    #[test]
+    fn prompt_text_trims_response_on_tty() {
+        let mut input: &[u8] = b"  Blake Alston  \n";
+        let value =
+            prompt_text_inner("What's your name?", "--name", true, &mut input, &mut Vec::new())
+                .unwrap();
+        assert_eq!(value, "Blake Alston");
+    }
+
+    #[test]
+    fn prompt_text_rejects_empty_input() {
+        let mut input: &[u8] = b"\n";
+        let err =
+            prompt_text_inner("What's your name?", "--name", true, &mut input, &mut Vec::new())
+                .expect_err("empty input must fail");
+        assert!(err.contains("empty"), "error should explain why: {err}");
     }
 }

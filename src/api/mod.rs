@@ -471,10 +471,10 @@ where
 /// split.
 fn require_project_lead(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    crate::authz::require_role(db, auth_user, project_id, Role::Lead)
+    crate::authz::require_role(db, identity, project_id, Role::Lead)
 }
 
 /// LIF-197: thin wrapper over `authz::require_structure_role` for the
@@ -482,10 +482,10 @@ fn require_project_lead(
 /// comment for why it can't just be `require_role(.., Maintainer)`.
 fn require_structure_role(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    crate::authz::require_structure_role(db, auth_user, project_id)
+    crate::authz::require_structure_role(db, identity, project_id)
 }
 
 /// LIF-197: thin wrapper over `authz::require_project_delete_role`, used by
@@ -494,10 +494,10 @@ fn require_structure_role(
 /// to `require_role(.., Lead)`.
 fn require_project_delete(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    crate::authz::require_project_delete_role(db, auth_user, project_id)
+    crate::authz::require_project_delete_role(db, identity, project_id)
 }
 
 /// LIF-197: apply the `visible_project_ids` cross-project read filter to a
@@ -523,19 +523,34 @@ fn filter_visible<T>(
 /// Require any authenticated user (LIF-233). Used for low-stakes, instance-wide
 /// actions like sidebar project ordering, which shouldn't be gated behind
 /// per-project lead/admin rights the way structural project edits are.
-/// Default-deny: returns Forbidden when auth_user is None.
-fn require_authenticated(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
-    match auth_user {
+/// Default-deny: returns Forbidden when identity is None.
+///
+/// LIFIC-10: in passwordless mode (`[auth] required = false`) the middleware
+/// resolves a `ResolvedIdentity` (first-admin fallback) even for a
+/// credential-less request, so this passes — fixing the auth-off bug where
+/// `/api/projects/reorder` previously 403'd.
+fn require_authenticated(
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+) -> Result<(), LificError> {
+    match identity {
         Some(_) => Ok(()),
         None => Err(LificError::Forbidden("authentication required".into())),
     }
 }
 
 /// Check if the authenticated user is an admin.
-/// Default-deny: returns Forbidden when auth_user is None (OAuth tokens, legacy keys).
-fn require_admin(auth_user: &Option<AuthUser>) -> Result<(), LificError> {
-    match auth_user {
-        Some(user) if user.is_admin => Ok(()),
+/// Default-deny: returns Forbidden when identity is None (legacy unbound
+/// OAuth token pre-LIFIC-9 bootstrap, or a resolve failure).
+///
+/// LIFIC-10: consumes `ResolvedIdentity`. An unbound API key resolves to the
+/// first admin (via `resolve_caller`), so it now passes — fixing the auth-off
+/// bug where `/api/instance/settings` previously 403'd. The separate operator
+/// signal is gone; `identity.user.is_admin` is the single check.
+fn require_admin(
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+) -> Result<(), LificError> {
+    match identity {
+        Some(i) if i.user.is_admin => Ok(()),
         _ => Err(LificError::Forbidden("only an admin can do this".into())),
     }
 }
@@ -548,7 +563,7 @@ async fn health() -> &'static str {
 
 async fn search(
     State(db): State<DbPool>,
-    axum::Extension(auth_user): axum::Extension<Option<AuthUser>>,
+    axum::Extension(identity): axum::Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, LificError> {
     // Cross-project read (LIF-197 scope item 2): non-visible projects are
@@ -556,7 +571,7 @@ async fn search(
     // narrows the search to one project, since a non-member of that project
     // shouldn't be able to probe its existence via a 403 vs. empty-results
     // side channel here.
-    let visible = crate::authz::visible_project_ids(&db, &auth_user)?;
+    let visible = crate::authz::visible_project_ids(&db, &identity)?;
     let results = with_read(&db, |conn| queries::search(conn, &q))?;
     Ok(Json(filter_visible(results, &visible, |r| r.project_id)))
 }
@@ -676,6 +691,33 @@ pub(crate) mod test_helpers {
                 username: "test-admin".into(),
                 display_name: "Test Admin".into(),
                 is_admin: true,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "test-admin".into(),
+                    display_name: "Test Admin".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
         RealtimeTestApp { app, realtime }
     }
@@ -792,6 +834,16 @@ pub(crate) mod test_helpers {
 
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
+        let auth_user = AuthUser {
+            id: user.id,
+            username: user.username.clone(),
+            display_name: user.display_name.clone(),
+            is_admin: user.is_admin,
+        };
+        let identity = crate::resolve_caller::ResolvedIdentity {
+            user: auth_user.clone(),
+            transport: crate::actor::Transport::Web,
+        };
         with_client_ip_test_layers(with_attachment_layers(super::router(db, &[])), test_peer())
             .layer(Extension(crate::realtime::RealtimeHub::new()))
             .layer(Extension(crate::config::AuthConfig {
@@ -799,12 +851,8 @@ pub(crate) mod test_helpers {
                 required: true,
                 secure_cookies: false,
             }))
-            .layer(Extension(Some(AuthUser {
-                id: user.id,
-                username: user.username.clone(),
-                display_name: user.display_name.clone(),
-                is_admin: user.is_admin,
-            })))
+            .layer(Extension(Some(auth_user)))
+            .layer(Extension(Some(identity)))
     }
 
     /// Set up a DB with an admin, a project lead, a regular user, and a project.

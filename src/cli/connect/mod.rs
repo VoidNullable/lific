@@ -402,19 +402,9 @@ fn mint_for_tool(
             let bot_username = format!("{}-{}", spec.id, owner_username);
             let bot_id = {
                 let conn = pool.write().map_err(|e| e.to_string())?;
-                match crate::db::queries::users::find_bot_by_username(&conn, &bot_username)
+                crate::db::queries::users::ensure_bot(&conn, *owner_id, spec.id, spec.display)
                     .map_err(|e| e.to_string())?
-                {
-                    Some(existing) => existing.id,
-                    None => crate::db::queries::users::create_bot_user(
-                        &conn,
-                        *owner_id,
-                        &bot_username,
-                        spec.display,
-                    )
-                    .map_err(|e| e.to_string())?
-                    .id,
-                }
+                    .id
             };
             let key = mint_or_rotate(pool, manager, &bot_username)?;
             {

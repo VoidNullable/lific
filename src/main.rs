@@ -16,6 +16,7 @@ mod links;
 mod mcp;
 mod oauth;
 mod ratelimit;
+mod resolve_caller;
 mod realtime;
 mod storage;
 
@@ -180,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
-        Command::Init { no_service, here } => {
+        Command::Init { no_service, here, name } => {
             // LIF-292: init/service must honor --config; they take the raw
             // flag (not the pre-loaded cfg) because init may need to CREATE
             // the file at that path and then reload anchored to it.
@@ -190,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli.json,
                 no_service,
                 here,
+                name,
             )
             .await;
         }
@@ -882,11 +884,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manager =
                 auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
 
-            // Auto-generate a key if none exist
-            if !auth::has_any_keys(&pool) {
+            // Auto-generate a key if none exist and no human operator exists
+            // yet (LIFIC-9: once a human exists we stop auto-minting the
+            // unbound "default" key — keys are minted on demand). The three
+            // branches are mutually exclusive by construction:
+            //   1. empty bootstrap (no human, no keys) → mint the default key
+            //   2. human present, still no keys → passwordless mode
+            //   3. keys exist → plain count
+            if auth::should_mint_initial_key(&pool) {
                 let key = auth::create_api_key(&pool, &manager, "default")?;
                 info!("no API keys found, auto-generated initial key");
                 print_initial_key(&key);
+            } else if !auth::has_any_keys(&pool) {
+                // A human operator exists (should_mint was false for lack of
+                // keys alone) but no key has been created yet: keys are minted
+                // on demand via `lific key create`.
+                info!("human operator present — passwordless mode; mint keys on demand with `lific key create`");
             } else {
                 let count = auth::list_api_keys(&pool)?
                     .iter()
@@ -995,15 +1008,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .flatten();
 
-                        // LIF-261: the auth middleware marks an operator-trusted
-                        // unbound API key with the OperatorCredential extension.
-                        // Forward it so MCP tools' authz gates treat it as
-                        // admin-equivalent in enforced mode.
-                        let is_operator = request
-                            .extensions()
-                            .get::<auth::OperatorCredential>()
-                            .is_some();
-
                         let issue_links = links::IssueLinkContext::for_http_request(
                             mcp_public_url.as_deref(),
                             request
@@ -1013,7 +1017,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mcp_allowed_hosts_for_links,
                         );
 
-                        mcp::with_request_context(auth_user, is_operator, issue_links, || async {
+                        mcp::with_request_context(auth_user, issue_links, || async {
                             mcp_service.handle(request).await.into_response()
                         })
                         .await
@@ -1076,9 +1080,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         display_name: u.display_name,
                                         is_admin: u.is_admin,
                                     }),
-                                None => db::queries::users::first_admin(&conn)
-                                    .ok()
-                                    .flatten(),
+                                // LIFIC-8: the "no credential → first admin"
+                                // fallback is consolidated in `resolve_caller`.
+                                None => resolve_caller::resolve_caller_conn(
+                                    &conn,
+                                    None,
+                                    actor::Transport::Mcp,
+                                )
+                                .ok()
+                                .flatten()
+                                .map(|i| i.user),
                             },
                             Err(_) => None,
                         }
@@ -1426,6 +1437,7 @@ async fn cmd_init(
     json_flag: bool,
     no_service: bool,
     here: bool,
+    name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cli::ui;
     // clap can't express this conflict: --config is a global arg on the
@@ -1488,15 +1500,36 @@ async fn cmd_init(
         db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
     }
 
+    // LIFIC-9: on a fresh install (no human operator yet) create the first
+    // passwordless admin, so identity is always known from the moment the
+    // instance exists — "auth off" becomes passwordless mode, not anonymous.
+    // The prompt needs a human, so a fresh non-interactive install must pass
+    // --name; an existing instance with users skips this entirely.
+    let created_admin = if !auth::has_human_operator(&pool) {
+        let op_name = match name {
+            Some(n) => n,
+            None => cli::term::prompt_text("What's your name?", "--name")
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+        };
+        let conn = pool.write()?;
+        let admin = db::queries::users::create_passwordless_admin(&conn, &op_name)?;
+        info!(operator = %admin.username, "created first human admin");
+        Some(admin)
+    } else {
+        None
+    };
+
     // Mint the initial API key HERE, in the operator's terminal. Once the
     // server runs as a background service, its stdout goes to the journal
-    // where nobody would see a printed key.
-    let new_key = if auth::has_any_keys(&pool) {
-        None
-    } else {
+    // where nobody would see a printed key. LIFIC-9: once a human admin exists
+    // we stop auto-minting the unbound "default" key — the operator is a real
+    // user now, and keys are minted on demand via `lific key create`.
+    let new_key = if auth::should_mint_initial_key(&pool) {
         let manager =
             auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
         Some(auth::create_api_key(&pool, &manager, "default")?)
+    } else {
+        None
     };
     // Release the CLI's DB handles before the service process opens the file.
     drop(pool);
@@ -1566,6 +1599,12 @@ async fn cmd_init(
             "config": { "path": config_path.display().to_string(), "created": created_config },
             "database": cfg.database.path.display().to_string(),
             "key": new_key,
+            "admin": created_admin.as_ref().map(|a| serde_json::json!({
+                "id": a.id,
+                "username": a.username,
+                "display_name": a.display_name,
+                "is_admin": a.is_admin,
+            })),
             "url": url,
             "service": {
                 "requested": !no_service,
@@ -1584,6 +1623,13 @@ async fn cmd_init(
         ui::step(format!("Using existing {}", config_path.display()));
     }
     ui::step(format!("Database ready {}", ui::dim(cfg.database.path.display())));
+
+    if let Some(ref admin) = created_admin {
+        ui::step(format!(
+            "First operator {} created — passwordless mode is on",
+            ui::command(&admin.display_name)
+        ));
+    }
 
     if let Some(ref key) = new_key {
         ui::note(
@@ -1856,7 +1902,7 @@ fn build_authless_mcp_router(
                     .and_then(|value| value.to_str().ok()),
                 &allowed_hosts_for_links,
             );
-            mcp::with_request_context(user, false, issue_links, || async {
+            mcp::with_request_context(user, issue_links, || async {
                 service.handle(request).await.into_response()
             })
             .await
@@ -1924,7 +1970,8 @@ async fn shutdown_signal(pool: db::DbPool) {
 
 #[cfg(test)]
 mod init_target_tests {
-    use super::resolve_init_target;
+    use super::{auth, cmd_init, resolve_init_target, Config};
+    use crate::db;
     use std::path::{Path, PathBuf};
 
     fn os_default() -> Option<(PathBuf, PathBuf)> {
@@ -1983,16 +2030,109 @@ mod init_target_tests {
     // filesystem access, so calling it here is side-effect free.
     #[tokio::test]
     async fn init_rejects_here_with_config() {
-        let err = super::cmd_init(
+        let err = cmd_init(
             Some(Path::new("/tmp/nonexistent/lific.toml")),
             None,
             true, // json
             true, // no_service
             true, // here
+            Some("test".into()),
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("--here conflicts with --config"));
+    }
+
+    // A temp dir that self-destructs, so cmd_init's filesystem writes stay out
+    // of the repo tree and don't collide across tests.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "lific-init-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Run `lific init --config <dir>/lific.toml --no-service` for the operator
+    /// `name` and assert on the DB state it wrote (stdout isn't a TTY under the
+    /// test harness, so we can't capture cmd_init's printed JSON — instead we
+    /// re-open the database and read back the shared facts).
+    async fn run_init(
+        dir: &TempDir,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let config_path = dir.path().join("lific.toml");
+        cmd_init(
+            Some(&config_path),
+            None,
+            true,  // json
+            true,  // no_service
+            false, // here
+            name.map(str::to_string),
+        )
+.await?;
+        let cfg = Config::load(Some(&config_path));
+        let pool = db::open(&cfg.database.path)?;
+        let conn = pool.read().unwrap();
+        let admin = crate::db::queries::users::first_admin(&conn)?;
+        Ok(serde_json::json!({
+            "admin": admin.map(|a| a.username),
+            "keys": auth::has_any_keys(&pool),
+        }))
+    }
+
+    // LIFIC-9: a fresh install (no humans) creates the first passwordless admin
+    // when given `--name` non-interactively.
+    #[tokio::test]
+    async fn init_fresh_install_creates_first_admin_with_name() {
+        let dir = TempDir::new();
+        let out = run_init(&dir, Some("Blake Alston")).await.unwrap();
+        assert_eq!(out["admin"], serde_json::json!("blake-alston"));
+    }
+
+    // LIFIC-9: once a human admin exists, init skips minting the unbound
+    // "default" key (passwordless mode) — no key is auto-generated.
+    #[tokio::test]
+    async fn init_fresh_install_skips_default_key_when_admin_created() {
+        let dir = TempDir::new();
+        let out = run_init(&dir, Some("Blake")).await.unwrap();
+        assert_eq!(out["admin"], serde_json::json!("blake"));
+        assert_eq!(
+            out["keys"], serde_json::json!(false),
+            "a human operator exists, so no unbound default key is minted"
+        );
+    }
+
+    // LIFIC-9: re-running init on an existing instance (admins already exist)
+    // skips creation — idempotent, existing setup untouched.
+    #[tokio::test]
+    async fn init_existing_install_skips_admin_creation() {
+        let dir = TempDir::new();
+        let first = run_init(&dir, Some("Blake")).await.unwrap();
+        assert_eq!(first["admin"], serde_json::json!("blake"));
+
+        // Second run with a different name must NOT create a second admin.
+        let second = run_init(&dir, Some("Someone Else")).await.unwrap();
+        assert_eq!(
+            second["admin"], serde_json::json!("blake"),
+            "existing instance keeps its first admin"
+        );
     }
 }
 

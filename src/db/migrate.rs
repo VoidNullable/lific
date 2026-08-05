@@ -170,6 +170,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project groups",
         include_str!("../../migrations/035_project_groups.sql"),
     ),
+    (
+        36,
+        "oauth client tool",
+        include_str!("../../migrations/036_oauth_client_tool.sql"),
+    ),
 ];
 
 /// Highest migration version this binary knows how to apply. Used by

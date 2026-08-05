@@ -10,7 +10,7 @@ use crate::authz;
 use crate::db::queries::activity::{ActivityScope, actor_stats, list_activity};
 use crate::db::{
     DbPool,
-    models::{ActivityFeed, ActorStat, AuthUser, Role},
+    models::{ActivityFeed, ActorStat, Role},
 };
 use crate::error::LificError;
 
@@ -22,7 +22,7 @@ use super::with_read;
 /// (`project_id = None`) fall back to admin-only.
 async fn require_scope_viewer(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     scope: &ActivityScope,
 ) -> Result<(), LificError> {
     let project_id: Option<i64> = match *scope {
@@ -38,8 +38,8 @@ async fn require_scope_viewer(
         ActivityScope::Project(id) => Some(id),
     };
     match project_id {
-        Some(pid) => authz::require_role(db, auth_user, pid, Role::Viewer),
-        None => authz::require_workspace_admin(db, auth_user),
+        Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
+        None => authz::require_workspace_admin(db, identity),
     }
 }
 
@@ -53,24 +53,24 @@ pub(super) struct ActivityQuery {
 /// comments, label attach/detach, and relation link/unlink events.
 pub(super) async fn issue_activity(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Issue(id);
-    require_scope_viewer(&db, &auth_user, &scope).await?;
+    require_scope_viewer(&db, &identity, &scope).await?;
     with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
 }
 
 /// GET /api/pages/{id}/activity
 pub(super) async fn page_activity(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Page(id);
-    require_scope_viewer(&db, &auth_user, &scope).await?;
+    require_scope_viewer(&db, &identity, &scope).await?;
     with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
 }
 
@@ -78,12 +78,12 @@ pub(super) async fn page_activity(
 /// create/edit/done/move/delete and the issue-driven cascade rows.
 pub(super) async fn plan_activity(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Plan(id);
-    require_scope_viewer(&db, &auth_user, &scope).await?;
+    require_scope_viewer(&db, &identity, &scope).await?;
     with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
 }
 
@@ -91,12 +91,12 @@ pub(super) async fn plan_activity(
 /// first: issues, pages, comments, modules, labels, folders.
 pub(super) async fn project_activity(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ActivityFeed>, LificError> {
     let scope = ActivityScope::Project(id);
-    require_scope_viewer(&db, &auth_user, &scope).await?;
+    require_scope_viewer(&db, &identity, &scope).await?;
     with_read(&db, |conn| list_activity(conn, scope, q.limit, q.offset)).map(Json)
 }
 
@@ -104,10 +104,10 @@ pub(super) async fn project_activity(
 /// active first (LIF-158: actor rail + expanded-entry stats).
 pub(super) async fn project_activity_actors(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<ActorStat>>, LificError> {
-    authz::require_role(&db, &auth_user, id, Role::Viewer)?;
+    authz::require_role(&db, &identity, id, Role::Viewer)?;
     with_read(&db, |conn| actor_stats(conn, id)).map(Json)
 }
 

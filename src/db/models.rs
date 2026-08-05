@@ -496,7 +496,7 @@ pub struct LoginRequest {
 
 /// Lightweight user identity extracted from auth middleware.
 /// Inserted into request extensions after token resolution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthUser {
     pub id: i64,
     pub username: String,

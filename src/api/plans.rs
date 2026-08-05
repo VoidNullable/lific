@@ -13,49 +13,49 @@ use super::{filter_visible, with_read, with_write};
 
 pub(super) async fn list_plans(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(q): Query<ListPlansQuery>,
 ) -> Result<Json<Vec<Plan>>, LificError> {
     if let Some(pid) = q.project_id {
-        authz::require_role(&db, &auth_user, pid, Role::Viewer)?;
+        authz::require_role(&db, &identity, pid, Role::Viewer)?;
         return with_read(&db, |conn| plans::list_plans(conn, &q)).map(Json);
     }
     // Cross-project list (LIF-197 scope item 2): filter, don't deny.
-    let visible = authz::visible_project_ids(&db, &auth_user)?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
     let list = with_read(&db, |conn| plans::list_plans(conn, &q))?;
     Ok(Json(filter_visible(list, &visible, |p| Some(p.project_id))))
 }
 
 pub(super) async fn get_plan(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Plan>, LificError> {
     let plan = with_read(&db, |conn| plans::get_plan(conn, id))?;
-    authz::require_role(&db, &auth_user, plan.project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, plan.project_id, Role::Viewer)?;
     Ok(Json(plan))
 }
 
 pub(super) async fn resolve_plan(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(identifier): Path<String>,
 ) -> Result<Json<Plan>, LificError> {
     let plan = with_read(&db, |conn| {
         let id = plans::resolve_plan_identifier(conn, &identifier)?;
         plans::get_plan(conn, id)
     })?;
-    authz::require_role(&db, &auth_user, plan.project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, plan.project_id, Role::Viewer)?;
     Ok(Json(plan))
 }
 
 pub(super) async fn create_plan(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreatePlan>,
 ) -> Result<Json<Plan>, LificError> {
-    authz::require_role(&db, &auth_user, input.project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id: plan.project_id });
     Ok(Json(plan))
@@ -64,12 +64,12 @@ pub(super) async fn create_plan(
 pub(super) async fn update_plan(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Json(input): Json<UpdatePlan>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, id))?.project_id;
-    authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let plan = with_write(&db, |conn| plans::update_plan(conn, id, &input))?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(plan))
@@ -78,11 +78,11 @@ pub(super) async fn update_plan(
 pub(super) async fn delete_plan_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, id))?.project_id;
-    authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     with_write(&db, |conn| plans::delete_plan(conn, id))?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
@@ -100,12 +100,12 @@ pub(super) struct AddStepRequest {
 pub(super) async fn add_step(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(plan_id): Path<i64>,
     Json(input): Json<AddStepRequest>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
-    authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let plan = with_write(&db, |conn| {
         plans::add_step(
             conn,
@@ -146,12 +146,12 @@ pub(super) struct StepUpdateResponse {
 pub(super) async fn update_step(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((plan_id, step_id)): Path<(i64, i64)>,
     Json(input): Json<UpdateStepRequest>,
 ) -> Result<Json<StepUpdateResponse>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
-    authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let (resp, issue_event) = with_write(&db, |conn| {
         plans::assert_step_in_plan(conn, plan_id, step_id)?;
         if let Some(ref t) = input.title {
@@ -209,11 +209,11 @@ pub(super) async fn update_step(
 pub(super) async fn delete_step_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((plan_id, step_id)): Path<(i64, i64)>,
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
-    authz::require_role(&db, &auth_user, project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let plan = with_write(&db, |conn| {
         plans::assert_step_in_plan(conn, plan_id, step_id)?;
         plans::delete_step(conn, step_id)?;
