@@ -325,6 +325,40 @@ impl Config {
         toml::to_string_pretty(&cfg).unwrap_or_default()
     }
 
+    /// Merge the auth-mode menu's choice into a config document, preserving
+    /// every other section and setting.
+    ///
+    /// LIFIC-23: sets `[auth] required` and, when `host` is supplied,
+    /// `[server] host`. When `existing` is empty/absent the function builds a
+    /// fresh default config carrying the chosen values; otherwise it edits the
+    /// existing TOML in place (formatting and comments survive via toml_edit).
+    /// Pure — no filesystem side effects. This is what the `lific init`
+    /// auth-mode menu (LIFIC-25) uses to persist the operator's choice.
+    ///
+    /// Returns `Err` (leaving the caller with the untouched source to fix by
+    /// hand) when an existing document does not parse — never destroys a
+    /// user's config, mirroring the connect writers.
+    pub fn apply_auth_mode(
+        existing: &str,
+        required: bool,
+        host: Option<&str>,
+    ) -> Result<String, String> {
+        let mut doc: toml_edit::DocumentMut = if existing.trim().is_empty() {
+            Config::default_toml()
+                .parse::<toml_edit::DocumentMut>()
+                .expect("default config parses")
+        } else {
+            existing
+                .parse()
+                .map_err(|e| format!("existing config does not parse: {e}"))?
+        };
+        doc["auth"]["required"] = toml_edit::value(required);
+        if let Some(host) = host {
+            doc["server"]["host"] = toml_edit::value(host);
+        }
+        Ok(doc.to_string())
+    }
+
     /// Resolve the backup directory relative to the database path if not absolute.
     pub fn backup_dir(&self) -> PathBuf {
         if self.backup.dir.is_absolute() {
@@ -588,6 +622,67 @@ trusted_proxies = ["not-a-cidr"]
         assert!(!text.contains("AUTH IS DISABLED"));
         // No internal jargon either.
         assert!(!text.contains("credential-less"));
+    }
+
+    // LIFIC-23: applying the auth-mode choice edits in place and preserves
+    // every other section, setting, and comment.
+    #[test]
+    fn apply_auth_mode_edits_required_and_host_and_preserves_sections() {
+        let existing = r#"# my cruft
+[server]
+host = "0.0.0.0"
+port = 3456
+
+[auth]
+required = true
+allow_signup = false
+
+[backup]
+enabled = false
+"#;
+        let out = Config::apply_auth_mode(existing, false, Some("127.0.0.1")).unwrap();
+        // Comment survives.
+        assert!(out.contains("# my cruft"), "comment must survive");
+        // Our two values are set.
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(false));
+        assert_eq!(doc["server"]["host"].as_str(), Some("127.0.0.1"));
+        // Untouched siblings survive with their values.
+        assert_eq!(doc["server"]["port"].as_integer(), Some(3456));
+        assert_eq!(doc["auth"]["allow_signup"].as_bool(), Some(false));
+        assert_eq!(doc["backup"]["enabled"].as_bool(), Some(false));
+    }
+
+    // LIFIC-23: password mode only touches required, leaving host untouched.
+    #[test]
+    fn apply_auth_mode_password_leaves_host_alone() {
+        let existing = "[server]\nhost = \"0.0.0.0\"\nport = 9000\n\n[auth]\nrequired = false\n";
+        let out = Config::apply_auth_mode(existing, true, None).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(true));
+        assert_eq!(doc["server"]["host"].as_str(), Some("0.0.0.0"));
+        assert_eq!(doc["server"]["port"].as_integer(), Some(9000));
+    }
+
+    // LIFIC-23: an absent/empty document produces a fresh default config.
+    #[test]
+    fn apply_auth_mode_creates_fresh_when_absent() {
+        let out = Config::apply_auth_mode("", false, Some("127.0.0.1")).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(false));
+        assert_eq!(doc["server"]["host"].as_str(), Some("127.0.0.1"));
+        // Defaults still present.
+        assert_eq!(doc["server"]["port"].as_integer(), Some(3456));
+        assert_eq!(doc["auth"]["allow_signup"].as_bool(), Some(true));
+    }
+
+    // LIFIC-23: an unparseable existing document must not be destroyed — the
+    // editor refuses and returns an error, mirroring the connect writers.
+    #[test]
+    fn apply_auth_mode_refuses_unparseable_and_returns_error() {
+        let existing = "this is = = not valid toml [[[\n";
+        let err = Config::apply_auth_mode(existing, false, Some("127.0.0.1")).unwrap_err();
+        assert!(err.contains("does not parse"), "error must say why: {err}");
     }
 
     // LIF-294: the startup guard's localhost check.
