@@ -637,4 +637,77 @@ mod tests {
             "convention addition grew to {addition} chars; keep it tight"
         );
     }
+
+    // ── LIFIC-18: stdio session identity (set_stdio_user seam) ─────────────
+    //
+    // The `lific mcp` entrypoint installs the session identity once at startup
+    // via `set_stdio_user` (see main.rs), and every tool call resolves through
+    // `current_identity`. This is seam two of the spec: with a valid bound
+    // token the agent resolves as itself; with none, the operator (first
+    // admin) fallback applies.
+
+    fn seed_user(pool: &crate::db::DbPool, username: &str, admin: bool) -> crate::db::models::AuthUser {
+        let conn = pool.write().expect("write conn");
+        let u = crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: username.into(),
+                email: format!("{username}@local.test"),
+                password: "somepass123".into(),
+                display_name: None,
+                is_admin: admin,
+                is_bot: false,
+            },
+        )
+        .expect("create user");
+        crate::db::models::AuthUser {
+            id: u.id,
+            username: u.username,
+            display_name: u.display_name,
+            is_admin: u.is_admin,
+        }
+    }
+
+    #[test]
+    fn stdio_session_with_agent_identity_resolves_as_that_agent() {
+        // A first admin exists as the operator fallback, but the bound session
+        // must resolve to the agent, NOT the admin.
+        let pool = crate::db::open_memory().expect("test db");
+        let admin = seed_user(&pool, "admin", true);
+        let agent = seed_user(&pool, "opencode-solo", false);
+
+        // Mirrors main.rs: LIFIC_TOKEN resolved to `agent`, installed for the
+        // whole session.
+        set_stdio_user(Some(agent.clone()));
+
+        let identity = current_identity(&pool).expect("a bound stdio session resolves");
+        assert_eq!(
+            identity.user, agent,
+            "agent session must resolve as the agent, not the operator"
+        );
+        assert_ne!(identity.user.id, admin.id);
+        assert_eq!(identity.transport, crate::actor::Transport::Mcp);
+
+        // Clean up the process-wide global so it never leaks into other tests.
+        set_stdio_user(None);
+    }
+
+    #[test]
+    fn stdio_session_without_identity_falls_back_to_operator() {
+        // No LIFIC_TOKEN / unbound → `set_stdio_user(None)` → the operator
+        // (first admin) fallback, the same pre-LIFIC-18 behavior.
+        let pool = crate::db::open_memory().expect("test db");
+        let admin = seed_user(&pool, "operator", true);
+
+        set_stdio_user(None);
+        let identity = current_identity(&pool).expect("operator fallback resolves");
+        assert_eq!(
+            identity.user.id, admin.id,
+            "no-token stdio session must resolve to the first admin"
+        );
+        assert!(identity.user.is_admin);
+        assert_eq!(identity.transport, crate::actor::Transport::Mcp);
+
+        set_stdio_user(None);
+    }
 }
