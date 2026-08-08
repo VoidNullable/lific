@@ -1875,6 +1875,102 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── reconnect healing, all transports (idempotency) ────────────────────
+    //
+    // The same self-healing expectation as the stdio case, applied to remote
+    // (API-key) and OAuth: re-running connect over an existing lific entry
+    // repairs it in place, mints/asserts the right credential state, reuses the
+    // agent bot, and never duplicates entries or keys.
+
+    #[test]
+    fn run_remote_reconnects_and_heals_a_stale_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let cfg = Config::default();
+        std::fs::create_dir_all(b.home.join(".config/opencode")).unwrap();
+        // A pre-existing **remote** (API-key) entry pointing at a stale URL with
+        // a bogus key that no longer exists in the DB.
+        std::fs::write(
+            b.home.join(".config/opencode/opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://stale/mcp", "headers": { "Authorization": "Bearer lific_sk-live-STALE" } } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+        a.url = Some("http://127.0.0.1:3456/mcp".into());
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        // Healed: url corrected, a real minted key present.
+        assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
+        let auth = v["mcp"]["lific"]["headers"]["Authorization"]
+            .as_str()
+            .expect("remote reconnect must write an Authorization header");
+        assert!(auth.starts_with("Bearer lific_sk-live-"), "got {auth}");
+
+        // The stale key is gone; one live bot key remains; one agent bot.
+        assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "remote reconnect must not duplicate the bot");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_oauth_reconnects_and_heals_a_stale_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let cfg = Config::default();
+        std::fs::create_dir_all(b.home.join(".config/opencode")).unwrap();
+        // A pre-existing entry with a wrong URL and a stale bearer header.
+        std::fs::write(
+            b.home.join(".config/opencode/opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://old/", "headers": { "Authorization": "Bearer gone" } } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+        a.oauth = true;
+        a.url = Some("http://127.0.0.1:3456/mcp".into());
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        // Healed: correct URL and NO headers (OAuth headerless).
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
+        assert!(
+            v["mcp"]["lific"].get("headers").is_none(),
+            "oauth reconnect must drop the stale Authorization header"
+        );
+
+        // OAuth mints nothing, so the DB stays untouched.
+        let conn = pool.read().unwrap();
+        let keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keys, 0, "oauth reconnects mint no keys");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn explicit_user_owns_the_bots() {
         let pool = db::open_memory().unwrap();
