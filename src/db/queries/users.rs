@@ -338,32 +338,10 @@ pub fn create_passwordless_admin(
             "operator name cannot be empty".into(),
         ));
     }
-    let username = derive_username(conn, display_name)?;
     // Unusable hash: never arithmetically a login password, just fills the NOT
     // NULL column. Same guarantee as `create_bot_user`.
     let password_hash = unusable_password_hash()?;
-
-    conn.execute(
-        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
-         VALUES (?1, ?2, ?3, ?4, 1, 0)",
-        params![
-            username,
-            format!("{username}@local"),
-            password_hash,
-            display_name,
-        ],
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            LificError::Internal("failed to create first admin (constraint)".into())
-        }
-        other => other.into(),
-    })?;
-
-    let id = conn.last_insert_rowid();
-    get_user_by_id(conn, id)
+    insert_first_admin(conn, display_name, password_hash)
 }
 
 /// Create the first human admin with a real password — the `Passwords` mode of
@@ -385,8 +363,26 @@ pub fn create_first_admin_with_password(
             "operator name cannot be empty".into(),
         ));
     }
-    let username = derive_username(conn, display_name)?;
+    if password.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator password cannot be empty".into(),
+        ));
+    }
     let password_hash = hash_password(password)?;
+    insert_first_admin(conn, display_name, password_hash)
+}
+
+/// Shared insert for the first human admin (LIFIC-22/25). Derives the unique
+/// username from `display_name`, fills the NOT NULL email with a synthetic
+/// `{username}@local` placeholder, and stores the given `password_hash`. Both
+/// passwordless mode (unusable hash) and password mode (real argon2 hash) land
+/// here, so the derivation and constraint handling live in exactly one place.
+fn insert_first_admin(
+    conn: &Connection,
+    display_name: &str,
+    password_hash: String,
+) -> Result<User, LificError> {
+    let username = derive_username(conn, display_name)?;
 
     conn.execute(
         "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
@@ -1715,6 +1711,17 @@ mod tests {
         assert!(
             authenticate(&conn, "blake", "wrongpassword").is_err(),
             "wrong password must be rejected"
+        );
+    }
+
+    #[test]
+    fn password_admin_rejects_empty_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let err = create_first_admin_with_password(&conn, "Blake", "").unwrap_err();
+        assert!(
+            matches!(err, LificError::BadRequest(_)),
+            "an empty password must be rejected, got {err:?}"
         );
     }
 }

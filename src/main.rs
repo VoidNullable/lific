@@ -1470,6 +1470,20 @@ fn resolve_init_target(
     }
 }
 
+/// Load the config file `init` operates on, applying the optional `--db`
+/// override on top. Shared by the initial load and the post-auth-mode reload
+/// (LIFIC-25), so the override logic lives in exactly one place.
+fn load_config_for_init(
+    config_path: &std::path::Path,
+    db_flag: Option<&std::path::Path>,
+) -> Config {
+    let mut cfg = Config::load(Some(config_path));
+    if let Some(db) = db_flag {
+        cfg.database.path = db.to_path_buf();
+    }
+    cfg
+}
+
 /// Resolve the auth mode the operator chose at `init` (LIFIC-25). Honors an
 /// explicit `--auth-mode` flag (non-interactive); otherwise, on a TTY, shows
 /// the interactive menu. Refuses (rather than hangs) off a TTY, matching
@@ -1581,11 +1595,9 @@ async fn cmd_init(
     // database.path anchors to the config's own directory — the same
     // resolution the installed service (WorkingDirectory = that directory)
     // applies at runtime. The pre-dispatch Config::load can't have done
-    // this when the file didn't exist yet.
-    let mut cfg = Config::load(Some(&config_path));
-    if let Some(db) = db_flag {
-        cfg.database.path = db.to_path_buf();
-    }
+    // this when the file didn't exist yet. Applied again after the auth-mode
+    // edit rewrites the file (LIFIC-25).
+    let mut cfg = load_config_for_init(&config_path, db_flag);
 
     // Create + migrate the database and seed instance settings now, while the
     // instance has zero users — this is the moment the authz-enforced default
@@ -1617,10 +1629,7 @@ async fn cmd_init(
         let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
         let new_toml = Config::apply_auth_mode(&existing, mode.required(), mode.host())?;
         std::fs::write(&config_path, new_toml)?;
-        cfg = Config::load(Some(&config_path));
-        if let Some(db) = db_flag {
-            cfg.database.path = db.to_path_buf();
-        }
+        cfg = load_config_for_init(&config_path, db_flag);
 
         let op_name = match name {
             Some(n) => n,
