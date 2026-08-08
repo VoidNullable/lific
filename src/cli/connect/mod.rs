@@ -1483,6 +1483,110 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── connect idempotency / self-healing the stdio token ────────────────
+    //
+    // If a stdio config already lists `lific` but is MISSING the token (e.g. it
+    // was written by a pre-token connect, or the env field was damaged), a
+    // re-run of `connect --stdio` must mint a token and repair the entry in
+    // place — reusing the same agent bot, keeping one active key, and not
+    // corrupting other entries.
+
+    #[test]
+    fn run_stdio_reconnects_and_heals_a_tokenless_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.clone()).unwrap();
+        // A pre-existing stdio entry with NO environment/token, plus a sibling.
+        std::fs::write(
+            b.project.join("opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "local", "command": ["lific", "--db", "/abs/lific.db", "mcp"] }, "other": { "type": "remote" } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
+                .unwrap();
+        // Lific entry healed: command kept, token env added.
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert_eq!(
+            v["mcp"]["lific"]["command"],
+            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+        );
+        let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("reconnect must write LIFIC_TOKEN");
+        assert!(token.starts_with("lific_sk-live-"));
+
+        // Sibling preserved.
+        assert_eq!(v["mcp"]["other"]["type"], "remote");
+
+        // The same agent bot is reused, not duplicated.
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "reconnect must not duplicate the agent bot");
+        assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_rerun_keeps_the_token_and_agent_stable() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let _ = run(&a, &cfg, &pool, &b).unwrap();
+        // Fresh connect run #2 must already be up-to-date and idempotent w.r.t.
+        // the DB state: same single bot, single active key, a valid token write.
+        let _ = run(&a, &cfg, &pool, &b).unwrap();
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'", [], |r| r.get(0))
+            .unwrap();
+        let keys: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "no agent churn across reruns");
+        assert_eq!(keys, 1, "exactly one active key across reruns");
+
+        // The config remains well-formed and carries a live token after run #2
+        // (a re-connect may rotate the key — that is a valid fresh plaintext).
+        let second_v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
+                .unwrap();
+        let second_token = second_v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("token must be present after rerun");
+        assert!(second_token.starts_with("lific_sk-live-"));
+        assert_eq!(second_v["mcp"]["lific"]["type"], "local");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn run_stdio_codex_writes_env_table_in_toml() {
         let dir = tmp();
