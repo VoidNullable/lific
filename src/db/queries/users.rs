@@ -564,15 +564,46 @@ pub fn set_admin(conn: &Connection, username: &str, is_admin: bool) -> Result<()
     Ok(())
 }
 
-/// Find a bot user by username (for reconnection checks).
-pub fn find_bot_by_username(
+/// Find a bot by its stable (owner, tool) pairing (LIFIC-17).
+///
+/// This is the key that survives an owner rename, where the derived
+/// `{tool}-{owner.username}` username does not.
+pub fn find_bot_by_owner_and_tool(
     conn: &Connection,
-    username: &str,
+    owner_id: i64,
+    tool_id: &str,
 ) -> Result<Option<crate::db::models::User>, LificError> {
     match conn.query_row(
         "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
-         FROM users WHERE username = ?1 AND is_bot = 1",
-        params![username],
+         FROM users WHERE owner_id = ?1 AND tool_id = ?2 AND is_bot = 1 LIMIT 1",
+        params![owner_id, tool_id],
+        row_to_user,
+    ) {
+        Ok(user) => Ok(Some(user)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Find a legacy bot (tool_id NULL, minted before LIFIC-17) by its owner and
+/// its tool *prefix*.
+///
+/// Legacy bots were keyed by the `{tool}-{owner.username}` username, which
+/// embeds the owner's name at mint time. After a rename that prefix is stale,
+/// so the lookup must not depend on the current owner username — it matches on
+/// the stable `owner_id` and the tool prefix alone, which a rename never
+/// touches. `GLOB '{tool_id}-*'` ties the match to the exact tool prefix (tool
+/// slugs are `[a-z0-9-]`, so no `*`/`?` need escaping).
+pub fn find_bot_legacy_by_tool_prefix(
+    conn: &Connection,
+    owner_id: i64,
+    tool_id: &str,
+) -> Result<Option<crate::db::models::User>, LificError> {
+    match conn.query_row(
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+         FROM users WHERE owner_id = ?1 AND is_bot = 1 AND tool_id IS NULL
+              AND username GLOB ?2 LIMIT 1",
+        params![owner_id, format!("{tool_id}-*")],
         row_to_user,
     ) {
         Ok(user) => Ok(Some(user)),
@@ -608,18 +639,40 @@ pub fn bot_is_connected(conn: &Connection, bot_id: i64) -> Result<bool, LificErr
 ///
 /// LIFIC-13: the single find-or-create decision all three doors (OAuth
 /// approval, `lific connect`, web create_bot) share.
+///
+/// LIFIC-17: dedupe keys on the stable `(owner_id, tool_id)` pair, not the
+/// derived username, so renaming the owner never orphans the agent. Legacy
+/// bots minted before the `tool_id` column existed (tool_id NULL) are found
+/// by their owner and tool prefix and backfilled in place — safe even when the
+/// owner renamed in the meantime, since the prefix match skips the stale owner
+/// name embedded in their username.
 pub fn ensure_bot(
     conn: &Connection,
     owner_id: i64,
     tool_id: &str,
     display_name: &str,
 ) -> Result<User, LificError> {
+    // Structured dedupe first: stable across owner renames.
+    if let Some(existing) = find_bot_by_owner_and_tool(conn, owner_id, tool_id)? {
+        return Ok(existing);
+    }
+    // Legacy bot: pre-migration, tool_id NULL, keyed only by owner + tool.
+    // Reuse and backfill it.
+    if let Some(legacy) = find_bot_legacy_by_tool_prefix(conn, owner_id, tool_id)? {
+        conn.execute(
+            "UPDATE users SET tool_id = ?1 WHERE id = ?2",
+            params![tool_id, legacy.id],
+        )?;
+        return Ok(legacy);
+    }
     let owner_username = get_user_by_id(conn, owner_id)?.username;
     let bot_username = format!("{tool_id}-{owner_username}");
-    match find_bot_by_username(conn, &bot_username)? {
-        Some(existing) => Ok(existing),
-        None => create_bot_user(conn, owner_id, &bot_username, display_name),
-    }
+    let bot = create_bot_user(conn, owner_id, &bot_username, display_name)?;
+    conn.execute(
+        "UPDATE users SET tool_id = ?1 WHERE id = ?2",
+        params![tool_id, bot.id],
+    )?;
+    Ok(bot)
 }
 
 /// List all bots owned by a specific user.
@@ -897,6 +950,84 @@ mod tests {
         let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode").unwrap().id;
         let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode").unwrap().id;
         assert_ne!(a, b, "each owner gets its own bot for the same tool");
+    }
+
+    // ── stable dedupe across owner rename (LIFIC-17) ──────────
+
+    // The bot identity is keyed on (owner_id, tool_id), not the derived
+    // `{tool}-{owner}` username string. Renaming the owner changes the string
+    // but not the (owner_id, tool_id) pair, so a re-connect must reuse the
+    // original bot rather than mint a duplicate.
+    #[test]
+    fn ensure_bot_reuses_existing_bot_after_owner_rename() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+
+        // Simulate the owner renaming their account: username changes, id stays.
+        conn.execute(
+            "UPDATE users SET username = ?1 WHERE id = ?2",
+            params!["renamed-blake", owner.id],
+        )
+        .unwrap();
+
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        assert_eq!(first, second, "renaming the owner must not orphan the agent");
+    }
+
+    // Bots minted before the tool_id column existed (tool_id NULL) are still
+    // found by their legacy `{tool}-{owner}` username and backfilled, so an
+    // existing install does not duplicate agents on the first post-upgrade
+    // reconnect.
+    #[test]
+    fn ensure_bot_backfills_legacy_bot_by_username() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+        // A pre-migration bot: username "opencode-blake", tool_id NULL.
+        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode")
+            .unwrap();
+
+        let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        assert_eq!(
+            reused.id, legacy.id,
+            "a legacy bot keyed by username must be reused, not duplicated"
+        );
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT tool_id FROM users WHERE id = ?1",
+                params![legacy.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("opencode"), "legacy bot tool_id backfilled");
+    }
+
+    // The legacy backfill holds even when the owner renamed *before* the
+    // reconnect: the legacy username embeds the old owner name, so the match
+    // keys on owner id + tool prefix, never the current owner username.
+    #[test]
+    fn ensure_bot_backfills_legacy_bot_even_after_owner_rename() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+        // A pre-migration bot whose username still has the old owner name.
+        let legacy = create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode")
+            .unwrap();
+        // The owner renames before ever reconnecting.
+        conn.execute(
+            "UPDATE users SET username = ?1 WHERE id = ?2",
+            params!["new-name", owner.id],
+        )
+        .unwrap();
+
+        let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        assert_eq!(
+            reused.id, legacy.id,
+            "renaming before a legacy reconnect must still reuse, not duplicate"
+        );
     }
 
     // ── disconnect/delete bot credential revocation (LIFIC-13 follow-up) ──
