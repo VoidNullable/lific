@@ -843,9 +843,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 warn!(
                     host = %cfg.server.host,
-                    "AUTH IS DISABLED ([auth] required = false): every credential-less request \
-                     gets admin-equivalent access. Anyone who can reach this address owns the \
-                     instance — keep it loopback-only or firewalled."
+                    "{} ([auth] required = false)",
+                    config::login_free_caution()
                 );
             }
 

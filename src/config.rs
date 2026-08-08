@@ -75,6 +75,18 @@ impl AuthConfig {
     }
 }
 
+/// Canonical plain-language caution for login-free mode (`[auth] required =
+/// false`). LIFIC-22: this is the single source of truth that both the `lific
+/// init` auth-mode menu and the `lific start` startup warning consume, so the
+/// two surfaces can never diverge. It names the risk, states the safe
+/// condition, and gives the recovery path — no shock all-caps language, no
+/// internal jargon like "credential-less request".
+pub fn login_free_caution() -> &'static str {
+    "LIFIC is running in login-free mode: anyone who can reach it can administer \
+     it. Keep it on a machine only you and trusted people can reach. To switch \
+     to passwords, set [auth] required = true and run lific init again."
+}
+
 /// Does this URL point at the local machine? Backs the LIF-294 startup guard:
 /// an auth-optional instance must never have a non-localhost `public_url`.
 /// Conservative — anything unparseable counts as NOT localhost.
@@ -557,6 +569,25 @@ trusted_proxies = ["not-a-cidr"]
         // Omitting the key keeps the secure default even when [auth] is present.
         let cfg: Config = toml::from_str("[auth]\nallow_signup = false\n").unwrap();
         assert!(cfg.auth.required);
+    }
+
+    // LIFIC-22: the shared login-free caution is set once and plain-language.
+    #[test]
+    fn login_free_caution_is_plain_and_complete() {
+        let text = login_free_caution();
+        // Names the mode.
+        assert!(text.contains("login-free mode"));
+        // States the risk in plain words.
+        assert!(text.contains("anyone who can reach it can administer it"));
+        // States the safe condition.
+        assert!(text.contains("Keep it on a machine only you and trusted people can reach"));
+        // States the recovery path.
+        assert!(text.contains("required = true"));
+        // No shock all-caps language is allowed to leak back in from the old
+        // "AUTH IS DISABLED" warning.
+        assert!(!text.contains("AUTH IS DISABLED"));
+        // No internal jargon either.
+        assert!(!text.contains("credential-less"));
     }
 
     // LIF-294: the startup guard's localhost check.
