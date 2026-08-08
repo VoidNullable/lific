@@ -87,26 +87,16 @@ pub fn login_free_caution() -> &'static str {
      to passwords, set [auth] required = true and run lific init again."
 }
 
-/// Does this URL point at the local machine? Backs the LIF-294 startup guard:
-/// an auth-optional instance must never have a non-localhost `public_url`.
-/// Conservative — anything unparseable counts as NOT localhost.
-pub fn is_localhost_url(url: &str) -> bool {
-    let rest = url.trim();
-    let rest = rest.split("://").nth(1).unwrap_or(rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    let host = host.to_ascii_lowercase();
-    // A literal IP must actually be loopback ("127.evil.com" is a valid DNS
-    // name pointing anywhere, so prefix matching would be a hole).
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return ip.is_loopback();
-    }
-    host == "localhost"
+/// Does a `[server] host` bind value point at the local machine? Backs the
+/// LIFIC-24 startup guard: login-free mode must refuse to bind anywhere but
+/// loopback, so the safety check and the actual listening socket agree.
+/// Conservative — anything unparseable counts as NOT loopback.
+pub fn is_localhost_host(host: &str) -> bool {
+    let host = host.trim();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,29 +675,20 @@ enabled = false
         assert!(err.contains("does not parse"), "error must say why: {err}");
     }
 
-    // LIF-294: the startup guard's localhost check.
+    // LIFIC-24: the startup guard's bind-host check.
     #[test]
-    fn is_localhost_url_accepts_only_loopback() {
-        for url in [
-            "http://localhost:3456",
-            "http://localhost",
-            "https://LOCALHOST/lific",
-            "http://127.0.0.1:3456",
-            "http://127.5.5.5",
-            "http://[::1]:3456",
-            "http://user@localhost:3456/path",
+    fn is_localhost_host_accepts_only_loopback() {
+        for host in [
+            "127.0.0.1",
+            "127.5.5.5",
+            "::1",
+            "localhost",
+            "LOCALHOST",
         ] {
-            assert!(is_localhost_url(url), "{url} should count as localhost");
+            assert!(is_localhost_host(host), "{host} should count as loopback");
         }
-        for url in [
-            "https://lific.tail1234.ts.net",
-            "http://192.168.1.10:3456",
-            "http://127.evil.com",       // DNS name, not a loopback IP
-            "https://localhost.example", // ditto
-            "http://[::2]",
-            "",
-        ] {
-            assert!(!is_localhost_url(url), "{url} must NOT count as localhost");
+        for host in ["0.0.0.0", "::", "[::]", "192.168.1.10", "lific.example", ""] {
+            assert!(!is_localhost_host(host), "{host} must NOT count as loopback");
         }
     }
 }

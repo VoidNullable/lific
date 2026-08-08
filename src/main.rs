@@ -831,13 +831,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // when the instance says it's publicly reachable; shout otherwise
             // (the default bind is 0.0.0.0 — the whole LAN can reach it).
             if !cfg.auth.required {
-                if let Some(url) = cfg.server.public_url.as_deref()
-                    && !config::is_localhost_url(url)
-                {
+                if !config::is_localhost_host(&cfg.server.host) {
                     return Err(format!(
-                        "refusing to start: [auth] required = false while server.public_url \
-                         ({url}) is not localhost — an instance without authentication must \
-                         never be publicly reachable. Re-enable auth or remove public_url."
+                        "refusing to start: [auth] required = false (login-free mode) while \
+                         [server] host ({}) is not loopback — anyone who can reach that bind \
+                         can administer the instance. Re-enable auth or bind to 127.0.0.1.",
+                        cfg.server.host
                     )
                     .into());
                 }
