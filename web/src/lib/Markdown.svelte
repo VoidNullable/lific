@@ -2,7 +2,7 @@
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import IssueHoverCard from "./IssueHoverCard.svelte";
-  import { IDENTIFIER_RE, refKind, routeFor, projectCodeOf } from "./references";
+  import { IDENTIFIER_RE, PROJECT_CODE_RE, refKind, routeFor, projectCodeOf } from "./references";
   import { openPeek } from "./issues/peek.svelte"; // LIF-248
   import { openContextMenu } from "./contextMenuState.svelte"; // LIF-248
   import { PanelRight, ExternalLink } from "lucide-svelte";
@@ -63,6 +63,64 @@
       });
       if (mentionKnown.size > 0) out = linkMentionsInText(out, mentionKnown);
       return out;
+    });
+  }
+
+  // Cross-issue comment links: "WS-25#comment-42" → anchor on the WS-25 issue page.
+  // Must run before linkIdentifiers so the full "IDENT#comment-N" token is consumed
+  // as one unit before IDENTIFIER_RE picks up "WS-25" alone.
+  const CROSS_COMMENT_RE = new RegExp(
+    `\\b(${PROJECT_CODE_RE}-\\d+)#comment-([1-9]\\d*)\\b`,
+    "g",
+  );
+
+  function linkCrossCommentRefs(html: string): string {
+    let skipDepth = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (token) => {
+      if (token[0] === "<") {
+        const m = token.match(TAG_NAME_RE);
+        if (m && SKIP_LINKING_TAGS.has(m[1].toLowerCase())) {
+          const isClosing = token[1] === "/";
+          const isSelfClosing = token.endsWith("/>");
+          if (isClosing) skipDepth = Math.max(0, skipDepth - 1);
+          else if (!isSelfClosing) skipDepth += 1;
+        }
+        return token;
+      }
+      if (skipDepth > 0) return token;
+      return token.replace(CROSS_COMMENT_RE, (_, ident, commentId) => {
+        const project = projectCodeOf(ident);
+        // routeFor returns "#/PROJECT/issues/IDENT"; append ?comment=N so
+        // commentTargetFromHash can scroll to the right comment on load.
+        const href = `${routeFor(project, "issue", ident)}?comment=${commentId}`;
+        return `<a href="${href}" class="identifier-link" data-issue-ident="${ident}">${ident}#comment-${commentId}</a>`;
+      });
+    });
+  }
+
+  // Same-page comment refs: bare "#42" → "#comment-42" anchor on the current page.
+  // Runs after linkIdentifiers so issue identifiers ("WS-25") are already wrapped
+  // and won't be re-processed. The <a>/<code>/<pre> depth guard ensures "#42"
+  // inside code spans or existing links is left alone.
+  const COMMENT_REF_RE = /(?<![A-Za-z0-9_-])#([1-9]\d*)\b/g;
+
+  function linkCommentRefs(html: string): string {
+    let skipDepth = 0;
+    return html.replace(/<[^>]+>|[^<]+/g, (token) => {
+      if (token[0] === "<") {
+        const m = token.match(TAG_NAME_RE);
+        if (m && SKIP_LINKING_TAGS.has(m[1].toLowerCase())) {
+          const isClosing = token[1] === "/";
+          const isSelfClosing = token.endsWith("/>");
+          if (isClosing) skipDepth = Math.max(0, skipDepth - 1);
+          else if (!isSelfClosing) skipDepth += 1;
+        }
+        return token;
+      }
+      if (skipDepth > 0) return token;
+      return token.replace(COMMENT_REF_RE, (_, n) =>
+        `<a href="#comment-${n}" class="comment-ref">#${n}</a>`,
+      );
     });
   }
 
@@ -134,7 +192,11 @@
   // their class + data-* attributes, GFM tables, task-list checkboxes, and the
   // LIF-262 attachment img/chip markup).
   let html = $derived(
-    DOMPurify.sanitize(decorateAttachmentLinks(linkIdentifiers(rendered, mentionMap)), {
+    DOMPurify.sanitize(
+      decorateAttachmentLinks(
+        linkCommentRefs(linkIdentifiers(linkCrossCommentRefs(rendered), mentionMap)),
+      ),
+      {
       // Keep the data-mermaid / data-lang / data-issue-ident / data-mention
       // hooks the post-render effects (and mention chips) read, plus
       // data-attachment (chip decoration) and the download attr on
