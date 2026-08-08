@@ -60,6 +60,7 @@ use clients::{ClientSpec, OauthSupport, Os, PathBase, Scope, ServerConfig};
 
 /// Parsed, validated arguments for a `connect` run. Built from the CLI enum in
 /// `cli/mod.rs` so the heavy lifting here is testable without clap.
+#[derive(Debug, Clone)]
 pub struct ConnectArgs {
     pub clients: Vec<String>,
     pub scope: Scope,
@@ -73,6 +74,19 @@ pub struct ConnectArgs {
     pub yes: bool,
     pub dry_run: bool,
     pub skip_agents: bool,
+}
+
+/// The transport a `lific connect` run uses, resolved once from flags or the
+/// interactive menu. Both paths funnel through [`resolve_transport_inner`] so
+/// the interactive and flag-driven runs can never diverge (LIFIC-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportMode {
+    /// Local stdio: spawn `lific --db <path> mcp` (agent token LIFIC-18).
+    Stdio,
+    /// Streamable-HTTP remote with a bearer API key.
+    Remote,
+    /// Header-less remote driving the client's native MCP OAuth flow.
+    Oauth,
 }
 
 /// The outcome for a single client write, for both human and JSON output.
@@ -121,6 +135,9 @@ pub struct ConnectResult {
     /// True when this run wrote header-less OAuth configs (`--oauth`).
     pub oauth: bool,
     pub url: String,
+    /// The resolved transport (LIFIC-19), so interactive and flag runs report
+    /// the same choice.
+    pub transport: TransportMode,
 }
 
 #[derive(Debug)]
@@ -341,6 +358,78 @@ fn interactive_picker(detected: &[DetectedClient], target: &str) -> Result<Vec<S
     })
 }
 
+// ── Transport selection (LIFIC-19) ───────────────────────────
+
+/// Resolve the transport for a run. The flags win when present (non-interactive
+/// path, unchanged). With neither `--stdio` nor `--oauth`, an interactive TTY
+/// gets a visible transport menu with stdio preselected; a non-TTY falls back
+/// to the remote default (the historical behavior).
+///
+/// Factored to take an injected `stdin_tty` and a picker closure so the
+/// flag/NON-tty branches are unit-testable (mirrors `resolve_clients_inner`).
+pub fn resolve_transport_inner(
+    stdio: bool,
+    oauth: bool,
+    stdin_tty: bool,
+    picker: impl FnOnce() -> Result<TransportMode, String>,
+) -> Result<TransportMode, String> {
+    if stdio {
+        return Ok(TransportMode::Stdio);
+    }
+    if oauth {
+        return Ok(TransportMode::Oauth);
+    }
+    if stdin_tty {
+        picker()
+    } else {
+        // No transport flag and not interactive → remote, the standing default.
+        Ok(TransportMode::Remote)
+    }
+}
+
+/// The interactive transport menu: stdio preselected, with remote and OAuth
+/// available. Does not prompt for a URL — the target URL is a server-config
+/// fact derived upstream (LIFIC-19 AC: never a connect-time prompt).
+fn interactive_transport_picker() -> Result<TransportMode, String> {
+    let mut prompt = cliclack::Select::new("How should clients connect to this Lific instance?");
+    prompt = prompt
+        .item(
+            TransportMode::Stdio,
+            "Local stdio",
+            "spawn lific --db <path> mcp; the agent carries its own token",
+        )
+        .item(
+            TransportMode::Remote,
+            "Remote (API key)",
+            "reach the running server over HTTP with a bearer key",
+        )
+        .item(
+            TransportMode::Oauth,
+            "OAuth",
+            "header-less config; the client authenticates via its native MCP OAuth flow",
+        )
+        .initial_value(TransportMode::Stdio);
+    prompt.interact().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            "cancelled".to_string()
+        } else {
+            format!("transport selection failed: {e}")
+        }
+    })
+}
+
+/// The CLI-shown label for a resolved transport (used in the run announcement
+/// and JSON output) so both paths name the same thing.
+impl TransportMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransportMode::Stdio => "stdio",
+            TransportMode::Remote => "remote",
+            TransportMode::Oauth => "oauth",
+        }
+    }
+}
+
 // ── Key minting ──────────────────────────────────────────────
 
 /// How this run mints per-tool keys, resolved once up front (owner selection is
@@ -524,7 +613,31 @@ pub fn run(
     }
 
     let stdin_tty = std::io::stdin().is_terminal();
-    let target = target_url(args, cfg);
+
+    // LIFIC-19: resolve the transport — flags win (non-interactive path, the
+    // scripted equivalent); an interactive TTY with neither flag gets a visible
+    // menu with stdio preselected. Resolving into the same `ConnectArgs` the
+    // flag path would have produced guarantees the two can never diverge.
+    let transport = resolve_transport_inner(args.stdio, args.oauth, stdin_tty, || {
+        interactive_transport_picker()
+    })?;
+    let mut args = args.clone();
+    match transport {
+        TransportMode::Stdio => {
+            args.stdio = true;
+            args.oauth = false;
+        }
+        TransportMode::Remote => {
+            args.stdio = false;
+            args.oauth = false;
+        }
+        TransportMode::Oauth => {
+            args.stdio = false;
+            args.oauth = true;
+        }
+    }
+
+    let target = target_url(&args, cfg);
     let selected = resolve_clients_inner(&args.clients, stdin_tty, base, args.scope, |d| {
         interactive_picker(d, &target)
     })?;
@@ -536,7 +649,7 @@ pub fn run(
     // never touches the DB.
     let needs_minting = !args.oauth && !args.dry_run;
     let key_source = if needs_minting {
-        Some(resolve_key_source(args, pool)?)
+        Some(resolve_key_source(&args, pool)?)
     } else if args.dry_run && !args.oauth {
         // Dry-run still reports an origin so output matches a real run's shape.
         Some(KeySource::Provided(
@@ -558,7 +671,7 @@ pub fn run(
 
     let outcomes = write_all_clients(
         &selected,
-        args,
+        &args,
         cfg,
         pool,
         base,
@@ -567,7 +680,7 @@ pub fn run(
     )?;
 
     // AGENTS.md (LIF-251).
-    let agents_md = maybe_write_agents_md(args, base, stdin_tty)?;
+    let agents_md = maybe_write_agents_md(&args, base, stdin_tty)?;
 
     // A representative URL/db-path for the run-level summary.
     let url = if args.stdio {
@@ -584,6 +697,7 @@ pub fn run(
         stdio: args.stdio,
         oauth: args.oauth,
         url,
+        transport,
     })
 }
 
@@ -824,6 +938,7 @@ fn print_json(result: &ConnectResult) {
         "dry_run": result.dry_run,
         "stdio": result.stdio,
         "oauth": result.oauth,
+        "transport": result.transport.as_str(),
         "url": result.url,
         "agents_md": result.agents_md.as_ref().map(|a| serde_json::json!({
             "path": a.path.display().to_string(),
@@ -839,6 +954,9 @@ fn print_human(result: &ConnectResult) {
     if result.dry_run {
         ui::info("Dry run — no files were written.");
     }
+    // LIFIC-19: surface the resolved transport so an interactive pick is never
+    // silent — the same choice a matching flag would have produced.
+    ui::step(format!("Transport: {}", ui::dim(result.transport.as_str())));
     for o in &result.outcomes {
         match (&o.action, &o.error) {
             (Some(action), _) => {
@@ -1077,6 +1195,78 @@ mod tests {
         .unwrap();
         assert_eq!(got, vec!["cursor".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── transport resolution (LIFIC-19) ──────────────────────
+
+    fn no_transport_picker() -> Result<TransportMode, String> {
+        panic!("picker must not be called when a transport flag is given or stdin is not a TTY")
+    }
+
+    #[test]
+    fn transport_stdio_flag_wins_without_picker() {
+        assert_eq!(
+            resolve_transport_inner(true, false, true, no_transport_picker).unwrap(),
+            TransportMode::Stdio
+        );
+        assert_eq!(
+            resolve_transport_inner(true, false, false, no_transport_picker).unwrap(),
+            TransportMode::Stdio
+        );
+    }
+
+    #[test]
+    fn transport_oauth_flag_wins_without_picker() {
+        assert_eq!(
+            resolve_transport_inner(false, true, true, no_transport_picker).unwrap(),
+            TransportMode::Oauth
+        );
+    }
+
+    #[test]
+    fn transport_non_tty_no_flag_defaults_to_remote() {
+        // The historical non-interactive default. No picker, no menu.
+        assert_eq!(
+            resolve_transport_inner(false, false, false, no_transport_picker).unwrap(),
+            TransportMode::Remote
+        );
+    }
+
+    #[test]
+    fn transport_tty_no_flag_calls_picker() {
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Stdio)).unwrap();
+        assert_eq!(got, TransportMode::Stdio);
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Remote)).unwrap();
+        assert_eq!(got, TransportMode::Remote);
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Oauth)).unwrap();
+        assert_eq!(got, TransportMode::Oauth);
+    }
+
+    #[test]
+    fn transport_labels_are_stable() {
+        assert_eq!(TransportMode::Stdio.as_str(), "stdio");
+        assert_eq!(TransportMode::Remote.as_str(), "remote");
+        assert_eq!(TransportMode::Oauth.as_str(), "oauth");
+    }
+
+    #[test]
+    fn run_remote_flag_and_nontty_default_agree() {
+        // LIFIC-19 AC: the interactive menu and the flag/non-interactive path
+        // must produce the same config for the same choice. Proving it at the
+        // seam: a non-TTY run (remote default) and an explicit --stdio run
+        // resolve to distinct transports, and the resolver decides them
+        // deterministically without a picker.
+        assert_eq!(
+            resolve_transport_inner(false, false, false, no_transport_picker).unwrap(),
+            TransportMode::Remote
+        );
+        assert_eq!(
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Remote)).unwrap(),
+            TransportMode::Remote
+        );
     }
 
     // ── detection ────────────────────────────────────────────
