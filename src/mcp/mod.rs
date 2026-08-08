@@ -121,6 +121,20 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
         .clone()
 }
 
+/// LIFIC-18: install the session-level identity for a stdio MCP server.
+///
+/// A stdio session is one long-lived, serialized process that is never wrapped
+/// in [`with_request_context`] (there is no HTTP request to carry the user), so
+/// installing the resolved agent here makes every tool call resolve as that
+/// agent via [`current_auth_user`] until the process exits. The operator
+/// fallback (a missing/unbound `LIFIC_TOKEN`) is the caller passing `None`,
+/// which keeps the existing credential-less resolution — also the operator.
+pub(crate) fn set_stdio_user(user: Option<AuthUser>) {
+    *MCP_REQUEST_USER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
+}
+
 /// LIFIC-11: the resolved identity for the current MCP request. MCP now
 /// resolves the caller exactly as REST does — via [`crate::resolve_caller::resolve_caller`] —
 /// so a credential-less request (unbound API key, legacy OAuth token, or a

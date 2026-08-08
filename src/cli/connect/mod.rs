@@ -214,10 +214,17 @@ pub fn absolute_db_path(cfg: &Config) -> String {
 }
 
 /// Build the canonical [`ServerConfig`] for one client. `key` is that client's
-/// own key (ignored for stdio and oauth transports).
+/// own credential. For a remote transport it's the bearer API key; for stdio
+/// (LIFIC-18) it's the agent token written into the client config's env field
+/// as `LIFIC_TOKEN`. Ignored for oauth transports.
 fn build_server_config(args: &ConnectArgs, cfg: &Config, key: &str) -> ServerConfig {
     if args.stdio {
-        ServerConfig::stdio(absolute_db_path(cfg))
+        // An empty key (no agent identity) yields a plain operator stdio config.
+        if key.is_empty() {
+            ServerConfig::stdio(absolute_db_path(cfg))
+        } else {
+            ServerConfig::stdio_with_token(absolute_db_path(cfg), key)
+        }
     } else if args.oauth {
         let url = args.url.clone().unwrap_or_else(|| default_url(cfg));
         ServerConfig::oauth_remote(url)
@@ -522,13 +529,15 @@ pub fn run(
         interactive_picker(d, &target)
     })?;
 
-    // Resolve how per-tool keys are minted (once — owner selection is run-wide).
-    // Not needed for stdio (no key) or --oauth (mints nothing), and skipped in
-    // dry-run so a preview never touches the DB.
-    let needs_minting = !args.stdio && !args.oauth && !args.dry_run;
+    // Resolve how per-tool credentials are minted (once — owner selection is
+    // run-wide). Both remote and stdio (LIFIC-18) mint a bot + key per tool;
+    // for stdio the key becomes the `LIFIC_TOKEN` written into the client's
+    // env field. `--oauth` mints nothing, and dry-run is skipped so a preview
+    // never touches the DB.
+    let needs_minting = !args.oauth && !args.dry_run;
     let key_source = if needs_minting {
         Some(resolve_key_source(args, pool)?)
-    } else if args.dry_run && !args.stdio && !args.oauth {
+    } else if args.dry_run && !args.oauth {
         // Dry-run still reports an origin so output matches a real run's shape.
         Some(KeySource::Provided(
             "lific_sk-live-DRYRUN000000000000000000000000".to_string(),
@@ -1186,6 +1195,128 @@ mod tests {
         assert!(
             std::path::Path::new(db_arg).is_absolute(),
             "stdio db path must be absolute, got {db_arg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── LIFIC-18: stdio agent token carrier ───────────────────────────────
+
+    #[test]
+    fn run_stdio_with_owner_mints_agent_key_written_into_env() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        let owner_id = seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+
+        // The outcome carries no bearer key (stdio surfaces none), but the
+        // config MUST carry the minted agent token in the env field.
+        assert!(result.outcomes.iter().all(|o| o.key.is_none()));
+
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("stdio config must write LIFIC_TOKEN into environment");
+        assert!(token.starts_with("lific_sk-live-"), "got {token}");
+
+        // The bot was minted as the per-tool agent owned by the operator.
+        let conn = pool.read().unwrap();
+        let (is_bot, owner): (bool, Option<i64>) = conn
+            .query_row(
+                "SELECT is_bot, owner_id FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(is_bot, "opencode-solo must be a bot");
+        assert_eq!(owner, Some(owner_id), "bot must be owned by the operator");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_openconfig_merges_with_existing_entries() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.clone()).unwrap();
+        std::fs::write(
+            b.project.join("opencode.json"),
+            r#"{ "mcp": { "other": { "type": "remote", "url": "http://other" } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        // Unrelated entries survive.
+        assert_eq!(v["mcp"]["other"]["url"], "http://other");
+        // Lific entry has the stdio command + token env.
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert!(
+            v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+                .as_str()
+                .is_some()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_codex_writes_env_table_in_toml() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["codex"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        let outcome = &result.outcomes[0];
+        assert_eq!(
+            outcome.action.as_deref(),
+            Some("created"),
+            "codex stdio error: {:?}",
+            outcome.error
+        );
+
+        let written =
+            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        // The stdio command and the env table with LIFIC_TOKEN both land.
+        assert!(
+            written.contains("command = \"lific\""),
+            "codex stdio must keep the lific command:\n{written}"
+        );
+        assert!(
+            written.contains("args = [\"--db\""),
+            "codex stdio must keep the db args:\n{written}"
+        );
+        assert!(
+            written.contains("LIFIC_TOKEN"),
+            "codex stdio must write LIFIC_TOKEN into env:\n{written}"
+        );
+        assert!(
+            written.contains("lific_sk-live-"),
+            "codex must carry a real minted key, not a placeholder:\n{written}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

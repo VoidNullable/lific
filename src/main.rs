@@ -1327,11 +1327,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pool = db::open(&cfg.database.path)?;
             info!(path = %cfg.database.path.display(), "database ready");
 
+            // LIFIC-18: a stdio agent carries its identity in LIFIC_TOKEN. Read
+            // it at startup, validate it, and resolve the caller as that agent
+            // for the whole session. A missing/invalid token runs as the
+            // operator with a stderr warning — never a hard error (MCP stdio
+            // has no transport auth; the launch boundary is the trust).
+            let manager = auth::create_key_manager()?;
+            let token_user = match auth::resolve_stdio_token(&pool, &manager) {
+                Ok(Some(user)) => Some(user),
+                Ok(None) => {
+                    // Absent or valid-but-unbound (e.g. a fresh-install
+                    // unassigned key): run as the operator, with a warning.
+                    eprintln!(
+                        "LIFIC_TOKEN not set or unbound — this session runs as the operator, \
+                         not a connected agent.\n\
+                         Run `lific connect` to bind this session to an agent identity."
+                    );
+                    None
+                }
+                Err(e) => {
+                    eprintln!(
+                        "LIFIC_TOKEN present but invalid ({e}) — this session runs as the \
+                         operator, not a connected agent."
+                    );
+                    None
+                }
+            };
+
             let server = mcp::LificMcp::new(pool);
+            // LIFIC-18: bind the resolved agent (or operator) as this stdio
+            // session's identity for the whole process lifetime.
+            mcp::set_stdio_user(token_user.clone());
             let transport = rmcp::transport::io::stdio();
 
             info!("lific MCP server started (stdio)");
             let handle = server.serve(transport).await?;
+            if let Some(u) = &token_user {
+                info!(user = %u.username, "stdio session bound to agent");
+            }
             handle.waiting().await?;
         }
 

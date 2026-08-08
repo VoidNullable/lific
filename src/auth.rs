@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use api_keys_simplified::{ApiKeyManagerV0, Environment, ExposeSecret, KeyStatus, SecureString};
 
 use crate::db::DbPool;
+use crate::db::models::AuthUser;
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -640,6 +641,126 @@ struct ApiKeyRow {
     id: i64,
     hash: String,
     user_id: Option<i64>,
+}
+
+/// LIFIC-18: resolve an API key (e.g. the `LIFIC_TOKEN` carried by a stdio
+/// agent) to its bound user, without an HTTP request context.
+///
+/// Mirrors the API-key branch of [`require_api_key`] for the stdio MCP
+/// entrypoint: verify the checksum, look up the key row by derived key_id, and
+/// verify the stored hash. Returns `Some(user)` when the key is valid AND
+/// bound to a user; `Ok(None)` for a valid-but-unbound key (the stdio session
+/// then falls back to the operator). An invalid/unrecognized key is an error so
+/// the caller can warn loudly and still degrade to the operator fallback.
+pub fn resolve_api_key_user(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    token: &str,
+) -> Result<Option<AuthUser>, String> {
+    use api_keys_simplified::SecureString;
+
+    let secure_token = SecureString::from(token.to_string());
+
+    // Fast checksum pre-check: reject malformed keys before touching DB.
+    match manager.verify_checksum(&secure_token) {
+        Ok(true) => {}
+        _ => return Err("invalid API key checksum".into()),
+    }
+
+    let key_id = manager.extract_key_id(&secure_token);
+
+    // Look up by derived key_id (indexed query).
+    let key_row: Option<ApiKeyRow> = {
+        let conn = db.read().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
+             AND (expires_at IS NULL OR expires_at > datetime('now'))",
+            params![key_id],
+            |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    hash: row.get(1)?,
+                    user_id: row.get(2)?,
+                })
+            },
+        )
+        .ok()
+    };
+
+    // Fallback: pre-migration-010 keys with no key_id — scan and backfill.
+    let key_row = key_row.or_else(|| {
+        let conn = db.read().ok()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0 \
+                 AND (expires_at IS NULL OR expires_at > datetime('now'))",
+            )
+            .ok()?;
+        let rows: Vec<ApiKeyRow> = stmt
+            .query_map([], |row| {
+                Ok(ApiKeyRow {
+                    id: row.get(0)?,
+                    hash: row.get(1)?,
+                    user_id: row.get(2)?,
+                })
+            })
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+        for row in rows {
+            if let Ok(KeyStatus::Valid) = manager.verify(&secure_token, &row.hash) {
+                if let Ok(wconn) = db.write() {
+                    let _ = wconn.execute(
+                        "UPDATE api_keys SET key_id = ?1 WHERE id = ?2",
+                        params![key_id, row.id],
+                    );
+                }
+                return Some(row);
+            }
+        }
+        None
+    });
+
+    let Some(key) = key_row else {
+        return Err("invalid API key".into());
+    };
+
+    match manager.verify(&secure_token, &key.hash) {
+        Ok(KeyStatus::Valid) => {
+            // Resolve user if the key has a user_id; a valid-but-unbound key
+            // (legacy, or a fresh-install unassigned key) is Ok(None).
+            let auth_user = key.user_id.and_then(|uid| {
+                let conn = db.read().ok()?;
+                crate::db::queries::users::get_user_by_id(&conn, uid)
+                    .ok()
+                    .map(|u| crate::db::models::AuthUser {
+                        id: u.id,
+                        username: u.username,
+                        display_name: u.display_name,
+                        is_admin: u.is_admin,
+                    })
+            });
+            Ok(auth_user)
+        }
+        _ => Err("API key hash verification failed".into()),
+    }
+}
+
+/// LIFIC-18: resolve the `LIFIC_TOKEN` a stdio agent carries into its bound
+/// user. `Ok(None)` when the token is absent, empty, or valid-but-unbound —
+/// the session runs as the operator. `Err` when a token was present but
+/// invalid (checksum/DB/hash failure), so the stdio entrypoint can emit a
+/// distinct warning while still degrading to the operator fallback.
+pub fn resolve_stdio_token(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+) -> Result<Option<AuthUser>, String> {
+    let raw = std::env::var("LIFIC_TOKEN").unwrap_or_default();
+    let token = raw.trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    resolve_api_key_user(db, manager, token)
 }
 
 #[cfg(test)]
@@ -1851,5 +1972,106 @@ mod tests {
 
         let body = identity_body(identity_echo_app(state), None).await;
         assert_eq!(body, "none", "zero-user bootstrap inserts no identity");
+    }
+
+    // ── LIFIC-18: stdio token resolution (auth::resolve_stdio_token) ───────
+
+    #[test]
+    fn resolve_api_key_user_bound_key_returns_user() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let uid = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "agent-user".into(),
+                    email: "agent-user@local.test".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let key = create_api_key(&pool, &manager, "opencode-agent").unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, "opencode-agent", uid).unwrap();
+        }
+        let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
+        let user = resolved.expect("bound key resolves to a user");
+        assert_eq!(user.id, uid);
+        assert_eq!(user.username, "agent-user");
+    }
+
+    #[test]
+    fn resolve_api_key_user_unbound_key_is_ok_none() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "unbound").unwrap();
+        let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
+        assert!(
+            resolved.is_none(),
+            "a valid-but-unbound key must be Ok(None) — operator fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_user_invalid_key_is_err() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let err = resolve_api_key_user(&pool, &manager, "lific_sk-live-NOTAREALKEY")
+            .expect_err("a bogus key must be an error");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn resolve_stdio_token_without_env_is_ok_none() {
+        // No LIFIC_TOKEN in the environment → Ok(None): the operator fallback.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::remove_var("LIFIC_TOKEN") };
+        let resolved = resolve_stdio_token(&pool, &manager).unwrap();
+        assert!(resolved.is_none(), "absent token must be Ok(None)");
+    }
+
+    #[test]
+    fn resolve_stdio_token_valid_env_resolves_bound_user() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let uid = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "stdio-agent".into(),
+                    email: "stdio-agent@local.test".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let key = create_api_key(&pool, &manager, "codex-agent").unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, "codex-agent", uid).unwrap();
+        }
+        // SAFETY: guarded by ENV_LOCK; restored every path below.
+        unsafe { std::env::set_var("LIFIC_TOKEN", &key) };
+        let resolved = resolve_stdio_token(&pool, &manager).unwrap();
+        unsafe { std::env::remove_var("LIFIC_TOKEN") };
+        assert_eq!(resolved.unwrap().id, uid);
     }
 }
