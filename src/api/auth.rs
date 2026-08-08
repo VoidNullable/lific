@@ -664,12 +664,13 @@ pub(super) async fn create_bot(
         crate::db::queries::users::ensure_bot(conn, user.id, &tool, display_name)
     })?;
 
-    // If the bot already has an active key it's already connected — refuse
-    // rather than silently minting a fresh credential for an active tool.
-    let has_key = with_read(&db, |conn| {
-        crate::db::queries::users::bot_has_active_key(conn, bot_user.id)
+    // If the bot already has a live credential (API key or OAuth token) it's
+    // already connected — refuse rather than silently minting a fresh
+    // credential for an active tool.
+    let connected = with_read(&db, |conn| {
+        crate::db::queries::users::bot_is_connected(conn, bot_user.id)
     })?;
-    if has_key {
+    if connected {
         return Err(LificError::BadRequest(format!(
             "{display_name} is already connected"
         )));

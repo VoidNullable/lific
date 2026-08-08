@@ -522,8 +522,10 @@ pub struct Bot {
     pub display_name: String,
     pub owner_id: Option<i64>,
     pub created_at: String,
-    /// Whether the bot has an active (non-revoked) API key.
-    pub has_active_key: bool,
+    /// Whether the bot has any live credential (an active API key or an active
+    /// OAuth token). Used by the Connected Tools UI to show connected state,
+    /// independent of *how* the bot was connected (LIFIC-13 OAuth vs lific connect key).
+    pub connected: bool,
 }
 
 // ── API Key (user-facing) ────────────────────────────────────

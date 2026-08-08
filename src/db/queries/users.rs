@@ -582,10 +582,17 @@ pub fn find_bot_by_username(
 }
 
 /// Check if a bot has any active (non-revoked) API keys.
-pub fn bot_has_active_key(conn: &Connection, bot_id: i64) -> Result<bool, LificError> {
+/// Whether a bot has standing access — an active (non-revoked) API key, or a
+/// non-revoked OAuth token. Mirrors the Connected Tools "connected" state
+/// (LIFIC-13): access is granted until explicitly revoked/disconnected,
+/// independent of OAuth token expiry (the agent self-heals via re-auth).
+/// Used to refuse re-connecting a tool that's already connected via either door.
+pub fn bot_is_connected(conn: &Connection, bot_id: i64) -> Result<bool, LificError> {
     let has: bool = conn
         .query_row(
-            "SELECT COUNT(*) > 0 FROM api_keys WHERE user_id = ?1 AND revoked = 0",
+            "SELECT
+                EXISTS(SELECT 1 FROM api_keys WHERE user_id = ?1 AND revoked = 0)
+                OR EXISTS(SELECT 1 FROM oauth_tokens WHERE user_id = ?1 AND revoked = 0)",
             params![bot_id],
             |row| row.get(0),
         )
@@ -622,7 +629,11 @@ pub fn list_bots(
 ) -> Result<Vec<crate::db::models::Bot>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT u.id, u.username, u.display_name, u.owner_id, u.created_at,
-                EXISTS(SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0) as has_key
+                EXISTS(
+                    SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0
+                    UNION
+                    SELECT 1 FROM oauth_tokens t WHERE t.user_id = u.id AND t.revoked = 0
+                ) as connected
          FROM users u
          WHERE u.is_bot = 1 AND u.owner_id = ?1
          ORDER BY u.created_at DESC",
@@ -634,7 +645,7 @@ pub fn list_bots(
             display_name: row.get(2)?,
             owner_id: row.get(3)?,
             created_at: row.get(4)?,
-            has_active_key: row.get(5)?,
+            connected: row.get(5)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -978,6 +989,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bot_rows, 0, "bot identity removed");
+    }
+
+    // ── list_bots / connected semantics (LIFIC-13 OAuth bots) ──
+
+    #[test]
+    fn bot_with_oauth_token_lists_as_connected() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        // No API key — connected purely by an OAuth token (LIFIC-13 path).
+        insert_oauth_token_for(&conn, bot.id);
+
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, bot.id);
+        assert!(
+            listed[0].connected,
+            "an OAuth-connected bot must list as connected (no API key involved)"
+        );
+        assert!(bot_is_connected(&conn, bot.id).unwrap());
+    }
+
+    #[test]
+    fn bot_with_only_revoked_credentials_lists_as_disconnected() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+        // Revoke the token — the bot is no longer connected.
+        conn.execute(
+            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1",
+            params![bot.id],
+        )
+        .unwrap();
+
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert!(
+            !listed[0].connected,
+            "a bot with only revoked credentials must list as disconnected"
+        );
+        assert!(!bot_is_connected(&conn, bot.id).unwrap());
+    }
+
+    #[test]
+    fn api_key_connected_bot_still_lists_as_connected() {
+        let pool = test_db();
+        let (owner, bot) = {
+            let conn = pool.write().unwrap();
+            let owner = test_create_user(&conn);
+            let bot = ensure_bot(&conn, owner.id, "claude-code", "Claude Code").unwrap();
+            (owner.id, bot.id)
+        };
+        // The classic `lific connect` path: an active API key, no OAuth token.
+        let name = format!("claude-code-{}", {
+            let conn = pool.read().unwrap();
+            get_user_by_id(&conn, owner).unwrap().username
+        });
+        let manager = crate::auth::create_key_manager().unwrap();
+        let _ = crate::auth::create_api_key(&pool, &manager, &name).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, &name, bot).unwrap();
+        }
+
+        let listed = {
+            let conn = pool.read().unwrap();
+            list_bots(&conn, owner).unwrap()
+        };
+        assert!(
+            listed.iter().any(|b| b.id == bot && b.connected),
+            "API-key-connected bot (legacy path) still lists as connected"
+        );
     }
 
     // ── LIF-190: profile + password updates ─────────────────
