@@ -204,6 +204,17 @@ pub enum Command {
         /// for non-interactively.
         #[arg(long)]
         name: Option<String>,
+
+        /// On a fresh install (no human operator), choose the auth mode instead
+        /// of showing the interactive menu. Non-interactive path; must be one of
+        /// `login-free` or `passwords`.
+        #[arg(long)]
+        auth_mode: Option<String>,
+
+        /// The password for `--auth-mode passwords` (prompted interactively if
+        /// omitted). Ignored in login-free mode.
+        #[arg(long)]
+        password: Option<String>,
     },
 
     /// Manage the background service that `lific init` installs.
@@ -1371,7 +1382,9 @@ mod tests {
             Command::Init {
                 no_service: false,
                 here: false,
-                name: _
+                name: _,
+                auth_mode: _,
+                password: _,
             }
         ));
     }
@@ -1384,7 +1397,9 @@ mod tests {
             Command::Init {
                 no_service: true,
                 here: false,
-                name: _
+                name: _,
+                auth_mode: _,
+                password: _,
             }
         ));
     }

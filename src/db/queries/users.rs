@@ -366,6 +366,51 @@ pub fn create_passwordless_admin(
     get_user_by_id(conn, id)
 }
 
+/// Create the first human admin with a real password — the `Passwords` mode of
+/// the `lific init` auth-mode menu (LIFIC-25).
+///
+/// Same username/email derivation as [`create_passwordless_admin`], but the
+/// stored hash is a real argon2 hash of `password`, so the operator can sign in
+/// on the web. This is the counterpart to passwordless mode: the operator
+/// still reaches the instance without an admin prompt, but through the password
+/// gate rather than browser auto-login.
+pub fn create_first_admin_with_password(
+    conn: &Connection,
+    display_name: &str,
+    password: &str,
+) -> Result<User, LificError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator name cannot be empty".into(),
+        ));
+    }
+    let username = derive_username(conn, display_name)?;
+    let password_hash = hash_password(password)?;
+
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+         VALUES (?1, ?2, ?3, ?4, 1, 0)",
+        params![
+            username,
+            format!("{username}@local"),
+            password_hash,
+            display_name,
+        ],
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            LificError::Internal("failed to create first admin (constraint)".into())
+        }
+        other => other.into(),
+    })?;
+
+    let id = conn.last_insert_rowid();
+    get_user_by_id(conn, id)
+}
+
 // ── Sessions ─────────────────────────────────────────────────
 
 /// Hash a session token with SHA-256 for storage.
@@ -1644,6 +1689,32 @@ mod tests {
         assert!(
             result.is_err(),
             "passwordless admin must never authenticate by password"
+        );
+    }
+
+    // ── create_first_admin_with_password (LIFIC-25) ──────────
+
+    #[test]
+    fn password_admin_is_admin_and_authenticates() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_first_admin_with_password(&conn, "Blake Smith", "hunter22").unwrap();
+
+        assert!(admin.is_admin, "first admin is an admin");
+        assert_eq!(admin.username, "blake-smith");
+        assert!(!admin.is_bot);
+        let got = authenticate(&conn, "blake-smith", "hunter22").unwrap();
+        assert_eq!(got.id, admin.id, "correct password logs in as the admin");
+    }
+
+    #[test]
+    fn password_admin_rejects_wrong_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_first_admin_with_password(&conn, "Blake", "correcthorse1").unwrap();
+        assert!(
+            authenticate(&conn, "blake", "wrongpassword").is_err(),
+            "wrong password must be rejected"
         );
     }
 }

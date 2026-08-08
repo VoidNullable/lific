@@ -87,6 +87,66 @@ pub fn login_free_caution() -> &'static str {
      to passwords, set [auth] required = true and run lific init again."
 }
 
+/// The two auth modes an operator can choose at `lific init` (LIFIC-25).
+///
+/// A single conceptual thing — "the auth mode" — bundles every consequence of
+/// the choice into one type, so the menu and `cmd_init` never drift on how the
+/// mode maps to config (`[auth] required`, `[server] host`), the database
+/// (`web_auto_login`), and admin creation (passwordless vs passworded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// No password; browser auto-login as the operator; binds loopback.
+    LoginFree,
+    /// Password sign-in on the web; leaves the bind host unchanged.
+    Passwords,
+}
+
+impl AuthMode {
+    /// `[auth] required`: login-free turns auth off; passwords keeps it on.
+    pub fn required(self) -> bool {
+        matches!(self, AuthMode::Passwords)
+    }
+
+    /// The `[server] host` to write, or `None` to leave it unchanged.
+    /// Login-free must bind loopback so the startup guard (LIFIC-24) and the
+    /// actual listening socket agree; password mode never touches it.
+    pub fn host(self) -> Option<&'static str> {
+        match self {
+            AuthMode::LoginFree => Some("127.0.0.1"),
+            AuthMode::Passwords => None,
+        }
+    }
+
+    /// The `instance_settings.web_auto_login` flag: on for login-free so the
+    /// browser signs the operator in without a password.
+    pub fn web_auto_login(self) -> bool {
+        matches!(self, AuthMode::LoginFree)
+    }
+
+    /// Whether the first admin is created passwordless (login-free) or with a
+    /// real password (passwords).
+    pub fn passwordless(self) -> bool {
+        matches!(self, AuthMode::LoginFree)
+    }
+
+    /// The stable string used for the `--auth-mode` CLI flag and menu labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::LoginFree => "login-free",
+            AuthMode::Passwords => "passwords",
+        }
+    }
+
+    /// Parse a `--auth-mode` flag value, case-insensitive.
+    pub fn parse(s: &str) -> Option<AuthMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "login-free" => Some(AuthMode::LoginFree),
+            "passwords" => Some(AuthMode::Passwords),
+            _ => None,
+        }
+    }
+}
+
 /// Does a `[server] host` bind value point at the local machine? Backs the
 /// LIFIC-24 startup guard: login-free mode must refuse to bind anywhere but
 /// loopback, so the safety check and the actual listening socket agree.
@@ -690,5 +750,32 @@ enabled = false
         for host in ["0.0.0.0", "::", "[::]", "192.168.1.10", "lific.example", ""] {
             assert!(!is_localhost_host(host), "{host} must NOT count as loopback");
         }
+    }
+
+    // LIFIC-25: the auth-mode menu's two choices bundle `(required, host,
+    // web_auto_login, admin-passwordless)` into one concept.
+    #[test]
+    fn auth_mode_bundles_its_consequences() {
+        let free = AuthMode::LoginFree;
+        assert!(!free.required());
+        assert_eq!(free.host(), Some("127.0.0.1"));
+        assert!(free.web_auto_login());
+        assert!(free.passwordless());
+
+        let pw = AuthMode::Passwords;
+        assert!(pw.required());
+        assert_eq!(pw.host(), None, "password mode leaves host unchanged");
+        assert!(!pw.web_auto_login());
+        assert!(!pw.passwordless());
+    }
+
+    #[test]
+    fn auth_mode_parses_and_names() {
+        assert_eq!(AuthMode::parse("login-free"), Some(AuthMode::LoginFree));
+        assert_eq!(AuthMode::parse("passwords"), Some(AuthMode::Passwords));
+        assert_eq!(AuthMode::parse("LOGIN-FREE"), Some(AuthMode::LoginFree));
+        assert_eq!(AuthMode::parse("bogus"), None);
+        assert_eq!(AuthMode::LoginFree.as_str(), "login-free");
+        assert_eq!(AuthMode::Passwords.as_str(), "passwords");
     }
 }
