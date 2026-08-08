@@ -4251,6 +4251,32 @@ fn build_create_step(
     })
 }
 
+// LIFIC-11: process-wide serialization lock for MCP tests. `MCP_REQUEST_USER`
+// is a static shared across every concurrently-running test; before `mcp_gate`'s
+// legacy short-circuit was removed, gated mutations never read it, so the
+// sharing was harmless. Now they do (gates resolve the caller via
+// `resolve_caller`), so a direct-call test reading `None` can race a concurrent
+// `with_request_user`/`seed_user` test writing some other user. Holding this
+// lock for the whole test serializes the MCP suite and removes the race. It's
+// deliberately a *different* lock from `MCP_HANDLER_LOCK` so
+// `seed_user`/`with_request_context` (which acquire that one) don't deadlock.
+// Wrapped in a newtype so clippy's `await_holding_lock` lint (which would
+// reject a raw `MutexGuard` held across `.await` in `#[tokio::test]`) leaves it
+// alone — safe here because each test owns its runtime/thread and tests never
+// depend on each other.
+// `pub(crate)` (cfg-test only) so the sibling `mcp::tests` module in mod.rs can
+// hold the same lock when its own tests mutate that global (LIFIC-18 review).
+#[cfg(test)]
+static TEST_MCP_SERIALIZATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct McpTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+pub(crate) fn acquire_test_guard() -> McpTestGuard {
+    McpTestGuard(TEST_MCP_SERIALIZATION_LOCK.lock().unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4275,27 +4301,6 @@ mod tests {
             },
         )
         .expect("seed first admin");
-    }
-
-    /// LIFIC-11: process-wide serialization lock for MCP tests. `MCP_REQUEST_USER`
-    /// is a static shared across every concurrently-running test; before
-    /// `mcp_gate`'s legacy short-circuit was removed, gated mutations never
-    /// read it, so the sharing was harmless. Now they do (gates resolve the
-    /// caller via `resolve_caller`), so a direct-call test reading `None` can
-    /// race a concurrent `with_request_user`/`seed_user` test writing some other
-    /// user. Holding this lock for the whole test serializes the MCP suite and
-    /// removes the race. It's deliberately a *different* lock from
-    /// `MCP_HANDLER_LOCK` so `seed_user`/`with_request_context` (which acquire
-    /// that one) don't deadlock. Wrapped in a newtype so clippy's
-    /// `await_holding_lock` lint (which would reject a raw `MutexGuard` held
-    /// across `.await` in `#[tokio::test]`) leaves it alone — safe here because
-    /// each test owns its runtime/thread and tests never depend on each other.
-    static TEST_MCP_SERIALIZATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    pub(super) struct McpTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    pub(super) fn acquire_test_guard() -> McpTestGuard {
-        McpTestGuard(TEST_MCP_SERIALIZATION_LOCK.lock().unwrap())
     }
 
     fn mcp() -> (LificMcp, McpTestGuard) {
@@ -10754,7 +10759,7 @@ mod authz_gating_tests {
             (lead, outsider)
         };
         let m = LificMcp::new(db);
-        let _sguard = super::tests::acquire_test_guard();
+        let _sguard = crate::mcp::tools::acquire_test_guard();
         let outsider_user = models::AuthUser {
             id: outsider.id,
             username: outsider.username,

@@ -8,7 +8,7 @@ use axum::{
 use rusqlite::params;
 use tracing::{info, warn};
 
-use api_keys_simplified::{ApiKeyManagerV0, Environment, ExposeSecret, KeyStatus, SecureString};
+use api_keys_simplified::{ApiKeyManagerV0, Environment, ExposeSecret, KeyStatus};
 
 use crate::db::DbPool;
 use crate::db::models::AuthUser;
@@ -496,142 +496,54 @@ pub async fn require_api_key(
     }
 
     // ── API keys (lific_sk- prefix) ──────────────────────────────
-    let secure_token = SecureString::from(token);
-
-    // Fast checksum pre-check: reject malformed keys in ~20μs without touching DB
-    match auth.manager.verify_checksum(&secure_token) {
-        Ok(true) => {} // valid checksum, proceed to DB lookup
-        _ => {
+    // LIFIC-18: shared with the stdio LIFIC_TOKEN resolver so the
+    // checksum/lookup/backfill/hash logic lives in one place (see
+    // `validate_api_key` just below `ApiKeyRow`).
+    let auth_user = match validate_api_key(&auth.db, &auth.manager, &token) {
+        Ok(user) => user,
+        Err(ApiKeyReject::BadChecksum) => {
             warn!("rejected API key with invalid checksum");
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", www_auth.as_str())],
-                "Invalid API key",
-            )
-                .into_response();
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
         }
-    }
-
-    // Compute deterministic key ID (BLAKE3, ~microseconds) for O(1) DB lookup
-    let key_id = auth.manager.extract_key_id(&secure_token);
-
-    // Look up the single matching key by key_id (indexed query)
-    let key_row: Option<ApiKeyRow> = {
-        let conn = match auth.db.read() {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        conn.query_row(
-            "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
-             AND (expires_at IS NULL OR expires_at > datetime('now'))",
-            params![key_id],
-            |row| {
-                Ok(ApiKeyRow {
-                    id: row.get(0)?,
-                    hash: row.get(1)?,
-                    user_id: row.get(2)?,
-                })
-            },
-        )
-        .ok()
-    };
-
-    // Fallback: keys created before migration 010 have no key_id — scan those
-    let key_row = key_row.or_else(|| {
-        let conn = auth.db.read().ok()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0 \
-                 AND (expires_at IS NULL OR expires_at > datetime('now'))",
-            )
-            .ok()?;
-        let rows: Vec<ApiKeyRow> = stmt
-            .query_map([], |row| {
-                Ok(ApiKeyRow {
-                    id: row.get(0)?,
-                    hash: row.get(1)?,
-                    user_id: row.get(2)?,
-                })
-            })
-            .ok()?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for row in rows {
-            if let Ok(KeyStatus::Valid) = auth.manager.verify(&secure_token, &row.hash) {
-                // Backfill the key_id so future lookups are O(1)
-                if let Ok(wconn) = auth.db.write() {
-                    let _ = wconn.execute(
-                        "UPDATE api_keys SET key_id = ?1 WHERE id = ?2",
-                        params![key_id, row.id],
-                    );
-                }
-                return Some(row);
-            }
+        Err(ApiKeyReject::Db) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
         }
-        None
-    });
-
-    let Some(key) = key_row else {
-        warn!("rejected invalid API key");
-        return (
-            StatusCode::UNAUTHORIZED,
-            [("WWW-Authenticate", www_auth.as_str())],
-            "Invalid API key",
-        )
-            .into_response();
-    };
-
-    // Verify the key against the stored Argon2 hash
-    match auth.manager.verify(&secure_token, &key.hash) {
-        Ok(KeyStatus::Valid) => {
-            // Resolve user if the key has a user_id
-            let auth_user = key.user_id.and_then(|uid| {
-                let conn = auth.db.read().ok()?;
-                crate::db::queries::users::get_user_by_id(&conn, uid)
-                    .ok()
-                    .map(|u| crate::db::models::AuthUser {
-                        id: u.id,
-                        username: u.username,
-                        display_name: u.display_name,
-                        is_admin: u.is_admin,
-                    })
-            });
-            // LIF-155: API keys are programmatic — 'mcp' on the /mcp
-            // path, 'api' for direct REST usage. The LIF-261 operator bypass
-            // for an unbound key (user_id = None) now lives entirely in
-            // `resolve_caller` (inserted above), which falls back to the first
-            // admin — read as `identity.user.is_admin` by the gates. The old
-            // credential-type-specific `OperatorCredential` marker and
-            // `operator_scope` task-local are gone (LIFIC-14).
-            let actor = crate::actor::ActorCtx {
-                user_id: auth_user.as_ref().map(|u| u.id),
-                transport: if is_mcp_request {
-                    crate::actor::Transport::Mcp
-                } else {
-                    crate::actor::Transport::Api
-                },
-            };
-            insert_resolved_identity(
-                &mut request,
-                &auth.db,
-                auth_user.clone(),
-                is_mcp_request,
-                crate::actor::Transport::Api,
-            );
-            request.extensions_mut().insert(auth_user);
-            crate::actor::scope(actor, next.run(request)).await
+        Err(ApiKeyReject::NotFound) => {
+            warn!("rejected invalid API key");
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
         }
-        _ => {
+        Err(ApiKeyReject::HashMismatch) => {
             warn!("API key hash verification failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", www_auth.as_str())],
-                "Invalid API key",
-            )
-                .into_response()
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
         }
-    }
+    };
+
+    // LIF-155: API keys are programmatic — 'mcp' on the /mcp path, 'api' for
+    // direct REST usage. The LIF-261 operator bypass for an unbound key
+    // (user_id = None) now lives entirely in `resolve_caller` (inserted above),
+    // which falls back to the first admin — read as `identity.user.is_admin` by
+    // the gates. The old credential-type-specific `OperatorCredential` marker
+    // and `operator_scope` task-local are gone (LIFIC-14).
+    let actor = crate::actor::ActorCtx {
+        user_id: auth_user.as_ref().map(|u| u.id),
+        transport: if is_mcp_request {
+            crate::actor::Transport::Mcp
+        } else {
+            crate::actor::Transport::Api
+        },
+    };
+    insert_resolved_identity(
+        &mut request,
+        &auth.db,
+        auth_user.clone(),
+        is_mcp_request,
+        crate::actor::Transport::Api,
+    );
+    request.extensions_mut().insert(auth_user);
+    crate::actor::scope(actor, next.run(request)).await
 }
 
 /// Internal struct for loading API key rows during auth.
@@ -643,35 +555,50 @@ struct ApiKeyRow {
     user_id: Option<i64>,
 }
 
-/// LIFIC-18: resolve an API key (e.g. the `LIFIC_TOKEN` carried by a stdio
-/// agent) to its bound user, without an HTTP request context.
+/// Why an API key failed to authenticate. Maps to both the HTTP response and
+/// the stdio-resolver error, so both callers share one decision.
+#[derive(Debug, Clone, Copy)]
+enum ApiKeyReject {
+    /// A database read/write failed (backend fault, not a bad key).
+    Db,
+    /// The key didn't pass the format checksum.
+    BadChecksum,
+    /// The key is well-formed but matches no active key.
+    NotFound,
+    /// A matching key exists but the stored hash didn't verify.
+    HashMismatch,
+}
+
+/// Shared API-key authentication for both the HTTP middleware and the stdio
+/// `LIFIC_TOKEN` resolver. Verifies the checksum, resolves the key row by
+/// derived key_id (with the pre-migration-010 scan-and-backfill fallback), and
+/// verifies the stored hash — exactly one copy of that logic (LIFIC-18 review:
+/// previously duplicated between `require_api_key` and `resolve_api_key_user`).
 ///
-/// Mirrors the API-key branch of [`require_api_key`] for the stdio MCP
-/// entrypoint: verify the checksum, look up the key row by derived key_id, and
-/// verify the stored hash. Returns `Some(user)` when the key is valid AND
-/// bound to a user; `Ok(None)` for a valid-but-unbound key (the stdio session
-/// then falls back to the operator). An invalid/unrecognized key is an error so
-/// the caller can warn loudly and still degrade to the operator fallback.
-pub fn resolve_api_key_user(
+/// Returns `Ok(Some(user))` for a valid bound key, `Ok(None)` for a valid but
+/// unbound key (the caller falls that back to the operator), and
+/// `Err(reject)` when the key does not authenticate.
+fn validate_api_key(
     db: &DbPool,
     manager: &ApiKeyManagerV0,
     token: &str,
-) -> Result<Option<AuthUser>, String> {
+) -> Result<Option<AuthUser>, ApiKeyReject> {
     use api_keys_simplified::SecureString;
 
     let secure_token = SecureString::from(token.to_string());
 
-    // Fast checksum pre-check: reject malformed keys before touching DB.
+    // Fast checksum pre-check: reject malformed keys in ~20μs without touching DB.
     match manager.verify_checksum(&secure_token) {
         Ok(true) => {}
-        _ => return Err("invalid API key checksum".into()),
+        _ => return Err(ApiKeyReject::BadChecksum),
     }
 
+    // Compute deterministic key ID (BLAKE3, ~microseconds) for O(1) DB lookup.
     let key_id = manager.extract_key_id(&secure_token);
 
-    // Look up by derived key_id (indexed query).
+    // Look up the single matching key by key_id (indexed query).
     let key_row: Option<ApiKeyRow> = {
-        let conn = db.read().map_err(|e| e.to_string())?;
+        let conn = db.read().map_err(|_| ApiKeyReject::Db)?;
         conn.query_row(
             "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
              AND (expires_at IS NULL OR expires_at > datetime('now'))",
@@ -687,7 +614,7 @@ pub fn resolve_api_key_user(
         .ok()
     };
 
-    // Fallback: pre-migration-010 keys with no key_id — scan and backfill.
+    // Fallback: keys created before migration 010 have no key_id — scan those.
     let key_row = key_row.or_else(|| {
         let conn = db.read().ok()?;
         let mut stmt = conn
@@ -709,6 +636,7 @@ pub fn resolve_api_key_user(
             .collect();
         for row in rows {
             if let Ok(KeyStatus::Valid) = manager.verify(&secure_token, &row.hash) {
+                // Backfill the key_id so future lookups are O(1).
                 if let Ok(wconn) = db.write() {
                     let _ = wconn.execute(
                         "UPDATE api_keys SET key_id = ?1 WHERE id = ?2",
@@ -722,13 +650,14 @@ pub fn resolve_api_key_user(
     });
 
     let Some(key) = key_row else {
-        return Err("invalid API key".into());
+        return Err(ApiKeyReject::NotFound);
     };
 
     match manager.verify(&secure_token, &key.hash) {
         Ok(KeyStatus::Valid) => {
-            // Resolve user if the key has a user_id; a valid-but-unbound key
-            // (legacy, or a fresh-install unassigned key) is Ok(None).
+            // Resolve the user if the key has a user_id. A valid-but-unbound
+            // key (legacy, or a fresh-install unassigned key) is Ok(None) — the
+            // caller falls back to the operator.
             let auth_user = key.user_id.and_then(|uid| {
                 let conn = db.read().ok()?;
                 crate::db::queries::users::get_user_by_id(&conn, uid)
@@ -742,8 +671,31 @@ pub fn resolve_api_key_user(
             });
             Ok(auth_user)
         }
-        _ => Err("API key hash verification failed".into()),
+        _ => Err(ApiKeyReject::HashMismatch),
     }
+}
+
+/// LIFIC-18: resolve an API key (e.g. the `LIFIC_TOKEN` carried by a stdio
+/// agent) to its bound user, without an HTTP request context.
+///
+/// Returns `Some(user)` when the key is valid AND bound to a user; `Ok(None)`
+/// for a valid-but-unbound key (the stdio session then falls back to the
+/// operator). An invalid/unrecognized key is an error so the caller can warn
+/// loudly and still degrade to the operator fallback.
+pub fn resolve_api_key_user(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    token: &str,
+) -> Result<Option<AuthUser>, String> {
+    // Reuse the shared validator (same checksum/lookup/backfill/hash logic the
+    // HTTP middleware runs). Mapping the typed rejection to a human string
+    // keeps the stdio resolver vendoring nothing of its own.
+    validate_api_key(db, manager, token).map_err(|reject| match reject {
+        ApiKeyReject::Db => "database error".to_string(),
+        ApiKeyReject::BadChecksum => "invalid API key checksum".to_string(),
+        ApiKeyReject::NotFound => "invalid API key".to_string(),
+        ApiKeyReject::HashMismatch => "API key hash verification failed".to_string(),
+    })
 }
 
 /// LIFIC-18: resolve the `LIFIC_TOKEN` a stdio agent carries into its bound
@@ -775,6 +727,11 @@ mod tests {
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
     }
+
+    // Serializes env mutation (LIFIC_TOKEN) across the stdio-token tests —
+    // the process env is global, so every test that touches it must share one
+    // lock, not declare its own.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn create_key_returns_valid_format() {
@@ -2031,7 +1988,6 @@ mod tests {
     #[test]
     fn resolve_stdio_token_without_env_is_ok_none() {
         // No LIFIC_TOKEN in the environment → Ok(None): the operator fallback.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let pool = test_db();
         let manager = create_key_manager().unwrap();
@@ -2043,7 +1999,6 @@ mod tests {
 
     #[test]
     fn resolve_stdio_token_valid_env_resolves_bound_user() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let pool = test_db();
         let manager = create_key_manager().unwrap();

@@ -649,7 +649,22 @@ pub fn run(
     // never touches the DB.
     let needs_minting = !args.oauth && !args.dry_run;
     let key_source = if needs_minting {
-        Some(resolve_key_source(&args, pool)?)
+        // For stdio (LIFIC-18), a bot+key is optional: if the owner can't be
+        // resolved unambiguously (no --user on a multi-user box), degrade to a
+        // plain operator stdio config rather than aborting the run — a stdio
+        // session with no token already runs as the operator. Remote still
+        // hard-fails: a remote config without a key is genuinely misconfigured.
+        match resolve_key_source(&args, pool) {
+            Ok(src) => Some(src),
+            Err(e) if args.stdio => {
+                eprintln!(
+                    "warning: skipping agent identity for stdio config ({e}); \
+                     it will run as the operator until you reconnect with --user <name>."
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        }
     } else if args.dry_run && !args.oauth {
         // Dry-run still reports an origin so output matches a real run's shape.
         Some(KeySource::Provided(
@@ -1512,6 +1527,57 @@ mod tests {
     }
 
     #[test]
+    fn run_stdio_codex_env_merges_into_existing_config() {
+        // LIFIC-18 spec: "The config write merges into an existing tool config
+        // without destroying other entries." opencode covered it; this pins the
+        // codex TOML merge path, which touches a different writer branch.
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.join(".codex")).unwrap();
+        std::fs::write(
+            b.project.join(".codex/config.toml"),
+            "model = \"gpt-5\"\n\n[mcp_servers.other]\nurl = \"http://other\"\n",
+        )
+        .unwrap();
+        let mut a = args(&["codex"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let written =
+            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        // Unrelated config survives.
+        assert!(
+            written.contains("model = \"gpt-5\""),
+            "user's model setting must survive:\n{written}"
+        );
+        assert!(
+            written.contains("[mcp_servers.other]"),
+            "unrelated server table must survive:\n{written}"
+        );
+        assert!(
+            written.contains("url = \"http://other\""),
+            "unrelated server's url must survive:\n{written}"
+        );
+        // Our entry: stdio command + token env.
+        assert!(
+            written.contains("command = \"lific\""),
+            "codex lific command must be present:\n{written}"
+        );
+        assert!(
+            written.contains("LIFIC_TOKEN"),
+            "codex must write LIFIC_TOKEN into env on merge:\n{written}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn run_dry_run_writes_nothing_but_returns_contents() {
         let dir = tmp();
         let b = base(&dir);
@@ -1742,6 +1808,46 @@ mod tests {
         a.key = None;
         let err = resolve_key_source(&a, &pool).unwrap_err();
         assert!(err.contains("--user"), "must guide toward --user: {err}");
+    }
+
+    #[test]
+    fn run_stdio_with_ambiguity_degrades_to_plain_config_not_error() {
+        // LIFIC-19 review fix: a non-interactive `--stdio` on a multi-user box
+        // (no --user) must NOT hard-fail just because the agent owner can't be
+        // resolved. A stdio config with no token runs as the operator, which is
+        // the documented LIFIC-18 fallback — so the run succeeds and writes a
+        // plain (token-less) stdio config.
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "a", false);
+        seed_user(&pool, "b", false); // two humans, no single owner, no --user
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        // The run succeeds and the config is written.
+        let oc = result.outcomes.iter().find(|o| o.id == "opencode").unwrap();
+        assert_eq!(oc.action.as_deref(), Some("created"));
+
+        // Plain stdio config: command present, but NO token (no env field,
+        // because no owner resolved → no LIFIC_TOKEN to bind).
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert_eq!(
+            v["mcp"]["lific"]["command"],
+            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+        );
+        assert!(
+            v["mcp"]["lific"].get("environment").is_none(),
+            "ambiguous-owner stdio must write no token env field"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── --oauth mode (LIF-259) ───────────────────────────────

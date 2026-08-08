@@ -670,6 +670,10 @@ mod tests {
 
     #[test]
     fn stdio_session_with_agent_identity_resolves_as_that_agent() {
+        // Serialize against the whole MCP suite: `set_stdio_user` mutates the
+        // process-wide MCP_REQUEST_USER global, which concurrent tool tests
+        // also read. Holding the shared test guard prevents a cross-test race.
+        let _sguard = crate::mcp::tools::acquire_test_guard();
         // A first admin exists as the operator fallback, but the bound session
         // must resolve to the agent, NOT the admin.
         let pool = crate::db::open_memory().expect("test db");
@@ -687,13 +691,13 @@ mod tests {
         );
         assert_ne!(identity.user.id, admin.id);
         assert_eq!(identity.transport, crate::actor::Transport::Mcp);
-
-        // Clean up the process-wide global so it never leaks into other tests.
-        set_stdio_user(None);
     }
 
     #[test]
     fn stdio_session_without_identity_falls_back_to_operator() {
+        // Serialize against the whole MCP suite for the same process-global
+        // reason as above (set_stdio_user writes MCP_REQUEST_USER).
+        let _sguard = crate::mcp::tools::acquire_test_guard();
         // No LIFIC_TOKEN / unbound → `set_stdio_user(None)` → the operator
         // (first admin) fallback, the same pre-LIFIC-18 behavior.
         let pool = crate::db::open_memory().expect("test db");
@@ -707,7 +711,5 @@ mod tests {
         );
         assert!(identity.user.is_admin);
         assert_eq!(identity.transport, crate::actor::Transport::Mcp);
-
-        set_stdio_user(None);
     }
 }
