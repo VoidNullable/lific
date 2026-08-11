@@ -101,8 +101,11 @@
   // Same-page comment refs: bare "#42" → "#comment-42" anchor on the current page.
   // Runs after linkIdentifiers so issue identifiers ("WS-25") are already wrapped
   // and won't be re-processed. The <a>/<code>/<pre> depth guard ensures "#42"
-  // inside code spans or existing links is left alone.
-  const COMMENT_REF_RE = /(?<![A-Za-z0-9_-])#([1-9]\d*)\b/g;
+  // inside code spans or existing links is left alone. The lookbehind excludes
+  // "&" because this pass runs on marked's HTML output, where apostrophes are
+  // numeric entities ("don't" → "don&#39;t") — without it, "#39" inside the
+  // entity would be linkified and mangle the text.
+  const COMMENT_REF_RE = /(?<![A-Za-z0-9_&-])#([1-9]\d*)\b/g;
 
   function linkCommentRefs(html: string): string {
     let skipDepth = 0;
