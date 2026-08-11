@@ -366,6 +366,7 @@
           <div class="cmt__avatar" aria-hidden="true">{initials(author)}</div>
           <div class="cmt__body">
             <div class="cmt__meta">
+              <a href="#comment-{comment.id}" class="cmt__anchor">#{comment.id}</a>
               <span class="cmt__author">{author}</span>
               <span class="cmt__time"><TimeAgo date={comment.created_at} /></span>
             </div>
@@ -569,6 +570,16 @@
     align-items: baseline;
     gap: 0.5rem;
     margin-bottom: 0.125rem;
+  }
+  .cmt__anchor {
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-faint);
+    text-decoration: none;
+  }
+  .cmt__anchor:hover {
+    color: var(--text-muted);
+    text-decoration: underline;
   }
   .cmt__author {
     font-size: 0.875rem;
