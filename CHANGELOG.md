@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.6.0 (2026-08-12)
+
+Two security fixes, both worth upgrading for. An uploaded SVG could run script on your instance's origin, and a malformed config file could quietly hand you a more permissive server than the one you configured. Alongside them, comments are linkable, identifiers are copyable, and the desktop sidebar gets out of the way.
+
+### Security
+
+- **An uploaded SVG can no longer run script on your instance.** SVG is on the upload allowlist, and every image type was served with `Content-Disposition: inline`. Because an SVG is an XML document that may contain `<script>`, opening one directly (the "open image in new tab" path, not the rendered `<img>` in a comment) executed its script on Lific's own origin, where it could read the session token the web UI holds and act as whoever opened the file. Any account permitted to upload could use this to escalate against an admin who viewed the attachment. SVG uploads still work and still render in comments and pages; they now download rather than render when opened as a page of their own, and every attachment response carries `Content-Security-Policy: default-src 'none'; sandbox` as a second layer. Reported by [@mjc](https://github.com/mjc).
+
+- **A malformed config file now stops the server instead of silently reverting to defaults.** A config that failed to parse, including one broken by a single typo, produced a warning on stderr and then booted from the built-in defaults. Those defaults bind `0.0.0.0`, allow self-service signup, and treat an empty `cors_origins` as "any origin", so an operator who had set `host = "127.0.0.1"` and `allow_signup = false` could be left running a materially more exposed instance with nothing but a log line to say so. A config file that exists but cannot be read or parsed is now a hard startup failure naming the file and the error. Unknown keys are rejected for the same reason: `allow_signupp = false` used to be ignored silently and now fails loudly. A missing config file is still perfectly fine and still starts on defaults. Reported by [@mjc](https://github.com/mjc).
+
+### Web UI
+
+- **Comments have their own links, and `#N` becomes one.** A comment can be linked directly and the browser scrolls to it, and a bare `#12` in issue text resolves to that issue. (PR #24 by [@unger1984](https://github.com/unger1984))
+- **Copy an identifier from wherever you are looking at it**: the detail-page breadcrumbs, a board card, or a list row. (PR #22 by [@lardissone](https://github.com/lardissone)) The copy and peek buttons are reachable by keyboard, not hover alone, and pills name the identifier they copy so a screen reader announces something useful.
+- **Copy selected text from the selection toolbar**, instead of reaching for the mouse to select and copy by hand.
+- **The desktop sidebar collapses**, giving the board and the issue list the full width.
+- **The status chip in the issue topbar is a picker.** Changing status no longer means opening the field below it.
+
+### Fixes
+
+- Starter label presets no longer vanish after you add the first one.
+- Editing a label no longer reloads the entire settings page.
+- `#N` inside a numeric HTML entity is left alone rather than linkified into nonsense.
+- Test databases are named from a counter rather than the clock, so a fast machine no longer collides two of them in the same millisecond.
+
+### Upgrading
+
+- No migrations. Upgrading from any 2.x needs no manual steps.
+- **Check that your `lific.toml` parses before rolling this out**, because a config Lific previously ignored will now stop it from starting. `lific doctor` reports the config as a normal check and keeps running the rest, which makes it the right tool for this. The strictness is the fix, not a side effect: a config that fails to load is exactly the case that used to degrade quietly.
+- If your config sets `secure_cookies` under `[auth]`, remove it. It has never been read from the file (it is derived from whether `server.public_url` is `https://`), and unknown keys are now an error rather than being ignored.
+
 ## v2.5.0 (2026-07-28)
 
 Every identifier Lific prints is now something you can click. Windows gets a prebuilt binary and the same CI treatment Linux has always had. On a phone the web UI navigates like an application instead of a desktop layout squeezed sideways.
