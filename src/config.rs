@@ -23,8 +23,11 @@ pub enum ConfigError {
     #[error("failed to parse config {}: {source}", path.display())]
     Parse {
         path: PathBuf,
+        /// Boxed to keep `ConfigError` small. `toml::de::Error` is over 100
+        /// bytes on its own, which makes every `Result<Config, _>` in the
+        /// program pay for the failure path (clippy::result_large_err).
         #[source]
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
 }
 
@@ -271,7 +274,7 @@ impl Config {
                         Err(source) => {
                             return Err(ConfigError::Parse {
                                 path: path.clone(),
-                                source,
+                                source: Box::new(source),
                             });
                         }
                     },
