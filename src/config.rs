@@ -4,8 +4,32 @@ use tracing::info;
 
 const CONFIG_FILENAME: &str = "lific.toml";
 
+/// A config file was found but could not be honored.
+///
+/// This is always fatal. Booting on defaults because a file failed to parse
+/// silently discards operator intent: `allow_signup = false`, a loopback
+/// `host`, and a `cors_origins` allowlist all revert to their permissive
+/// defaults, and the operator's only clue is a warning on stderr. Refusing to
+/// start is the safe failure mode.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read config {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse config {}: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[derive(Default)]
 pub struct Config {
     pub server: ServerConfig,
@@ -16,7 +40,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     /// Allow self-service signup via the API. If false, only admins can create users via CLI.
     pub allow_signup: bool,
@@ -98,7 +122,7 @@ pub fn is_localhost_url(url: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     /// Host to bind to
     pub host: String,
@@ -128,14 +152,14 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DatabaseConfig {
     /// Path to the SQLite database file
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BackupConfig {
     /// Enable automatic backups
     pub enabled: bool,
@@ -148,7 +172,7 @@ pub struct BackupConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogConfig {
     /// Log level: trace, debug, info, warn, error
     pub level: String,
@@ -204,7 +228,14 @@ impl Default for LogConfig {
 }
 
 impl Config {
-    /// Load config from the first file found, or return defaults.
+    /// Load config from the first file found, or return defaults when no file
+    /// exists anywhere in the search path.
+    ///
+    /// A file that exists but cannot be read or parsed is a hard error, not a
+    /// fallback. Probing past a broken file would be just as surprising: if
+    /// `./lific.toml` is malformed, quietly using `/etc/lific/lific.toml`
+    /// instead is not what the operator asked for either.
+    ///
     /// Search order:
     /// 1. Explicit path (if provided — used alone, no fallback)
     /// 2. ./lific.toml (working directory)
@@ -214,7 +245,7 @@ impl Config {
     /// 4. System config dir (LIF-293): /etc/lific/ on Linux/BSD,
     ///    /Library/Application Support/Lific/ on macOS,
     ///    %ProgramData%\lific\ on Windows
-    pub fn load(explicit_path: Option<&Path>) -> Self {
+    pub fn load(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
         let candidates = Self::candidate_paths(explicit_path);
 
         for path in &candidates {
@@ -235,20 +266,26 @@ impl Config {
                             {
                                 config.database.path = parent.join(&config.database.path);
                             }
-                            return config;
+                            return Ok(config);
                         }
-                        Err(e) => {
-                            eprintln!("Warning: failed to parse {}: {e}", path.display());
+                        Err(source) => {
+                            return Err(ConfigError::Parse {
+                                path: path.clone(),
+                                source,
+                            });
                         }
                     },
-                    Err(e) => {
-                        eprintln!("Warning: failed to read {}: {e}", path.display());
+                    Err(source) => {
+                        return Err(ConfigError::Read {
+                            path: path.clone(),
+                            source,
+                        });
                     }
                 }
             }
         }
 
-        Config::default()
+        Ok(Config::default())
     }
 
     /// The ordered list of paths [`Config::load`] probes. Split out so the
@@ -383,7 +420,7 @@ enabled = false
         )
         .unwrap();
 
-        let config = Config::load(Some(&path));
+        let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.server.port, 9999);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
@@ -401,7 +438,7 @@ enabled = false
 
         // Loaded from an explicit path in another directory: the relative db
         // path must resolve beside the config file, not in the process cwd.
-        let config = Config::load(Some(&path));
+        let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.database.path, dir.join("lific.db"));
         // backup_dir derives from database.path, so it anchors too.
         assert_eq!(config.backup_dir(), dir.join("backups"));
@@ -416,29 +453,67 @@ enabled = false
         let path = dir.join("lific.toml");
         std::fs::write(&path, format!("[database]\npath = \"{ABSOLUTE_DB_PATH}\"\n")).unwrap();
 
-        let config = Config::load(Some(&path));
+        let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// No config file anywhere is a legitimate first-run state, so defaults
+    /// are correct here. This is the ONLY path that may return defaults.
     #[test]
     fn missing_file_returns_defaults() {
-        let config = Config::load(Some(Path::new("/tmp/nonexistent_lific_cfg_12345.toml")));
+        let config =
+            Config::load(Some(Path::new("/tmp/nonexistent_lific_cfg_12345.toml"))).unwrap();
         assert_eq!(config.server.port, 3456);
     }
 
+    /// A malformed config must refuse to load rather than silently reverting
+    /// to defaults. The old behavior reverted `host` to `0.0.0.0`,
+    /// `allow_signup` to `true` and `cors_origins` to allow-any, leaving only
+    /// a stderr warning behind.
     #[test]
-    fn invalid_toml_returns_defaults() {
+    fn invalid_toml_is_a_hard_error() {
         let dir = std::env::temp_dir().join(format!("lific_bad_cfg_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.toml");
         std::fs::write(&path, "{{{{not valid toml!!!!").unwrap();
 
-        let config = Config::load(Some(&path));
-        assert_eq!(config.server.port, 3456); // fell back to defaults
+        let err = Config::load(Some(&path)).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        // The message names the offending file so the operator can fix it.
+        assert!(err.to_string().contains("bad.toml"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A misspelled key is the exact scenario reported: the operator believes
+    /// they closed signup, the key is ignored, and the instance comes up with
+    /// `allow_signup = true`. It must fail loudly instead.
+    #[test]
+    fn unknown_key_is_rejected_rather_than_ignored() {
+        let dir = std::env::temp_dir().join(format!("lific_typo_cfg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("typo.toml");
+        // `allow_signup` fat-fingered.
+        std::fs::write(&path, "[auth]\nallow_signupp = false\n").unwrap();
+
+        let err = Config::load(Some(&path)).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("allow_signupp"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The whole point of the change: the permissive defaults an operator
+    /// would have silently inherited are genuinely permissive, so inheriting
+    /// them by accident matters.
+    #[test]
+    fn defaults_are_permissive_enough_to_warrant_failing_closed() {
+        let d = Config::default();
+        assert_eq!(d.server.host, "0.0.0.0");
+        assert!(d.auth.allow_signup);
+        assert!(d.server.cors_origins.is_empty()); // empty == allow any origin
     }
 
     #[test]
@@ -448,7 +523,7 @@ enabled = false
         let path = dir.join("partial.toml");
         std::fs::write(&path, "[server]\nport = 7777\n").unwrap();
 
-        let config = Config::load(Some(&path));
+        let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.server.port, 7777);
         assert_eq!(config.server.host, "0.0.0.0"); // default
         // Default db filename, anchored beside the config file it came from.

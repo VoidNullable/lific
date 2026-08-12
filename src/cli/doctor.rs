@@ -16,7 +16,8 @@
 //! 1. **config** — which config file is in use. Explicit `--config` / `./lific.toml`
 //!    / `~/.config/lific/lific.toml` = pass. Built-in defaults (no file) = warn.
 //!    A file that exists but fails to parse = fail (we re-parse directly here
-//!    because `Config::load` swallows parse errors and silently uses defaults).
+//!    so the diagnostic can report the parse error as one check among many,
+//!    rather than aborting the whole run the way `Config::load` now does).
 //! 2. **database** — file present + opens + migrations apply. Missing file with a
 //!    writable parent = warn ("created on first start"); unwritable parent = fail.
 //!    Opening runs migrations (same as `lific start`); we say so.
@@ -260,10 +261,12 @@ pub async fn build_report_with_config_path(
 
 /// Determine which config file is in use and whether it parses.
 ///
-/// We do NOT reuse `Config::load` here because it silently swallows parse
-/// errors and falls back to defaults (printing only a warning to stderr). For
-/// a diagnostic we must surface a broken config as a hard fail, so we re-run
-/// the same search order and parse the found file directly.
+/// We do NOT reuse `Config::load` here. It now refuses to load a malformed
+/// config at all, which is right for booting the server but wrong for a
+/// diagnostic: `lific doctor` is exactly the tool you reach for when the
+/// config is broken, so it must report the parse failure as a FAIL check and
+/// carry on with the remaining checks. So we re-run the same search order and
+/// parse the found file directly.
 fn check_config(explicit_config: Option<&Path>) -> Check {
     // The search is re-done here (rather than trusting the already-loaded
     // config) to report provenance and catch parse errors the loader hides. If
@@ -905,8 +908,8 @@ mod tests {
 
     #[test]
     fn config_check_fails_on_unparseable_file() {
-        // A file that exists but is broken TOML must surface as a FAIL — the
-        // thing `Config::load` hides. We exercise the parse branch directly.
+        // A file that exists but is broken TOML must surface as a FAIL rather
+        // than aborting the run. We exercise the parse branch directly.
         let dir = std::env::temp_dir().join(format!("lific_doctor_cfg_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.toml");

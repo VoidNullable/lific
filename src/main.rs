@@ -137,8 +137,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Load config (CLI flags override config values)
-    let mut cfg = Config::load(cli.config.as_deref());
+    // Load config (CLI flags override config values). A malformed config is
+    // fatal: booting on defaults would silently widen the instance.
+    let mut cfg = Config::load(cli.config.as_deref())?;
 
     // CLI overrides
     if let Some(ref db) = cli.db {
@@ -1467,7 +1468,7 @@ async fn cmd_init(
     // resolution the installed service (WorkingDirectory = that directory)
     // applies at runtime. The pre-dispatch Config::load can't have done
     // this when the file didn't exist yet.
-    let mut cfg = Config::load(Some(&config_path));
+    let mut cfg = Config::load(Some(&config_path))?;
     if let Some(db) = db_flag {
         cfg.database.path = db.to_path_buf();
     }
