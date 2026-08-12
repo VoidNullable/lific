@@ -237,10 +237,19 @@ fn resolve_entity_project(
 }
 
 /// `GET /api/attachments/{id}` — stream the bytes with the correct
-/// `Content-Type`. Non-image types get `Content-Disposition: attachment` and
-/// `X-Content-Type-Options: nosniff` so a browser never renders them inline
-/// (defense against a malicious "image" that's actually HTML). Content-
-/// addressed, so the response is immutable-cacheable forever.
+/// `Content-Type`.
+///
+/// Three layers keep a hostile upload from executing on our origin:
+/// - `X-Content-Type-Options: nosniff`, so a browser never re-guesses the type.
+/// - `Content-Disposition: inline` only for the raster formats in
+///   [`storage::is_inline_safe_mime`]; everything else, SVG included, is
+///   forced to `attachment`. An SVG is an image that can carry `<script>`,
+///   and browsers run it when the file is navigated to directly.
+/// - `Content-Security-Policy: default-src 'none'; sandbox`, which neuters
+///   script, fetch and form submission even if a future MIME slips through
+///   the disposition rule.
+///
+/// Content-addressed, so the response is immutable-cacheable forever.
 pub(super) async fn download_attachment(
     State(db): State<DbPool>,
     Extension(auth_user): Extension<Option<AuthUser>>,
@@ -255,7 +264,7 @@ pub(super) async fn download_attachment(
     authorize_read(&db, &auth_user, &attachment)?;
 
     let bytes = store.read(&attachment.sha256)?;
-    let is_image = storage::is_image_mime(&attachment.mime);
+    let inline_safe = storage::is_inline_safe_mime(&attachment.mime);
 
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -266,11 +275,19 @@ pub(super) async fn download_attachment(
             header::CACHE_CONTROL,
             "private, max-age=31536000, immutable",
         )
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        // Defense in depth behind the disposition rule: even if a scriptable
+        // type were ever served inline, this document can't load or run
+        // anything. `sandbox` (no allow-* tokens) also drops it into an
+        // opaque origin, so it can't touch our localStorage or cookies.
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        );
 
-    // Force download for non-images; inline for images. Either way the
-    // filename is offered for the "Save as" dialog.
-    let disposition = if is_image {
+    // Force download for anything that isn't a plain raster image. Either way
+    // the filename is offered for the "Save as" dialog.
+    let disposition = if inline_safe {
         format!("inline; filename=\"{}\"", header_safe(&attachment.filename))
     } else {
         format!(
@@ -774,6 +791,66 @@ mod api_tests {
             .unwrap()
             .to_string();
         assert!(disp.starts_with("attachment"), "got {disp}");
+    }
+
+    /// An SVG carrying a `<script>` is a real upload a real user can make.
+    /// Served `inline` from our own origin it becomes stored XSS: the script
+    /// runs as the viewer and can read the bearer token the SPA keeps in
+    /// localStorage, turning any upload-capable account into whoever opens
+    /// the file. It must download instead of rendering.
+    #[tokio::test]
+    async fn svg_download_forces_attachment_disposition() {
+        let app = test_app();
+        let hostile = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
+
+        let resp = upload(&app, "logo.svg", "image/svg+xml", hostile, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        // SVG is still an accepted upload; only how we serve it changed.
+        assert_eq!(data["mime"], "image/svg+xml");
+        let id = data["id"].as_i64().unwrap();
+
+        let resp = json_get(&app, &format!("/api/attachments/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let disp = resp
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            disp.starts_with("attachment"),
+            "SVG must never render inline, got {disp}"
+        );
+    }
+
+    /// Defense in depth: every attachment response, whatever its type,
+    /// carries a CSP that forbids script execution and network access.
+    #[tokio::test]
+    async fn every_attachment_response_carries_a_locked_down_csp() {
+        let app = test_app();
+
+        for (name, mime, bytes) in [
+            ("shot.png", "image/png", png_bytes()),
+            ("logo.svg", "image/svg+xml", b"<svg xmlns=\"x\"></svg>".to_vec()),
+            ("notes.txt", "text/plain", b"hello\n".to_vec()),
+        ] {
+            let resp = upload(&app, name, mime, &bytes, None).await;
+            assert_eq!(resp.status(), StatusCode::OK, "upload {name}");
+            let id = parse_json(resp).await["id"].as_i64().unwrap();
+
+            let resp = json_get(&app, &format!("/api/attachments/{id}")).await;
+            let csp = resp
+                .headers()
+                .get("content-security-policy")
+                .unwrap_or_else(|| panic!("{name} served without a CSP"))
+                .to_str()
+                .unwrap();
+            assert!(csp.contains("default-src 'none'"), "{name}: {csp}");
+            assert!(csp.contains("sandbox"), "{name}: {csp}");
+        }
     }
 
     #[tokio::test]

@@ -206,10 +206,25 @@ pub const ALLOWED_MIMES: &[&str] = &[
     "application/zip",
 ];
 
-/// Whether a canonical MIME is an image (drives inline rendering + the
-/// `Content-Disposition` decision on download).
-pub fn is_image_mime(mime: &str) -> bool {
-    mime.starts_with("image/")
+/// Whether a canonical MIME is safe to hand a browser as a *top-level
+/// document* (`Content-Disposition: inline`).
+///
+/// This is deliberately an allowlist of raster formats rather than
+/// `is_image_mime`. SVG is an image by MIME, but it is also an XML document
+/// that can carry `<script>`, and browsers execute that script when the SVG
+/// is navigated to directly (or framed) from the app's own origin. Serving
+/// one inline is stored XSS: the script runs on the Lific origin and can read
+/// the session bearer token the SPA keeps in `localStorage`, escalating any
+/// upload-capable account to whoever views the file.
+///
+/// Rendering is unaffected. `Content-Disposition` is ignored for subresource
+/// loads, so `<img src="/api/attachments/1">` still displays an SVG, and
+/// scripts never run in that context.
+pub fn is_inline_safe_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 /// Sniff the real content type from magic bytes, cross-checked against the
@@ -428,10 +443,32 @@ mod tests {
     }
 
     #[test]
-    fn is_image_mime_classifies() {
-        assert!(is_image_mime("image/png"));
-        assert!(is_image_mime("image/svg+xml"));
-        assert!(!is_image_mime("application/pdf"));
-        assert!(!is_image_mime("text/plain"));
+    fn only_raster_images_are_inline_safe() {
+        assert!(is_inline_safe_mime("image/png"));
+        assert!(is_inline_safe_mime("image/jpeg"));
+        assert!(is_inline_safe_mime("image/gif"));
+        assert!(is_inline_safe_mime("image/webp"));
+        assert!(!is_inline_safe_mime("application/pdf"));
+        assert!(!is_inline_safe_mime("text/plain"));
+    }
+
+    /// SVG is an image by MIME but a scriptable document in a browser.
+    /// Serving it inline from our own origin is stored XSS, so it must never
+    /// be classified inline-safe no matter how the allowlist evolves.
+    #[test]
+    fn svg_is_never_inline_safe() {
+        assert!(!is_inline_safe_mime("image/svg+xml"));
+    }
+
+    /// Every inline-safe type must still be an accepted upload type. The two
+    /// lists are allowed to differ, but not to contradict each other.
+    #[test]
+    fn inline_safe_types_are_all_allowed_uploads() {
+        for mime in ALLOWED_MIMES {
+            if is_inline_safe_mime(mime) {
+                assert!(ALLOWED_MIMES.contains(mime));
+            }
+        }
+        assert!(ALLOWED_MIMES.contains(&"image/svg+xml"));
     }
 }
