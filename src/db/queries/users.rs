@@ -674,12 +674,14 @@ pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificE
 
 /// Revoke every durable credential owned by a user as part of compromised
 /// account recovery: the user's API keys, keys for connected-tool bots they
-/// own, and user-bound OAuth access tokens. This is intentionally separate from
+/// own, user-bound OAuth access tokens, and unbound operator keys. This is
+/// intentionally separate from
 /// ordinary logout so callers can make the lockdown semantics explicit.
 pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result<(), LificError> {
     conn.execute(
         "UPDATE api_keys SET revoked = 1
-         WHERE user_id = ?1
+         WHERE user_id IS NULL
+            OR user_id = ?1
             OR user_id IN (SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1)",
         params![user_id],
     )?;
@@ -2769,7 +2771,8 @@ mod tests {
         conn.execute(
             "INSERT INTO api_keys (name, key_hash, user_id) VALUES
              ('human-recovery-key', 'hash-human', ?1),
-             ('bot-recovery-key', 'hash-bot', ?2)",
+             ('bot-recovery-key', 'hash-bot', ?2),
+             ('operator-recovery-key', 'hash-operator', NULL)",
             params![user.id, bot.id],
         )
         .unwrap();
