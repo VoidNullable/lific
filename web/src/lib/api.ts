@@ -860,6 +860,19 @@ export async function createPageComment(pageId: number, content: string) {
   });
 }
 
+export async function updateComment(id: number, content: string) {
+  return request<Comment>(`/comments/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export async function deleteComment(id: number) {
+  return request<{ deleted: boolean }>(`/comments/${id}`, {
+    method: "DELETE",
+  });
+}
+
 // ── Attachments (LIF-262) ────────────────────────────────────
 //
 // Image + file uploads on issues, comments, and pages. Bytes are stored

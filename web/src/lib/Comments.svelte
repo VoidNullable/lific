@@ -21,7 +21,7 @@
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { MENTION_RE } from "./mentions";
-  import { MessageSquare, CornerDownLeft, Paperclip } from "lucide-svelte";
+  import { MessageSquare, CornerDownLeft, Paperclip, MoreHorizontal } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import { tick, onDestroy, onMount } from "svelte";
   import {
@@ -33,11 +33,15 @@
   import { createUploadController } from "./attachments/uploads.svelte";
   import DropOverlay from "./attachments/DropOverlay.svelte";
   import PendingUploads from "./attachments/PendingUploads.svelte";
+  import { canManageComment, commentWasEdited } from "./commentState";
 
   let {
     comments,
     editable = true,
     onSubmit,
+    currentUser = null,
+    onUpdate,
+    onDelete,
     placeholder = "Write a comment\u2026",
     // LIF-263: project the comments belong to. When set, the composer
     // fetches @mention candidates and offers autocomplete. Null (workspace
@@ -53,6 +57,9 @@
     comments: Comment[];
     editable?: boolean;
     onSubmit: (content: string) => Promise<Comment | null>;
+    currentUser?: { id: number } | null;
+    onUpdate?: (id: number, content: string) => Promise<Comment | null>;
+    onDelete?: (id: number) => Promise<boolean>;
     placeholder?: string;
     projectId?: number | null;
     attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
@@ -62,6 +69,14 @@
   let submitting = $state(false);
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
   let fileInputEl = $state<HTMLInputElement | null>(null);
+  let editingId = $state<number | null>(null);
+  let editDraft = $state("");
+  let editTextareaEl = $state<HTMLTextAreaElement | null>(null);
+  let editFileInputEl = $state<HTMLInputElement | null>(null);
+  let updatingId = $state<number | null>(null);
+  let deletingId = $state<number | null>(null);
+  let menuId = $state<number | null>(null);
+  let confirmDeleteId = $state<number | null>(null);
 
   let canSend = $derived(draft.trim().length > 0 && !submitting);
 
@@ -162,13 +177,14 @@
   });
 
   function updateMentionContext() {
-    const el = textareaEl;
+    const el = editingId === null ? textareaEl : editTextareaEl;
     if (!el || candidates.length === 0) {
       mentionOpen = false;
       return;
     }
     const caret = el.selectionStart ?? 0;
-    const before = draft.slice(0, caret);
+    const activeDraft = editingId === null ? draft : editDraft;
+    const before = activeDraft.slice(0, caret);
     const m = before.match(ACTIVE_MENTION_RE);
     if (m) {
       mentionOpen = true;
@@ -181,13 +197,15 @@
   }
 
   function selectMention(cand: MentionCandidate) {
-    const el = textareaEl;
+    const el = editingId === null ? textareaEl : editTextareaEl;
     if (!el) return;
-    const caret = el.selectionStart ?? draft.length;
-    const before = draft.slice(0, mentionStart);
-    const after = draft.slice(caret);
+    const activeDraft = editingId === null ? draft : editDraft;
+    const caret = el.selectionStart ?? activeDraft.length;
+    const before = activeDraft.slice(0, mentionStart);
+    const after = activeDraft.slice(caret);
     const insert = `@${cand.username} `;
-    draft = before + insert + after;
+    if (editingId === null) draft = before + insert + after;
+    else editDraft = before + insert + after;
     mentionOpen = false;
     // Restore caret just past the inserted token + trailing space.
     const nextCaret = before.length + insert.length;
@@ -256,7 +274,12 @@
     if (onMentionKeydown(e)) return;
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      submit();
+      if (editingId === null) submit();
+      else saveEdit();
+    }
+    if (e.key === "Escape" && editingId !== null) {
+      e.preventDefault();
+      cancelEdit();
     }
   }
 
@@ -267,7 +290,7 @@
 
   // Grow the textarea with its content; CSS min-height floors it.
   function resize() {
-    const el = textareaEl;
+    const el = editingId === null ? textareaEl : editTextareaEl;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
@@ -275,14 +298,18 @@
 
   // ── LIF-262: attachment uploads ──────────────────────────
 
-  function insertSnippet(snippet: string) {
-    const el = textareaEl;
+  function insertSnippet(snippet: string, edit = false) {
+    const el = edit ? editTextareaEl : textareaEl;
+    const activeDraft = edit ? editDraft : draft;
     if (!el) {
-      draft = draft + (draft.endsWith("\n") || draft === "" ? "" : "\n") + snippet + "\n";
+      const next = activeDraft + (activeDraft.endsWith("\n") || activeDraft === "" ? "" : "\n") + snippet + "\n";
+      if (edit) editDraft = next;
+      else draft = next;
       return;
     }
-    const { text, caret } = insertAtCaret(el, draft, snippet);
-    draft = text;
+    const { text, caret } = insertAtCaret(el, activeDraft, snippet);
+    if (edit) editDraft = text;
+    else draft = text;
     requestAnimationFrame(() => {
       el.focus();
       el.setSelectionRange(caret, caret);
@@ -298,18 +325,28 @@
   });
   onDestroy(() => uploads.destroy());
 
-  function onPaste(e: ClipboardEvent) {
+  const editUploads = createUploadController({
+    // Link only after a successful PUT re-scans the saved Markdown. This
+    // keeps Cancel and editor switches free of attachment side effects.
+    link: () => null,
+    onInsert: (snippet) => {
+      if (editingId !== null) insertSnippet(snippet, true);
+    },
+  });
+  onDestroy(() => editUploads.destroy());
+
+  function onPaste(e: ClipboardEvent, edit = false) {
     const files = filesFromClipboard(e);
     if (files.length > 0) {
       e.preventDefault();
-      uploads.enqueue(files);
+      (edit ? editUploads : uploads).enqueue(files);
     }
   }
 
-  function onFilePicked(e: Event) {
+  function onFilePicked(e: Event, edit = false) {
     const input = e.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      uploads.enqueue(Array.from(input.files));
+      (edit ? editUploads : uploads).enqueue(Array.from(input.files));
       input.value = "";
     }
   }
@@ -320,6 +357,47 @@
       .slice(0, 2)
       .map((w) => w[0]?.toUpperCase() ?? "")
       .join("");
+  }
+
+  function startEdit(comment: Comment) {
+    editUploads.destroy();
+    editingId = comment.id;
+    editDraft = comment.content;
+    menuId = null;
+    confirmDeleteId = null;
+    tick().then(() => {
+      editTextareaEl?.focus();
+      resize();
+    });
+  }
+
+  function cancelEdit() {
+    if (updatingId !== null) return;
+    editUploads.destroy();
+    editingId = null;
+    editDraft = "";
+    mentionOpen = false;
+  }
+
+  async function saveEdit() {
+    if (editingId === null || updatingId !== null || editUploads.busy || editDraft.trim() === "" || !onUpdate) return;
+    const id = editingId;
+    updatingId = id;
+    const updated = await onUpdate(id, editDraft.trim());
+    updatingId = null;
+    if (updated && editingId === id) cancelEdit();
+  }
+
+  async function confirmDelete(id: number) {
+    if (deletingId !== null || !onDelete) return;
+    deletingId = id;
+    const deleted = await onDelete(id);
+    deletingId = null;
+    if (deleted) {
+      if (editingId === id) cancelEdit();
+      menuId = null;
+      confirmDeleteId = null;
+    }
   }
 
   // LIF-159 — palette "Add comment" action: scroll the composer into
@@ -337,9 +415,10 @@
   // composer into view.
   export async function insertQuote(text: string) {
     const quoted = text.split("\n").map((l) => "> " + l).join("\n") + "\n\n";
-    draft = quoted + draft;
+    if (editingId === null) draft = quoted + draft;
+    else editDraft = quoted + editDraft;
     await tick();
-    const el = textareaEl;
+    const el = editingId === null ? textareaEl : editTextareaEl;
     if (el) {
       el.focus();
       resize();
@@ -369,10 +448,69 @@
               <a href="#comment-{comment.id}" class="cmt__anchor">#{comment.id}</a>
               <span class="cmt__author">{author}</span>
               <span class="cmt__time"><TimeAgo date={comment.created_at} /></span>
+              {#if commentWasEdited(comment)}
+                <span class="cmt__edited" title={`Edited ${comment.updated_at}`}>edited</span>
+              {/if}
+              {#if canManageComment(comment, currentUser, onUpdate !== undefined && onDelete !== undefined)}
+                <div class="cmt__menu-wrap">
+                  <button
+                    type="button"
+                    class="cmt__menu-button"
+                    aria-label={`Comment ${comment.id} actions`}
+                    aria-haspopup="menu"
+                    aria-expanded={menuId === comment.id}
+                    onclick={() => {
+                      menuId = menuId === comment.id ? null : comment.id;
+                      confirmDeleteId = null;
+                    }}
+                    onfocus={() => (menuId = comment.id)}
+                    onkeydown={(e) => { if (e.key === "Escape") menuId = null; }}
+                  ><MoreHorizontal size={16} /></button>
+                  {#if menuId === comment.id}
+                    <div class="cmt__menu" role="menu" aria-label={`Comment ${comment.id} actions`}>
+                      {#if confirmDeleteId === comment.id}
+                        <p>Delete this comment?</p>
+                        <div class="cmt__menu-confirm">
+                          <button type="button" onclick={() => (confirmDeleteId = null)} disabled={deletingId === comment.id}>Cancel</button>
+                          <button type="button" class="cmt__delete" onclick={() => confirmDelete(comment.id)} disabled={deletingId === comment.id}>
+                            {deletingId === comment.id ? "Deleting…" : "Delete"}
+                          </button>
+                        </div>
+                      {:else}
+                        <button type="button" role="menuitem" onclick={() => startEdit(comment)} disabled={updatingId !== null || deletingId !== null}>Edit</button>
+                        <button type="button" role="menuitem" onclick={() => (confirmDeleteId = comment.id)} disabled={updatingId !== null || deletingId !== null}>Delete</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </div>
-            <div class="cmt__md">
-              <Markdown content={comment.content} mentions={candidates} class="text-sm" />
-            </div>
+            {#if editingId === comment.id}
+              <DropOverlay onFiles={(files) => editUploads.enqueue(files)}>
+                <div class="cmt__composer cmt__editor">
+                  <div class="cmt__input-wrap">
+                    <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={onKeydown} onclick={updateMentionContext} onpaste={(e) => onPaste(e, true)}></textarea>
+                    {#if mentionOpen && mentionMatches.length > 0}
+                      <ul class="mention-pop" role="listbox" aria-label="Mention a user">
+                        {#each mentionMatches as cand, i (cand.user_id)}
+                          <li><button type="button" role="option" aria-selected={i === mentionIndex} class="mention-pop__row" class:is-active={i === mentionIndex} onmousedown={(e) => { e.preventDefault(); selectMention(cand); }} onmouseenter={() => (mentionIndex = i)}><span class="mention-pop__avatar" aria-hidden="true">{initialsOf(cand.display_name || cand.username)}</span><span class="mention-pop__text"><span class="mention-pop__name">{cand.display_name || cand.username}</span><span class="mention-pop__user">@{cand.username}</span></span></button></li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                  <PendingUploads controller={editUploads} />
+                  <div class="cmt__toolbar">
+                    <div class="cmt__toolbar-left"><button type="button" class="cmt__attach" onclick={() => editFileInputEl?.click()} disabled={editUploads.busy}><Paperclip size={13} /><span>{editUploads.busy ? "Uploading…" : "Attach"}</span></button><span class="cmt__hint">Markdown · drag, paste or attach files</span></div>
+                    <div class="cmt__actions"><span class="cmt__kbd" aria-hidden="true"><kbd>{isMac ? "⌘" : "Ctrl"}</kbd><kbd><CornerDownLeft size={11} /></kbd></span><button type="button" class="cmt__cancel" onclick={cancelEdit} disabled={updatingId === comment.id}>Cancel</button><button type="button" class="cmt__send" onclick={saveEdit} disabled={editDraft.trim() === "" || editUploads.busy || updatingId === comment.id}>{updatingId === comment.id ? "Saving…" : "Save"}</button></div>
+                  </div>
+                  <input bind:this={editFileInputEl} type="file" class="cmt__file-input" multiple accept="image/*,application/pdf,text/plain,.log,application/zip" onchange={(e) => onFilePicked(e, true)} />
+                </div>
+              </DropOverlay>
+            {:else}
+              <div class="cmt__md">
+                <Markdown content={comment.content} mentions={candidates} class="text-sm" />
+              </div>
+            {/if}
           </div>
         </li>
       {/each}
@@ -590,6 +728,33 @@
     font-size: 0.75rem;
     color: var(--text-muted);
   }
+  .cmt__edited {
+    font-size: 0.6875rem;
+    color: var(--text-faint);
+    font-style: italic;
+  }
+  .cmt__menu-wrap { position: relative; margin-left: auto; }
+  .cmt__menu-button {
+    display: grid; place-items: center; width: 1.75rem; height: 1.75rem;
+    border: 0; border-radius: 0.375rem; background: transparent;
+    color: var(--text-muted);
+  }
+  .cmt__menu-button:hover, .cmt__menu-button:focus-visible { background: var(--bg-subtle); color: var(--text); outline: none; }
+  .cmt__menu {
+    position: absolute; z-index: 30; right: 0; top: calc(100% + 0.25rem);
+    min-width: 8rem; padding: 0.25rem; border: 1px solid var(--border);
+    border-radius: 0.5rem; background: var(--surface); box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+  }
+  .cmt__menu > button, .cmt__menu-confirm > button {
+    border: 0; border-radius: 0.3125rem; background: transparent; color: var(--text);
+    padding: 0.375rem 0.5rem; font-size: 0.75rem;
+  }
+  .cmt__menu > button { display: block; width: 100%; text-align: left; }
+  .cmt__menu > button:hover:not(:disabled) { background: var(--bg-subtle); }
+  .cmt__menu p { margin: 0; padding: 0.375rem 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
+  .cmt__menu-confirm { display: flex; justify-content: flex-end; gap: 0.25rem; }
+  .cmt__menu-confirm .cmt__delete { color: var(--error); }
+  .cmt__editor { margin-top: 0.5rem; }
   /* Markdown body in full-strength text so it reads as content, not an
      afterthought. Kill the leading margin the prose layer adds. */
   .cmt__md :global(.prose > :first-child) {
@@ -766,6 +931,11 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+  .cmt__cancel {
+    border: 0; border-radius: 0.5rem; padding: 0.4375rem 0.625rem;
+    background: transparent; color: var(--text-muted); font-size: 0.8125rem; font-weight: 500;
+  }
+  .cmt__cancel:hover:not(:disabled) { color: var(--text); background: var(--bg-subtle); }
 
   /* ── @mention popover (LIF-263) ─────────────────────── */
   /* Command-Palette vocabulary: a floating surface card with a soft
