@@ -20,6 +20,9 @@ pub enum LificError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Too many requests: {0}")]
+    TooManyRequests(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -39,6 +42,7 @@ impl IntoResponse for LificError {
             LificError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             LificError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             LificError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            LificError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             LificError::Internal(msg) => {
                 error!(error = %msg, "internal error");
                 (
@@ -49,6 +53,13 @@ impl IntoResponse for LificError {
         };
 
         let body = json!({ "error": message });
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if matches!(self, LificError::TooManyRequests(_)) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
