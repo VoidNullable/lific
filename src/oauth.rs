@@ -445,12 +445,54 @@ async fn authorize_page(
     State(oauth): State<OAuthState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeParams>,
-) -> Html<String> {
+) -> Response {
+    let requested_scope = params.scope.as_deref().unwrap_or("mcp").trim();
+    if params.response_type != "code" || requested_scope != "mcp" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("<h1>Unsupported OAuth request</h1><p>Only authorization-code access to the MCP capability is supported.</p>".to_string()),
+        )
+            .into_response();
+    }
+
+    // Resolve the registered client before showing consent. A generic
+    // "application" prompt trains users to approve phishing clients and gives
+    // no meaningful capability disclosure. The redirect URI is checked here
+    // as well as on POST so a crafted GET cannot produce a misleading screen.
+    let client_name = oauth
+        .db
+        .read()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT client_name, redirect_uris FROM oauth_clients WHERE client_id = ?1",
+                params![params.client_id],
+                |row| {
+                    let name: String = row.get(0)?;
+                    let uris_json: String = row.get(1)?;
+                    Ok((name, uris_json))
+                },
+            )
+            .ok()
+        })
+        .and_then(|(name, uris_json)| {
+            let uris: Vec<String> = serde_json::from_str(&uris_json).ok()?;
+            uris.iter()
+                .any(|uri| uri == &params.redirect_uri)
+                .then_some(name)
+        });
+    let Some(client_name) = client_name else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("<h1>Invalid OAuth client</h1><p>The client or redirect URI is not registered.</p>".to_string()),
+        )
+            .into_response();
+    };
+
     // Bind the CSRF token to the session the browser presents when loading this
     // page (sent on the top-level GET navigation under SameSite=Lax). The POST
     // approval must carry the same session for the token to validate.
     let csrf_token = generate_csrf_token(&session_credential(&headers));
-
     // LIFIC-13: the approval screen asks which tool is connecting so the audit
     // log can attribute requests to a per-tool bot. Options come from the same
     // Connected Tools registry `lific connect` uses; a free-text field covers
@@ -459,7 +501,9 @@ async fn authorize_page(
     let preset_id = client_tool_id(&oauth.db, &params.client_id);
     let tool_pick_list = tool_pick_list_html(preset_id.as_deref());
 
-    Html(format!(
+    (
+        StatusCode::OK,
+        Html(format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
@@ -479,7 +523,8 @@ async fn authorize_page(
 </head>
 <body>
     <h1>Authorize access to Lific</h1>
-    <p>An application wants to access your Lific issue tracker.</p>
+    <p><span class="client">{client_name}</span> wants access to your Lific issue tracker.</p>
+    <p>Capability requested: <span class="client">MCP issue-tracker access</span>.</p>
     <form method="POST" action="/oauth/authorize">
         <input type="hidden" name="client_id" value="{client_id}">
         <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -495,16 +540,19 @@ async fn authorize_page(
 </body>
 </html>"#,
         client_id = html_escape(&params.client_id),
+        client_name = html_escape(&client_name),
         redirect_uri = html_escape(&params.redirect_uri),
         response_type = html_escape(&params.response_type),
         state = html_escape(params.state.as_deref().unwrap_or("")),
         code_challenge = html_escape(params.code_challenge.as_deref().unwrap_or("")),
         code_challenge_method =
             html_escape(params.code_challenge_method.as_deref().unwrap_or("S256")),
-        scope = html_escape(params.scope.as_deref().unwrap_or("mcp")),
+        scope = html_escape(requested_scope),
         csrf_token = html_escape(&csrf_token),
         tool_pick_list = tool_pick_list,
-    ))
+        )),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -632,6 +680,20 @@ async fn authorize_approve(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<ApproveForm>,
 ) -> Response {
+    if form.response_type != "code"
+        || form.scope.as_deref().unwrap_or("mcp") != "mcp"
+        || form
+            .code_challenge_method
+            .as_deref()
+            .is_some_and(|method| method != "S256")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("<h1>Unsupported OAuth request</h1><p>Only authorization-code access to the MCP capability is supported.</p>".to_string()),
+        )
+            .into_response();
+    }
+
     // The credential presented on this POST (Bearer header or lific_token
     // cookie). The CSRF token must have been minted for this same credential.
     let credential = session_credential(&headers);
@@ -2300,6 +2362,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authorize_consent_identifies_client_and_capability() {
+        let (app, _db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let uri = format!(
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256",
+            urlencoding::encode("http://localhost/callback")
+        );
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        assert!(body.contains("Test Client"));
+        assert!(body.contains("MCP issue-tracker access"));
+        assert!(!body.contains("An application wants"));
+    }
+
+    #[tokio::test]
+    async fn authorize_consent_rejects_unknown_capability_or_client() {
+        let (app, _db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let bad_scope = format!(
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=admin",
+            urlencoding::encode("http://localhost/callback")
+        );
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(bad_scope).body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let unknown = "/oauth/authorize?client_id=unknown&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&response_type=code&scope=mcp";
+        let resp = app
+            .oneshot(Request::builder().uri(unknown).body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
