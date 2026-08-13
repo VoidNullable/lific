@@ -175,12 +175,29 @@ impl RateLimiter {
     }
 
     /// Remove all keys whose attempt lists are empty or fully expired.
-    fn sweep(map: &mut HashMap<String, Vec<Instant>>, window: Duration) {
-        let now = Instant::now();
+    fn sweep(map: &mut HashMap<String, Vec<Instant>>, now: Instant, window: Duration) {
         map.retain(|_, entries| {
-            entries.retain(|t| now.duration_since(*t) < window);
+            entries.retain(|t| now.saturating_duration_since(*t) < window);
             !entries.is_empty()
         });
+    }
+
+    /// Keep the bounded table available to new identities. Expired entries are
+    /// removed first; if an attacker has filled the table with live keys, evict
+    /// the key whose oldest attempt will expire first instead of permanently
+    /// denying every new identity.
+    fn make_room(map: &mut HashMap<String, Vec<Instant>>, now: Instant, window: Duration) {
+        Self::sweep(map, now, window);
+        if map.len() < MAX_KEYS {
+            return;
+        }
+        if let Some(oldest_key) = map
+            .iter()
+            .min_by_key(|(_, entries)| entries.first().copied().unwrap_or(now))
+            .map(|(key, _)| key.clone())
+        {
+            map.remove(&oldest_key);
+        }
     }
 
     /// Record an attempt for the given key.
@@ -189,15 +206,14 @@ impl RateLimiter {
         let now = Instant::now();
         let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Evict expired keys if map is getting large
-        if map.len() > MAX_KEYS {
-            Self::sweep(&mut map, self.window);
+        if !map.contains_key(key) && map.len() >= MAX_KEYS {
+            Self::make_room(&mut map, now, self.window);
         }
 
         let entry = map.entry(key.to_string()).or_default();
 
         // Prune expired entries for this key
-        entry.retain(|t| now.duration_since(*t) < self.window);
+        entry.retain(|t| now.saturating_duration_since(*t) < self.window);
 
         if entry.len() >= self.max_attempts {
             return false;
@@ -232,12 +248,12 @@ impl RateLimiter {
         let now = Instant::now();
         let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
 
-        if map.len() > MAX_KEYS {
-            Self::sweep(&mut map, self.window);
+        if !map.contains_key(key) && map.len() >= MAX_KEYS {
+            Self::make_room(&mut map, now, self.window);
         }
 
         let entry = map.entry(key.to_string()).or_default();
-        entry.retain(|t| now.duration_since(*t) < self.window);
+        entry.retain(|t| now.saturating_duration_since(*t) < self.window);
         entry.push(now);
     }
 
@@ -306,8 +322,17 @@ mod tests {
         // Wait for it to expire
         std::thread::sleep(Duration::from_millis(5));
 
-        RateLimiter::sweep(&mut map, window);
+        RateLimiter::sweep(&mut map, Instant::now(), window);
         assert!(map.is_empty(), "expired keys should be evicted");
+    }
+
+    #[test]
+    fn full_table_evicts_old_identity_for_new_key() {
+        let rl = RateLimiter::new(1, Duration::from_secs(60));
+        for index in 0..MAX_KEYS {
+            assert!(rl.check(&format!("identity-{index}")));
+        }
+        assert!(rl.check("new-identity"));
     }
 
     // ── LIF-75: peek() is non-recording ──────────────────────
