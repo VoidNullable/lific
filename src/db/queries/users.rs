@@ -672,6 +672,24 @@ pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificE
     Ok(())
 }
 
+/// Revoke every durable credential owned by a user as part of compromised
+/// account recovery: the user's API keys, keys for connected-tool bots they
+/// own, and user-bound OAuth access tokens. This is intentionally separate from
+/// ordinary logout so callers can make the lockdown semantics explicit.
+pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result<(), LificError> {
+    conn.execute(
+        "UPDATE api_keys SET revoked = 1
+         WHERE user_id = ?1
+            OR user_id IN (SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1)",
+        params![user_id],
+    )?;
+    conn.execute(
+        "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+        params![user_id],
+    )?;
+    Ok(())
+}
+
 /// Generate a session token with the lific_sess_ prefix.
 fn generate_session_token() -> String {
     let bytes: [u8; 32] = rand::random();
@@ -2740,6 +2758,43 @@ mod tests {
         delete_all_sessions(&conn, user.id).unwrap();
         assert!(validate_session(&conn, &s1.token).is_err());
         assert!(validate_session(&conn, &s2.token).is_err());
+    }
+
+    #[test]
+    fn compromised_recovery_revokes_user_bot_and_oauth_credentials() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let bot = create_bot_user(&conn, user.id, "bot", "Bot").unwrap();
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, user_id) VALUES
+             ('human-recovery-key', 'hash-human', ?1),
+             ('bot-recovery-key', 'hash-bot', ?2)",
+            params![user.id, bot.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+             VALUES ('recovery-client', 'Recovery', '[\"http://localhost\"]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, user_id)
+             VALUES ('oauth-hash', 'recovery-client', '2099-01-01T00:00:00Z', ?1)",
+            params![user.id],
+        )
+        .unwrap();
+
+        revoke_all_durable_credentials(&conn, user.id).unwrap();
+        let active_keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_keys WHERE revoked = 0", [], |r| r.get(0))
+            .unwrap();
+        let active_tokens: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_tokens WHERE revoked = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(active_keys, 0);
+        assert_eq!(active_tokens, 0);
     }
 
     // ── API key ownership tests ──────────────────────────────

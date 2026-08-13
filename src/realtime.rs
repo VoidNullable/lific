@@ -20,6 +20,7 @@ const MAX_SOCKETS_PER_USER: usize = 16;
 #[derive(Debug, Clone)]
 pub struct RealtimeHub {
     tx: broadcast::Sender<RealtimeMessage>,
+    revocations: broadcast::Sender<i64>,
     connections: Arc<Mutex<HashMap<i64, usize>>>,
 }
 
@@ -30,8 +31,10 @@ impl RealtimeHub {
 
     fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
+        let (revocations, _) = broadcast::channel(capacity);
         Self {
             tx,
+            revocations,
             connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -62,6 +65,13 @@ impl RealtimeHub {
 
     pub fn send_to_users(&self, event: RealtimeEvent, user_ids: Vec<i64>) {
         self.send_message(event, RealtimeAudience::Users(user_ids));
+    }
+
+    /// Immediately terminate every live socket for a user after account
+    /// recovery. The normal periodic session check remains as a defense in
+    /// depth for revocations made by other processes.
+    pub fn revoke_user(&self, user_id: i64) {
+        let _ = self.revocations.send(user_id);
     }
 
     fn send_message(&self, event: RealtimeEvent, audience: RealtimeAudience) {
@@ -188,6 +198,7 @@ pub async fn serve_socket(
     };
     let mut visible_projects = visible_projects_for(&db, &auth_user);
     let mut rx = hub.subscribe();
+    let mut revocations = hub.revocations.subscribe();
     let mut revalidate = time::interval(SESSION_REVALIDATE_INTERVAL);
     revalidate.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -200,6 +211,14 @@ pub async fn serve_socket(
             flow
         },
         event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
+        revoked = revocations.recv() => {
+            if matches!(revoked, Ok(id) if id == auth_user.id) {
+                let _ = socket.send(Message::Close(None)).await;
+                SocketFlow::Close
+            } else {
+                SocketFlow::Open
+            }
+        },
         message = socket.recv() => {
             handle_client_message(&mut socket, &db, &auth_user, message).await
         },
@@ -570,6 +589,14 @@ mod tests {
         // Dropping one slot frees exactly one.
         slots.pop();
         assert!(hub.try_register(7).is_some());
+    }
+
+    #[test]
+    fn revoke_user_broadcasts_immediately_to_socket_tasks() {
+        let hub = RealtimeHub::new();
+        let mut rx = hub.revocations.subscribe();
+        hub.revoke_user(42);
+        assert_eq!(rx.try_recv().unwrap(), 42);
     }
 
     #[test]
