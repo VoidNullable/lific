@@ -490,6 +490,7 @@ impl LiveJira {
         email: &str,
         token: &str,
     ) -> Result<LiveJira, String> {
+        let site = validate_site_slug(site)?;
         use base64::Engine;
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -503,7 +504,7 @@ impl LiveJira {
         );
         Ok(LiveJira {
             client,
-            site: site.to_string(),
+            site,
             project_key: project_key.to_string(),
             auth,
         })
@@ -512,6 +513,24 @@ impl LiveJira {
     fn base(&self) -> String {
         format!("https://{}.atlassian.net/rest/api/3", self.site)
     }
+}
+
+/// Jira Cloud site names become the hostname component of the request URL.
+/// Keep this to one DNS-label-shaped slug so credentials can never be sent to
+/// an attacker-controlled host or path through string interpolation.
+pub fn validate_site_slug(site: &str) -> Result<String, String> {
+    let site = site.trim().to_ascii_lowercase();
+    if site.is_empty()
+        || site.len() > 63
+        || site.starts_with('-')
+        || site.ends_with('-')
+        || !site
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("Jira site must be a single DNS label (letters, digits, and hyphens)".into());
+    }
+    Ok(site)
 }
 
 impl JiraFetcher for LiveJira {
@@ -729,5 +748,13 @@ mod tests {
         };
         let fetched = collect(&fetcher, "mycompany", &JiraStatusMap::default()).unwrap();
         assert_eq!(fetched.issues.len(), issues.len());
+    }
+
+    #[test]
+    fn jira_site_slug_rejects_host_and_path_injection() {
+        assert_eq!(validate_site_slug("My-Team").unwrap(), "my-team");
+        for invalid in ["", "evil.example", "evil/path", "-leading", "trailing-", "a_b"] {
+            assert!(validate_site_slug(invalid).is_err(), "accepted {invalid:?}");
+        }
     }
 }

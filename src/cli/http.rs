@@ -89,12 +89,19 @@ impl HttpBackend {
             anyhow!("HTTP backend URL must not contain credentials, a query, or a fragment")
         })?;
         if parsed.scheme() == "http"
+            && api_key.is_some()
             && parsed
                 .host_str()
                 .is_some_and(|host| !is_loopback_host(host))
         {
+            bail!(
+                "refusing to send bearer credentials over plaintext http to {}",
+                parsed.host_str().unwrap_or_default()
+            );
+        }
+        if parsed.scheme() == "http" && parsed.host_str().is_some_and(|host| !is_loopback_host(host)) {
             eprintln!(
-                "warning: sending credentials over unencrypted http to {}",
+                "warning: connecting over unencrypted http to {}",
                 parsed.host_str().unwrap_or_default()
             );
         }
@@ -1505,6 +1512,17 @@ mod tests {
         assert!(is_loopback_host("::1"));
         assert!(!is_loopback_host("0.0.0.0"));
         assert!(!is_loopback_host("tracker.example"));
+    }
+
+    #[test]
+    fn refuses_plaintext_remote_bearer_transport() {
+        let error = match HttpBackend::new("http://tracker.example", Some("secret-key")) {
+            Ok(_) => panic!("remote plaintext bearer transport must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("plaintext http"));
+        assert!(HttpBackend::new("http://127.0.0.1:3456", Some("secret-key")).is_ok());
+        assert!(HttpBackend::new("http://tracker.example", None).is_ok());
     }
 
     #[test]
