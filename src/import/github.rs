@@ -14,9 +14,16 @@
 //! tested against fixture JSON; the network lives behind [`GithubFetcher`].
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use std::io::Read;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel, StatusMap};
 use crate::db::models::{Priority, Status};
+
+pub const MAX_GITHUB_ISSUES: usize = 10_000;
+pub const MAX_GITHUB_COMMENTS_PER_ISSUE: usize = 1_000;
+pub const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_GITHUB_NORMALIZED_BYTES: usize = 128 * 1024 * 1024;
 
 /// One issue as returned by the GitHub REST API (fields we use).
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +192,7 @@ pub fn collect(
     map: &StatusMap,
 ) -> Result<super::FetchedIssues, String> {
     let mut out = super::FetchedIssues::default();
+    let mut total_normalized_bytes = 0usize;
     let mut page = 1u32;
     loop {
         let (issues, has_next) = fetcher.fetch_issues_page(page, state)?;
@@ -193,12 +201,46 @@ pub fn collect(
                 out.skipped_non_issues += 1;
                 continue;
             }
+            if out.issues.len() >= MAX_GITHUB_ISSUES {
+                return Err(format!(
+                    "GitHub repository has too many issues (more than {})",
+                    MAX_GITHUB_ISSUES
+                ));
+            }
             out.skipped_assignees += issue.assignees.len();
             if issue.milestone.is_some() {
                 out.skipped_other += 1;
             }
             let comments = fetcher.fetch_comments(issue.number)?;
-            out.issues.push(map_issue(slug, issue, &comments, map));
+            if comments.len() > MAX_GITHUB_COMMENTS_PER_ISSUE {
+                return Err(format!(
+                    "GitHub issue #{} has too many comments ({} > {})",
+                    issue.number,
+                    comments.len(),
+                    MAX_GITHUB_COMMENTS_PER_ISSUE
+                ));
+            }
+            let normalized = map_issue(slug, issue, &comments, map);
+            let previous_capacity = out.issues.capacity();
+            out.issues
+                .try_reserve(1)
+                .map_err(|_| "GitHub import normalized allocation failed".to_string())?;
+            let issue_slots = out
+                .issues
+                .capacity()
+                .saturating_sub(previous_capacity)
+                .saturating_mul(std::mem::size_of::<NormalizedIssue>());
+            total_normalized_bytes = total_normalized_bytes
+                .checked_add(issue_slots)
+                .and_then(|bytes| bytes.checked_add(normalized_retained_bytes(&normalized)))
+                .ok_or_else(|| "GitHub import content size overflow".to_string())?;
+            if total_normalized_bytes > MAX_GITHUB_NORMALIZED_BYTES {
+                return Err(format!(
+                    "GitHub import normalized data exceeds {} byte limit",
+                    MAX_GITHUB_NORMALIZED_BYTES
+                ));
+            }
+            out.issues.push(normalized);
         }
         if !has_next {
             break;
@@ -210,6 +252,40 @@ pub fn collect(
         }
     }
     Ok(out)
+}
+
+fn normalized_retained_bytes(issue: &NormalizedIssue) -> usize {
+    let label_bytes = issue.labels.iter().fold(
+        issue
+            .labels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<NormalizedLabel>()),
+        |bytes, label| {
+            bytes
+                .saturating_add(label.name.capacity())
+                .saturating_add(label.color.as_ref().map_or(0, String::capacity))
+        },
+    );
+    let comment_bytes = issue.comments.iter().fold(
+        issue
+            .comments
+            .capacity()
+            .saturating_mul(std::mem::size_of::<NormalizedComment>()),
+        |bytes, comment| {
+            bytes
+                .saturating_add(comment.author.capacity())
+                .saturating_add(comment.body.capacity())
+                .saturating_add(comment.created_at.as_ref().map_or(0, String::capacity))
+        },
+    );
+
+    issue
+        .source
+        .capacity()
+        .saturating_add(issue.title.capacity())
+        .saturating_add(issue.description.capacity())
+        .saturating_add(label_bytes)
+        .saturating_add(comment_bytes)
 }
 
 /// Parse the RFC 5988 `Link` header to decide whether a next page exists.
@@ -290,6 +366,25 @@ impl LiveGithub {
         }
         Ok(resp)
     }
+
+    fn json_bounded<T: DeserializeOwned>(
+        resp: reqwest::blocking::Response,
+        label: &str,
+    ) -> Result<T, String> {
+        let mut bytes = Vec::new();
+        let mut reader = resp.take((MAX_GITHUB_RESPONSE_BYTES + 1) as u64);
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read GitHub {label} response: {e}"))?;
+        if bytes.len() > MAX_GITHUB_RESPONSE_BYTES {
+            return Err(format!(
+                "GitHub {label} response exceeds {} byte limit",
+                MAX_GITHUB_RESPONSE_BYTES
+            ));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("failed to parse GitHub {label} JSON: {e}"))
+    }
 }
 
 impl GithubFetcher for LiveGithub {
@@ -310,9 +405,10 @@ impl GithubFetcher for LiveGithub {
             .get("link")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let issues: Vec<GithubIssue> = resp
-            .json()
-            .map_err(|e| format!("failed to parse issues JSON: {e}"))?;
+        let issues: Vec<GithubIssue> = Self::json_bounded(resp, "issues")?;
+        if issues.len() > 100 {
+            return Err("GitHub issues response exceeds the per-page item limit".into());
+        }
         Ok((issues, has_next_page(link.as_deref())))
     }
 
