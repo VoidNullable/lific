@@ -271,6 +271,9 @@ pub fn sync_entity_links(
     entity: AttachmentEntity,
     entity_id: i64,
     referenced_ids: &[i64],
+    user_id: i64,
+    is_admin: bool,
+    project_id: Option<i64>,
 ) -> Result<(), LificError> {
     // Current links for this entity.
     let mut stmt = conn.prepare_cached(
@@ -290,11 +293,65 @@ pub fn sync_entity_links(
     // attachment row — a stale/typo reference in the text shouldn't create a
     // dangling link).
     for id in referenced_ids {
-        if !current.contains(id) && attachment_exists(conn, *id)? {
+        if !current.contains(id)
+            && attachment_allowed_for_entity(conn, *id, user_id, is_admin, project_id)?
+        {
             link_attachment(conn, *id, entity, entity_id)?;
         }
     }
     Ok(())
+}
+
+/// An attachment may be introduced into a document only by its uploader (or
+/// an administrator), or when it is already linked to another entity in the
+/// same project. This prevents a user who can edit one document from guessing
+/// another user's unlinked attachment id and importing it into that document.
+fn attachment_allowed_for_entity(
+    conn: &Connection,
+    attachment_id: i64,
+    user_id: i64,
+    is_admin: bool,
+    project_id: Option<i64>,
+) -> Result<bool, LificError> {
+    if is_admin {
+        return attachment_exists(conn, attachment_id);
+    }
+    let owned: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT uploader_id FROM attachments WHERE id = ?1",
+            params![attachment_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if owned == Some(Some(user_id)) {
+        return Ok(true);
+    }
+    let Some(project_id) = project_id else {
+        return Ok(false);
+    };
+    let linked: Option<i64> = conn
+        .query_row(
+            "SELECT 1
+             FROM attachment_links l
+             WHERE l.attachment_id = ?1
+               AND (
+                 (l.entity_type = 'issue' AND EXISTS
+                    (SELECT 1 FROM issues i WHERE i.id = l.entity_id AND i.project_id = ?2))
+                 OR (l.entity_type = 'page' AND EXISTS
+                    (SELECT 1 FROM pages p WHERE p.id = l.entity_id AND p.project_id = ?2))
+                 OR (l.entity_type = 'comment' AND EXISTS
+                    (SELECT 1 FROM comments c
+                     LEFT JOIN issues i ON i.id = c.issue_id
+                     LEFT JOIN pages p ON p.id = c.page_id
+                     WHERE c.id = l.entity_id
+                       AND (i.project_id = ?2 OR p.project_id = ?2)))
+               )
+             LIMIT 1",
+            params![attachment_id, project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(linked.is_some())
 }
 
 fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
@@ -1064,7 +1121,7 @@ pub fn sync_links(
     markdown: &str,
 ) -> Result<(), LificError> {
     let ids = parse_referenced_ids(markdown);
-    sync_entity_links(conn, entity, entity_id, &ids)
+    sync_entity_links(conn, entity, entity_id, &ids, 0, false, None)
 }
 
 /// Reconcile attachment links without allowing references to import an
@@ -1238,7 +1295,8 @@ mod tests {
         let c = create_attachment(&conn, "c", "c.png", "image/png", 1, None).unwrap();
 
         // Start linking a + b.
-        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[a.id, b.id]).unwrap();
+        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[a.id, b.id], 0, true, Some(1))
+            .unwrap();
         let ids: Vec<i64> = list_for_entity(&conn, AttachmentEntity::Issue, issue)
             .unwrap()
             .into_iter()
@@ -1247,7 +1305,8 @@ mod tests {
         assert_eq!(ids, vec![a.id, b.id]);
 
         // Re-sync to b + c: a is unlinked, c is added.
-        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[b.id, c.id]).unwrap();
+        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[b.id, c.id], 0, true, Some(1))
+            .unwrap();
         let mut ids: Vec<i64> = list_for_entity(&conn, AttachmentEntity::Issue, issue)
             .unwrap()
             .into_iter()
@@ -1265,11 +1324,74 @@ mod tests {
         let conn = pool.write().unwrap();
         let issue = seed_issue(&conn);
         // 99999 doesn't exist — must not create a dangling link.
-        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[99999]).unwrap();
+        sync_entity_links(&conn, AttachmentEntity::Issue, issue, &[99999], 0, true, Some(1))
+            .unwrap();
         assert!(
             list_for_entity(&conn, AttachmentEntity::Issue, issue)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn sync_does_not_import_unlinked_attachment_from_another_user() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = seed_user(&conn, "owner");
+        let editor = seed_user(&conn, "editor");
+        let issue = seed_issue(&conn);
+        let att = create_attachment(&conn, "foreign", "f.png", "image/png", 1, Some(owner))
+            .unwrap();
+
+        sync_entity_links(
+            &conn,
+            AttachmentEntity::Issue,
+            issue,
+            &[att.id],
+            editor,
+            false,
+            Some(1),
+        )
+        .unwrap();
+        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue)
+            .unwrap()
+            .is_empty());
+
+        // Once the owner has placed the attachment in the same project, a
+        // maintainer editing another entity in that project may reference it.
+        link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
+        let second = queries::create_issue(
+            &conn,
+            &crate::db::models::CreateIssue {
+                project_id: queries::get_issue(&conn, issue).unwrap().project_id,
+                title: "second".into(),
+                description: String::new(),
+                status: "todo".into(),
+                priority: "medium".into(),
+                module_id: None,
+                start_date: None,
+                target_date: None,
+                labels: vec![],
+                source: None,
+            },
+        )
+        .unwrap()
+        .id;
+        sync_entity_links(
+            &conn,
+            AttachmentEntity::Issue,
+            second,
+            &[att.id],
+            editor,
+            false,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            list_for_entity(&conn, AttachmentEntity::Issue, second)
+                .unwrap()
+                .len(),
+            1
         );
     }
 

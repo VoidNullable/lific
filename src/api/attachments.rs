@@ -946,6 +946,28 @@ fn linked_attachment_events(
 
 // ── Authorization helpers ────────────────────────────────────
 
+/// Re-scan markdown references while preserving the caller's ownership and
+/// project scope for newly introduced attachment links.
+pub(crate) fn sync_links_scoped(
+    conn: &rusqlite::Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+    markdown: &str,
+    user: &AuthUser,
+    project_id: Option<i64>,
+) -> Result<(), LificError> {
+    let ids = q::parse_referenced_ids(markdown);
+    q::sync_entity_links(
+        conn,
+        entity,
+        entity_id,
+        &ids,
+        user.id,
+        user.is_admin,
+        project_id,
+    )
+}
+
 /// Resolve every distinct project id an attachment is linked into (via its
 /// issue/page/comment links). Empty when the attachment is unlinked.
 fn owning_project_ids(

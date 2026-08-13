@@ -10,7 +10,6 @@ use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_user, with_read};
-
 fn require_comment_viewer(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -81,9 +80,16 @@ fn create_for_parent(
             content,
             member_scoped,
         )?;
+        super::attachments::sync_links_scoped(
+            conn,
+            crate::db::models::AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+            &user,
+            project_id,
+        )?;
         Ok((comment, project_id))
     })?;
-
     if let Some(project_id) = project_id {
         realtime.send(match parent {
             CommentParent::Issue(issue_id) => issue_updated_event(project_id, issue_id),
@@ -200,6 +206,14 @@ pub(super) async fn update_comment_handler(
             CommentActor::from(&user),
             &input.content,
             member_scoped,
+        )?;
+        super::attachments::sync_links_scoped(
+            conn,
+            crate::db::models::AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+            &user,
+            project_id,
         )?;
         Ok((comment, context))
     })?;

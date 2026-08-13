@@ -120,14 +120,17 @@ pub(super) async fn create_page(
     Json(input): Json<CreatePage>,
 ) -> Result<Json<Page>, LificError> {
     require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
+    let user = super::require_user(&identity)?;
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::create_page(conn, &input)?;
         // LIF-262: link any attachments the content references.
-        crate::db::queries::attachments::sync_links(
+        super::attachments::sync_links_scoped(
             conn,
             AttachmentEntity::Page,
             page.id,
             &page.content,
+            &user,
+            page.project_id,
         )?;
         Ok(page)
     })?;
@@ -146,14 +149,17 @@ pub(super) async fn update_page(
 ) -> Result<Json<Page>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
     require_page_role(&db, &identity, project_id, Role::Maintainer)?;
+    let user = super::require_user(&identity)?;
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::update_page(conn, id, &input)?;
         // LIF-262: re-scan the (possibly edited) content and reconcile links.
-        crate::db::queries::attachments::sync_links(
+        super::attachments::sync_links_scoped(
             conn,
             AttachmentEntity::Page,
             page.id,
             &page.content,
+            &user,
+            page.project_id,
         )?;
         Ok(page)
     })?;
