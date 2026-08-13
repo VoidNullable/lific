@@ -3516,6 +3516,7 @@ impl LificMcp {
         // visible members, resolving the project from the comment's parent.
         let (project_id, parent, parent_identifier) =
             self.read(|conn| resolve_comment_context(conn, &existing))?;
+        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
         let member_scoped = crate::authz::authz_enforced(&self.db).map_err(|e| e.to_string())?;
 
         let c = self.write(|conn| {
@@ -3576,6 +3577,7 @@ impl LificMcp {
 
         let (project_id, parent, parent_identifier) =
             self.read(|conn| resolve_comment_context(conn, &existing))?;
+        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
 
         self.write(|conn| queries::comments::delete_comment(conn, input.comment_id))?;
         if let (Some(issue_id), Some(project_id)) = (existing.issue_id, project_id) {
