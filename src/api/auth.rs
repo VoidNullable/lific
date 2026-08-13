@@ -728,7 +728,9 @@ pub(super) struct UserListItem {
 
 pub(super) async fn list_users(
     State(db): State<DbPool>,
+    Extension(auth_user): Extension<Option<AuthUser>>,
 ) -> Result<Json<Vec<UserListItem>>, LificError> {
+    require_admin(&auth_user)?;
     with_read(&db, |conn| {
         let users = crate::db::queries::users::list_users(conn)?;
         Ok(users
@@ -853,6 +855,14 @@ mod tests {
         let data = parse_json(resp).await;
         assert_eq!(data["allow_signup"], true);
         assert_eq!(data["has_users"], true, "seeded admin counts as a human");
+    }
+
+    #[tokio::test]
+    async fn user_roster_requires_admin_authentication() {
+        assert!(super::require_admin(&None).is_err());
+
+        let app = test_app_with_auth(true);
+        assert_eq!(json_get(&app, "/api/users").await.status(), StatusCode::OK);
     }
 
     #[tokio::test]
