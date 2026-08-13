@@ -34,6 +34,7 @@
     type Module,
     type Label,
   } from "../api";
+  import { safeLabelColor } from "../labelColors";
   import { peekState, closePeek, notifyPeekSync } from "./peek.svelte";
   import { sheetDrag } from "../actions/sheetdrag"; // swipe-down dismiss (mobile sheet)
   import { updateIssueWithUndo } from "./state.svelte";
@@ -443,7 +444,7 @@
               <span
                 class="text-caption font-medium px-2 py-0.5 rounded-full border"
                 style={labelObj
-                  ? `color: ${labelObj.color}; border-color: ${labelObj.color}40; background: ${labelObj.color}10;`
+                  ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40; background: ${safeLabelColor(labelObj.color)}10;`
                   : "border-color: var(--border);"}
               >
                 {lbl}

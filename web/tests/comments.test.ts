@@ -28,6 +28,7 @@ const { deleteComment, updateComment } = await import("../src/lib/api");
 const originalFetch = globalThis.fetch;
 let vite: ViteDevServer;
 let Comments: Component<any>;
+let ColorPicker: Component<any>;
 let renderComponent: typeof import("svelte/server").render;
 
 beforeAll(async () => {
@@ -41,8 +42,9 @@ beforeAll(async () => {
     },
   });
   ({ default: Comments } = await vite.ssrLoadModule("/src/lib/Comments.svelte"));
+  ({ default: ColorPicker } = await vite.ssrLoadModule("/src/lib/ColorPicker.svelte"));
   ({ render: renderComponent } = await vite.ssrLoadModule("svelte/server"));
-}, 20_000);
+}, 60_000);
 
 afterAll(async () => {
   await vite.close();
@@ -96,6 +98,17 @@ test("renders mutation actions only for the comment author", () => {
 
   expect(owner).toContain("Comment 42 actions");
   expect(otherUser).not.toContain("Comment 42 actions");
+});
+
+test("renders unsafe stored label colors through the component fallback", () => {
+  const value = "red; background-image: url(https://example.test)";
+  const html = renderComponent(ColorPicker, {
+    props: { value, onChange: () => {} },
+  }).body;
+
+  expect(html).toContain("background: #6B7280");
+  expect(html).not.toContain(value);
+  expect(html).not.toContain("background-image");
 });
 
 test("marks comments edited only when the update timestamp changes", () => {

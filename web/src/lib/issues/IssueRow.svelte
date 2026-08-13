@@ -10,6 +10,7 @@
   // state instance; keeping them explicit here first makes the seam
   // reviewable and build-verifiable.
   import type { Issue, Label, Module } from "../api";
+  import { safeLabelColor } from "../labelColors";
   import { Check, Signal, Layers, PanelRight, ExternalLink, Copy } from "lucide-svelte";
   import { longpress } from "../actions/longpress"; // press-and-hold peek on touch
   import StatusIcon from "../StatusIcon.svelte";
@@ -330,7 +331,7 @@
         <span
           class="text-micro font-medium px-1.5 py-0.5 rounded-full
                  border border-[var(--border)]"
-          style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+          style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
         >
           {lbl}
         </span>

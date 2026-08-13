@@ -24,7 +24,7 @@
   import { Tag, Trash2, Plus, ArrowRight, Search } from "lucide-svelte";
   import ColorPicker from "./ColorPicker.svelte";
   import Skeleton from "./Skeleton.svelte";
-  import { colorForName, DEFAULT_LABEL_COLOR } from "./labelColors";
+  import { colorForName, DEFAULT_LABEL_COLOR, safeLabelColor } from "./labelColors";
 
   let {
     projectId,
@@ -364,7 +364,7 @@
             <button
               class="inline-flex items-center gap-1.5 text-caption font-medium px-2 py-1 rounded-full border
                      hover:brightness-110 transition"
-              style="color: {p.color}; border-color: {p.color}55; background: {p.color}12;"
+              style="color: {safeLabelColor(p.color)}; border-color: {safeLabelColor(p.color)}55; background: {safeLabelColor(p.color)}12;"
               onclick={() => create(p.name, p.color)}
             >
               <Plus size={11} />
@@ -390,7 +390,7 @@
         <div class="flex flex-wrap items-center gap-3 px-4 py-2.5 {idx > 0 ? 'border-t border-[var(--border)]' : ''}">
           {#if confirmingId === l.id}
             <!-- Delete / merge confirm (#4) -->
-            <span class="size-3 rounded-full shrink-0" style="background: {l.color}"></span>
+            <span class="size-3 rounded-full shrink-0" style="background: {safeLabelColor(l.color)}"></span>
             <div class="flex-1 min-w-0">
               <p class="text-body-sm text-[var(--text)]">
                 Delete <strong>{l.name}</strong>?
@@ -440,7 +440,7 @@
           {:else if !canEdit}
             <!-- Read-only display row (viewer): static dot + name, usage
                  count still links out to the filtered issue list. -->
-            <span class="size-3.5 rounded-full shrink-0" style="background: {l.color}"></span>
+            <span class="size-3.5 rounded-full shrink-0" style="background: {safeLabelColor(l.color)}"></span>
             <span class="flex-1 min-w-0 text-body-sm font-medium text-[var(--text)] truncate">{l.name}</span>
             {#if usageTotal(l.name) > 0}
               <button
@@ -519,7 +519,7 @@
             <button
               class="inline-flex items-center gap-1.5 text-caption font-medium px-2 py-1 rounded-full border
                      hover:brightness-110 transition"
-              style="color: {p.color}; border-color: {p.color}55; background: {p.color}12;"
+              style="color: {safeLabelColor(p.color)}; border-color: {safeLabelColor(p.color)}55; background: {safeLabelColor(p.color)}12;"
               onclick={() => create(p.name, p.color)}
             >
               <Plus size={11} />

@@ -25,6 +25,7 @@
     type Folder,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
+  import { safeLabelColor } from "./labelColors";
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { shortcutHelpState } from "./shortcutHelpState.svelte";
   import ProjectIcon from "./ProjectIcon.svelte";
@@ -713,7 +714,7 @@
                 {:else if c.color}
                   <span
                     class="size-2.5 rounded-full"
-                    style="background: {c.color}"
+                    style="background: {safeLabelColor(c.color)}"
                   ></span>
                 {/if}
               </span>

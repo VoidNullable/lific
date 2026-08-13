@@ -18,6 +18,7 @@
   // outside-click on window), so the open menu must stay in sync both ways.
   // All the actual mutations live in the parent and arrive as callbacks.
   import type { Module, Label } from "../api";
+  import { safeLabelColor } from "../labelColors";
   import { fly } from "svelte/transition";
   import { Trash2, X } from "lucide-svelte";
   import StatusIcon from "../StatusIcon.svelte";
@@ -196,7 +197,7 @@
               >
                 <span
                   class="size-2.5 rounded-full shrink-0"
-                  style="background: {lbl.color}"
+                  style="background: {safeLabelColor(lbl.color)}"
                 ></span>
                 <span class="truncate">{lbl.name}</span>
               </button>

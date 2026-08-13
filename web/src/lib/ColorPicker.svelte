@@ -10,6 +10,7 @@
     colorName,
     isValidHex,
     normalizeHex,
+    safeLabelColor,
   } from "./labelColors";
 
   let {
@@ -29,12 +30,13 @@
   let open = $state(false);
   let hexDraft = $state("");
   let hexBad = $state(false);
+  let displayValue = $derived(safeLabelColor(value));
 
   function toggle(e: MouseEvent) {
     e.stopPropagation();
     open = !open;
     if (open) {
-      hexDraft = value.replace(/^#/, "");
+      hexDraft = displayValue.replace(/^#/, "");
       hexBad = false;
     }
   }
@@ -62,9 +64,9 @@
     class="rounded-full shrink-0 border border-black/10 dark:border-white/15
            shadow-sm transition-transform hover:scale-105
            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-    style="width: {size}px; height: {size}px; background: {value}"
-    aria-label="Color: {colorName(value)}. Click to change."
-    title="{colorName(value)} · {value}"
+    style="width: {size}px; height: {size}px; background: {displayValue}"
+    aria-label="Color: {colorName(displayValue)}. Click to change."
+    title="{colorName(displayValue)} · {displayValue}"
     onclick={toggle}
   ></button>
 
@@ -79,7 +81,7 @@
     >
       <div class="grid grid-cols-6 gap-1.5 mb-2.5">
         {#each LABEL_PALETTE as c (c.value)}
-          {@const selected = c.value.toLowerCase() === value.toLowerCase()}
+          {@const selected = c.value.toLowerCase() === displayValue.toLowerCase()}
           <button
             type="button"
             class="size-6 rounded-full grid place-items-center transition-transform
