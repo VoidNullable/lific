@@ -33,7 +33,9 @@ pub enum ActivityScope {
 pub const MAX_LIMIT: i64 = 200;
 const DEFAULT_LIMIT: i64 = super::DEFAULT_PAGE_LIMIT;
 
-/// Return the trailing-24-hour activity count for the websocket's initial snapshot.
+/// Return trailing-24-hour logical mutations for the websocket's initial snapshot.
+/// Multi-field trigger rows are grouped by their realtime invalidation target so
+/// the result uses the same one-update unit as the client counter.
 /// `None` means unrestricted visibility; `Some` limits rows to visible projects.
 pub fn activity_count(
     conn: &Connection,
@@ -44,8 +46,12 @@ pub fn activity_count(
     };
 
     let sql = format!(
-        "SELECT COUNT(*) FROM audit_log a
-         WHERE a.ts >= datetime('now', '-24 hours'){project_filter}"
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM audit_log a
+             WHERE a.ts >= datetime('now', '-24 hours'){project_filter}
+             GROUP BY a.ts, a.actor_user_id, a.transport, a.action,
+                      a.project_id, a.issue_id, a.page_id, a.entity_type, a.entity_id
+         )"
     );
     conn.prepare_cached(&sql)?
         .query_row(
@@ -286,17 +292,27 @@ mod tests {
             // only events inside the rolling 24-hour window.
             conn.execute("UPDATE audit_log SET ts = datetime('now', '-25 hours')", [])
                 .unwrap();
-            queries::create_issue(&conn, &new_issue(first.id, "Fresh first")).unwrap();
+            let issue = queries::create_issue(&conn, &new_issue(first.id, "Fresh first")).unwrap();
+            queries::update_issue(
+                &conn,
+                issue.id,
+                &UpdateIssue {
+                    title: Some("Renamed first".into()),
+                    description: Some("Changed too".into()),
+                    ..no_update()
+                },
+            )
+            .unwrap();
             queries::create_issue(&conn, &new_issue(second.id, "Fresh second one")).unwrap();
             queries::create_issue(&conn, &new_issue(second.id, "Fresh second two")).unwrap();
             (first.id, second.id)
         };
 
         let conn = pool.read().unwrap();
-        assert_eq!(activity_count(&conn, None).unwrap(), 3);
+        assert_eq!(activity_count(&conn, None).unwrap(), 4);
         assert_eq!(
             activity_count(&conn, Some(&HashSet::from([first_project]))).unwrap(),
-            1
+            2
         );
         assert_eq!(
             activity_count(&conn, Some(&HashSet::from([second_project]))).unwrap(),

@@ -269,7 +269,7 @@
   }
 
   let activityRate = $derived.by(() => {
-    realtimeActivityRevision;
+    void realtimeActivityRevision;
     return selectActivityRate(realtimeActivityCounts(activityNow));
   });
 
