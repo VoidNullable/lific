@@ -452,18 +452,39 @@ pub async fn require_api_key(
             }
             // Resolve the user bound to this token at approval time (LIF-79).
             // Tokens issued before user binding existed have no user_id and
-            // stay anonymous (None), preserving the previous behavior.
-            let auth_user = crate::oauth::oauth_token_user_id(&auth.db, &token)
-                .and_then(|uid| {
-                    let conn = auth.db.read().ok()?;
-                    crate::db::queries::users::get_user_by_id(&conn, uid).ok()
-                })
-                .map(|u| crate::db::models::AuthUser {
-                    id: u.id,
-                    username: u.username,
-                    display_name: u.display_name,
-                    is_admin: u.is_admin,
-                });
+            // stay anonymous (None), preserving the previous behavior. A token
+            // that IS bound must resolve its user: a dangling binding (the bot
+            // was deleted, or the lookup failed) is a dead credential, not an
+            // anonymous one. Falling through as None would hand the caller the
+            // first-admin fallback — deleting an agent must never escalate its
+            // leftover token to operator (PR #23 review).
+            let auth_user = match crate::oauth::oauth_token_user_id(&auth.db, &token) {
+                None => None,
+                Some(uid) => {
+                    let user = auth.db.read().ok().and_then(|conn| {
+                        crate::db::queries::users::get_user_by_id(&conn, uid).ok()
+                    });
+                    match user {
+                        Some(u) => Some(crate::db::models::AuthUser {
+                            id: u.id,
+                            username: u.username,
+                            display_name: u.display_name,
+                            is_admin: u.is_admin,
+                        }),
+                        None => {
+                            if is_mcp_request {
+                                warn!("/mcp rejected: OAuth token bound to a missing user");
+                            }
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                [("WWW-Authenticate", www_auth.as_str())],
+                                "OAuth token bound to a missing or deleted user",
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+            };
             // LIF-155: OAuth tokens are programmatic access — 'mcp' when
             // aimed at /mcp (the normal case), 'api' against REST.
             let actor = crate::actor::ActorCtx {
@@ -1306,7 +1327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_token_for_deleted_user_resolves_to_none_not_panic() {
+    async fn oauth_token_for_deleted_user_is_rejected() {
         let pool = test_db();
         let user_id = {
             let conn = pool.write().unwrap();
@@ -1341,10 +1362,11 @@ mod tests {
             )
             .await
             .unwrap();
-        // Must not panic, and must not resolve to a phantom user.
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(bytes.as_ref(), b"none");
+        // PR #23 review: a token bound to a user that no longer exists is a
+        // dead credential, not an anonymous one. Anonymous would flow into
+        // the first-admin fallback — deleting a bot must never escalate its
+        // leftover token to operator.
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── LIF-131: api_keys.expires_at must be enforced at auth time ──────────

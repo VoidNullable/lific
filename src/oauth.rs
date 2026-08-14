@@ -1383,6 +1383,24 @@ async fn token_exchange(
             .into_response();
     }
 
+    // A code bound to a user must still resolve that user at exchange time —
+    // the bot may have been deleted between approval and exchange (PR #23
+    // review). Minting anyway would create a dangling-user token.
+    if let Some(uid) = code_user_id {
+        let exists = conn
+            .query_row("SELECT 1 FROM users WHERE id = ?1", params![uid], |_| {
+                Ok(())
+            })
+            .is_ok();
+        if !exists {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_grant", "error_description": "authorizing user no longer exists"})),
+            )
+                .into_response();
+        }
+    }
+
     // Mark code as used
     if let Err(e) = conn.execute(
         "UPDATE oauth_codes SET used = 1 WHERE code = ?1",
@@ -1501,7 +1519,23 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
         "consumed" => device_error(StatusCode::BAD_REQUEST, "invalid_grant", Some("device code already used")),
         "approved" => {
             // Mint the access token bound to the approving user, then mark the
-            // code consumed (single use).
+            // code consumed (single use). The bound user must still exist —
+            // the bot may have been deleted between approval and this poll
+            // (PR #23 review).
+            if let Some(uid) = row.user_id {
+                let exists = conn
+                    .query_row("SELECT 1 FROM users WHERE id = ?1", params![uid], |_| {
+                        Ok(())
+                    })
+                    .is_ok();
+                if !exists {
+                    return device_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        Some("authorizing user no longer exists"),
+                    );
+                }
+            }
             let scope = "mcp";
             let client_id = "device";
             // Ensure a client row exists so the FK on oauth_tokens is satisfied.

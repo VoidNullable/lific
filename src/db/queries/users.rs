@@ -794,6 +794,18 @@ pub fn disconnect_bot(
         "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
         params![bot_id],
     )?;
+    // Kill in-flight OAuth handshakes too (PR #23 review): an approved but
+    // not-yet-exchanged device code or auth code would otherwise mint a
+    // fresh token for the bot the owner just disconnected.
+    conn.execute(
+        "UPDATE oauth_device_codes SET status = 'denied' \
+         WHERE user_id = ?1 AND status IN ('pending', 'approved')",
+        params![bot_id],
+    )?;
+    conn.execute(
+        "UPDATE oauth_codes SET used = 1 WHERE user_id = ?1 AND used = 0",
+        params![bot_id],
+    )?;
 
     Ok(())
 }
@@ -814,6 +826,13 @@ pub fn delete_bot(
     // Delete the bot's OAuth tokens (LIFIC-13 follow-up): leaves no dangling
     // rows pointing at a removed identity.
     conn.execute("DELETE FROM oauth_tokens WHERE user_id = ?1", params![bot_id])?;
+    // And its in-flight OAuth handshakes (PR #23 review): a pending device or
+    // auth code bound to a deleted identity must not stay exchangeable.
+    conn.execute(
+        "DELETE FROM oauth_device_codes WHERE user_id = ?1",
+        params![bot_id],
+    )?;
+    conn.execute("DELETE FROM oauth_codes WHERE user_id = ?1", params![bot_id])?;
 
     // Delete any comments made by this bot (or reassign — deleting for now)
     conn.execute("DELETE FROM comments WHERE user_id = ?1", params![bot_id])?;
@@ -1161,6 +1180,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bot_rows, 0, "bot identity removed");
+    }
+
+    /// Seed an in-flight OAuth handshake pair (approved device code + unused
+    /// auth code) bound to `user_id`, for the disconnect/delete revocation
+    /// tests (PR #23 review).
+    fn insert_pending_handshakes_for(conn: &Connection, user_id: i64) {
+        conn.execute(
+            "INSERT INTO oauth_device_codes
+                (device_code_hash, user_code, expires_at, status, user_id)
+             VALUES ('devhash', 'BCDF-GHJK', datetime('now', '+1 hour'), 'approved', ?1)",
+            params![user_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
+             VALUES ('c1', 'Test', '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_codes
+                (code, client_id, redirect_uri, code_challenge, expires_at, user_id)
+             VALUES ('code1', 'c1', 'http://localhost/cb', 'ch', datetime('now', '+1 hour'), ?1)",
+            params![user_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn disconnect_bot_kills_in_flight_oauth_handshakes() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "claude-code", "Claude Code").unwrap();
+        insert_pending_handshakes_for(&conn, bot.id);
+
+        disconnect_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        let device_status: String = conn
+            .query_row(
+                "SELECT status FROM oauth_device_codes WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(device_status, "denied", "approved device code denied");
+        let code_used: i64 = conn
+            .query_row(
+                "SELECT used FROM oauth_codes WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(code_used, 1, "pending auth code burned");
+    }
+
+    #[test]
+    fn delete_bot_removes_in_flight_oauth_handshakes() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        insert_pending_handshakes_for(&conn, bot.id);
+
+        delete_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        let device_rows: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let code_rows: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_codes WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            (device_rows, code_rows),
+            (0, 0),
+            "no exchangeable handshakes survive bot deletion"
+        );
     }
 
     // ── list_bots / connected semantics (LIFIC-13 OAuth bots) ──
