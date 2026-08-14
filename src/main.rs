@@ -867,12 +867,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db::queries::settings::ensure(&conn, cfg.auth.allow_signup)?;
 
                 // LIF-215: single-user web auto-login hands an admin session to
-                // anyone who can load the page. That's fine on a private/local
-                // instance but dangerous when the server is publicly reachable.
-                // Use an https public_url as the "exposed" heuristic and shout.
-                if db::queries::settings::get(&conn)
+                // anyone who can load the page. It shares login-free mode's
+                // threat model, so it gets the same guard rail (PR #23 review):
+                // refuse outright on a non-loopback bind — the [auth] required
+                // check above doesn't see this DB flag, and a stale or toggled
+                // flag must not turn a public bind into passwordless admin.
+                // Behind a loopback bind with an https public_url (reverse
+                // proxy), keep the loud warning.
+                let auto_login = db::queries::settings::get(&conn)
                     .map(|s| s.web_auto_login)
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                if auto_login && !config::is_localhost_host(&cfg.server.host) {
+                    return Err(format!(
+                        "refusing to start: single-user web auto-login is enabled while \
+                         [server] host ({}) is not loopback — anyone who can reach that bind \
+                         gets an admin session without a password. Disable web auto-login \
+                         in the instance settings or bind to 127.0.0.1.",
+                        cfg.server.host
+                    )
+                    .into());
+                }
+                if auto_login
                     && cfg
                         .server
                         .public_url
@@ -1336,9 +1351,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // LIFIC-18: a stdio agent carries its identity in LIFIC_TOKEN. Read
             // it at startup, validate it, and resolve the caller as that agent
-            // for the whole session. A missing/invalid token runs as the
-            // operator with a stderr warning — never a hard error (MCP stdio
-            // has no transport auth; the launch boundary is the trust).
+            // for the whole session. A missing/unbound token runs as the
+            // operator with a stderr warning (MCP stdio has no transport auth;
+            // the launch boundary is the trust). A PRESENT-but-invalid token is
+            // a hard error: a revoked or mistyped agent credential must not
+            // silently fall back to higher-privilege operator access (PR #23
+            // review).
             let manager = auth::create_key_manager()?;
             let token_user = match auth::resolve_stdio_token(&pool, &manager) {
                 Ok(Some(user)) => Some(user),
@@ -1353,11 +1371,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None
                 }
                 Err(e) => {
-                    eprintln!(
-                        "LIFIC_TOKEN present but invalid ({e}) — this session runs as the \
-                         operator, not a connected agent."
-                    );
-                    None
+                    return Err(format!(
+                        "LIFIC_TOKEN is set but invalid ({e}); refusing to start. A revoked \
+                         or mistyped agent credential must not fall back to operator access. \
+                         Re-run `lific connect` to mint a fresh token, or unset LIFIC_TOKEN \
+                         to run as the operator."
+                    )
+                    .into());
                 }
             };
 
