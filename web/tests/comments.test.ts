@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Comment } from "../src/lib/api";
 import {
   canManageComment,
+  commentKeyboardAction,
   commentWasEdited,
   removeComment,
   replaceComment,
@@ -72,6 +73,14 @@ test("only the comment author gets web mutation actions", () => {
   expect(canManageComment(own, { id: 3 }, true)).toBe(true);
   expect(canManageComment(own, { id: 9 }, true)).toBe(false);
   expect(canManageComment(own, { id: 3 }, false)).toBe(false);
+});
+
+test("routes comment shortcuts by the focused interaction", () => {
+  expect(commentKeyboardAction("new", "Enter", true)).toBe("submit");
+  expect(commentKeyboardAction("edit", "Enter", true)).toBe("save");
+  expect(commentKeyboardAction("edit", "Escape", false)).toBe("cancel");
+  expect(commentKeyboardAction("menu", "Escape", false)).toBe("close-menu");
+  expect(commentKeyboardAction("new", "Escape", false)).toBeNull();
 });
 
 test("renders mutation actions only for the comment author", () => {

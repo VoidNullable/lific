@@ -1,5 +1,24 @@
 import type { Comment } from "./api";
 
+export type CommentKeyboardContext = "new" | "edit" | "menu";
+export type CommentKeyboardAction = "submit" | "save" | "cancel" | "close-menu";
+
+export function commentKeyboardAction(
+  context: CommentKeyboardContext,
+  key: string,
+  modified: boolean,
+): CommentKeyboardAction | null {
+  if (key === "Enter" && modified) {
+    if (context === "new") return "submit";
+    if (context === "edit") return "save";
+  }
+  if (key === "Escape") {
+    if (context === "edit") return "cancel";
+    if (context === "menu") return "close-menu";
+  }
+  return null;
+}
+
 export function canManageComment(
   comment: Comment,
   currentUser: { id: number } | null,

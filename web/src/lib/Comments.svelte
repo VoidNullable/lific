@@ -33,7 +33,12 @@
   import { createUploadController } from "./attachments/uploads.svelte";
   import DropOverlay from "./attachments/DropOverlay.svelte";
   import PendingUploads from "./attachments/PendingUploads.svelte";
-  import { canManageComment, commentWasEdited } from "./commentState";
+  import {
+    canManageComment,
+    commentKeyboardAction,
+    commentWasEdited,
+    type CommentKeyboardContext,
+  } from "./commentState";
 
   let {
     comments,
@@ -269,18 +274,28 @@
     }
   }
 
-  function onKeydown(e: KeyboardEvent) {
+  function onKeydown(e: KeyboardEvent, context: Exclude<CommentKeyboardContext, "menu">) {
     // The mention popover consumes ↑/↓/Enter/Tab/Esc while open.
     if (onMentionKeydown(e)) return;
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      if (editingId === null) submit();
-      else saveEdit();
-    }
-    if (e.key === "Escape" && editingId !== null) {
-      e.preventDefault();
+    const action = commentKeyboardAction(context, e.key, e.metaKey || e.ctrlKey);
+    if (!action) return;
+    e.preventDefault();
+    if (action === "submit") void submit();
+    if (action === "save") void saveEdit();
+    if (action === "cancel") {
+      // The editor disappears synchronously, so DocumentDetail can no longer
+      // detect a focused textarea when the event reaches its window handler.
+      e.stopPropagation();
       cancelEdit();
     }
+  }
+
+  function onMenuKeydown(e: KeyboardEvent) {
+    if (menuId === null || commentKeyboardAction("menu", e.key, e.metaKey || e.ctrlKey) !== "close-menu") return;
+    e.preventDefault();
+    e.stopPropagation();
+    menuId = null;
+    confirmDeleteId = null;
   }
 
   function onInput() {
@@ -463,11 +478,10 @@
                       menuId = menuId === comment.id ? null : comment.id;
                       confirmDeleteId = null;
                     }}
-                    onfocus={() => (menuId = comment.id)}
-                    onkeydown={(e) => { if (e.key === "Escape") menuId = null; }}
+                    onkeydown={onMenuKeydown}
                   ><MoreHorizontal size={16} /></button>
                   {#if menuId === comment.id}
-                    <div class="cmt__menu" role="menu" aria-label={`Comment ${comment.id} actions`}>
+                    <div class="cmt__menu" role="menu" tabindex="-1" aria-label={`Comment ${comment.id} actions`} onkeydown={onMenuKeydown}>
                       {#if confirmDeleteId === comment.id}
                         <p>Delete this comment?</p>
                         <div class="cmt__menu-confirm">
@@ -489,7 +503,7 @@
               <DropOverlay onFiles={(files) => editUploads.enqueue(files)}>
                 <div class="cmt__composer cmt__editor">
                   <div class="cmt__input-wrap">
-                    <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={onKeydown} onclick={updateMentionContext} onpaste={(e) => onPaste(e, true)}></textarea>
+                    <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={(e) => onKeydown(e, "edit")} onclick={updateMentionContext} onpaste={(e) => onPaste(e, true)}></textarea>
                     {#if mentionOpen && mentionMatches.length > 0}
                       <ul class="mention-pop" role="listbox" aria-label="Mention a user">
                         {#each mentionMatches as cand, i (cand.user_id)}
@@ -537,7 +551,7 @@
           {placeholder}
           class="cmt__input"
           oninput={onInput}
-          onkeydown={onKeydown}
+          onkeydown={(e) => onKeydown(e, "new")}
           onclick={updateMentionContext}
           onpaste={onPaste}
           onblur={() => setTimeout(() => (mentionOpen = false), 120)}
