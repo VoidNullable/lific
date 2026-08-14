@@ -228,10 +228,11 @@ fn render_toml(existing: &str, entry: &CompiledEntry) -> Result<String, WriteErr
     Ok(doc.to_string())
 }
 
-/// Convert a JSON scalar/array (the compiled entry's shape) into a toml_edit
-/// value. Codex entries only ever contain strings and string arrays.
+/// Convert a JSON scalar/array/object (the compiled entry's shape) into a
+/// toml_edit value. Codex entries carry strings, string arrays, and — for the
+/// stdio agent token (LIFIC-18) — a nested `env` object of strings.
 fn json_to_toml_value(v: &serde_json::Value) -> Result<toml_edit::Item, WriteError> {
-    use toml_edit::{Array, Item, Value, value};
+    use toml_edit::{Array, Item, Value, value, InlineTable};
     match v {
         serde_json::Value::String(s) => Ok(value(s.as_str())),
         serde_json::Value::Bool(b) => Ok(value(*b)),
@@ -258,6 +259,19 @@ fn json_to_toml_value(v: &serde_json::Value) -> Result<toml_edit::Item, WriteErr
                 }
             }
             Ok(Item::Value(Value::Array(a)))
+        }
+        // A nested string-only object becomes an inline table, mirroring how
+        // a tool's stdio `env = { LIFIC_TOKEN = "..." }` is conventionally
+        // written. The key carries the token (LIFIC-18).
+        serde_json::Value::Object(map) => {
+            let mut inline = InlineTable::new();
+            for (k, vv) in map {
+                let s = vv.as_str().ok_or_else(|| {
+                    WriteError::new(format!("unsupported TOML object value for `{k}`"))
+                })?;
+                inline.insert(k, Value::from(s.to_string()));
+            }
+            Ok(Item::Value(Value::InlineTable(inline)))
         }
         other => Err(WriteError::new(format!("unsupported TOML value: {other}"))),
     }

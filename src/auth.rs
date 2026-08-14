@@ -8,9 +8,10 @@ use axum::{
 use rusqlite::params;
 use tracing::{info, warn};
 
-use api_keys_simplified::{ApiKeyManagerV0, Environment, ExposeSecret, KeyStatus, SecureString};
+use api_keys_simplified::{ApiKeyManagerV0, Environment, ExposeSecret, KeyStatus};
 
 use crate::db::DbPool;
+use crate::db::models::AuthUser;
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -164,6 +165,29 @@ pub fn has_any_keys(db: &DbPool) -> bool {
     }
 }
 
+/// Whether a first human (non-bot) operator exists yet.
+pub fn has_human_operator(db: &DbPool) -> bool {
+    if let Ok(conn) = db.read() {
+        crate::db::queries::users::has_human_users(&conn).unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// LIFIC-9: whether to auto-mint the "default" unbound API key at startup.
+///
+/// This is the single decision both `lific init` and `lific start` share. Under
+/// the new design a human operator is created at `init` (passwordless mode), so
+/// an unbound operator-style key should no longer be minted as the default path
+/// — the operator *is* a real user now. The "default" key is still available on
+/// demand via `lific key create`. We mint it only for the genuinely empty
+/// bootstrap (no users at all, no keys) so a headless/agent-first install can
+/// still get a credential before any human exists — and once a human exists we
+/// never auto-mint it again, even if all keys were later revoked.
+pub fn should_mint_initial_key(db: &DbPool) -> bool {
+    !has_any_keys(db) && !has_human_operator(db)
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ApiKeyInfo {
@@ -206,6 +230,36 @@ fn is_attachment_download(method: &Method, path: &str) -> bool {
     };
     let id = rest.strip_suffix('/').unwrap_or(rest);
     !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// LIFIC-8: resolve the caller's identity and stamp it into the request
+/// extension *alongside* the legacy `Option<AuthUser>`. Best-effort by design
+/// during the expand step — a resolve failure (DB fault, read-lock poisoning)
+/// is logged and degrades to `None` so auth itself never breaks. LIFIC-10
+/// will make the downstream gates read this; until then nothing consumes it.
+///
+/// `default` is the transport the credential-type implies when the request
+/// is NOT aimed at `/mcp` (session → web, key/oauth → api).
+fn insert_resolved_identity(
+    request: &mut Request<Body>,
+    db: &DbPool,
+    credential_user: Option<crate::db::models::AuthUser>,
+    is_mcp_request: bool,
+    default: crate::actor::Transport,
+) {
+    let transport = if is_mcp_request {
+        crate::actor::Transport::Mcp
+    } else {
+        default
+    };
+    let resolved = match crate::resolve_caller::resolve_caller(db, credential_user, transport) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(error = %e, "resolved-identity lookup failed; degrading to None");
+            None
+        }
+    };
+    request.extensions_mut().insert(resolved);
 }
 
 /// Axum middleware that validates Bearer tokens and resolves user identity.
@@ -289,6 +343,13 @@ pub async fn require_api_key(
                     user_id: Some(auth_user.id),
                     transport: crate::actor::Transport::Web,
                 };
+                insert_resolved_identity(
+                    &mut request,
+                    &auth.db,
+                    Some(auth_user.clone()),
+                    false,
+                    crate::actor::Transport::Web,
+                );
                 request.extensions_mut().insert(Some(auth_user));
                 return crate::actor::scope(actor, next.run(request)).await;
             }
@@ -302,23 +363,23 @@ pub async fn require_api_key(
         // config surfaces as an error instead of silently degrading to
         // anonymous-with-admin-powers.
         if !auth.required {
+            let default = if is_mcp_request {
+                crate::actor::Transport::Mcp
+            } else {
+                crate::actor::Transport::Api
+            };
             let actor = crate::actor::ActorCtx {
                 user_id: None,
-                transport: if is_mcp_request {
-                    crate::actor::Transport::Mcp
-                } else {
-                    crate::actor::Transport::Api
-                },
+                transport: default,
             };
+            // LIFIC-8: resolve the passwordless identity (first-admin
+            // fallback). resolve_caller handles the operator bypass — no
+            // separate carrier needed (LIFIC-14 deleted the last of them).
+            insert_resolved_identity(&mut request, &auth.db, None, is_mcp_request, default);
             request
                 .extensions_mut()
                 .insert(Option::<crate::db::models::AuthUser>::None);
-            request.extensions_mut().insert(OperatorCredential);
-            return crate::actor::scope(
-                actor,
-                crate::authz::operator_scope(true, next.run(request)),
-            )
-            .await;
+            return crate::actor::scope(actor, next.run(request)).await;
         }
 
         if is_mcp_request {
@@ -362,6 +423,13 @@ pub async fn require_api_key(
                         crate::actor::Transport::Web
                     },
                 };
+                insert_resolved_identity(
+                    &mut request,
+                    &auth.db,
+                    Some(auth_user.clone()),
+                    is_mcp_request,
+                    crate::actor::Transport::Web,
+                );
                 request.extensions_mut().insert(Some(auth_user));
                 return crate::actor::scope(actor, next.run(request)).await;
             }
@@ -406,6 +474,13 @@ pub async fn require_api_key(
                     crate::actor::Transport::Api
                 },
             };
+            insert_resolved_identity(
+                &mut request,
+                &auth.db,
+                auth_user.clone(),
+                is_mcp_request,
+                crate::actor::Transport::Api,
+            );
             request.extensions_mut().insert(auth_user);
             return crate::actor::scope(actor, next.run(request)).await;
         }
@@ -421,31 +496,109 @@ pub async fn require_api_key(
     }
 
     // ── API keys (lific_sk- prefix) ──────────────────────────────
-    let secure_token = SecureString::from(token);
-
-    // Fast checksum pre-check: reject malformed keys in ~20μs without touching DB
-    match auth.manager.verify_checksum(&secure_token) {
-        Ok(true) => {} // valid checksum, proceed to DB lookup
-        _ => {
+    // LIFIC-18: shared with the stdio LIFIC_TOKEN resolver so the
+    // checksum/lookup/backfill/hash logic lives in one place (see
+    // `validate_api_key` just below `ApiKeyRow`).
+    let auth_user = match validate_api_key(&auth.db, &auth.manager, &token) {
+        Ok(user) => user,
+        Err(ApiKeyReject::BadChecksum) => {
             warn!("rejected API key with invalid checksum");
-            return (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", www_auth.as_str())],
-                "Invalid API key",
-            )
-                .into_response();
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
         }
+        Err(ApiKeyReject::Db) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
+        Err(ApiKeyReject::NotFound) => {
+            warn!("rejected invalid API key");
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
+        }
+        Err(ApiKeyReject::HashMismatch) => {
+            warn!("API key hash verification failed");
+            return (StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
+        }
+    };
+
+    // LIF-155: API keys are programmatic — 'mcp' on the /mcp path, 'api' for
+    // direct REST usage. The LIF-261 operator bypass for an unbound key
+    // (user_id = None) now lives entirely in `resolve_caller` (inserted above),
+    // which falls back to the first admin — read as `identity.user.is_admin` by
+    // the gates. The old credential-type-specific `OperatorCredential` marker
+    // and `operator_scope` task-local are gone (LIFIC-14).
+    let actor = crate::actor::ActorCtx {
+        user_id: auth_user.as_ref().map(|u| u.id),
+        transport: if is_mcp_request {
+            crate::actor::Transport::Mcp
+        } else {
+            crate::actor::Transport::Api
+        },
+    };
+    insert_resolved_identity(
+        &mut request,
+        &auth.db,
+        auth_user.clone(),
+        is_mcp_request,
+        crate::actor::Transport::Api,
+    );
+    request.extensions_mut().insert(auth_user);
+    crate::actor::scope(actor, next.run(request)).await
+}
+
+/// Internal struct for loading API key rows during auth.
+#[derive(Debug)]
+struct ApiKeyRow {
+    #[allow(dead_code)]
+    id: i64,
+    hash: String,
+    user_id: Option<i64>,
+}
+
+/// Why an API key failed to authenticate. Maps to both the HTTP response and
+/// the stdio-resolver error, so both callers share one decision.
+#[derive(Debug, Clone, Copy)]
+enum ApiKeyReject {
+    /// A database read/write failed (backend fault, not a bad key).
+    Db,
+    /// The key didn't pass the format checksum.
+    BadChecksum,
+    /// The key is well-formed but matches no active key.
+    NotFound,
+    /// A matching key exists but the stored hash didn't verify.
+    HashMismatch,
+}
+
+/// Shared API-key authentication for both the HTTP middleware and the stdio
+/// `LIFIC_TOKEN` resolver. Verifies the checksum, resolves the key row by
+/// derived key_id (with the pre-migration-010 scan-and-backfill fallback), and
+/// verifies the stored hash — exactly one copy of that logic (LIFIC-18 review:
+/// previously duplicated between `require_api_key` and `resolve_api_key_user`).
+///
+/// Returns `Ok(Some(user))` for a valid bound key, `Ok(None)` for a valid but
+/// unbound key (the caller falls that back to the operator), and
+/// `Err(reject)` when the key does not authenticate.
+fn validate_api_key(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    token: &str,
+) -> Result<Option<AuthUser>, ApiKeyReject> {
+    use api_keys_simplified::SecureString;
+
+    let secure_token = SecureString::from(token.to_string());
+
+    // Fast checksum pre-check: reject malformed keys in ~20μs without touching DB.
+    match manager.verify_checksum(&secure_token) {
+        Ok(true) => {}
+        _ => return Err(ApiKeyReject::BadChecksum),
     }
 
-    // Compute deterministic key ID (BLAKE3, ~microseconds) for O(1) DB lookup
-    let key_id = auth.manager.extract_key_id(&secure_token);
+    // Compute deterministic key ID (BLAKE3, ~microseconds) for O(1) DB lookup.
+    let key_id = manager.extract_key_id(&secure_token);
 
-    // Look up the single matching key by key_id (indexed query)
+    // Look up the single matching key by key_id (indexed query).
     let key_row: Option<ApiKeyRow> = {
-        let conn = match auth.db.read() {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
+        let conn = db.read().map_err(|_| ApiKeyReject::Db)?;
         conn.query_row(
             "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
              AND (expires_at IS NULL OR expires_at > datetime('now'))",
@@ -461,9 +614,9 @@ pub async fn require_api_key(
         .ok()
     };
 
-    // Fallback: keys created before migration 010 have no key_id — scan those
+    // Fallback: keys created before migration 010 have no key_id — scan those.
     let key_row = key_row.or_else(|| {
-        let conn = auth.db.read().ok()?;
+        let conn = db.read().ok()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0 \
@@ -481,11 +634,10 @@ pub async fn require_api_key(
             .ok()?
             .filter_map(|r| r.ok())
             .collect();
-
         for row in rows {
-            if let Ok(KeyStatus::Valid) = auth.manager.verify(&secure_token, &row.hash) {
-                // Backfill the key_id so future lookups are O(1)
-                if let Ok(wconn) = auth.db.write() {
+            if let Ok(KeyStatus::Valid) = manager.verify(&secure_token, &row.hash) {
+                // Backfill the key_id so future lookups are O(1).
+                if let Ok(wconn) = db.write() {
                     let _ = wconn.execute(
                         "UPDATE api_keys SET key_id = ?1 WHERE id = ?2",
                         params![key_id, row.id],
@@ -498,21 +650,16 @@ pub async fn require_api_key(
     });
 
     let Some(key) = key_row else {
-        warn!("rejected invalid API key");
-        return (
-            StatusCode::UNAUTHORIZED,
-            [("WWW-Authenticate", www_auth.as_str())],
-            "Invalid API key",
-        )
-            .into_response();
+        return Err(ApiKeyReject::NotFound);
     };
 
-    // Verify the key against the stored Argon2 hash
-    match auth.manager.verify(&secure_token, &key.hash) {
+    match manager.verify(&secure_token, &key.hash) {
         Ok(KeyStatus::Valid) => {
-            // Resolve user if the key has a user_id
+            // Resolve the user if the key has a user_id. A valid-but-unbound
+            // key (legacy, or a fresh-install unassigned key) is Ok(None) — the
+            // caller falls back to the operator.
             let auth_user = key.user_id.and_then(|uid| {
-                let conn = auth.db.read().ok()?;
+                let conn = db.read().ok()?;
                 crate::db::queries::users::get_user_by_id(&conn, uid)
                     .ok()
                     .map(|u| crate::db::models::AuthUser {
@@ -522,65 +669,50 @@ pub async fn require_api_key(
                         is_admin: u.is_admin,
                     })
             });
-            // LIF-261: an API key with NO user binding is operator-trusted —
-            // it can only be minted with shell access to the server, so it's
-            // admin-equivalent in enforced mode. This is the ONE credential
-            // path that sets the operator signal; OAuth/session tokens never
-            // do, so a legacy unbound OAuth token (also `AuthUser = None`)
-            // stays default-denied. Keyed off the DB binding, not the resolved
-            // `auth_user`, so a key bound to a since-deleted user does NOT
-            // silently become an operator.
-            let is_operator = key.user_id.is_none();
-            // LIF-155: API keys are programmatic — 'mcp' on the /mcp
-            // path, 'api' for direct REST usage.
-            let actor = crate::actor::ActorCtx {
-                user_id: auth_user.as_ref().map(|u| u.id),
-                transport: if is_mcp_request {
-                    crate::actor::Transport::Mcp
-                } else {
-                    crate::actor::Transport::Api
-                },
-            };
-            request.extensions_mut().insert(auth_user);
-            // The /mcp route reads this marker to pass the operator flag into
-            // `with_request_identity`; REST reads the task-local scoped below.
-            if is_operator {
-                request.extensions_mut().insert(OperatorCredential);
-            }
-            crate::actor::scope(
-                actor,
-                crate::authz::operator_scope(is_operator, next.run(request)),
-            )
-            .await
+            Ok(auth_user)
         }
-        _ => {
-            warn!("API key hash verification failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", www_auth.as_str())],
-                "Invalid API key",
-            )
-                .into_response()
-        }
+        _ => Err(ApiKeyReject::HashMismatch),
     }
 }
 
-/// LIF-261: request-extension marker inserted by [`require_api_key`] when the
-/// authenticated credential is an operator-trusted unbound API key. The `/mcp`
-/// route reads it (via `request.extensions().get::<OperatorCredential>()`) to
-/// forward the operator flag into `mcp::with_request_identity`. REST handlers
-/// don't read it — they see the operator signal through the task-local scoped
-/// by `authz::operator_scope` around the same request.
-#[derive(Clone, Copy)]
-pub struct OperatorCredential;
+/// LIFIC-18: resolve an API key (e.g. the `LIFIC_TOKEN` carried by a stdio
+/// agent) to its bound user, without an HTTP request context.
+///
+/// Returns `Some(user)` when the key is valid AND bound to a user; `Ok(None)`
+/// for a valid-but-unbound key (the stdio session then falls back to the
+/// operator). An invalid/unrecognized key is an error so the caller can warn
+/// loudly and still degrade to the operator fallback.
+pub fn resolve_api_key_user(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    token: &str,
+) -> Result<Option<AuthUser>, String> {
+    // Reuse the shared validator (same checksum/lookup/backfill/hash logic the
+    // HTTP middleware runs). Mapping the typed rejection to a human string
+    // keeps the stdio resolver vendoring nothing of its own.
+    validate_api_key(db, manager, token).map_err(|reject| match reject {
+        ApiKeyReject::Db => "database error".to_string(),
+        ApiKeyReject::BadChecksum => "invalid API key checksum".to_string(),
+        ApiKeyReject::NotFound => "invalid API key".to_string(),
+        ApiKeyReject::HashMismatch => "API key hash verification failed".to_string(),
+    })
+}
 
-/// Internal struct for loading API key rows during auth.
-#[derive(Debug)]
-struct ApiKeyRow {
-    #[allow(dead_code)]
-    id: i64,
-    hash: String,
-    user_id: Option<i64>,
+/// LIFIC-18: resolve the `LIFIC_TOKEN` a stdio agent carries into its bound
+/// user. `Ok(None)` when the token is absent, empty, or valid-but-unbound —
+/// the session runs as the operator. `Err` when a token was present but
+/// invalid (checksum/DB/hash failure), so the stdio entrypoint can emit a
+/// distinct warning while still degrading to the operator fallback.
+pub fn resolve_stdio_token(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+) -> Result<Option<AuthUser>, String> {
+    let raw = std::env::var("LIFIC_TOKEN").unwrap_or_default();
+    let token = raw.trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    resolve_api_key_user(db, manager, token)
 }
 
 #[cfg(test)]
@@ -595,6 +727,11 @@ mod tests {
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
     }
+
+    // Serializes env mutation (LIFIC_TOKEN) across the stdio-token tests —
+    // the process env is global, so every test that touches it must share one
+    // lock, not declare its own.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn create_key_returns_valid_format() {
@@ -757,6 +894,32 @@ mod tests {
         let manager = create_key_manager().unwrap();
         create_api_key(&pool, &manager, "first").unwrap();
         assert!(has_any_keys(&pool));
+    }
+
+    // LIFIC-9: the initial-key decision is shared by `init` and `start`.
+    #[test]
+    fn should_mint_initial_key_empty_bootstrap_mints() {
+        let pool = test_db();
+        // No humans, no keys: the genuinely empty bootstrap.
+        assert!(should_mint_initial_key(&pool));
+    }
+
+    #[test]
+    fn should_mint_initial_key_false_once_a_human_operator_exists() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        crate::db::queries::users::create_passwordless_admin(&conn, "Blake").unwrap();
+        drop(conn);
+        // A human exists even with zero keys: passwordless mode, no mint.
+        assert!(!should_mint_initial_key(&pool));
+    }
+
+    #[test]
+    fn should_mint_initial_key_false_when_any_key_exists() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "first").unwrap();
+        assert!(!should_mint_initial_key(&pool));
     }
 
     #[test]
@@ -942,6 +1105,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_token_bound_to_bot_resolves_to_the_bot_identity() {
+        // LIFIC-13: at OAuth approval Lific mints a per-tool bot and binds the
+        // issued token to it. The middleware must resolve that token to the bot
+        // (which authz then raises to the bot's owner for permissions).
+        let pool = test_db();
+        let bot_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "claude-code-blake".into(),
+                    email: "claude-code-blake@bot.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: Some("Claude Code".into()),
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let token = insert_oauth_token(&pool, "bot", Some(bot_id));
+
+        let resp = identity_echo_app(test_auth_state(&pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.as_ref().to_vec()).unwrap();
+        assert!(
+            body.contains(&format!("id:{bot_id}:claude-code-blake")),
+            "OAuth token must resolve to the per-tool bot, got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_api_key_without_user_resolves_to_none_via_middleware() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
@@ -976,15 +1182,19 @@ mod tests {
         Router::new()
             .route(
                 "/probe",
-                get(move || {
-                    let pool = pool.clone();
-                    async move {
-                        match crate::authz::visible_project_ids(&pool, &None).unwrap() {
-                            None => "unrestricted".to_string(),
-                            Some(ids) => format!("restricted:{}", ids.len()),
+                get(
+                    move |Extension(identity): Extension<
+                        Option<crate::resolve_caller::ResolvedIdentity>,
+                    >| {
+                        let pool = pool.clone();
+                        async move {
+                            match crate::authz::visible_project_ids(&pool, &identity).unwrap() {
+                                None => "unrestricted".to_string(),
+                                Some(ids) => format!("restricted:{}", ids.len()),
+                            }
                         }
-                    }
-                }),
+                    },
+                ),
             )
             .layer(middleware::from_fn_with_state(auth_state, require_api_key))
     }
@@ -992,6 +1202,7 @@ mod tests {
     #[tokio::test]
     async fn auth_not_required_credentialless_request_passes_as_operator() {
         let pool = test_db();
+        seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         enable_enforcement(&pool);
         let mut state = test_auth_state(&pool);
         state.required = false;
@@ -1253,14 +1464,14 @@ mod tests {
         assert_eq!(stored.as_deref(), Some("2030-06-01"));
     }
 
-    // ── LIF-261: operator-key trust rule, end-to-end through the middleware ──
+    // ── LIF-261 / LIFIC-7: operator-key trust rule, end-to-end through the middleware ──
     //
-    // The auth middleware sets `authz::operator_scope(true, ..)` ONLY on the
-    // unbound-API-key path. These drive a real route that runs
+    // resolve_caller maps any credential that authenticates but resolves no
+    // user (unbound API key, legacy unbound OAuth token, "auth off" request)
+    // to the first admin — so an unbound key passes the gate via
+    // `identity.user.is_admin`. These drive a real route that runs
     // `authz::require_role(.., Viewer)` in enforced mode behind the real
-    // `require_api_key`, so a 200 means the gate passed and a 403 means it
-    // denied — proving the credential-type signal reaches authz and that a
-    // legacy unbound OAuth token (also `None`) does NOT get the bypass.
+    // `require_api_key`: a 200 means the gate passed, a 403 means it denied.
 
     fn enable_enforcement(pool: &db::DbPool) {
         let conn = pool.write().unwrap();
@@ -1295,11 +1506,11 @@ mod tests {
     fn gate_app(auth_state: AuthState, pool: db::DbPool, project_id: i64) -> Router {
         async fn gate(
             State((pool, project_id)): State<(db::DbPool, i64)>,
-            Extension(auth_user): Extension<Option<crate::db::models::AuthUser>>,
+            Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
         ) -> Result<String, crate::error::LificError> {
             crate::authz::require_role(
                 &pool,
-                &auth_user,
+                &identity,
                 project_id,
                 crate::db::models::Role::Viewer,
             )?;
@@ -1327,6 +1538,7 @@ mod tests {
     #[tokio::test]
     async fn enforced_operator_unbound_key_passes_viewer_gate_via_middleware() {
         let pool = test_db();
+        seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         let manager = create_key_manager().unwrap();
         let key = create_api_key(&pool, &manager, "operator").unwrap(); // unbound
         let project = seed_project_id(&pool, "OPM");
@@ -1349,13 +1561,17 @@ mod tests {
         let project = seed_project_id(&pool, "OAM");
         enable_enforcement(&pool);
         // Unbound OAuth token (user_id = None) — the LIF-204 legacy case.
+        // No admin is seeded, so resolve_caller returns None and the enforced
+        // gate default-denies. (With an admin present, resolve_caller would
+        // resolve it to first_admin — the operator bypass is "the first admin
+        // is trusted," not credential-type-specific.)
         let token = insert_oauth_token(&pool, "legacy-unbound", None);
 
         let app = gate_app(test_auth_state(&pool), pool.clone(), project);
         assert_eq!(
             gate_status(app, &token).await,
             StatusCode::FORBIDDEN,
-            "a legacy unbound OAuth token must NOT gain operator power — it stays default-denied"
+            "with no admin to resolve to, a credential-less request stays default-denied"
         );
     }
 
@@ -1496,5 +1712,321 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("cookie", "other=1; another=2".parse().unwrap());
         assert_eq!(session_cookie_token(&headers), None);
+    }
+
+    // ── LIFIC-8: middleware inserts ResolvedIdentity alongside Option<AuthUser> ──
+    //
+    // `require_api_key` now also inserts `Extension<ResolvedIdentity>` (when a
+    // user can be resolved) at every success branch. These drive the real
+    // middleware through a handler that echoes the identity back, asserting
+    // the resolved user AND the transport for each credential type — including
+    // the first-admin passwordless fallback for the credential-less and
+    // unbound-credential paths.
+
+    fn seed_admin(pool: &db::DbPool, username: &str) -> i64 {
+        let conn = pool.write().unwrap();
+        let u = crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: username.into(),
+                email: format!("{username}@local.test"),
+                password: "adminpass123".into(),
+                display_name: Some(format!("Admin {username}")),
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        u.id
+    }
+
+    /// Echo handler that reports the `ResolvedIdentity` the middleware
+    /// resolved, mirroring `echo_app` but for the new identity type.
+    fn identity_echo_app(auth_state: AuthState) -> Router {
+        async fn echo(
+            Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+        ) -> String {
+            match identity {
+                Some(id) => format!(
+                    "id:{}:{}:{}:{}",
+                    id.user.id,
+                    id.user.username,
+                    id.user.is_admin,
+                    id.transport.as_str()
+                ),
+                None => "none".to_string(),
+            }
+        }
+        Router::new()
+            .route("/echo", get(echo))
+            .layer(middleware::from_fn_with_state(auth_state, require_api_key))
+    }
+
+    async fn identity_body(app: Router, auth: Option<&str>) -> String {
+        let mut req = Request::builder().uri("/echo");
+        if let Some(token) = auth {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.as_ref().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolved_identity_session_token_is_the_user_on_web_transport() {
+        let pool = test_db();
+        let (token, user_id) = {
+            let conn = pool.write().unwrap();
+            let u = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "sessuser".into(),
+                    email: "sessuser@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let token = crate::db::queries::users::create_session(&conn, u.id, None)
+                .unwrap()
+                .token;
+            (token, u.id)
+        };
+
+        let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&token)).await;
+        assert_eq!(
+            body,
+            format!("id:{user_id}:sessuser:false:web"),
+            "session token must resolve to its user on the web transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_identity_bound_api_key_resolves_to_bound_user() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "bound").unwrap();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            let u = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "keyuser".into(),
+                    email: "keyuser@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, "bound", u.id).unwrap();
+            u.id
+        };
+
+        let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&key)).await;
+        assert_eq!(
+            body,
+            format!("id:{user_id}:keyuser:false:api"),
+            "a user-bound API key must resolve to that user on the api transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_identity_bound_oauth_token_resolves_to_bound_user() {
+        let pool = test_db();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "oauthuser".into(),
+                    email: "oauthuser@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let token = insert_oauth_token(&pool, "bound-oauth", Some(user_id));
+
+        let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&token)).await;
+        assert_eq!(
+            body,
+            format!("id:{user_id}:oauthuser:false:api"),
+            "a user-bound OAuth token must resolve to that user on the api transport"
+        );
+    }
+
+    // The passwordless fallback: a legacy unbound OAuth token carries no user,
+    // so resolve_caller falls back to the first admin. The legacy
+    // Option<AuthUser> stays None (proven by the existing middleware tests);
+    // only the new ResolvedIdentity sees the fallback user.
+    #[tokio::test]
+    async fn resolved_identity_legacy_unbound_oauth_falls_back_to_first_admin() {
+        let pool = test_db();
+        let admin_id = seed_admin(&pool, "admin");
+        let token = insert_oauth_token(&pool, "legacy-unbound-id", None);
+
+        let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&token)).await;
+        assert_eq!(
+            body,
+            format!("id:{admin_id}:admin:true:api"),
+            "a legacy unbound OAuth token must resolve to the first admin via the fallback"
+        );
+    }
+
+    // An operator-trusted unbound API key likewise resolves to the first admin
+    // in the new identity (its admin-ness comes from first_admin, not a
+    // separate operator flag).
+    #[tokio::test]
+    async fn resolved_identity_unbound_api_key_falls_back_to_first_admin() {
+        let pool = test_db();
+        let admin_id = seed_admin(&pool, "admin");
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "operator").unwrap(); // unbound
+
+        let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&key)).await;
+        assert_eq!(
+            body,
+            format!("id:{admin_id}:admin:true:api"),
+            "an unbound (operator) API key must resolve to the first admin"
+        );
+    }
+
+    // Auth-off: a credential-less request is the passwordless case par
+    // excellence — resolve_caller supplies the first admin so identity is
+    // always known even with no credential presented.
+    #[tokio::test]
+    async fn resolved_identity_auth_off_credentialless_falls_back_to_first_admin() {
+        let pool = test_db();
+        let admin_id = seed_admin(&pool, "admin");
+        let mut state = test_auth_state(&pool);
+        state.required = false;
+
+        let body = identity_body(identity_echo_app(state), None).await;
+        assert_eq!(
+            body,
+            format!("id:{admin_id}:admin:true:api"),
+            "auth-off credential-less request must resolve to the first admin"
+        );
+    }
+
+    // The degenerate case: no credential AND no admin exists → no
+    // ResolvedIdentity is inserted. The legacy Option<AuthUser> path is
+    // unchanged (the request still passes as operator-equivalent).
+    #[tokio::test]
+    async fn resolved_identity_auth_off_zero_users_inserts_no_identity() {
+        let pool = test_db(); // no users at all
+        let mut state = test_auth_state(&pool);
+        state.required = false;
+
+        let body = identity_body(identity_echo_app(state), None).await;
+        assert_eq!(body, "none", "zero-user bootstrap inserts no identity");
+    }
+
+    // ── LIFIC-18: stdio token resolution (auth::resolve_stdio_token) ───────
+
+    #[test]
+    fn resolve_api_key_user_bound_key_returns_user() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let uid = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "agent-user".into(),
+                    email: "agent-user@local.test".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let key = create_api_key(&pool, &manager, "opencode-agent").unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, "opencode-agent", uid).unwrap();
+        }
+        let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
+        let user = resolved.expect("bound key resolves to a user");
+        assert_eq!(user.id, uid);
+        assert_eq!(user.username, "agent-user");
+    }
+
+    #[test]
+    fn resolve_api_key_user_unbound_key_is_ok_none() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "unbound").unwrap();
+        let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
+        assert!(
+            resolved.is_none(),
+            "a valid-but-unbound key must be Ok(None) — operator fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_user_invalid_key_is_err() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let err = resolve_api_key_user(&pool, &manager, "lific_sk-live-NOTAREALKEY")
+            .expect_err("a bogus key must be an error");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn resolve_stdio_token_without_env_is_ok_none() {
+        // No LIFIC_TOKEN in the environment → Ok(None): the operator fallback.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe { std::env::remove_var("LIFIC_TOKEN") };
+        let resolved = resolve_stdio_token(&pool, &manager).unwrap();
+        assert!(resolved.is_none(), "absent token must be Ok(None)");
+    }
+
+    #[test]
+    fn resolve_stdio_token_valid_env_resolves_bound_user() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let uid = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "stdio-agent".into(),
+                    email: "stdio-agent@local.test".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let key = create_api_key(&pool, &manager, "codex-agent").unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, "codex-agent", uid).unwrap();
+        }
+        // SAFETY: guarded by ENV_LOCK; restored every path below.
+        unsafe { std::env::set_var("LIFIC_TOKEN", &key) };
+        let resolved = resolve_stdio_token(&pool, &manager).unwrap();
+        unsafe { std::env::remove_var("LIFIC_TOKEN") };
+        assert_eq!(resolved.unwrap().id, uid);
     }
 }

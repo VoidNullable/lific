@@ -292,6 +292,121 @@ pub fn first_admin(conn: &Connection) -> Result<Option<AuthUser>, LificError> {
     }
 }
 
+// ── Passwordless admin (LIFIC-9) ────────────────────────────
+
+/// Derive a usable, unique username from a display name. Keeps [a-z0-9-],
+/// collapses runs of non-alphanumerics to a single `-`, and falls back to
+/// `admin` if nothing survives; appends `-N` when the raw slug is taken.
+fn derive_username(conn: &Connection, display_name: &str) -> Result<String, LificError> {
+    let slug: String = display_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if slug.is_empty() { "admin".to_string() } else { slug };
+    let mut candidate = base.clone();
+    let mut n = 1;
+    while get_user_by_username(conn, &candidate).is_ok() {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    Ok(candidate)
+}
+
+/// Create the first human admin on a fresh install — a passwordless operator.
+///
+/// "Passwordless" means it can never be signed into by password: the stored
+/// hash is a random value with no known plaintext, and the email is a synthetic
+/// placeholder that satisfies the NOT NULL UNIQUE schema. The operator reaches
+/// this identity through the browser auto-login / passwordless fallback in
+/// `resolve_caller`, never through a password prompt.
+///
+/// LIFIC-9: this is what makes `[auth] required = false` "passwordless mode"
+/// instead of "half-broken anonymous" — there is always a real admin to resolve
+/// to from the moment the instance exists.
+pub fn create_passwordless_admin(
+    conn: &Connection,
+    display_name: &str,
+) -> Result<User, LificError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator name cannot be empty".into(),
+        ));
+    }
+    // Unusable hash: never arithmetically a login password, just fills the NOT
+    // NULL column. Same guarantee as `create_bot_user`.
+    let password_hash = unusable_password_hash()?;
+    insert_first_admin(conn, display_name, password_hash)
+}
+
+/// Create the first human admin with a real password — the `Passwords` mode of
+/// the `lific init` auth-mode menu (LIFIC-25).
+///
+/// Same username/email derivation as [`create_passwordless_admin`], but the
+/// stored hash is a real argon2 hash of `password`, so the operator can sign in
+/// on the web. This is the counterpart to passwordless mode: the operator
+/// still reaches the instance without an admin prompt, but through the password
+/// gate rather than browser auto-login.
+pub fn create_first_admin_with_password(
+    conn: &Connection,
+    display_name: &str,
+    password: &str,
+) -> Result<User, LificError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator name cannot be empty".into(),
+        ));
+    }
+    if password.is_empty() {
+        return Err(LificError::BadRequest(
+            "operator password cannot be empty".into(),
+        ));
+    }
+    let password_hash = hash_password(password)?;
+    insert_first_admin(conn, display_name, password_hash)
+}
+
+/// Shared insert for the first human admin (LIFIC-22/25). Derives the unique
+/// username from `display_name`, fills the NOT NULL email with a synthetic
+/// `{username}@local` placeholder, and stores the given `password_hash`. Both
+/// passwordless mode (unusable hash) and password mode (real argon2 hash) land
+/// here, so the derivation and constraint handling live in exactly one place.
+fn insert_first_admin(
+    conn: &Connection,
+    display_name: &str,
+    password_hash: String,
+) -> Result<User, LificError> {
+    let username = derive_username(conn, display_name)?;
+
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+         VALUES (?1, ?2, ?3, ?4, 1, 0)",
+        params![
+            username,
+            format!("{username}@local"),
+            password_hash,
+            display_name,
+        ],
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            LificError::Internal("failed to create first admin (constraint)".into())
+        }
+        other => other.into(),
+    })?;
+
+    let id = conn.last_insert_rowid();
+    get_user_by_id(conn, id)
+}
+
 // ── Sessions ─────────────────────────────────────────────────
 
 /// Hash a session token with SHA-256 for storage.
@@ -433,16 +548,24 @@ pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<Use
 /// Create a bot user owned by the given human user.
 /// Returns the bot user. API key creation is handled separately by the caller
 /// using `auth::create_api_key` + `assign_key_to_user`.
+/// Generate an unusable password hash: a random value with no known plaintext.
+///
+/// Used for identities that must never be signed into by password (passwordless
+/// human admins, and bots) to satisfy the NOT NULL `password_hash` column while
+/// guaranteeing `authenticate` can never succeed against it.
+fn unusable_password_hash() -> Result<String, LificError> {
+    let random_pw: [u8; 32] = rand::random();
+    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
+    hash_password(&random_pw_hex)
+}
+
 pub fn create_bot_user(
     conn: &Connection,
     owner_id: i64,
     bot_username: &str,
     display_name: &str,
 ) -> Result<crate::db::models::User, LificError> {
-    // Bot users get a random password (never used for login)
-    let random_pw: [u8; 32] = rand::random();
-    let random_pw_hex: String = random_pw.iter().map(|b| format!("{b:02x}")).collect();
-    let password_hash = hash_password(&random_pw_hex)?;
+    let password_hash = unusable_password_hash()?;
 
     conn.execute(
         "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id)
@@ -482,15 +605,46 @@ pub fn set_admin(conn: &Connection, username: &str, is_admin: bool) -> Result<()
     Ok(())
 }
 
-/// Find a bot user by username (for reconnection checks).
-pub fn find_bot_by_username(
+/// Find a bot by its stable (owner, tool) pairing (LIFIC-17).
+///
+/// This is the key that survives an owner rename, where the derived
+/// `{tool}-{owner.username}` username does not.
+pub fn find_bot_by_owner_and_tool(
     conn: &Connection,
-    username: &str,
+    owner_id: i64,
+    tool_id: &str,
 ) -> Result<Option<crate::db::models::User>, LificError> {
     match conn.query_row(
         "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
-         FROM users WHERE username = ?1 AND is_bot = 1",
-        params![username],
+         FROM users WHERE owner_id = ?1 AND tool_id = ?2 AND is_bot = 1 LIMIT 1",
+        params![owner_id, tool_id],
+        row_to_user,
+    ) {
+        Ok(user) => Ok(Some(user)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Find a legacy bot (tool_id NULL, minted before LIFIC-17) by its owner and
+/// its tool *prefix*.
+///
+/// Legacy bots were keyed by the `{tool}-{owner.username}` username, which
+/// embeds the owner's name at mint time. After a rename that prefix is stale,
+/// so the lookup must not depend on the current owner username — it matches on
+/// the stable `owner_id` and the tool prefix alone, which a rename never
+/// touches. `GLOB '{tool_id}-*'` ties the match to the exact tool prefix (tool
+/// slugs are `[a-z0-9-]`, so no `*`/`?` need escaping).
+pub fn find_bot_legacy_by_tool_prefix(
+    conn: &Connection,
+    owner_id: i64,
+    tool_id: &str,
+) -> Result<Option<crate::db::models::User>, LificError> {
+    match conn.query_row(
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+         FROM users WHERE owner_id = ?1 AND is_bot = 1 AND tool_id IS NULL
+              AND username GLOB ?2 LIMIT 1",
+        params![owner_id, format!("{tool_id}-*")],
         row_to_user,
     ) {
         Ok(user) => Ok(Some(user)),
@@ -500,15 +654,66 @@ pub fn find_bot_by_username(
 }
 
 /// Check if a bot has any active (non-revoked) API keys.
-pub fn bot_has_active_key(conn: &Connection, bot_id: i64) -> Result<bool, LificError> {
+/// Whether a bot has standing access — an active (non-revoked) API key, or a
+/// non-revoked OAuth token. Mirrors the Connected Tools "connected" state
+/// (LIFIC-13): access is granted until explicitly revoked/disconnected,
+/// independent of OAuth token expiry (the agent self-heals via re-auth).
+/// Used to refuse re-connecting a tool that's already connected via either door.
+pub fn bot_is_connected(conn: &Connection, bot_id: i64) -> Result<bool, LificError> {
     let has: bool = conn
         .query_row(
-            "SELECT COUNT(*) > 0 FROM api_keys WHERE user_id = ?1 AND revoked = 0",
+            "SELECT
+                EXISTS(SELECT 1 FROM api_keys WHERE user_id = ?1 AND revoked = 0)
+                OR EXISTS(SELECT 1 FROM oauth_tokens WHERE user_id = ?1 AND revoked = 0)",
             params![bot_id],
             |row| row.get(0),
         )
         .unwrap_or(false);
     Ok(has)
+}
+
+/// Ensure a per-tool bot exists for `owner_id`, reusing an existing one rather
+/// than minting a duplicate. The bot username is `{tool_id}-{owner.username}`
+/// — the same convention `lific connect` and the web UI's Connected Tools use,
+/// so a bot minted at OAuth approval is indistinguishable from one connected
+/// another way. Returns the bot user.
+///
+/// LIFIC-13: the single find-or-create decision all three doors (OAuth
+/// approval, `lific connect`, web create_bot) share.
+///
+/// LIFIC-17: dedupe keys on the stable `(owner_id, tool_id)` pair, not the
+/// derived username, so renaming the owner never orphans the agent. Legacy
+/// bots minted before the `tool_id` column existed (tool_id NULL) are found
+/// by their owner and tool prefix and backfilled in place — safe even when the
+/// owner renamed in the meantime, since the prefix match skips the stale owner
+/// name embedded in their username.
+pub fn ensure_bot(
+    conn: &Connection,
+    owner_id: i64,
+    tool_id: &str,
+    display_name: &str,
+) -> Result<User, LificError> {
+    // Structured dedupe first: stable across owner renames.
+    if let Some(existing) = find_bot_by_owner_and_tool(conn, owner_id, tool_id)? {
+        return Ok(existing);
+    }
+    // Legacy bot: pre-migration, tool_id NULL, keyed only by owner + tool.
+    // Reuse and backfill it.
+    if let Some(legacy) = find_bot_legacy_by_tool_prefix(conn, owner_id, tool_id)? {
+        conn.execute(
+            "UPDATE users SET tool_id = ?1 WHERE id = ?2",
+            params![tool_id, legacy.id],
+        )?;
+        return Ok(legacy);
+    }
+    let owner_username = get_user_by_id(conn, owner_id)?.username;
+    let bot_username = format!("{tool_id}-{owner_username}");
+    let bot = create_bot_user(conn, owner_id, &bot_username, display_name)?;
+    conn.execute(
+        "UPDATE users SET tool_id = ?1 WHERE id = ?2",
+        params![tool_id, bot.id],
+    )?;
+    Ok(bot)
 }
 
 /// List all bots owned by a specific user.
@@ -518,7 +723,11 @@ pub fn list_bots(
 ) -> Result<Vec<crate::db::models::Bot>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT u.id, u.username, u.display_name, u.owner_id, u.created_at,
-                EXISTS(SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0) as has_key
+                EXISTS(
+                    SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0
+                    UNION
+                    SELECT 1 FROM oauth_tokens t WHERE t.user_id = u.id AND t.revoked = 0
+                ) as connected
          FROM users u
          WHERE u.is_bot = 1 AND u.owner_id = ?1
          ORDER BY u.created_at DESC",
@@ -530,68 +739,81 @@ pub fn list_bots(
             display_name: row.get(2)?,
             owner_id: row.get(3)?,
             created_at: row.get(4)?,
-            has_active_key: row.get(5)?,
+            connected: row.get(5)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// Disconnect a bot: revoke its API key(s). Only the owner or admin can do this.
+/// Verify a bot both exists and is owned by `requester_id` (or the requester
+/// is admin). Returns the bot's id on success. Shared by [`disconnect_bot`]
+/// and [`delete_bot`], whose ownership rules are identical.
+fn verify_bot_owner(
+    conn: &Connection,
+    bot_id: i64,
+    requester_id: i64,
+    is_admin: bool,
+    action: &str,
+) -> Result<(), LificError> {
+    let owner_id: Option<i64> = conn
+        .query_row(
+            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
+            params![bot_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| LificError::NotFound("bot not found".into()))?;
+
+    if owner_id != Some(requester_id) && !is_admin {
+        return Err(LificError::BadRequest(format!(
+            "you can only {action} your own bots"
+        )));
+    }
+    Ok(())
+}
+
+/// Disconnect a bot: revoke its credentials (API keys and OAuth tokens) so the
+/// bot can no longer act. The bot's identity is kept — reconnecting later
+/// reuses it. Only the owner or admin can do this.
 pub fn disconnect_bot(
     conn: &Connection,
     bot_id: i64,
     requester_id: i64,
     is_admin: bool,
 ) -> Result<(), LificError> {
-    // Verify ownership
-    let owner_id: Option<i64> = conn
-        .query_row(
-            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
-            params![bot_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| LificError::NotFound("bot not found".into()))?;
-
-    if owner_id != Some(requester_id) && !is_admin {
-        return Err(LificError::BadRequest(
-            "you can only disconnect your own bots".into(),
-        ));
-    }
+    verify_bot_owner(conn, bot_id, requester_id, is_admin, "disconnect")?;
 
     // Revoke all API keys for this bot
     conn.execute(
         "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
         params![bot_id],
     )?;
+    // Revoke all OAuth tokens for this bot (LIFIC-13 follow-up): an
+    // OAuth-connected agent has no API key, so without this "Disconnect"
+    // would leave its access token live. Rows are kept — reconnectable bot.
+    conn.execute(
+        "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+        params![bot_id],
+    )?;
 
     Ok(())
 }
 
-/// Permanently delete a bot user and all its API keys.
-/// Only the owner or an admin can do this.
+/// Permanently delete a bot user, its API keys, its OAuth tokens, and the
+/// comments it made. The identity is gone, so any OAuth token rows are shred
+/// rather than revoked. Only the owner or an admin can do this.
 pub fn delete_bot(
     conn: &Connection,
     bot_id: i64,
     requester_id: i64,
     is_admin: bool,
 ) -> Result<(), LificError> {
-    // Verify ownership
-    let owner_id: Option<i64> = conn
-        .query_row(
-            "SELECT owner_id FROM users WHERE id = ?1 AND is_bot = 1",
-            params![bot_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| LificError::NotFound("bot not found".into()))?;
-
-    if owner_id != Some(requester_id) && !is_admin {
-        return Err(LificError::BadRequest(
-            "you can only delete your own bots".into(),
-        ));
-    }
+    verify_bot_owner(conn, bot_id, requester_id, is_admin, "delete")?;
 
     // Delete API keys first (FK constraint)
     conn.execute("DELETE FROM api_keys WHERE user_id = ?1", params![bot_id])?;
+    // Delete the bot's OAuth tokens (LIFIC-13 follow-up): leaves no dangling
+    // rows pointing at a removed identity.
+    conn.execute("DELETE FROM oauth_tokens WHERE user_id = ?1", params![bot_id])?;
 
     // Delete any comments made by this bot (or reassign — deleting for now)
     conn.execute("DELETE FROM comments WHERE user_id = ?1", params![bot_id])?;
@@ -714,6 +936,304 @@ mod tests {
         assert!(
             !has_human_users(&conn).unwrap(),
             "a bot-only instance still reads as having no human accounts"
+        );
+    }
+
+    // ── ensure_bot (LIFIC-13) ────────────────────────────────
+
+    #[test]
+    fn ensure_bot_creates_a_new_bot_for_the_owner() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+
+        let bot_id = ensure_bot(&conn, owner.id, "claude-code", "Claude Code")
+            .unwrap()
+            .id;
+        let bot = get_user_by_id(&conn, bot_id).unwrap();
+        assert!(bot.is_bot, "minted user is a bot");
+        assert_eq!(bot.username, "claude-code-blake");
+        assert_eq!(bot.display_name, "Claude Code");
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert_eq!(listed.len(), 1, "one bot owned by this user");
+        assert_eq!(listed[0].owner_id, Some(owner.id));
+    }
+
+    #[test]
+    fn ensure_bot_reuses_existing_bot_for_same_tool_and_owner() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        assert_eq!(first, second, "re-approval must reuse, not duplicate");
+    }
+
+    #[test]
+    fn ensure_bot_distinguishes_owners() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner_a = test_create_user(&conn);
+        let owner_b = create_user(
+            &conn,
+            &CreateUser {
+                username: "ada".into(),
+                email: "ada@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode").unwrap().id;
+        let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode").unwrap().id;
+        assert_ne!(a, b, "each owner gets its own bot for the same tool");
+    }
+
+    // ── stable dedupe across owner rename (LIFIC-17) ──────────
+
+    // The bot identity is keyed on (owner_id, tool_id), not the derived
+    // `{tool}-{owner}` username string. Renaming the owner changes the string
+    // but not the (owner_id, tool_id) pair, so a re-connect must reuse the
+    // original bot rather than mint a duplicate.
+    #[test]
+    fn ensure_bot_reuses_existing_bot_after_owner_rename() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+
+        // Simulate the owner renaming their account: username changes, id stays.
+        conn.execute(
+            "UPDATE users SET username = ?1 WHERE id = ?2",
+            params!["renamed-blake", owner.id],
+        )
+        .unwrap();
+
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        assert_eq!(first, second, "renaming the owner must not orphan the agent");
+    }
+
+    // Bots minted before the tool_id column existed (tool_id NULL) are still
+    // found by their legacy `{tool}-{owner}` username and backfilled, so an
+    // existing install does not duplicate agents on the first post-upgrade
+    // reconnect.
+    #[test]
+    fn ensure_bot_backfills_legacy_bot_by_username() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+        // A pre-migration bot: username "opencode-blake", tool_id NULL.
+        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode")
+            .unwrap();
+
+        let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        assert_eq!(
+            reused.id, legacy.id,
+            "a legacy bot keyed by username must be reused, not duplicated"
+        );
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT tool_id FROM users WHERE id = ?1",
+                params![legacy.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("opencode"), "legacy bot tool_id backfilled");
+    }
+
+    // The legacy backfill holds even when the owner renamed *before* the
+    // reconnect: the legacy username embeds the old owner name, so the match
+    // keys on owner id + tool prefix, never the current owner username.
+    #[test]
+    fn ensure_bot_backfills_legacy_bot_even_after_owner_rename() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // username "blake"
+        // A pre-migration bot whose username still has the old owner name.
+        let legacy = create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode")
+            .unwrap();
+        // The owner renames before ever reconnecting.
+        conn.execute(
+            "UPDATE users SET username = ?1 WHERE id = ?2",
+            params!["new-name", owner.id],
+        )
+        .unwrap();
+
+        let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        assert_eq!(
+            reused.id, legacy.id,
+            "renaming before a legacy reconnect must still reuse, not duplicate"
+        );
+    }
+
+    // ── disconnect/delete bot credential revocation (LIFIC-13 follow-up) ──
+
+    /// Insert an active (non-revoked) `oauth_tokens` row bound to `user_id`.
+    fn insert_oauth_token_for(conn: &Connection, user_id: i64) -> i64 {
+        let token_hash = format!("testtoken-{user_id}-{}", user_id);
+        let client_id = "test-client";
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, 'Test', '[\"http://localhost\"]')",
+            params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+             VALUES (?1, ?2, datetime('now', '+1 hour'), 'mcp', ?3)",
+            params![token_hash, client_id, user_id],
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT rowid FROM oauth_tokens WHERE access_token = ?1",
+                params![token_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn disconnect_bot_revokes_bots_oauth_tokens_but_keeps_bot() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "claude-code", "Claude Code").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+
+        disconnect_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        // The bot and its OAuth tokens still exist (reconnectable), but tokens revoked.
+        let revoked: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1 AND revoked = 1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1, "bot's OAuth token revoked");
+        let still_there: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_there, 1, "token row kept — reconnectable bot");
+        let bot_exists: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE id = ?1 AND is_bot = 1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bot_exists, 1, "bot identity kept after disconnect");
+    }
+
+    #[test]
+    fn delete_bot_removes_its_oauth_token_rows() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+
+        delete_bot(&conn, bot.id, owner.id, false).unwrap();
+
+        let tokens: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tokens, 0, "delete shreds the bot's OAuth token rows");
+        let bot_rows: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE id = ?1",
+                params![bot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bot_rows, 0, "bot identity removed");
+    }
+
+    // ── list_bots / connected semantics (LIFIC-13 OAuth bots) ──
+
+    #[test]
+    fn bot_with_oauth_token_lists_as_connected() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        // No API key — connected purely by an OAuth token (LIFIC-13 path).
+        insert_oauth_token_for(&conn, bot.id);
+
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, bot.id);
+        assert!(
+            listed[0].connected,
+            "an OAuth-connected bot must list as connected (no API key involved)"
+        );
+        assert!(bot_is_connected(&conn, bot.id).unwrap());
+    }
+
+    #[test]
+    fn bot_with_only_revoked_credentials_lists_as_disconnected() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let bot = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        insert_oauth_token_for(&conn, bot.id);
+        // Revoke the token — the bot is no longer connected.
+        conn.execute(
+            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1",
+            params![bot.id],
+        )
+        .unwrap();
+
+        let listed = list_bots(&conn, owner.id).unwrap();
+        assert!(
+            !listed[0].connected,
+            "a bot with only revoked credentials must list as disconnected"
+        );
+        assert!(!bot_is_connected(&conn, bot.id).unwrap());
+    }
+
+    #[test]
+    fn api_key_connected_bot_still_lists_as_connected() {
+        let pool = test_db();
+        let (owner, bot) = {
+            let conn = pool.write().unwrap();
+            let owner = test_create_user(&conn);
+            let bot = ensure_bot(&conn, owner.id, "claude-code", "Claude Code").unwrap();
+            (owner.id, bot.id)
+        };
+        // The classic `lific connect` path: an active API key, no OAuth token.
+        let name = format!("claude-code-{}", {
+            let conn = pool.read().unwrap();
+            get_user_by_id(&conn, owner).unwrap().username
+        });
+        let manager = crate::auth::create_key_manager().unwrap();
+        let _ = crate::auth::create_api_key(&pool, &manager, &name).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::assign_key_to_user(&conn, &name, bot).unwrap();
+        }
+
+        let listed = {
+            let conn = pool.read().unwrap();
+            list_bots(&conn, owner).unwrap()
+        };
+        assert!(
+            listed.iter().any(|b| b.id == bot && b.connected),
+            "API-key-connected bot (legacy path) still lists as connected"
         );
     }
 
@@ -1108,5 +1628,100 @@ mod tests {
 
         let result = assign_key_to_user(&conn, "nope", user.id);
         assert!(result.is_err());
+    }
+
+    // ── create_passwordless_admin (LIFIC-9) ─────────────────
+
+    #[test]
+    fn operator_admin_is_not_a_connected_tool() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
+
+        assert!(admin.is_admin, "first admin is an admin");
+        assert!(!admin.is_bot, "first admin is a person, not a connected tool");
+        assert_eq!(admin.display_name, "Operator Blake");
+    }
+
+    #[test]
+    fn operator_admin_resolves_as_first_admin() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
+
+        let resolved = first_admin(&conn).unwrap().expect("resolves as first admin");
+        assert_eq!(resolved.id, admin.id);
+        assert_eq!(resolved.username, admin.username);
+    }
+
+    #[test]
+    fn operator_username_comes_from_their_name() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_passwordless_admin(&conn, "Blake Smith").unwrap();
+        assert_eq!(admin.username, "blake-smith");
+    }
+
+    #[test]
+    fn same_named_operators_get_distinct_usernames() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let first = create_passwordless_admin(&conn, "Blake").unwrap();
+        let second = create_passwordless_admin(&conn, "blake!").unwrap();
+
+        assert_ne!(first.username, second.username, "usernames must not collide");
+        assert!(!first.username.is_empty());
+        assert!(!second.username.is_empty());
+    }
+
+    #[test]
+    fn passwordless_admin_cannot_be_logged_into_by_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_passwordless_admin(&conn, "Blake").unwrap();
+        // The random stored hash has no known plaintext, so password login
+        // must always fail — there is no password, only passwordless identity.
+        let result = authenticate(&conn, "blake", "anypassword123");
+        assert!(
+            result.is_err(),
+            "passwordless admin must never authenticate by password"
+        );
+    }
+
+    // ── create_first_admin_with_password (LIFIC-25) ──────────
+
+    #[test]
+    fn password_admin_is_admin_and_authenticates() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_first_admin_with_password(&conn, "Blake Smith", "hunter22").unwrap();
+
+        assert!(admin.is_admin, "first admin is an admin");
+        assert_eq!(admin.username, "blake-smith");
+        assert!(!admin.is_bot);
+        let got = authenticate(&conn, "blake-smith", "hunter22").unwrap();
+        assert_eq!(got.id, admin.id, "correct password logs in as the admin");
+    }
+
+    #[test]
+    fn password_admin_rejects_wrong_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_first_admin_with_password(&conn, "Blake", "correcthorse1").unwrap();
+        assert!(
+            authenticate(&conn, "blake", "wrongpassword").is_err(),
+            "wrong password must be rejected"
+        );
+    }
+
+    #[test]
+    fn password_admin_rejects_empty_password() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let err = create_first_admin_with_password(&conn, "Blake", "").unwrap_err();
+        assert!(
+            matches!(err, LificError::BadRequest(_)),
+            "an empty password must be rejected, got {err:?}"
+        );
     }
 }

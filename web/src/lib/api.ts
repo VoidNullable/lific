@@ -253,7 +253,7 @@ export interface Bot {
   display_name: string;
   owner_id: number | null;
   created_at: string;
-  has_active_key: boolean;
+  connected: boolean;
 }
 
 export interface CreateBotResponse {

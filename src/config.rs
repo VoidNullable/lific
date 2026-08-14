@@ -102,26 +102,88 @@ impl AuthConfig {
     }
 }
 
-/// Does this URL point at the local machine? Backs the LIF-294 startup guard:
-/// an auth-optional instance must never have a non-localhost `public_url`.
-/// Conservative — anything unparseable counts as NOT localhost.
-pub fn is_localhost_url(url: &str) -> bool {
-    let rest = url.trim();
-    let rest = rest.split("://").nth(1).unwrap_or(rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    let host = host.to_ascii_lowercase();
-    // A literal IP must actually be loopback ("127.evil.com" is a valid DNS
-    // name pointing anywhere, so prefix matching would be a hole).
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return ip.is_loopback();
+/// Canonical plain-language caution for login-free mode (`[auth] required =
+/// false`). LIFIC-22: this is the single source of truth that both the `lific
+/// init` auth-mode menu and the `lific start` startup warning consume, so the
+/// two surfaces can never diverge. It names the risk, states the safe
+/// condition, and gives the recovery path — no shock all-caps language, no
+/// internal jargon like "credential-less request".
+pub fn login_free_caution() -> &'static str {
+    "LIFIC is running in login-free mode: anyone who can reach it can administer \
+     it. Keep it on a machine only you and trusted people can reach. To switch \
+     to passwords, set [auth] required = true and run lific init again."
+}
+
+/// The two auth modes an operator can choose at `lific init` (LIFIC-25).
+///
+/// A single conceptual thing — "the auth mode" — bundles every consequence of
+/// the choice into one type, so the menu and `cmd_init` never drift on how the
+/// mode maps to config (`[auth] required`, `[server] host`), the database
+/// (`web_auto_login`), and admin creation (passwordless vs passworded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// No password; browser auto-login as the operator; binds loopback.
+    LoginFree,
+    /// Password sign-in on the web; leaves the bind host unchanged.
+    Passwords,
+}
+
+impl AuthMode {
+    /// `[auth] required`: login-free turns auth off; passwords keeps it on.
+    pub fn required(self) -> bool {
+        matches!(self, AuthMode::Passwords)
     }
-    host == "localhost"
+
+    /// The `[server] host` to write, or `None` to leave it unchanged.
+    /// Login-free must bind loopback so the startup guard (LIFIC-24) and the
+    /// actual listening socket agree; password mode never touches it.
+    pub fn host(self) -> Option<&'static str> {
+        match self {
+            AuthMode::LoginFree => Some("127.0.0.1"),
+            AuthMode::Passwords => None,
+        }
+    }
+
+    /// The `instance_settings.web_auto_login` flag: on for login-free so the
+    /// browser signs the operator in without a password.
+    pub fn web_auto_login(self) -> bool {
+        matches!(self, AuthMode::LoginFree)
+    }
+
+    /// Whether the first admin is created passwordless (login-free) or with a
+    /// real password (passwords).
+    pub fn passwordless(self) -> bool {
+        matches!(self, AuthMode::LoginFree)
+    }
+
+    /// The stable string used for the `--auth-mode` CLI flag and menu labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::LoginFree => "login-free",
+            AuthMode::Passwords => "passwords",
+        }
+    }
+
+    /// Parse a `--auth-mode` flag value, case-insensitive.
+    pub fn parse(s: &str) -> Option<AuthMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "login-free" => Some(AuthMode::LoginFree),
+            "passwords" => Some(AuthMode::Passwords),
+            _ => None,
+        }
+    }
+}
+
+/// Does a `[server] host` bind value point at the local machine? Backs the
+/// LIFIC-24 startup guard: login-free mode must refuse to bind anywhere but
+/// loopback, so the safety check and the actual listening socket agree.
+/// Conservative — anything unparseable counts as NOT loopback.
+pub fn is_localhost_host(host: &str) -> bool {
+    let host = host.trim();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +413,40 @@ impl Config {
         let mut cfg = Config::default();
         cfg.database.path = db_path.to_path_buf();
         toml::to_string_pretty(&cfg).unwrap_or_default()
+    }
+
+    /// Merge the auth-mode menu's choice into a config document, preserving
+    /// every other section and setting.
+    ///
+    /// LIFIC-23: sets `[auth] required` and, when `host` is supplied,
+    /// `[server] host`. When `existing` is empty/absent the function builds a
+    /// fresh default config carrying the chosen values; otherwise it edits the
+    /// existing TOML in place (formatting and comments survive via toml_edit).
+    /// Pure — no filesystem side effects. This is what the `lific init`
+    /// auth-mode menu (LIFIC-25) uses to persist the operator's choice.
+    ///
+    /// Returns `Err` (leaving the caller with the untouched source to fix by
+    /// hand) when an existing document does not parse — never destroys a
+    /// user's config, mirroring the connect writers.
+    pub fn apply_auth_mode(
+        existing: &str,
+        required: bool,
+        host: Option<&str>,
+    ) -> Result<String, String> {
+        let mut doc: toml_edit::DocumentMut = if existing.trim().is_empty() {
+            Config::default_toml()
+                .parse::<toml_edit::DocumentMut>()
+                .expect("default config parses")
+        } else {
+            existing
+                .parse()
+                .map_err(|e| format!("existing config does not parse: {e}"))?
+        };
+        doc["auth"]["required"] = toml_edit::value(required);
+        if let Some(host) = host {
+            doc["server"]["host"] = toml_edit::value(host);
+        }
+        Ok(doc.to_string())
     }
 
     /// Resolve the backup directory relative to the database path if not absolute.
@@ -637,29 +733,127 @@ trusted_proxies = ["not-a-cidr"]
         assert!(cfg.auth.required);
     }
 
-    // LIF-294: the startup guard's localhost check.
+    // LIFIC-22: the shared login-free caution is set once and plain-language.
     #[test]
-    fn is_localhost_url_accepts_only_loopback() {
-        for url in [
-            "http://localhost:3456",
-            "http://localhost",
-            "https://LOCALHOST/lific",
-            "http://127.0.0.1:3456",
-            "http://127.5.5.5",
-            "http://[::1]:3456",
-            "http://user@localhost:3456/path",
+    fn login_free_caution_is_plain_and_complete() {
+        let text = login_free_caution();
+        // Names the mode.
+        assert!(text.contains("login-free mode"));
+        // States the risk in plain words.
+        assert!(text.contains("anyone who can reach it can administer it"));
+        // States the safe condition.
+        assert!(text.contains("Keep it on a machine only you and trusted people can reach"));
+        // States the recovery path.
+        assert!(text.contains("required = true"));
+        // No shock all-caps language is allowed to leak back in from the old
+        // "AUTH IS DISABLED" warning.
+        assert!(!text.contains("AUTH IS DISABLED"));
+        // No internal jargon either.
+        assert!(!text.contains("credential-less"));
+    }
+
+    // LIFIC-23: applying the auth-mode choice edits in place and preserves
+    // every other section, setting, and comment.
+    #[test]
+    fn apply_auth_mode_edits_required_and_host_and_preserves_sections() {
+        let existing = r#"# my cruft
+[server]
+host = "0.0.0.0"
+port = 3456
+
+[auth]
+required = true
+allow_signup = false
+
+[backup]
+enabled = false
+"#;
+        let out = Config::apply_auth_mode(existing, false, Some("127.0.0.1")).unwrap();
+        // Comment survives.
+        assert!(out.contains("# my cruft"), "comment must survive");
+        // Our two values are set.
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(false));
+        assert_eq!(doc["server"]["host"].as_str(), Some("127.0.0.1"));
+        // Untouched siblings survive with their values.
+        assert_eq!(doc["server"]["port"].as_integer(), Some(3456));
+        assert_eq!(doc["auth"]["allow_signup"].as_bool(), Some(false));
+        assert_eq!(doc["backup"]["enabled"].as_bool(), Some(false));
+    }
+
+    // LIFIC-23: password mode only touches required, leaving host untouched.
+    #[test]
+    fn apply_auth_mode_password_leaves_host_alone() {
+        let existing = "[server]\nhost = \"0.0.0.0\"\nport = 9000\n\n[auth]\nrequired = false\n";
+        let out = Config::apply_auth_mode(existing, true, None).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(true));
+        assert_eq!(doc["server"]["host"].as_str(), Some("0.0.0.0"));
+        assert_eq!(doc["server"]["port"].as_integer(), Some(9000));
+    }
+
+    // LIFIC-23: an absent/empty document produces a fresh default config.
+    #[test]
+    fn apply_auth_mode_creates_fresh_when_absent() {
+        let out = Config::apply_auth_mode("", false, Some("127.0.0.1")).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["auth"]["required"].as_bool(), Some(false));
+        assert_eq!(doc["server"]["host"].as_str(), Some("127.0.0.1"));
+        // Defaults still present.
+        assert_eq!(doc["server"]["port"].as_integer(), Some(3456));
+        assert_eq!(doc["auth"]["allow_signup"].as_bool(), Some(true));
+    }
+
+    // LIFIC-23: an unparseable existing document must not be destroyed — the
+    // editor refuses and returns an error, mirroring the connect writers.
+    #[test]
+    fn apply_auth_mode_refuses_unparseable_and_returns_error() {
+        let existing = "this is = = not valid toml [[[\n";
+        let err = Config::apply_auth_mode(existing, false, Some("127.0.0.1")).unwrap_err();
+        assert!(err.contains("does not parse"), "error must say why: {err}");
+    }
+
+    // LIFIC-24: the startup guard's bind-host check.
+    #[test]
+    fn is_localhost_host_accepts_only_loopback() {
+        for host in [
+            "127.0.0.1",
+            "127.5.5.5",
+            "::1",
+            "localhost",
+            "LOCALHOST",
         ] {
-            assert!(is_localhost_url(url), "{url} should count as localhost");
+            assert!(is_localhost_host(host), "{host} should count as loopback");
         }
-        for url in [
-            "https://lific.tail1234.ts.net",
-            "http://192.168.1.10:3456",
-            "http://127.evil.com",       // DNS name, not a loopback IP
-            "https://localhost.example", // ditto
-            "http://[::2]",
-            "",
-        ] {
-            assert!(!is_localhost_url(url), "{url} must NOT count as localhost");
+        for host in ["0.0.0.0", "::", "[::]", "192.168.1.10", "lific.example", ""] {
+            assert!(!is_localhost_host(host), "{host} must NOT count as loopback");
         }
+    }
+
+    // LIFIC-25: the auth-mode menu's two choices bundle `(required, host,
+    // web_auto_login, admin-passwordless)` into one concept.
+    #[test]
+    fn auth_mode_bundles_its_consequences() {
+        let free = AuthMode::LoginFree;
+        assert!(!free.required());
+        assert_eq!(free.host(), Some("127.0.0.1"));
+        assert!(free.web_auto_login());
+        assert!(free.passwordless());
+
+        let pw = AuthMode::Passwords;
+        assert!(pw.required());
+        assert_eq!(pw.host(), None, "password mode leaves host unchanged");
+        assert!(!pw.web_auto_login());
+        assert!(!pw.passwordless());
+    }
+
+    #[test]
+    fn auth_mode_parses_and_names() {
+        assert_eq!(AuthMode::parse("login-free"), Some(AuthMode::LoginFree));
+        assert_eq!(AuthMode::parse("passwords"), Some(AuthMode::Passwords));
+        assert_eq!(AuthMode::parse("LOGIN-FREE"), Some(AuthMode::LoginFree));
+        assert_eq!(AuthMode::parse("bogus"), None);
+        assert_eq!(AuthMode::LoginFree.as_str(), "login-free");
+        assert_eq!(AuthMode::Passwords.as_str(), "passwords");
     }
 }

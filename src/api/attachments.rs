@@ -72,15 +72,16 @@ pub struct UploadResponse {
 /// unlinked until the entity's markdown is saved and re-scanned.
 pub(super) async fn upload_attachment(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(store): Extension<AttachmentStore>,
     Extension(config): Extension<AttachmentConfig>,
     Extension(limiter): Extension<Arc<AttachmentUploadLimiter>>,
     mut multipart: Multipart,
 ) -> Result<Response, LificError> {
-    let user = auth_user
-        .clone()
+    let user = identity
+        .as_ref()
+        .map(|i| i.user.clone())
         .ok_or_else(|| LificError::Forbidden("authentication required to upload".into()))?;
 
     // Per-user rate limit (mirrors the signup/login limiter pattern).
@@ -194,7 +195,7 @@ pub(super) struct ListForEntityQuery {
 /// reading the entity itself).
 pub(super) async fn list_entity_attachments(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Query(query): Query<ListForEntityQuery>,
 ) -> Result<axum::Json<Vec<Attachment>>, LificError> {
     let entity: AttachmentEntity = query.entity_type.parse().map_err(LificError::BadRequest)?;
@@ -203,8 +204,8 @@ pub(super) async fn list_entity_attachments(
     // pages (no project) fall back to workspace-admin.
     let project_id = resolve_entity_project(&db, entity, query.entity_id)?;
     match project_id {
-        Some(pid) => authz::require_role(&db, &auth_user, pid, Role::Viewer)?,
-        None => authz::require_workspace_admin(&db, &auth_user)?,
+        Some(pid) => authz::require_role(&db, &identity, pid, Role::Viewer)?,
+        None => authz::require_workspace_admin(&db, &identity)?,
     }
 
     let items = with_read(&db, |conn| {
@@ -252,7 +253,7 @@ fn resolve_entity_project(
 /// Content-addressed, so the response is immutable-cacheable forever.
 pub(super) async fn download_attachment(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(store): Extension<AttachmentStore>,
     Path(id): Path<i64>,
 ) -> Result<Response, LificError> {
@@ -261,7 +262,7 @@ pub(super) async fn download_attachment(
     // Authorize: the caller must be able to view SOME project this attachment
     // is linked into (Viewer), or be the uploader / an admin for a still-
     // unlinked attachment.
-    authorize_read(&db, &auth_user, &attachment)?;
+    authorize_read(&db, &identity, &attachment)?;
 
     let bytes = store.read(&attachment.sha256)?;
     let inline_safe = storage::is_inline_safe_mime(&attachment.mime);
@@ -307,17 +308,18 @@ pub(super) async fn download_attachment(
 /// the sidecar file if no other row shares the content hash.
 pub(super) async fn delete_attachment(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(store): Extension<AttachmentStore>,
     Path(id): Path<i64>,
 ) -> Result<axum::Json<serde_json::Value>, LificError> {
-    let user = auth_user
-        .clone()
+    let user = identity
+        .as_ref()
+        .map(|i| i.user.clone())
         .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
 
-    authorize_delete(&db, &auth_user, &user, &attachment)?;
+    authorize_delete(&db, &identity, &user, &attachment)?;
 
     let events = with_write(&db, |conn| {
         let events = linked_attachment_events(conn, id)?;
@@ -475,7 +477,7 @@ fn owning_project_ids(
 /// behavior — matching every other GET while the flag is off.
 fn authorize_read(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     attachment: &Attachment,
 ) -> Result<(), LificError> {
     let project_ids = with_read(db, |conn| owning_project_ids(conn, attachment.id))?;
@@ -484,7 +486,7 @@ fn authorize_read(
         // Unlinked: only the uploader or an admin can read it. (When
         // enforcement is off we still restrict unlinked reads to the uploader
         // to avoid an enumeration hole on freshly-uploaded blobs.)
-        match auth_user {
+        match identity.as_ref().map(|i| &i.user) {
             Some(u) if u.is_admin => Ok(()),
             Some(u) if Some(u.id) == attachment.uploader_id => Ok(()),
             _ => Err(LificError::Forbidden(
@@ -495,7 +497,7 @@ fn authorize_read(
         // Viewer on ANY linked project is enough to read.
         let mut last_err = None;
         for pid in project_ids {
-            match authz::require_role(db, auth_user, pid, Role::Viewer) {
+            match authz::require_role(db, identity, pid, Role::Viewer) {
                 Ok(()) => return Ok(()),
                 Err(e) => last_err = Some(e),
             }
@@ -509,7 +511,7 @@ fn authorize_read(
 /// Delete gate: uploader, admin, or Maintainer on any owning project.
 fn authorize_delete(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     user: &AuthUser,
     attachment: &Attachment,
 ) -> Result<(), LificError> {
@@ -518,7 +520,7 @@ fn authorize_delete(
     }
     let project_ids = with_read(db, |conn| owning_project_ids(conn, attachment.id))?;
     for pid in project_ids {
-        if authz::require_role(db, auth_user, pid, Role::Maintainer).is_ok() {
+        if authz::require_role(db, identity, pid, Role::Maintainer).is_ok() {
             return Ok(());
         }
     }
@@ -888,6 +890,24 @@ mod api_tests {
                 username: "a".into(),
                 display_name: "A".into(),
                 is_admin: true,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "a".into(),
+                    display_name: "A".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "a".into(),
+                    display_name: "A".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         let resp = upload(&app, "big.png", "image/png", &png_bytes(), None).await;
@@ -924,6 +944,15 @@ mod api_tests {
                 username: lead.username.clone(),
                 display_name: lead.display_name.clone(),
                 is_admin: false,
+            })))
+            .layer(axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: lead.id,
+                    username: lead.username.clone(),
+                    display_name: lead.display_name.clone(),
+                    is_admin: false,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         let issue = parse_json(
@@ -1079,6 +1108,15 @@ mod api_tests {
                 username: "gc".into(),
                 display_name: "GC".into(),
                 is_admin: true,
+            })))
+            .layer(axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin_id,
+                    username: "gc".into(),
+                    display_name: "GC".into(),
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
         let (project_id2, _) = seed_project(&app).await;
 

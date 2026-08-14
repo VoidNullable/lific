@@ -60,6 +60,7 @@ use clients::{ClientSpec, OauthSupport, Os, PathBase, Scope, ServerConfig};
 
 /// Parsed, validated arguments for a `connect` run. Built from the CLI enum in
 /// `cli/mod.rs` so the heavy lifting here is testable without clap.
+#[derive(Debug, Clone)]
 pub struct ConnectArgs {
     pub clients: Vec<String>,
     pub scope: Scope,
@@ -73,6 +74,19 @@ pub struct ConnectArgs {
     pub yes: bool,
     pub dry_run: bool,
     pub skip_agents: bool,
+}
+
+/// The transport a `lific connect` run uses, resolved once from flags or the
+/// interactive menu. Both paths funnel through [`resolve_transport_inner`] so
+/// the interactive and flag-driven runs can never diverge (LIFIC-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportMode {
+    /// Local stdio: spawn `lific --db <path> mcp` (agent token LIFIC-18).
+    Stdio,
+    /// Streamable-HTTP remote with a bearer API key.
+    Remote,
+    /// Header-less remote driving the client's native MCP OAuth flow.
+    Oauth,
 }
 
 /// The outcome for a single client write, for both human and JSON output.
@@ -121,6 +135,9 @@ pub struct ConnectResult {
     /// True when this run wrote header-less OAuth configs (`--oauth`).
     pub oauth: bool,
     pub url: String,
+    /// The resolved transport (LIFIC-19), so interactive and flag runs report
+    /// the same choice.
+    pub transport: TransportMode,
 }
 
 #[derive(Debug)]
@@ -214,10 +231,17 @@ pub fn absolute_db_path(cfg: &Config) -> String {
 }
 
 /// Build the canonical [`ServerConfig`] for one client. `key` is that client's
-/// own key (ignored for stdio and oauth transports).
+/// own credential. For a remote transport it's the bearer API key; for stdio
+/// (LIFIC-18) it's the agent token written into the client config's env field
+/// as `LIFIC_TOKEN`. Ignored for oauth transports.
 fn build_server_config(args: &ConnectArgs, cfg: &Config, key: &str) -> ServerConfig {
     if args.stdio {
-        ServerConfig::stdio(absolute_db_path(cfg))
+        // An empty key (no agent identity) yields a plain operator stdio config.
+        if key.is_empty() {
+            ServerConfig::stdio(absolute_db_path(cfg))
+        } else {
+            ServerConfig::stdio_with_token(absolute_db_path(cfg), key)
+        }
     } else if args.oauth {
         let url = args.url.clone().unwrap_or_else(|| default_url(cfg));
         ServerConfig::oauth_remote(url)
@@ -334,6 +358,78 @@ fn interactive_picker(detected: &[DetectedClient], target: &str) -> Result<Vec<S
     })
 }
 
+// ── Transport selection (LIFIC-19) ───────────────────────────
+
+/// Resolve the transport for a run. The flags win when present (non-interactive
+/// path, unchanged). With neither `--stdio` nor `--oauth`, an interactive TTY
+/// gets a visible transport menu with stdio preselected; a non-TTY falls back
+/// to the remote default (the historical behavior).
+///
+/// Factored to take an injected `stdin_tty` and a picker closure so the
+/// flag/NON-tty branches are unit-testable (mirrors `resolve_clients_inner`).
+pub fn resolve_transport_inner(
+    stdio: bool,
+    oauth: bool,
+    stdin_tty: bool,
+    picker: impl FnOnce() -> Result<TransportMode, String>,
+) -> Result<TransportMode, String> {
+    if stdio {
+        return Ok(TransportMode::Stdio);
+    }
+    if oauth {
+        return Ok(TransportMode::Oauth);
+    }
+    if stdin_tty {
+        picker()
+    } else {
+        // No transport flag and not interactive → remote, the standing default.
+        Ok(TransportMode::Remote)
+    }
+}
+
+/// The interactive transport menu: stdio preselected, with remote and OAuth
+/// available. Does not prompt for a URL — the target URL is a server-config
+/// fact derived upstream (LIFIC-19 AC: never a connect-time prompt).
+fn interactive_transport_picker() -> Result<TransportMode, String> {
+    let mut prompt = cliclack::Select::new("How should clients connect to this Lific instance?");
+    prompt = prompt
+        .item(
+            TransportMode::Stdio,
+            "Local stdio",
+            "spawn lific --db <path> mcp; the agent carries its own token",
+        )
+        .item(
+            TransportMode::Remote,
+            "Remote (API key)",
+            "reach the running server over HTTP with a bearer key",
+        )
+        .item(
+            TransportMode::Oauth,
+            "OAuth",
+            "header-less config; the client authenticates via its native MCP OAuth flow",
+        )
+        .initial_value(TransportMode::Stdio);
+    prompt.interact().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            "cancelled".to_string()
+        } else {
+            format!("transport selection failed: {e}")
+        }
+    })
+}
+
+/// The CLI-shown label for a resolved transport (used in the run announcement
+/// and JSON output) so both paths name the same thing.
+impl TransportMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransportMode::Stdio => "stdio",
+            TransportMode::Remote => "remote",
+            TransportMode::Oauth => "oauth",
+        }
+    }
+}
+
 // ── Key minting ──────────────────────────────────────────────
 
 /// How this run mints per-tool keys, resolved once up front (owner selection is
@@ -402,19 +498,9 @@ fn mint_for_tool(
             let bot_username = format!("{}-{}", spec.id, owner_username);
             let bot_id = {
                 let conn = pool.write().map_err(|e| e.to_string())?;
-                match crate::db::queries::users::find_bot_by_username(&conn, &bot_username)
+                crate::db::queries::users::ensure_bot(&conn, *owner_id, spec.id, spec.display)
                     .map_err(|e| e.to_string())?
-                {
-                    Some(existing) => existing.id,
-                    None => crate::db::queries::users::create_bot_user(
-                        &conn,
-                        *owner_id,
-                        &bot_username,
-                        spec.display,
-                    )
-                    .map_err(|e| e.to_string())?
-                    .id,
-                }
+                    .id
             };
             let key = mint_or_rotate(pool, manager, &bot_username)?;
             {
@@ -527,18 +613,59 @@ pub fn run(
     }
 
     let stdin_tty = std::io::stdin().is_terminal();
-    let target = target_url(args, cfg);
+
+    // LIFIC-19: resolve the transport — flags win (non-interactive path, the
+    // scripted equivalent); an interactive TTY with neither flag gets a visible
+    // menu with stdio preselected. Resolving into the same `ConnectArgs` the
+    // flag path would have produced guarantees the two can never diverge.
+    let transport = resolve_transport_inner(args.stdio, args.oauth, stdin_tty, || {
+        interactive_transport_picker()
+    })?;
+    let mut args = args.clone();
+    match transport {
+        TransportMode::Stdio => {
+            args.stdio = true;
+            args.oauth = false;
+        }
+        TransportMode::Remote => {
+            args.stdio = false;
+            args.oauth = false;
+        }
+        TransportMode::Oauth => {
+            args.stdio = false;
+            args.oauth = true;
+        }
+    }
+
+    let target = target_url(&args, cfg);
     let selected = resolve_clients_inner(&args.clients, stdin_tty, base, args.scope, |d| {
         interactive_picker(d, &target)
     })?;
 
-    // Resolve how per-tool keys are minted (once — owner selection is run-wide).
-    // Not needed for stdio (no key) or --oauth (mints nothing), and skipped in
-    // dry-run so a preview never touches the DB.
-    let needs_minting = !args.stdio && !args.oauth && !args.dry_run;
+    // Resolve how per-tool credentials are minted (once — owner selection is
+    // run-wide). Both remote and stdio (LIFIC-18) mint a bot + key per tool;
+    // for stdio the key becomes the `LIFIC_TOKEN` written into the client's
+    // env field. `--oauth` mints nothing, and dry-run is skipped so a preview
+    // never touches the DB.
+    let needs_minting = !args.oauth && !args.dry_run;
     let key_source = if needs_minting {
-        Some(resolve_key_source(args, pool)?)
-    } else if args.dry_run && !args.stdio && !args.oauth {
+        // For stdio (LIFIC-18), a bot+key is optional: if the owner can't be
+        // resolved unambiguously (no --user on a multi-user box), degrade to a
+        // plain operator stdio config rather than aborting the run — a stdio
+        // session with no token already runs as the operator. Remote still
+        // hard-fails: a remote config without a key is genuinely misconfigured.
+        match resolve_key_source(&args, pool) {
+            Ok(src) => Some(src),
+            Err(e) if args.stdio => {
+                eprintln!(
+                    "warning: skipping agent identity for stdio config ({e}); \
+                     it will run as the operator until you reconnect with --user <name>."
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        }
+    } else if args.dry_run && !args.oauth {
         // Dry-run still reports an origin so output matches a real run's shape.
         Some(KeySource::Provided(
             "lific_sk-live-DRYRUN000000000000000000000000".to_string(),
@@ -559,7 +686,7 @@ pub fn run(
 
     let outcomes = write_all_clients(
         &selected,
-        args,
+        &args,
         cfg,
         pool,
         base,
@@ -568,7 +695,7 @@ pub fn run(
     )?;
 
     // AGENTS.md (LIF-251).
-    let agents_md = maybe_write_agents_md(args, base, stdin_tty)?;
+    let agents_md = maybe_write_agents_md(&args, base, stdin_tty)?;
 
     // A representative URL/db-path for the run-level summary.
     let url = if args.stdio {
@@ -585,6 +712,7 @@ pub fn run(
         stdio: args.stdio,
         oauth: args.oauth,
         url,
+        transport,
     })
 }
 
@@ -825,6 +953,7 @@ fn print_json(result: &ConnectResult) {
         "dry_run": result.dry_run,
         "stdio": result.stdio,
         "oauth": result.oauth,
+        "transport": result.transport.as_str(),
         "url": result.url,
         "agents_md": result.agents_md.as_ref().map(|a| serde_json::json!({
             "path": a.path.display().to_string(),
@@ -840,6 +969,9 @@ fn print_human(result: &ConnectResult) {
     if result.dry_run {
         ui::info("Dry run — no files were written.");
     }
+    // LIFIC-19: surface the resolved transport so an interactive pick is never
+    // silent — the same choice a matching flag would have produced.
+    ui::step(format!("Transport: {}", ui::dim(result.transport.as_str())));
     for o in &result.outcomes {
         match (&o.action, &o.error) {
             (Some(action), _) => {
@@ -1080,6 +1212,78 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── transport resolution (LIFIC-19) ──────────────────────
+
+    fn no_transport_picker() -> Result<TransportMode, String> {
+        panic!("picker must not be called when a transport flag is given or stdin is not a TTY")
+    }
+
+    #[test]
+    fn transport_stdio_flag_wins_without_picker() {
+        assert_eq!(
+            resolve_transport_inner(true, false, true, no_transport_picker).unwrap(),
+            TransportMode::Stdio
+        );
+        assert_eq!(
+            resolve_transport_inner(true, false, false, no_transport_picker).unwrap(),
+            TransportMode::Stdio
+        );
+    }
+
+    #[test]
+    fn transport_oauth_flag_wins_without_picker() {
+        assert_eq!(
+            resolve_transport_inner(false, true, true, no_transport_picker).unwrap(),
+            TransportMode::Oauth
+        );
+    }
+
+    #[test]
+    fn transport_non_tty_no_flag_defaults_to_remote() {
+        // The historical non-interactive default. No picker, no menu.
+        assert_eq!(
+            resolve_transport_inner(false, false, false, no_transport_picker).unwrap(),
+            TransportMode::Remote
+        );
+    }
+
+    #[test]
+    fn transport_tty_no_flag_calls_picker() {
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Stdio)).unwrap();
+        assert_eq!(got, TransportMode::Stdio);
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Remote)).unwrap();
+        assert_eq!(got, TransportMode::Remote);
+        let got =
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Oauth)).unwrap();
+        assert_eq!(got, TransportMode::Oauth);
+    }
+
+    #[test]
+    fn transport_labels_are_stable() {
+        assert_eq!(TransportMode::Stdio.as_str(), "stdio");
+        assert_eq!(TransportMode::Remote.as_str(), "remote");
+        assert_eq!(TransportMode::Oauth.as_str(), "oauth");
+    }
+
+    #[test]
+    fn run_remote_flag_and_nontty_default_agree() {
+        // LIFIC-19 AC: the interactive menu and the flag/non-interactive path
+        // must produce the same config for the same choice. Proving it at the
+        // seam: a non-TTY run (remote default) and an explicit --stdio run
+        // resolve to distinct transports, and the resolver decides them
+        // deterministically without a picker.
+        assert_eq!(
+            resolve_transport_inner(false, false, false, no_transport_picker).unwrap(),
+            TransportMode::Remote
+        );
+        assert_eq!(
+            resolve_transport_inner(false, false, true, || Ok(TransportMode::Remote)).unwrap(),
+            TransportMode::Remote
+        );
+    }
+
     // ── detection ────────────────────────────────────────────
 
     #[test]
@@ -1196,6 +1400,283 @@ mod tests {
         assert!(
             std::path::Path::new(db_arg).is_absolute(),
             "stdio db path must be absolute, got {db_arg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── LIFIC-18: stdio agent token carrier ───────────────────────────────
+
+    #[test]
+    fn run_stdio_with_owner_mints_agent_key_written_into_env() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        let owner_id = seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+
+        // The outcome carries no bearer key (stdio surfaces none), but the
+        // config MUST carry the minted agent token in the env field.
+        assert!(result.outcomes.iter().all(|o| o.key.is_none()));
+
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("stdio config must write LIFIC_TOKEN into environment");
+        assert!(token.starts_with("lific_sk-live-"), "got {token}");
+
+        // The bot was minted as the per-tool agent owned by the operator.
+        let conn = pool.read().unwrap();
+        let (is_bot, owner): (bool, Option<i64>) = conn
+            .query_row(
+                "SELECT is_bot, owner_id FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(is_bot, "opencode-solo must be a bot");
+        assert_eq!(owner, Some(owner_id), "bot must be owned by the operator");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_openconfig_merges_with_existing_entries() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.clone()).unwrap();
+        std::fs::write(
+            b.project.join("opencode.json"),
+            r#"{ "mcp": { "other": { "type": "remote", "url": "http://other" } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        // Unrelated entries survive.
+        assert_eq!(v["mcp"]["other"]["url"], "http://other");
+        // Lific entry has the stdio command + token env.
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert!(
+            v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+                .as_str()
+                .is_some()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── connect idempotency / self-healing the stdio token ────────────────
+    //
+    // If a stdio config already lists `lific` but is MISSING the token (e.g. it
+    // was written by a pre-token connect, or the env field was damaged), a
+    // re-run of `connect --stdio` must mint a token and repair the entry in
+    // place — reusing the same agent bot, keeping one active key, and not
+    // corrupting other entries.
+
+    #[test]
+    fn run_stdio_reconnects_and_heals_a_tokenless_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.clone()).unwrap();
+        // A pre-existing stdio entry with NO environment/token, plus a sibling.
+        std::fs::write(
+            b.project.join("opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "local", "command": ["lific", "--db", "/abs/lific.db", "mcp"] }, "other": { "type": "remote" } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
+                .unwrap();
+        // Lific entry healed: command kept, token env added.
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert_eq!(
+            v["mcp"]["lific"]["command"],
+            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+        );
+        let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("reconnect must write LIFIC_TOKEN");
+        assert!(token.starts_with("lific_sk-live-"));
+
+        // Sibling preserved.
+        assert_eq!(v["mcp"]["other"]["type"], "remote");
+
+        // The same agent bot is reused, not duplicated.
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "reconnect must not duplicate the agent bot");
+        assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_rerun_keeps_the_token_and_agent_stable() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let _ = run(&a, &cfg, &pool, &b).unwrap();
+        // Fresh connect run #2 must already be up-to-date and idempotent w.r.t.
+        // the DB state: same single bot, single active key, a valid token write.
+        let _ = run(&a, &cfg, &pool, &b).unwrap();
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'", [], |r| r.get(0))
+            .unwrap();
+        let keys: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "no agent churn across reruns");
+        assert_eq!(keys, 1, "exactly one active key across reruns");
+
+        // The config remains well-formed and carries a live token after run #2
+        // (a re-connect may rotate the key — that is a valid fresh plaintext).
+        let second_v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
+                .unwrap();
+        let second_token = second_v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
+            .as_str()
+            .expect("token must be present after rerun");
+        assert!(second_token.starts_with("lific_sk-live-"));
+        assert_eq!(second_v["mcp"]["lific"]["type"], "local");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_codex_writes_env_table_in_toml() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["codex"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        let outcome = &result.outcomes[0];
+        assert_eq!(
+            outcome.action.as_deref(),
+            Some("created"),
+            "codex stdio error: {:?}",
+            outcome.error
+        );
+
+        let written =
+            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        // The stdio command and the env table with LIFIC_TOKEN both land.
+        assert!(
+            written.contains("command = \"lific\""),
+            "codex stdio must keep the lific command:\n{written}"
+        );
+        assert!(
+            written.contains("args = [\"--db\""),
+            "codex stdio must keep the db args:\n{written}"
+        );
+        assert!(
+            written.contains("LIFIC_TOKEN"),
+            "codex stdio must write LIFIC_TOKEN into env:\n{written}"
+        );
+        assert!(
+            written.contains("lific_sk-live-"),
+            "codex must carry a real minted key, not a placeholder:\n{written}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_stdio_codex_env_merges_into_existing_config() {
+        // LIFIC-18 spec: "The config write merges into an existing tool config
+        // without destroying other entries." opencode covered it; this pins the
+        // codex TOML merge path, which touches a different writer branch.
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        std::fs::create_dir_all(b.project.join(".codex")).unwrap();
+        std::fs::write(
+            b.project.join(".codex/config.toml"),
+            "model = \"gpt-5\"\n\n[mcp_servers.other]\nurl = \"http://other\"\n",
+        )
+        .unwrap();
+        let mut a = args(&["codex"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let written =
+            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        // Unrelated config survives.
+        assert!(
+            written.contains("model = \"gpt-5\""),
+            "user's model setting must survive:\n{written}"
+        );
+        assert!(
+            written.contains("[mcp_servers.other]"),
+            "unrelated server table must survive:\n{written}"
+        );
+        assert!(
+            written.contains("url = \"http://other\""),
+            "unrelated server's url must survive:\n{written}"
+        );
+        // Our entry: stdio command + token env.
+        assert!(
+            written.contains("command = \"lific\""),
+            "codex lific command must be present:\n{written}"
+        );
+        assert!(
+            written.contains("LIFIC_TOKEN"),
+            "codex must write LIFIC_TOKEN into env on merge:\n{written}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1394,6 +1875,102 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── reconnect healing, all transports (idempotency) ────────────────────
+    //
+    // The same self-healing expectation as the stdio case, applied to remote
+    // (API-key) and OAuth: re-running connect over an existing lific entry
+    // repairs it in place, mints/asserts the right credential state, reuses the
+    // agent bot, and never duplicates entries or keys.
+
+    #[test]
+    fn run_remote_reconnects_and_heals_a_stale_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let cfg = Config::default();
+        std::fs::create_dir_all(b.home.join(".config/opencode")).unwrap();
+        // A pre-existing **remote** (API-key) entry pointing at a stale URL with
+        // a bogus key that no longer exists in the DB.
+        std::fs::write(
+            b.home.join(".config/opencode/opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://stale/mcp", "headers": { "Authorization": "Bearer lific_sk-live-STALE" } } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+        a.url = Some("http://127.0.0.1:3456/mcp".into());
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        // Healed: url corrected, a real minted key present.
+        assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
+        let auth = v["mcp"]["lific"]["headers"]["Authorization"]
+            .as_str()
+            .expect("remote reconnect must write an Authorization header");
+        assert!(auth.starts_with("Bearer lific_sk-live-"), "got {auth}");
+
+        // The stale key is gone; one live bot key remains; one agent bot.
+        assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
+        let conn = pool.read().unwrap();
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "remote reconnect must not duplicate the bot");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_oauth_reconnects_and_heals_a_stale_lific_entry() {
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "solo", true);
+        let cfg = Config::default();
+        std::fs::create_dir_all(b.home.join(".config/opencode")).unwrap();
+        // A pre-existing entry with a wrong URL and a stale bearer header.
+        std::fs::write(
+            b.home.join(".config/opencode/opencode.json"),
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://old/", "headers": { "Authorization": "Bearer gone" } } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+        a.oauth = true;
+        a.url = Some("http://127.0.0.1:3456/mcp".into());
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
+
+        // Healed: correct URL and NO headers (OAuth headerless).
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
+        assert!(
+            v["mcp"]["lific"].get("headers").is_none(),
+            "oauth reconnect must drop the stale Authorization header"
+        );
+
+        // OAuth mints nothing, so the DB stays untouched.
+        let conn = pool.read().unwrap();
+        let keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keys, 0, "oauth reconnects mint no keys");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn explicit_user_owns_the_bots() {
         let pool = db::open_memory().unwrap();
@@ -1431,6 +2008,46 @@ mod tests {
         a.key = None;
         let err = resolve_key_source(&a, &pool).unwrap_err();
         assert!(err.contains("--user"), "must guide toward --user: {err}");
+    }
+
+    #[test]
+    fn run_stdio_with_ambiguity_degrades_to_plain_config_not_error() {
+        // LIFIC-19 review fix: a non-interactive `--stdio` on a multi-user box
+        // (no --user) must NOT hard-fail just because the agent owner can't be
+        // resolved. A stdio config with no token runs as the operator, which is
+        // the documented LIFIC-18 fallback — so the run succeeds and writes a
+        // plain (token-less) stdio config.
+        let dir = tmp();
+        let b = base(&dir);
+        let pool = db::open_memory().unwrap();
+        seed_user(&pool, "a", false);
+        seed_user(&pool, "b", false); // two humans, no single owner, no --user
+        let mut cfg = Config::default();
+        cfg.database.path = dir.join("mydb.db");
+        let mut a = args(&["opencode"], Scope::Project);
+        a.stdio = true;
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+        // The run succeeds and the config is written.
+        let oc = result.outcomes.iter().find(|o| o.id == "opencode").unwrap();
+        assert_eq!(oc.action.as_deref(), Some("created"));
+
+        // Plain stdio config: command present, but NO token (no env field,
+        // because no owner resolved → no LIFIC_TOKEN to bind).
+        let written =
+            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["mcp"]["lific"]["type"], "local");
+        assert_eq!(
+            v["mcp"]["lific"]["command"],
+            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+        );
+        assert!(
+            v["mcp"]["lific"].get("environment").is_none(),
+            "ambiguous-owner stdio must write no token env field"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── --oauth mode (LIF-259) ───────────────────────────────

@@ -147,16 +147,9 @@ pub fn ensure_import_bot(
     source_slug: &str,
     display: &str,
 ) -> Result<i64, LificError> {
-    let owner_username = {
-        let conn = pool.read()?;
-        queries::users::get_user_by_id(&conn, owner_id)?.username
-    };
-    let bot_username = format!("import-{source_slug}-{owner_username}");
+    let tool_id = format!("import-{source_slug}");
     let conn = pool.write()?;
-    if let Some(existing) = queries::users::find_bot_by_username(&conn, &bot_username)? {
-        return Ok(existing.id);
-    }
-    let bot = queries::users::create_bot_user(&conn, owner_id, &bot_username, display)?;
+    let bot = queries::users::ensure_bot(&conn, owner_id, &tool_id, display)?;
     Ok(bot.id)
 }
 

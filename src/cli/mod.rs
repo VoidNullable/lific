@@ -198,6 +198,23 @@ pub enum Command {
         /// enforced at run time because --config is a global arg).
         #[arg(long)]
         here: bool,
+
+        /// On a fresh install (no users yet), create the first human admin with
+        /// this name instead of prompting. The operator name cannot be prompted
+        /// for non-interactively.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// On a fresh install (no human operator), choose the auth mode instead
+        /// of showing the interactive menu. Non-interactive path; must be one of
+        /// `login-free` or `passwords`.
+        #[arg(long)]
+        auth_mode: Option<String>,
+
+        /// The password for `--auth-mode passwords` (prompted interactively if
+        /// omitted). Ignored in login-free mode.
+        #[arg(long)]
+        password: Option<String>,
     },
 
     /// Manage the background service that `lific init` installs.
@@ -1364,7 +1381,10 @@ mod tests {
             cli.command,
             Command::Init {
                 no_service: false,
-                here: false
+                here: false,
+                name: _,
+                auth_mode: _,
+                password: _,
             }
         ));
     }
@@ -1376,7 +1396,10 @@ mod tests {
             cli.command,
             Command::Init {
                 no_service: true,
-                here: false
+                here: false,
+                name: _,
+                auth_mode: _,
+                password: _,
             }
         ));
     }

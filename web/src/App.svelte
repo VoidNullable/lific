@@ -73,13 +73,28 @@
   let realtimeDisposed = false;
 
   onMount(async () => {
-    if (!hasSession()) {
-      const inst = await getInstance();
-      if (inst.ok && inst.data.web_auto_login) {
-        const res = await autoLogin();
-        if (res.ok) saveSession(res.data.token);
+    // Probe the instance once; its auto-login flag decides single-user mode.
+    const inst = await getInstance();
+
+    // LIF-215 follow-up: trust a stored session only if it still validates.
+    // `hasSession()` only checks localStorage — an expired token (server
+    // rejects with 401) would otherwise look valid, skip auto-login, and leave
+    // the user stuck with a dead session. Clear it so the flow below can self-
+    // heal in single-user mode (or fall through to /login otherwise).
+    if (hasSession()) {
+      const probe = await me();
+      if (!probe.ok && probe.status === 401) {
+        clearSession();
       }
     }
+
+    // Single-user mode: no valid session → silently mint a fresh admin session
+    // (covers both a cold load with no token and a just-expired one).
+    if (!hasSession() && inst.ok && inst.data.web_auto_login) {
+      const res = await autoLogin();
+      if (res.ok) saveSession(res.data.token);
+    }
+
     bootstrapping = false;
     if (!realtimeDisposed) syncRealtimeSocket();
   });

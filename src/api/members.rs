@@ -38,10 +38,10 @@ use super::{with_read, with_write};
 /// (`Viewer`+); non-members are denied same as any other project read.
 pub(super) async fn list_project_members(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<MemberWithUser>>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
     with_read(&db, |conn| {
         members::list_members_with_users(conn, project_id)
     })
@@ -69,13 +69,14 @@ pub(super) async fn list_project_members(
 /// access," never as "full access."
 pub(super) async fn my_project_role(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
 
     let enforced = authz::authz_enforced(&db)?;
     let (role, is_admin) = with_read(&db, |conn| {
+        let auth_user = identity.as_ref().map(|i| i.user.clone());
         let effective = authz::effective_user(conn, &auth_user);
         let is_admin = matches!(&effective, Some(u) if u.is_admin);
         let role = match &effective {
@@ -99,11 +100,11 @@ pub(super) async fn my_project_role(
 pub(super) async fn add_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
     Json(input): Json<AddMember>,
 ) -> Result<Json<ProjectMember>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Lead)?;
+    authz::require_role(&db, &identity, project_id, Role::Lead)?;
     let role = input.role.as_deref().unwrap_or("viewer").to_string();
     let member = with_write(&db, |conn| {
         members::add_member(conn, project_id, input.user_id, &role)
@@ -118,11 +119,11 @@ pub(super) async fn add_project_member(
 pub(super) async fn update_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((project_id, user_id)): Path<(i64, i64)>,
     Json(input): Json<ChangeMemberRole>,
 ) -> Result<Json<ProjectMember>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Lead)?;
+    authz::require_role(&db, &identity, project_id, Role::Lead)?;
     let member = with_write(&db, |conn| {
         members::change_role(conn, project_id, user_id, &input.role)
     })?;
@@ -135,10 +136,10 @@ pub(super) async fn update_project_member(
 pub(super) async fn remove_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((project_id, user_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Lead)?;
+    authz::require_role(&db, &identity, project_id, Role::Lead)?;
     with_write(&db, |conn| {
         members::remove_member_guarded(conn, project_id, user_id)
     })?;

@@ -276,7 +276,7 @@
   function toolState(toolId: string): "connected" | "disconnected" | "none" {
     const bot = getToolBot(toolId);
     if (!bot) return "none";
-    return bot.has_active_key ? "connected" : "disconnected";
+    return bot.connected ? "connected" : "disconnected";
   }
 
   // Open the modal and mint credentials in one step (no extra confirm).

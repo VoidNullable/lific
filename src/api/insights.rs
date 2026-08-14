@@ -12,7 +12,7 @@ use crate::authz;
 use crate::db::queries::insights::{clamp_weeks, get_insights};
 use crate::db::{
     DbPool,
-    models::{AuthUser, InsightsPayload, Role},
+    models::{InsightsPayload, Role},
 };
 use crate::error::LificError;
 
@@ -28,11 +28,11 @@ pub(super) struct InsightsQuery {
 /// GET /api/projects/{id}/insights?weeks=N
 pub(super) async fn project_insights(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
     Query(q): Query<InsightsQuery>,
 ) -> Result<Json<InsightsPayload>, LificError> {
-    authz::require_role(&db, &auth_user, id, Role::Viewer)?;
+    authz::require_role(&db, &identity, id, Role::Viewer)?;
     let weeks = clamp_weeks(q.weeks);
     with_read(&db, |conn| get_insights(conn, id, weeks)).map(Json)
 }

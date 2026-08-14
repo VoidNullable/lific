@@ -45,12 +45,12 @@ fn create_comment_with_mentions(
 /// Workspace-level pages (`project_id = None`) fall back to admin-only.
 fn require_comment_viewer(
     db: &DbPool,
-    auth_user: &Option<AuthUser>,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
     match project_id {
-        Some(pid) => authz::require_role(db, auth_user, pid, Role::Viewer),
-        None => authz::require_workspace_admin(db, auth_user),
+        Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
+        None => authz::require_workspace_admin(db, identity),
     }
 }
 
@@ -68,13 +68,13 @@ pub(super) struct ListCommentsQuery {
 
 pub(super) async fn list_comments(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(issue_id): Path<i64>,
     Query(q): Query<ListCommentsQuery>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
     let project_id =
         with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
-    require_comment_viewer(&db, &auth_user, Some(project_id))?;
+    require_comment_viewer(&db, &identity, Some(project_id))?;
     let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
         crate::db::queries::comments::list_comments_paginated(
@@ -93,14 +93,16 @@ pub(super) async fn create_comment(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(issue_id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
     let project_id =
         with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
-    require_comment_viewer(&db, &auth_user, Some(project_id))?;
+    require_comment_viewer(&db, &identity, Some(project_id))?;
 
-    let user = auth_user
+    let user = identity
+        .as_ref()
+        .map(|i| i.user.clone())
         .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
 
     let comment = create_comment_with_mentions(
@@ -116,12 +118,12 @@ pub(super) async fn create_comment(
 
 pub(super) async fn list_page_comments(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(page_id): Path<i64>,
     Query(q): Query<ListCommentsQuery>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
-    require_comment_viewer(&db, &auth_user, project_id)?;
+    require_comment_viewer(&db, &identity, project_id)?;
     let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
         crate::db::queries::comments::list_comments_paginated(
@@ -140,13 +142,15 @@ pub(super) async fn create_page_comment(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(page_id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
-    require_comment_viewer(&db, &auth_user, project_id)?;
+    require_comment_viewer(&db, &identity, project_id)?;
 
-    let user = auth_user
+    let user = identity
+        .as_ref()
+        .map(|i| i.user.clone())
         .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
 
     let comment = create_comment_with_mentions(
@@ -169,10 +173,10 @@ pub(super) async fn create_page_comment(
 /// user who can't see the project. Powers the composer autocomplete.
 pub(super) async fn mention_candidates(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<MentionCandidate>>, LificError> {
-    authz::require_role(&db, &auth_user, project_id, Role::Viewer)?;
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
     let member_scoped = authz::authz_enforced(&db)?;
     with_read(&db, |conn| {
         comments::mention_candidates(conn, Some(project_id), member_scoped)
@@ -184,10 +188,10 @@ pub(super) async fn update_comment_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can edit
     let existing = with_read(&db, |conn| {
@@ -251,9 +255,9 @@ pub(super) async fn delete_comment_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = auth_user.ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
 
     // Check ownership: only the author or an admin can delete
     let existing = with_read(&db, |conn| {
@@ -358,6 +362,15 @@ mod tests {
                 username: user.username.clone(),
                 display_name: user.display_name.clone(),
                 is_admin: user.is_admin,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: user.id,
+                    username: user.username.clone(),
+                    display_name: user.display_name.clone(),
+                    is_admin: user.is_admin,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         (app, issue.id, user.id)
@@ -558,9 +571,18 @@ mod tests {
             }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
-                username: other.username,
-                display_name: other.display_name,
+                username: other.username.clone(),
+                display_name: other.display_name.clone(),
                 is_admin: false,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: other.id,
+                    username: other.username,
+                    display_name: other.display_name,
+                    is_admin: false,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         // Try to edit owner's comment
@@ -673,9 +695,18 @@ mod tests {
             }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
-                username: admin.username,
-                display_name: admin.display_name,
+                username: admin.username.clone(),
+                display_name: admin.display_name.clone(),
                 is_admin: true,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin.id,
+                    username: admin.username,
+                    display_name: admin.display_name,
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         // Admin can delete regular user's comment
@@ -756,6 +787,15 @@ mod tests {
                 username: user.username.clone(),
                 display_name: user.display_name.clone(),
                 is_admin: user.is_admin,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: user.id,
+                    username: user.username.clone(),
+                    display_name: user.display_name.clone(),
+                    is_admin: user.is_admin,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         (app, page_id, user.id)
@@ -939,9 +979,18 @@ mod tests {
             }))
             .layer(Extension(Some(AuthUser {
                 id: other.id,
-                username: other.username,
-                display_name: other.display_name,
+                username: other.username.clone(),
+                display_name: other.display_name.clone(),
                 is_admin: false,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: other.id,
+                    username: other.username,
+                    display_name: other.display_name,
+                    is_admin: false,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         // Try to edit owner's page comment as a non-owner, non-admin user
@@ -1033,9 +1082,18 @@ mod tests {
             }))
             .layer(Extension(Some(AuthUser {
                 id: admin.id,
-                username: admin.username,
-                display_name: admin.display_name,
+                username: admin.username.clone(),
+                display_name: admin.display_name.clone(),
                 is_admin: true,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: admin.id,
+                    username: admin.username,
+                    display_name: admin.display_name,
+                    is_admin: true,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         let resp = app
@@ -1415,9 +1473,18 @@ mod tests {
             }))
             .layer(Extension(Some(AuthUser {
                 id: user.id,
-                username: user.username,
-                display_name: user.display_name,
+                username: user.username.clone(),
+                display_name: user.display_name.clone(),
                 is_admin: false,
+            })))
+            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: AuthUser {
+                    id: user.id,
+                    username: user.username,
+                    display_name: user.display_name,
+                    is_admin: false,
+                },
+                transport: crate::actor::Transport::Web,
             })));
 
         // Post one comment to the issue and one to the page.

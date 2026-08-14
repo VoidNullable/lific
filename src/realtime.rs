@@ -344,7 +344,11 @@ fn visible_projects_for(
     db: &crate::db::DbPool,
     auth_user: &crate::db::models::AuthUser,
 ) -> Option<HashSet<i64>> {
-    crate::authz::visible_project_ids(db, &Some(auth_user.clone()))
+    let identity = crate::resolve_caller::ResolvedIdentity {
+        user: auth_user.clone(),
+        transport: crate::actor::Transport::Web,
+    };
+    crate::authz::visible_project_ids(db, &Some(identity))
         .ok()
         .flatten()
 }
@@ -386,10 +390,16 @@ fn visible_to(
             }
         }
         RealtimeAudience::Event => match message.event.project_id() {
-            Some(project_id) => match crate::authz::can_view_project(db, auth_user, project_id) {
-                Ok(true) => EventVisibility::Visible,
-                Ok(false) | Err(_) => EventVisibility::Hidden,
-            },
+            Some(project_id) => {
+                let identity = crate::resolve_caller::ResolvedIdentity {
+                    user: auth_user.clone(),
+                    transport: crate::actor::Transport::Web,
+                };
+                match crate::authz::can_view_project(db, &identity, project_id) {
+                    Ok(true) => EventVisibility::Visible,
+                    Ok(false) | Err(_) => EventVisibility::Hidden,
+                }
+            }
             None => EventVisibility::Visible,
         },
     }

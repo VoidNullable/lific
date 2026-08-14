@@ -29,6 +29,11 @@ pub enum Transport {
     Stdio {
         /// Absolute path to the SQLite database the spawned server should open.
         db_path: String,
+        /// The agent credential carried by this stdio session (LIFIC-18). Written
+        /// into the client config's env field as `LIFIC_TOKEN` so the spawned
+        /// server resolves the caller as the bound agent. `None` for a plain
+        /// (operator) stdio config with no agent identity.
+        token: Option<String>,
     },
     /// Remote streamable-HTTP server reached over the network, written WITHOUT
     /// any `Authorization` header — the client's native MCP OAuth flow (DCR +
@@ -65,6 +70,19 @@ impl ServerConfig {
             name: "lific".into(),
             transport: Transport::Stdio {
                 db_path: db_path.into(),
+                token: None,
+            },
+        }
+    }
+
+    /// A stdio server carrying an agent credential (LIFIC-18). The token is
+    /// written into the client config's env field as `LIFIC_TOKEN`.
+    pub fn stdio_with_token(db_path: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            name: "lific".into(),
+            transport: Transport::Stdio {
+                db_path: db_path.into(),
+                token: Some(token.into()),
             },
         }
     }
@@ -198,6 +216,11 @@ pub struct ClientSpec {
     /// config, and the post-connect auth hint (LIF-259 `--oauth`).
     pub oauth: OauthSupport,
     pub format: Format,
+    /// The env-field name this client uses for a stdio command's environment
+    /// (LIFIC-18): `environment` for OpenCode, `env` for Claude Code and Codex,
+    /// per those tools' config schemas. `None` when the client's stdio entry
+    /// cannot carry an env map (the token is then simply not written).
+    pub stdio_env_key: Option<&'static str>,
     /// Compute the global-scope config path for this OS, or `None` if the
     /// client has no global config (rare).
     global_path: fn(&PathBase) -> Option<PathBuf>,
@@ -224,6 +247,15 @@ impl ClientSpec {
         // The mappers don't set `name` themselves; inject the canonical server
         // name here so there's one source of truth (always `"lific"`).
         entry.name = cfg.name.clone();
+        // LIFIC-18: for a stdio transport carrying an agent token, write the
+        // token into the client's env field as LIFIC_TOKEN so the spawned
+        // server resolves the caller as the bound agent. Clients that can't
+        // carry an env map get the token silently dropped (i.e. write nothing).
+        if let (Transport::Stdio { token: Some(tok), .. }, Some(env_key)) =
+            (&cfg.transport, self.stdio_env_key)
+        {
+            entry.value[env_key] = serde_json::json!({ "LIFIC_TOKEN": tok });
+        }
         entry
     }
 
@@ -315,6 +347,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "opencode mcp auth lific",
             },
             format: Format::Json,
+            stdio_env_key: Some("environment"),
             global_path: |b| Some(config_dir(b, &["opencode", "opencode.json"])),
             project_path: |b| Some(project_rel(b, &["opencode.json"])),
             detect_extra: no_extra,
@@ -343,7 +376,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcp".into(),
                     value: serde_json::json!({
@@ -363,6 +396,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "claude mcp login lific  (or /mcp inside a session)",
             },
             format: Format::Json,
+            stdio_env_key: Some("env"),
             global_path: |b| Some(home_dot(b, &[".claude.json"])),
             project_path: |b| Some(project_rel(b, &[".mcp.json"])),
             detect_extra: no_extra,
@@ -386,7 +420,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcpServers".into(),
                     value: serde_json::json!({
@@ -409,6 +443,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                          config-file entry — add Lific there instead.",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| {
                 Some(match b.os {
                     Os::Mac => home_dot(
@@ -462,7 +497,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcpServers".into(),
                     value: serde_json::json!({
@@ -481,6 +516,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "Cursor will prompt to authorize in-app on first connect",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| Some(home_dot(b, &[".cursor", "mcp.json"])),
             project_path: |b| Some(project_rel(b, &[".cursor", "mcp.json"])),
             detect_extra: |b, scope| match scope {
@@ -505,7 +541,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcpServers".into(),
                     value: serde_json::json!({
@@ -524,6 +560,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "VS Code starts the browser OAuth flow on first connect",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| {
                 Some(match b.os {
                     Os::Mac => home_dot(
@@ -560,7 +597,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "servers".into(),
                     value: serde_json::json!({
@@ -580,6 +617,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "codex mcp login lific",
             },
             format: Format::Toml,
+            stdio_env_key: Some("env"),
             global_path: |b| Some(home_dot(b, &[".codex", "config.toml"])),
             project_path: |b| Some(project_rel(b, &[".codex", "config.toml"])),
             detect_extra: |b, scope| match scope {
@@ -611,7 +649,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcp_servers.lific".into(),
                     value: serde_json::json!({
@@ -630,6 +668,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "Zed runs the OAuth flow automatically when no header is set",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| Some(config_dir(b, &["zed", "settings.json"])),
             project_path: |_| None,
             detect_extra: |b, scope| match scope {
@@ -654,7 +693,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "context_servers".into(),
                     value: serde_json::json!({
@@ -673,6 +712,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "run /mcp auth lific inside Gemini CLI",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| Some(home_dot(b, &[".gemini", "settings.json"])),
             project_path: |b| Some(project_rel(b, &[".gemini", "settings.json"])),
             detect_extra: |b, scope| match scope {
@@ -698,7 +738,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcpServers".into(),
                     value: serde_json::json!({
@@ -717,6 +757,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                 hint: "Windsurf prompts to authorize in-app on first connect",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| Some(home_dot(b, &[".codeium", "windsurf", "mcp_config.json"])),
             project_path: |_| None,
             detect_extra: |b, scope| match scope {
@@ -742,7 +783,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcpServers".into(),
                     value: serde_json::json!({
@@ -764,6 +805,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                          (drop --oauth) to connect it.",
             },
             format: Format::Yaml,
+            stdio_env_key: None,
             global_path: |b| Some(config_dir(b, &["goose", "config.yaml"])),
             project_path: |_| None,
             detect_extra: |b, scope| match scope {
@@ -802,7 +844,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "extensions".into(),
                     value: serde_json::json!({
@@ -830,6 +872,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                          (drop --oauth) to connect it.",
             },
             format: Format::Json,
+            stdio_env_key: None,
             global_path: |b| Some(config_dir(b, &["crush", "crush.json"])),
             project_path: |b| Some(project_rel(b, &["crush.json"])),
             detect_extra: |b, scope| match scope {
@@ -858,7 +901,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                     }),
                     notes: vec![],
                 },
-                Transport::Stdio { db_path } => CompiledEntry {
+                Transport::Stdio { db_path, .. } => CompiledEntry {
                     name: String::new(),
                     top_key: "mcp".into(),
                     value: serde_json::json!({
@@ -902,6 +945,10 @@ mod tests {
 
     fn stdio_cfg() -> ServerConfig {
         ServerConfig::stdio("/abs/lific.db")
+    }
+
+    fn stdio_token_cfg() -> ServerConfig {
+        ServerConfig::stdio_with_token("/abs/lific.db", "lific_sk-live-AGENTTOKEN")
     }
 
     fn oauth_cfg() -> ServerConfig {
@@ -1002,6 +1049,83 @@ mod tests {
             e.value["command"],
             serde_json::json!(["lific", "--db", "/abs/lific.db", "mcp"])
         );
+    }
+
+    // ── LIFIC-18: stdio agent token → env field ────────────────────────────
+
+    #[test]
+    fn opencode_stdio_token_writes_into_environment_field() {
+        let e = find_client("opencode")
+            .unwrap()
+            .compile(&stdio_token_cfg());
+        assert_eq!(e.value["type"], "local");
+        // Command stays unchanged.
+        assert_eq!(
+            e.value["command"],
+            serde_json::json!(["lific", "--db", "/abs/lific.db", "mcp"])
+        );
+        // opencode names its env field `environment`.
+        assert_eq!(e.value["environment"]["LIFIC_TOKEN"], "lific_sk-live-AGENTTOKEN");
+    }
+
+    #[test]
+    fn claude_code_stdio_token_writes_into_env_field() {
+        let e = find_client("claude-code")
+            .unwrap()
+            .compile(&stdio_token_cfg());
+        assert_eq!(e.value["type"], "stdio");
+        assert_eq!(e.value["env"]["LIFIC_TOKEN"], "lific_sk-live-AGENTTOKEN");
+    }
+
+    #[test]
+    fn codex_stdio_token_writes_into_env_field() {
+        let e = find_client("codex").unwrap().compile(&stdio_token_cfg());
+        assert_eq!(e.value["env"]["LIFIC_TOKEN"], "lific_sk-live-AGENTTOKEN");
+    }
+
+    #[test]
+    fn stdio_without_token_writes_no_env_entry() {
+        // A plain stdio config (operator, no agent) must not invent an env map.
+        for id in ["opencode", "claude-code", "codex"] {
+            let e = find_client(id).unwrap().compile(&stdio_cfg());
+            assert!(
+                e.value.get("environment").is_none() && e.value.get("env").is_none(),
+                "{id} plain stdio must not write an env field"
+            );
+        }
+    }
+
+    #[test]
+    fn stdio_token_for_env_incapable_client_is_dropped() {
+        // Clients with no documented env field (well, cursor here as stand-in)
+        // must not write the token into an invented key.
+        let e = find_client("cursor").unwrap().compile(&stdio_token_cfg());
+        assert!(e.value.get("env").is_none());
+        assert!(e.value.get("environment").is_none());
+        // The stdio command still stands.
+        assert_eq!(e.value["command"], "lific");
+    }
+
+    #[test]
+    fn connect_stdio_env_uses_per_client_env_key() {
+        // opencode=environment, claude-code & codex=env — the three named in
+        // the spec. Others are None.
+        let spec_env = |id: &str| find_client(id).unwrap().stdio_env_key;
+        assert_eq!(spec_env("opencode"), Some("environment"));
+        assert_eq!(spec_env("claude-code"), Some("env"));
+        assert_eq!(spec_env("codex"), Some("env"));
+        for id in [
+            "claude-desktop",
+            "cursor",
+            "vscode",
+            "zed",
+            "gemini",
+            "windsurf",
+            "goose",
+            "crush",
+        ] {
+            assert_eq!(spec_env(id), None, "{id} has no documented stdio env field");
+        }
     }
 
     #[test]

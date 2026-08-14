@@ -28,15 +28,6 @@ static MCP_HANDLER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 /// Uses unwrap_or_else to recover from poison (e.g. if a handler panics).
 static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
 
-/// LIF-261: per-request "the credential is an operator-trusted unbound API
-/// key" flag, mirroring [`MCP_REQUEST_USER`]. A task-local can't carry this on
-/// the MCP path because rmcp spawns internal tasks that drop it, so it lives in
-/// a global guarded by the same serialization lock. Read by `authz` (via
-/// [`current_is_operator`]) to treat an unbound API key as admin-equivalent in
-/// enforced mode without granting that power to a legacy unbound OAuth token
-/// (which also resolves to `AuthUser = None`).
-static MCP_REQUEST_OPERATOR: Mutex<bool> = Mutex::new(false);
-
 /// Per-request external origin used for structured resource links.
 /// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
 static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<Arc<IssueLinkContext>>> = Mutex::new(None);
@@ -64,22 +55,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = R>,
 {
-    with_request_context(user, false, None, f).await
-}
-
-/// LIF-261: like [`with_request_user`] but also records whether the request's
-/// credential is an operator-trusted unbound API key. The `/mcp` route passes
-/// `true` only when the auth middleware resolved an unbound API key (never for
-/// OAuth/session tokens), so `authz` can treat it as admin-equivalent in
-/// enforced mode. `with_request_user` keeps the old signature (operator =
-/// false) for every non-unbound-key caller.
-#[cfg_attr(not(test), allow(dead_code))]
-pub async fn with_request_identity<F, Fut, R>(user: Option<AuthUser>, is_operator: bool, f: F) -> R
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = R>,
-{
-    with_request_context(user, is_operator, None, f).await
+    with_request_context(user, None, f).await
 }
 
 /// Run an MCP request with its authenticated identity and optional external
@@ -87,7 +63,6 @@ where
 /// HTTP callers pass the validated browser-facing base URL.
 pub async fn with_request_context<F, Fut, R>(
     user: Option<AuthUser>,
-    is_operator: bool,
     issue_links: Option<IssueLinkContext>,
     f: F,
 ) -> R
@@ -106,28 +81,36 @@ where
     *MCP_REQUEST_USER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
-    *MCP_REQUEST_OPERATOR
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = is_operator;
     *MCP_REQUEST_ISSUE_LINKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = issue_links;
+    // Panic-safe cleanup: clear the globals on scope exit (including if `f`
+    // panics), before `_guard` releases MCP_HANDLER_LOCK (reverse declaration
+    // order). Without this, a panicking request would leave a stale user in the
+    // process-wide global for the next (concurrent) test to read.
+    let _clear = RequestGlobalGuard;
     #[cfg(test)]
     let result = TEST_REQUEST_ISSUE_LINKS
         .scope(test_issue_links, crate::actor::scope(actor, f()))
         .await;
     #[cfg(not(test))]
     let result = crate::actor::scope(actor, f()).await;
-    *MCP_REQUEST_USER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    *MCP_REQUEST_OPERATOR
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
-    *MCP_REQUEST_ISSUE_LINKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     result
+}
+
+/// Drops the per-request globals on scope exit (panic-safe). Declared after the
+/// globals are set in [`with_request_context`], so it runs before the handler
+/// lock is released.
+struct RequestGlobalGuard;
+impl Drop for RequestGlobalGuard {
+    fn drop(&mut self) {
+        *MCP_REQUEST_USER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *MCP_REQUEST_ISSUE_LINKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 }
 
 /// Get the authenticated user for the current MCP request, if any.
@@ -138,12 +121,31 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
         .clone()
 }
 
-/// LIF-261: whether the current MCP request's credential is an operator-trusted
-/// unbound API key. Read by `authz::operator_context`.
-pub(crate) fn current_is_operator() -> bool {
-    *MCP_REQUEST_OPERATOR
+/// LIFIC-18: install the session-level identity for a stdio MCP server.
+///
+/// A stdio session is one long-lived, serialized process that is never wrapped
+/// in [`with_request_context`] (there is no HTTP request to carry the user), so
+/// installing the resolved agent here makes every tool call resolve as that
+/// agent via [`current_auth_user`] until the process exits. The operator
+/// fallback (a missing/unbound `LIFIC_TOKEN`) is the caller passing `None`,
+/// which keeps the existing credential-less resolution — also the operator.
+pub(crate) fn set_stdio_user(user: Option<AuthUser>) {
+    *MCP_REQUEST_USER
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
+}
+
+/// LIFIC-11: the resolved identity for the current MCP request. MCP now
+/// resolves the caller exactly as REST does — via [`crate::resolve_caller::resolve_caller`] —
+/// so a credential-less request (unbound API key, legacy OAuth token, or a
+/// stdio session with no bound user) falls back to the first admin, and the
+/// gates read `identity.user.is_admin`. The separate operator flag is gone:
+/// every credential that authenticates is trusted as the operator, matching
+/// REST one-for-one (no transport-specific divergence).
+pub(crate) fn current_identity(db: &crate::db::DbPool) -> Option<crate::resolve_caller::ResolvedIdentity> {
+    crate::resolve_caller::resolve_caller(db, current_auth_user(), crate::actor::Transport::Mcp)
+        .ok()
+        .flatten()
 }
 
 /// Get the validated external origin for structured resource links, if this MCP
@@ -424,44 +426,10 @@ mod tests {
         assert!(current_auth_user().is_none());
     }
 
-    // ── LIF-261: operator flag on the MCP request identity global ──────────
-    //
-    // The `/mcp` route calls `with_request_identity(user, is_operator, ..)`;
-    // MCP tools' authz gates read the operator flag via
-    // `current_is_operator()`. These prove the global is set/read/cleared and
-    // that `with_request_user` keeps the non-operator default.
-
-    #[tokio::test]
-    async fn with_request_identity_exposes_and_clears_operator_flag() {
-        // Default (no request) is false.
-        assert!(!current_is_operator());
-
-        let seen = with_request_identity(None, true, || async { current_is_operator() }).await;
-        assert!(
-            seen,
-            "operator flag must be visible inside the request scope"
-        );
-
-        // Cleared after the request completes.
-        assert!(
-            !current_is_operator(),
-            "operator flag must be cleared after the request"
-        );
-    }
-
-    #[tokio::test]
-    async fn with_request_user_defaults_operator_false() {
-        let seen = with_request_user(None, || async { current_is_operator() }).await;
-        assert!(
-            !seen,
-            "with_request_user (non-unbound-key callers) must never set the operator flag"
-        );
-    }
-
     #[tokio::test]
     async fn with_request_context_scopes_issue_link_origin() {
         let context = IssueLinkContext::parse("https://tracker.example/base");
-        let (seen, global_seen) = with_request_context(None, false, context, || async {
+        let (seen, global_seen) = with_request_context(None, context, || async {
             let scoped = current_issue_link_context()
                 .expect("request origin should be visible")
                 .issue_markdown("LIF-1")
@@ -491,16 +459,35 @@ mod tests {
         );
     }
 
-    // End-to-end: an operator-trusted unbound API key aimed at /mcp passes an
-    // enforced-mode MCP Viewer gate, while a legacy unbound OAuth token does
-    // not. Mirrors the /mcp route wiring (require_api_key → OperatorCredential
-    // extension → with_request_identity), then runs a real MCP gate.
+    // End-to-end: a credential-less MCP request resolves to the first admin
+    // (via resolve_caller), so it passes an enforced-mode Viewer gate. LIFIC-11
+    // unified MCP onto the same resolve_caller path REST uses, so the old
+    // operator-vs-legacy-OAuth distinction is gone: an unbound API key and a
+    // legacy unbound OAuth token both authenticate and both resolve to the
+    // first admin. Mirrors the /mcp route wiring (require_api_key → with_request_user
+    // → current_identity), then runs a real authz gate.
     #[tokio::test]
-    async fn mcp_operator_key_passes_gate_but_legacy_oauth_does_not() {
+    async fn unbound_credentials_resolve_to_first_admin_and_pass_mcp_gate() {
         use axum::extract::State;
         use axum::response::IntoResponse;
 
         let pool = crate::db::open_memory().expect("test db");
+        // resolve_caller needs a first_admin to resolve credential-less requests to
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "admin".into(),
+                    email: "admin@test.local".into(),
+                    password: "adminpass123".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+        }
         let manager = crate::auth::create_key_manager().unwrap();
         let unbound_key = crate::auth::create_api_key(&pool, &manager, "mcp-operator").unwrap();
         let project = {
@@ -529,23 +516,17 @@ mod tests {
         let oauth_token = insert_oauth_token(&pool, "mcp-legacy-unbound", None);
 
         // Route that mirrors main.rs's /mcp identity plumbing, then runs the
-        // same authz gate an MCP Viewer-tool would (via the tools.rs
-        // require_role_mcp path — here inlined as authz::require_role over the
-        // MCP current_auth_user()).
+        // same authz gate an MCP Viewer-tool would (authz::require_role over
+        // the resolved identity).
         async fn gate(
             State((pool, project_id)): State<(DbPool, i64)>,
             axum::Extension(auth_user): axum::Extension<Option<AuthUser>>,
-            request: axum::extract::Request,
         ) -> axum::response::Response {
-            let is_operator = request
-                .extensions()
-                .get::<crate::auth::OperatorCredential>()
-                .is_some();
-            crate::mcp::with_request_identity(auth_user, is_operator, || async {
+            crate::mcp::with_request_user(auth_user, || async {
                 let db = std::sync::Arc::new(pool);
                 match crate::authz::require_role(
                     &db,
-                    &crate::mcp::current_auth_user(),
+                    &crate::mcp::current_identity(&db),
                     project_id,
                     crate::db::models::Role::Viewer,
                 ) {
@@ -586,12 +567,12 @@ mod tests {
         assert_eq!(
             status(unbound_key, app.clone()).await,
             StatusCode::OK,
-            "operator-trusted unbound API key must pass the enforced MCP Viewer gate"
+            "an unbound API key authenticates and resolves to the first admin, passing the enforced MCP Viewer gate"
         );
         assert_eq!(
             status(oauth_token, app).await,
-            StatusCode::FORBIDDEN,
-            "legacy unbound OAuth token must NOT gain operator power on the MCP surface"
+            StatusCode::OK,
+            "a legacy unbound OAuth token also authenticates and resolves to the first admin — MCP and REST now share one resolve_caller path"
         );
     }
 
@@ -655,5 +636,80 @@ mod tests {
             addition <= 700,
             "convention addition grew to {addition} chars; keep it tight"
         );
+    }
+
+    // ── LIFIC-18: stdio session identity (set_stdio_user seam) ─────────────
+    //
+    // The `lific mcp` entrypoint installs the session identity once at startup
+    // via `set_stdio_user` (see main.rs), and every tool call resolves through
+    // `current_identity`. This is seam two of the spec: with a valid bound
+    // token the agent resolves as itself; with none, the operator (first
+    // admin) fallback applies.
+
+    fn seed_user(pool: &crate::db::DbPool, username: &str, admin: bool) -> crate::db::models::AuthUser {
+        let conn = pool.write().expect("write conn");
+        let u = crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: username.into(),
+                email: format!("{username}@local.test"),
+                password: "somepass123".into(),
+                display_name: None,
+                is_admin: admin,
+                is_bot: false,
+            },
+        )
+        .expect("create user");
+        crate::db::models::AuthUser {
+            id: u.id,
+            username: u.username,
+            display_name: u.display_name,
+            is_admin: u.is_admin,
+        }
+    }
+
+    #[test]
+    fn stdio_session_with_agent_identity_resolves_as_that_agent() {
+        // Serialize against the whole MCP suite: `set_stdio_user` mutates the
+        // process-wide MCP_REQUEST_USER global, which concurrent tool tests
+        // also read. Holding the shared test guard prevents a cross-test race.
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        // A first admin exists as the operator fallback, but the bound session
+        // must resolve to the agent, NOT the admin.
+        let pool = crate::db::open_memory().expect("test db");
+        let admin = seed_user(&pool, "admin", true);
+        let agent = seed_user(&pool, "opencode-solo", false);
+
+        // Mirrors main.rs: LIFIC_TOKEN resolved to `agent`, installed for the
+        // whole session.
+        set_stdio_user(Some(agent.clone()));
+
+        let identity = current_identity(&pool).expect("a bound stdio session resolves");
+        assert_eq!(
+            identity.user, agent,
+            "agent session must resolve as the agent, not the operator"
+        );
+        assert_ne!(identity.user.id, admin.id);
+        assert_eq!(identity.transport, crate::actor::Transport::Mcp);
+    }
+
+    #[test]
+    fn stdio_session_without_identity_falls_back_to_operator() {
+        // Serialize against the whole MCP suite for the same process-global
+        // reason as above (set_stdio_user writes MCP_REQUEST_USER).
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        // No LIFIC_TOKEN / unbound → `set_stdio_user(None)` → the operator
+        // (first admin) fallback, the same pre-LIFIC-18 behavior.
+        let pool = crate::db::open_memory().expect("test db");
+        let admin = seed_user(&pool, "operator", true);
+
+        set_stdio_user(None);
+        let identity = current_identity(&pool).expect("operator fallback resolves");
+        assert_eq!(
+            identity.user.id, admin.id,
+            "no-token stdio session must resolve to the first admin"
+        );
+        assert!(identity.user.is_admin);
+        assert_eq!(identity.transport, crate::actor::Transport::Mcp);
     }
 }
