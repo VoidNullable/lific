@@ -106,6 +106,19 @@ pub fn write(path: &Path, format: Format, entry: &CompiledEntry) -> Result<Actio
     }
     std::fs::write(path, &rendered.contents)
         .map_err(|e| WriteError::new(format!("failed to write {}: {e}", path.display())))?;
+    // Connector configs can embed live credentials (an API key, an OAuth
+    // token, or a LIFIC_TOKEN env entry). Don't leave those group/world
+    // readable (PR #23 review). Configs without secrets keep umask perms —
+    // some of them are shared, committed files.
+    #[cfg(unix)]
+    if rendered.contents.contains("LIFIC_TOKEN")
+        || rendered.contents.contains("lific_sk-")
+        || rendered.contents.contains("lific_at_")
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| WriteError::new(format!("failed to chmod {}: {e}", path.display())))?;
+    }
     Ok(rendered.action)
 }
 
