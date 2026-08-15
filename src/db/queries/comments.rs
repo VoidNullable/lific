@@ -142,9 +142,6 @@ pub fn count_comments(
 /// greater, the same bounds every other paginated query uses. Passing neither
 /// preserves the unbounded behaviour used by exports and other internal
 /// callers.
-///
-/// Transports that over-fetch by one to detect `has_more` must clamp their own
-/// input to `MAX_PAGE_LIMIT - 1`, since `limit + 1` is clamped back down here.
 pub fn list_comments_paginated(
     conn: &Connection,
     parent: CommentParent,
@@ -153,6 +150,24 @@ pub fn list_comments_paginated(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<Comment>, LificError> {
+    Ok(list_comments_page(conn, parent, author, order, limit, offset)?.items)
+}
+
+/// [`list_comments_paginated`] as a [`Page`](super::Page).
+///
+/// LIF-388: the over-fetch that answers `has_more` happens here, after the
+/// clamp, rather than at the transport. A caller that asked for
+/// `MAX_PAGE_LIMIT` comments and then over-fetched itself would have its
+/// `limit + 1` clamped straight back to the cap, and would report "no more
+/// comments" on the one page size where the answer matters most.
+pub fn list_comments_page(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<super::Page<Comment>, LificError> {
     let dir = match order {
         None | Some("asc") => "ASC",
         Some("desc") => "DESC",
@@ -184,14 +199,16 @@ pub fn list_comments_paginated(
     // `dir` comes from the two-value whitelist above, never raw input.
     sql.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
 
+    let mut page_limit = super::NO_LIMIT;
     if limit.is_some() || offset.is_some() {
         let (limit, offset) = super::page_unbounded(limit, offset);
+        page_limit = limit;
         sql.push_str(&format!(
             " LIMIT ?{} OFFSET ?{}",
             param_values.len() + 1,
             param_values.len() + 2
         ));
-        param_values.push(Box::new(limit));
+        param_values.push(Box::new(super::over_fetch(limit)));
         param_values.push(Box::new(offset));
     }
 
@@ -199,7 +216,11 @@ pub fn list_comments_paginated(
         param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), row_to_comment)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let rows: Vec<Comment> = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(match page_limit {
+        super::NO_LIMIT => super::Page::complete(rows),
+        limit => super::Page::from_over_fetch(rows, limit),
+    })
 }
 
 /// Update a comment's content. Parent-agnostic.
@@ -852,6 +873,67 @@ mod tests {
 
         let comments = list_comments(&conn, CommentParent::Page(page_id), None, None).unwrap();
         assert!(comments.is_empty());
+    }
+
+    // LIF-388: the page size that matters most is the cap itself. When the
+    // over-fetch lived at the transport, asking for MAX_PAGE_LIMIT comments
+    // and then fetching MAX_PAGE_LIMIT + 1 got clamped straight back to the
+    // cap, so `has_more` was false on a thread that plainly had more. The
+    // over-fetch now happens inside the query, after its own clamp.
+    #[test]
+    fn has_more_holds_at_the_page_cap() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        // One comment past a full capped page. Inserted directly: this test is
+        // about the LIMIT arithmetic, not about comment creation.
+        for n in 0..=super::super::MAX_PAGE_LIMIT {
+            conn.execute(
+                "INSERT INTO comments (issue_id, user_id, content) VALUES (?1, ?2, ?3)",
+                params![issue_id, user_id, format!("comment {n}")],
+            )
+            .unwrap();
+        }
+
+        let capped = list_comments_page(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(super::super::MAX_PAGE_LIMIT),
+            None,
+        )
+        .unwrap();
+        assert_eq!(capped.items.len() as i64, super::super::MAX_PAGE_LIMIT);
+        assert!(
+            capped.has_more,
+            "a capped page with a row past it must report has_more"
+        );
+
+        // Over the cap clamps down to it, and the answer must not change.
+        let over_cap = list_comments_page(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(super::super::MAX_PAGE_LIMIT + 100),
+            None,
+        )
+        .unwrap();
+        assert_eq!(over_cap.items.len() as i64, super::super::MAX_PAGE_LIMIT);
+        assert!(over_cap.has_more);
+
+        // The last page has nothing past it.
+        let tail = list_comments_page(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            None,
+            Some(super::super::MAX_PAGE_LIMIT),
+            Some(super::super::MAX_PAGE_LIMIT),
+        )
+        .unwrap();
+        assert_eq!(tail.items.len(), 1);
+        assert!(!tail.has_more);
     }
 
     /// Read an issue's raw updated_at timestamp directly from the table.

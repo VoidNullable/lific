@@ -26,8 +26,10 @@ pub enum ActivityScope {
 }
 
 /// Activity caps lower than the shared 500: the feed is a rolling audit tail,
-/// and each row carries old/new value blobs.
-const MAX_LIMIT: i64 = 200;
+/// and each row carries old/new value blobs. Public so a transport that has to
+/// compute its own paging hints clamps against this number rather than
+/// restating it.
+pub const MAX_LIMIT: i64 = 200;
 const DEFAULT_LIMIT: i64 = super::DEFAULT_PAGE_LIMIT;
 
 /// List activity newest-first. `limit` is clamped to 1..=200 (default 50).
@@ -77,7 +79,7 @@ pub fn list_activity(
     };
 
     let n = sp.len();
-    sp.push(Box::new(limit + 1));
+    sp.push(Box::new(super::over_fetch(limit)));
     sp.push(Box::new(offset));
 
     let sql = format!(
@@ -97,12 +99,15 @@ pub fn list_activity(
     let refs: Vec<&dyn rusqlite::types::ToSql> = sp.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), row_to_activity)?;
-    let mut items: Vec<Activity> = rows.collect::<Result<Vec<_>, _>>()?;
+    let items: Vec<Activity> = rows.collect::<Result<Vec<_>, _>>()?;
 
-    let has_more = items.len() as i64 > limit;
-    items.truncate(limit as usize);
-
-    Ok(ActivityFeed { items, has_more })
+    // ActivityFeed is the serialized shape the REST feed and the web UI read;
+    // the split itself is the shared one (LIF-388).
+    let page = super::Page::from_over_fetch(items, limit);
+    Ok(ActivityFeed {
+        items: page.items,
+        has_more: page.has_more,
+    })
 }
 
 /// Per-actor rollup for a project: action counts, last-seen, and their

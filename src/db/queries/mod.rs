@@ -74,6 +74,53 @@ pub fn page_unbounded(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
     )
 }
 
+/// One page of rows plus whether the query saw another row past it.
+///
+/// LIF-388: every paginated read surface used to open-code the same dance —
+/// ask for `limit + 1` rows, compare the length against the limit, truncate,
+/// hand `has_more` to the renderer. Doing it here instead of at the call site
+/// is not only shorter, it is the only place it can be *correct*: a caller
+/// that clamps to the cap and then asks for `cap + 1` gets clamped back down
+/// to `cap`, so `has_more` is always false on the last legal page size.
+/// [`Page::from_over_fetch`] runs inside the query, after its own clamp, so
+/// the extra row is never subject to the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+}
+
+impl<T> Page<T> {
+    /// Split rows fetched with [`over_fetch`] into the page the caller asked
+    /// for, plus the `has_more` the extra row implies.
+    pub fn from_over_fetch(mut items: Vec<T>, limit: i64) -> Self {
+        let has_more = items.len() as i64 > limit;
+        if has_more {
+            items.truncate(limit.max(0) as usize);
+        }
+        Self { items, has_more }
+    }
+
+    /// A page that is known to hold everything there is: an unbounded read
+    /// ([`NO_LIMIT`]) has nothing beyond it by definition.
+    pub fn complete(items: Vec<T>) -> Self {
+        Self {
+            items,
+            has_more: false,
+        }
+    }
+}
+
+/// The SQL `LIMIT` that reads one row past `limit` so [`Page::from_over_fetch`]
+/// can answer `has_more` without a second COUNT query. [`NO_LIMIT`] passes
+/// through: there is no row past "everything".
+pub fn over_fetch(limit: i64) -> i64 {
+    match limit {
+        NO_LIMIT => NO_LIMIT,
+        n => n.saturating_add(1),
+    }
+}
+
 /// Run a closure inside a SQLite SAVEPOINT so that multi-statement writes are atomic.
 /// On success the savepoint is released; on error it is rolled back.
 pub(crate) fn savepoint<F, T>(

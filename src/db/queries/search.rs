@@ -3,10 +3,22 @@ use rusqlite::Connection;
 use crate::db::models::*;
 use crate::error::LificError;
 
-/// Default hits per search page. Smaller than the shared page default on purpose.
-const DEFAULT_SEARCH_LIMIT: i64 = 20;
+/// Default hits per search page. Smaller than the shared page default on
+/// purpose. Public so a transport that has to publish the same default in its
+/// own paging hints reads it from here rather than restating `20`.
+pub const DEFAULT_SEARCH_LIMIT: i64 = 20;
 
+/// Search, discarding the `has_more` signal.
 pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, LificError> {
+    Ok(search_page(conn, q)?.items)
+}
+
+/// [`search`] as a [`Page`](super::Page). The over-fetch happens under this
+/// query's clamp, so `has_more` stays correct at the cap (LIF-388).
+pub fn search_page(
+    conn: &Connection,
+    q: &SearchQuery,
+) -> Result<super::Page<SearchResult>, LificError> {
     // Search publishes a smaller default page than the shared 50: an FTS hit
     // list is a preview, not a data dump. The cap stays the shared one.
     let (limit, offset) = super::page_with(
@@ -15,6 +27,7 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
         DEFAULT_SEARCH_LIMIT,
         super::MAX_PAGE_LIMIT,
     );
+    let fetch = super::over_fetch(limit);
 
     // Validate enum-ish params up front so a typo'd filter errors instead
     // of silently returning everything.
@@ -32,13 +45,14 @@ pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, L
     // through FTS5; `literal` does a case-insensitive substring scan for
     // punctuation-heavy needles (e.g. `core:sodom`, `[RequiredSpecs]`) that
     // FTS's tokenizer strips away.
-    match q.mode.as_deref() {
-        None | Some("fts") => search_fts(conn, q, limit, offset),
-        Some("literal") => search_literal(conn, q, limit, offset),
+    let hits = match q.mode.as_deref() {
+        None | Some("fts") => search_fts(conn, q, fetch, offset),
+        Some("literal") => search_literal(conn, q, fetch, offset),
         Some(other) => Err(LificError::BadRequest(format!(
             "invalid mode '{other}'. Use fts or literal."
         ))),
-    }
+    }?;
+    Ok(super::Page::from_over_fetch(hits, limit))
 }
 
 /// FTS5 full-text path (the original `search` body).

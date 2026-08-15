@@ -56,6 +56,11 @@ fn error_response(error: String) -> String {
     format!("Error: {error}")
 }
 
+/// `list_resources` publishes a bigger default page than the queries behind it
+/// (their default is 50): its rows are one line each and it is the discovery
+/// call an agent makes first. The cap is the shared one.
+const LIST_RESOURCES_DEFAULT_LIMIT: i64 = 100;
+
 /// The message a tool raises once it has tried every identifier shape it
 /// accepts (page, then issue, then project) and none of them resolved.
 fn unknown_identifier(ident: &str) -> String {
@@ -1347,16 +1352,21 @@ impl LificMcp {
             Some(p) => Some(resolve_project(&*self.read_conn()?, p)?),
             None => None,
         };
-        let limit = input.limit.unwrap_or(20).max(1);
-        let offset = input.offset.unwrap_or(0).max(0);
+        // The query owns the default (20) and the cap; clamping here too gives
+        // the paging hint below the same numbers the query paged by.
+        let (limit, offset) = queries::page_with(
+            input.limit,
+            input.offset,
+            queries::DEFAULT_SEARCH_LIMIT,
+            queries::MAX_PAGE_LIMIT,
+        );
         // Cross-project read (LIF-198 scope item 2): non-visible projects'
         // hits are silently absent, never a 403 — even when `project` narrows
         // the search to one project a non-member can't see, mirroring the
         // REST /api/search handler.
         let visible = visible_project_ids_mcp(&self.db)?;
-        // Over-fetch by one to detect whether more results exist beyond this page.
-        let results = self.read(|conn| {
-            queries::search(
+        let hits = self.read(|conn| {
+            queries::search_page(
                 conn,
                 &models::SearchQuery {
                     query: input.query.clone(),
@@ -1364,12 +1374,13 @@ impl LificMcp {
                     result_type: input.result_type.clone(),
                     sort: input.sort.clone(),
                     mode: input.mode.clone(),
-                    limit: Some(limit + 1),
+                    limit: Some(limit),
                     offset: Some(offset),
                 },
             )
         })?;
-        let mut results = filter_visible(results, &visible, |r| r.project_id);
+        let has_more = hits.has_more;
+        let results = filter_visible(hits.items, &visible, |r| r.project_id);
         if results.is_empty() {
             // LIF-257: nudge only when the search itself came up
             // empty AND the DB has no projects — checked after the
@@ -1379,10 +1390,6 @@ impl LificMcp {
                 return Ok(nudge);
             }
             return Ok("No results found.".into());
-        }
-        let has_more = results.len() as i64 > limit;
-        if has_more {
-            results.truncate(limit as usize);
         }
         let link_context = current_issue_link_context();
         Ok(render_response(|output| {
@@ -1439,8 +1446,17 @@ impl LificMcp {
     }
 
     fn get_activity_inner(&self, input: GetActivityInput) -> Result<String, String> {
-        let limit = input.limit.unwrap_or(30).clamp(1, 200);
-        let offset = input.offset.unwrap_or(0).max(0);
+        // This tool publishes a tighter default than the activity query's own
+        // (30 against 50); the cap is the query's, read from it rather than
+        // restated. Clamping here as well gives the paging hint below the same
+        // numbers the query paged by.
+        const DEFAULT_ACTIVITY_LIMIT: i64 = 30;
+        let (limit, offset) = queries::page_with(
+            input.limit,
+            input.offset,
+            DEFAULT_ACTIVITY_LIMIT,
+            queries::activity::MAX_LIMIT,
+        );
         let ident = input.identifier.trim();
 
         // Resolve the identifier shape: page → issue → project. Pages are
@@ -1578,11 +1594,12 @@ impl LificMcp {
             None => None,
         };
         drop(conn);
-        let limit = input.limit.unwrap_or(50).max(1);
-        let offset = input.offset.unwrap_or(0).max(0);
-        // Over-fetch by one to detect whether more results exist beyond this page.
-        let mut issues = self.read(|conn| {
-            queries::list_issues(
+        // The query's own default (50) is this tool's documented default, so
+        // the shared clamp needs no override; it runs here as well to give the
+        // paging hint below the numbers the query paged by.
+        let (limit, offset) = queries::page(input.limit, input.offset);
+        let issues = self.read(|conn| {
+            queries::list_issues_page(
                 conn,
                 &models::ListIssuesQuery {
                     project_id: Some(pid),
@@ -1598,18 +1615,16 @@ impl LificMcp {
                     updated_until: input.updated_until.clone(),
                     order_by: input.order_by.clone(),
                     order: input.order.clone(),
-                    limit: Some(limit + 1),
+                    limit: Some(limit),
                     offset: Some(offset),
                 },
             )
         })?;
-        if issues.is_empty() {
+        if issues.items.is_empty() {
             return Ok("No issues found.".into());
         }
-        let has_more = issues.len() as i64 > limit;
-        if has_more {
-            issues.truncate(limit as usize);
-        }
+        let has_more = issues.has_more;
+        let issues = issues.items;
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             writeln!(output, "{} issues:", issues.len())?;
@@ -2154,21 +2169,22 @@ impl LificMcp {
         let pid = resolve_project(&*self.read_conn()?, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
         const BOARD_CAP: i64 = 500;
-        let mut issues = self.read(|conn| {
-            queries::list_issues(
+        let board = self.read(|conn| {
+            queries::list_issues_page(
                 conn,
                 &models::ListIssuesQuery {
                     project_id: Some(pid),
-                    // Over-fetch by one to detect truncation.
-                    limit: Some(BOARD_CAP + 1),
+                    limit: Some(BOARD_CAP),
                     ..Default::default()
                 },
             )
         })?;
-        let truncated = issues.len() as i64 > BOARD_CAP;
-        if truncated {
-            issues.truncate(BOARD_CAP as usize);
-        }
+        // LIF-388: the query over-fetches under its own cap, so a project with
+        // more than BOARD_CAP issues actually reports the truncation warning.
+        // Asking for BOARD_CAP + 1 here used to be clamped straight back down
+        // to the cap, which made the warning unreachable.
+        let truncated = board.has_more;
+        let mut issues = board.items;
         let group_by = input.group_by.as_deref().unwrap_or("status");
         let include_closed = input.include_closed.unwrap_or(false);
         let is_closed = |i: &models::Issue| i.status == "done" || i.status == "cancelled";
@@ -2724,16 +2740,16 @@ impl LificMcp {
                 };
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
-                let limit = input.limit.unwrap_or(50).clamp(1, 500);
-                let offset = input.offset.unwrap_or(0).max(0);
+                // No clamp here: list_plans applies the shared one, and its
+                // default (50) is this branch's documented default.
                 let plans = self.read(|conn| {
                     queries::plans::list_plans(
                         conn,
                         &models::ListPlansQuery {
                             project_id: Some(pid),
                             status: input.status.clone(),
-                            limit: Some(limit),
-                            offset: Some(offset),
+                            limit: input.limit,
+                            offset: input.offset,
                             ..Default::default()
                         },
                     )
@@ -2807,23 +2823,27 @@ impl LificMcp {
                 };
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
-                let limit = input.limit.unwrap_or(100).max(1);
-                let offset = input.offset.unwrap_or(0).max(0);
-                let mut issues = self.read(|conn| {
-                    queries::list_issues(
+                // This branch publishes a bigger default page than list_issues
+                // (100 against 50); the cap is the shared one.
+                let (limit, offset) = queries::page_with(
+                    input.limit,
+                    input.offset,
+                    LIST_RESOURCES_DEFAULT_LIMIT,
+                    queries::MAX_PAGE_LIMIT,
+                );
+                let issues = self.read(|conn| {
+                    queries::list_issues_page(
                         conn,
                         &models::ListIssuesQuery {
                             project_id: Some(pid),
-                            limit: Some(limit + 1),
+                            limit: Some(limit),
                             offset: Some(offset),
                             ..Default::default()
                         },
                     )
                 })?;
-                let has_more = issues.len() as i64 > limit;
-                if has_more {
-                    issues.truncate(limit as usize);
-                }
+                let has_more = issues.has_more;
+                let issues = issues.items;
                 Ok(render_response(|output| {
                     writeln!(
                         output,
@@ -2867,12 +2887,14 @@ impl LificMcp {
                 let status = input.status.as_deref();
                 let order_by = input.order_by.as_deref();
                 let order = input.order.as_deref();
-                let limit = input.limit.unwrap_or(100).max(1);
-                let offset = input.offset.unwrap_or(0).max(0);
+                let (limit, offset) = queries::page_with(
+                    input.limit,
+                    input.offset,
+                    LIST_RESOURCES_DEFAULT_LIMIT,
+                    queries::MAX_PAGE_LIMIT,
+                );
                 let (pages, folder_names) = self.read(|conn| {
-                    // Over-fetch by one to detect truncation (mirrors the
-                    // issue branch above).
-                    let pages = queries::list_pages(
+                    let pages = queries::list_pages_page(
                         conn,
                         project_id,
                         folder_id,
@@ -2880,7 +2902,7 @@ impl LificMcp {
                         status,
                         order_by,
                         order,
-                        Some(limit + 1),
+                        Some(limit),
                         Some(offset),
                     )?;
                     // One folders round-trip for the whole listing — folders
@@ -2894,15 +2916,10 @@ impl LificMcp {
                     };
                     Ok((pages, folder_names))
                 })?;
-                let mut pages = filter_visible(pages, &visible, |p| p.project_id);
+                let has_more = pages.has_more;
+                let pages = filter_visible(pages.items, &visible, |p| p.project_id);
                 if pages.is_empty() {
                     return Ok("No pages found.".into());
-                }
-                // Over-fetched by one: detect truncation, then trim
-                // back to the requested page size before rendering.
-                let has_more = pages.len() as i64 > limit;
-                if has_more {
-                    pages.truncate(limit as usize);
                 }
                 Ok(render_response(|output| {
                     writeln!(output, "{} pages:", pages.len())?;
@@ -3359,7 +3376,13 @@ impl LificMcp {
         let (parent, parent_identifier, _) = resolve_comment_parent(self, &input.identifier)?;
         self.require_comment_role_mcp(parent, models::Role::Viewer)?;
 
-        let limit = input.limit.map(|limit| limit.clamp(1, 500));
+        // An absent limit still means "every comment"; a present one is
+        // clamped to the shared cap, the same bound the query applies. The
+        // Option survives because the header wording below distinguishes
+        // "you asked for a page" from "you asked for the thread".
+        let limit = input
+            .limit
+            .map(|limit| limit.clamp(1, queries::MAX_PAGE_LIMIT));
         let offset = input.offset.unwrap_or(0).max(0);
         let order = input.order.as_deref().unwrap_or("asc");
         let link_context = current_issue_link_context();
@@ -3372,18 +3395,20 @@ impl LificMcp {
             }
         };
 
-        let (mut comments, total) = self.read(|conn| {
-            let comments = queries::comments::list_comments_paginated(
+        let (page, total) = self.read(|conn| {
+            let comments = queries::comments::list_comments_page(
                 conn,
                 parent,
                 input.author.as_deref(),
                 Some(order),
-                limit.map(|limit| limit + 1),
+                limit,
                 input.offset.map(|offset| offset.max(0)),
             )?;
             let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
             Ok((comments, total))
         })?;
+        let has_more = page.has_more;
+        let comments = page.items;
         if comments.is_empty() {
             return Ok(if total == 0 {
                 format!(
@@ -3397,11 +3422,6 @@ impl LificMcp {
                 )
             });
         }
-        let page_limit = limit.filter(|&limit| comments.len() as i64 > limit);
-        let has_more = page_limit.is_some();
-        page_limit
-            .into_iter()
-            .for_each(|page_limit| comments.truncate(page_limit as usize));
         let shown = comments.len() as i64;
         Ok(render_response(|output| {
             match (limit, offset, shown < total) {
@@ -5255,6 +5275,45 @@ mod tests {
         assert!(!result.contains("done"), "got: {result}");
         assert!(!result.contains("cancelled"), "got: {result}");
         assert!(!result.contains("[omitted"), "got: {result}");
+    }
+
+    // LIF-388: the board's truncation warning was unreachable. It asked
+    // list_issues for cap + 1 rows to detect the overflow, and the shared
+    // clamp cut that back to the cap, so the length comparison never tripped.
+    // The over-fetch lives inside the query now, so a project past the cap
+    // actually says so.
+    #[test]
+    fn board_warns_when_the_project_exceeds_the_cap() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Overflow", "OVF");
+        {
+            let conn = m.db.write().unwrap();
+            let pid: i64 = conn
+                .query_row(
+                    "SELECT id FROM projects WHERE identifier = 'OVF'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            // One issue past the board's cap, inserted directly: 501 tool
+            // calls would only be a slower way to make the same row.
+            for sequence in 1..=501 {
+                conn.execute(
+                    "INSERT INTO issues (project_id, sequence, title) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![pid, sequence, format!("Issue {sequence}")],
+                )
+                .unwrap();
+            }
+        }
+
+        let result = m.get_board(Parameters(GetBoardInput {
+            project: "OVF".into(),
+            ..Default::default()
+        }));
+        assert!(
+            result.starts_with("warning: board view capped at 500 issues"),
+            "got: {result}"
+        );
     }
 
     // ── pages ──

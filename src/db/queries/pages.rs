@@ -100,6 +100,29 @@ pub fn list_pages(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<Page>, LificError> {
+    Ok(list_pages_page(
+        conn, project_id, folder_id, label, status, order_by, order, limit, offset,
+    )?
+    .items)
+}
+
+/// [`list_pages`] as a [`Page`](super::Page) (the pagination kind, not the
+/// document kind). An absent `limit` still means "everything", and such a read
+/// reports `has_more: false` because there is nothing past everything. A
+/// present limit is clamped here and over-fetched by one, so `has_more` holds
+/// at the cap (LIF-388).
+#[allow(clippy::too_many_arguments)]
+pub fn list_pages_page(
+    conn: &Connection,
+    project_id: Option<i64>,
+    folder_id: Option<i64>,
+    label: Option<&str>,
+    status: Option<&str>,
+    order_by: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<super::Page<Page>, LificError> {
     // Build the query incrementally so the optional label filter can
     // graft on a JOIN. Using DISTINCT shields against a page joining
     // multiple labels and double-appearing if the filter weren't there
@@ -177,14 +200,16 @@ pub fn list_pages(
     // callers (export, REST, CLI) keep their unbounded behavior; only the
     // MCP list_resources(page) branch passes explicit values (LIF-137).
     // Offset applies whenever provided.
+    let mut page_limit = super::NO_LIMIT;
     if limit.is_some() || offset.is_some() {
         let (limit, offset) = super::page_unbounded(limit, offset);
+        page_limit = limit;
         sql.push_str(&format!(
             " LIMIT ?{} OFFSET ?{}",
             param_values.len() + 1,
             param_values.len() + 2
         ));
-        param_values.push(Box::new(limit));
+        param_values.push(Box::new(super::over_fetch(limit)));
         param_values.push(Box::new(offset));
     }
 
@@ -192,9 +217,14 @@ pub fn list_pages(
         param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), page_from_row)?;
-    let mut pages: Vec<Page> = rows.collect::<Result<Vec<_>, _>>()?;
-    populate_page_labels(conn, &mut pages)?;
-    Ok(pages)
+    let rows: Vec<Page> = rows.collect::<Result<Vec<_>, _>>()?;
+    // Trim before the label round-trip so the over-fetched row costs nothing.
+    let mut page = match page_limit {
+        super::NO_LIMIT => super::Page::complete(rows),
+        limit => super::Page::from_over_fetch(rows, limit),
+    };
+    populate_page_labels(conn, &mut page.items)?;
+    Ok(page)
 }
 
 pub fn get_page(conn: &Connection, id: i64) -> Result<Page, LificError> {

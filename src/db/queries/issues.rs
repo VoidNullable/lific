@@ -180,8 +180,19 @@ pub fn resolve_identifier(conn: &Connection, identifier: &str) -> Result<i64, Li
     })
 }
 
-/// List issues with optional filters.
+/// List issues with optional filters, discarding the `has_more` signal.
 pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>, LificError> {
+    Ok(list_issues_page(conn, q)?.items)
+}
+
+/// [`list_issues`] as a [`Page`](super::Page): the over-fetch that answers
+/// `has_more` happens here, under this query's own clamp, so a caller asking
+/// for exactly [`MAX_PAGE_LIMIT`](super::MAX_PAGE_LIMIT) rows still learns
+/// whether more exist (LIF-388).
+pub fn list_issues_page(
+    conn: &Connection,
+    q: &ListIssuesQuery,
+) -> Result<super::Page<Issue>, LificError> {
     let mut sql = String::from(
         "SELECT DISTINCT i.id, i.project_id, i.sequence, p.identifier, i.title, i.description,
                 i.status, i.priority, i.module_id, i.sort_order,
@@ -293,7 +304,7 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
         param_values.len() + 1,
         param_values.len() + 2
     ));
-    param_values.push(Box::new(limit));
+    param_values.push(Box::new(super::over_fetch(limit)));
     param_values.push(Box::new(offset));
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -330,7 +341,12 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
         })
     })?;
 
-    let mut issues: Vec<Issue> = rows.collect::<Result<Vec<_>, _>>()?;
+    // Trim the over-fetched row before the label round-trip below, so the row
+    // that only exists to answer `has_more` never costs a label lookup.
+    let super::Page {
+        items: mut issues,
+        has_more,
+    } = super::Page::from_over_fetch(rows.collect::<Result<Vec<_>, _>>()?, limit);
 
     if !issues.is_empty() {
         // Map issue_id -> position so label rows attach in O(1) instead of a
@@ -397,7 +413,10 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
         }
     }
 
-    Ok(issues)
+    Ok(super::Page {
+        items: issues,
+        has_more,
+    })
 }
 
 /// Per-status issue counts for a project (LIF-161). One indexed GROUP BY
@@ -688,6 +707,56 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    // LIF-388: `has_more` has to survive the page size that equals the cap.
+    // The board view asked for MAX_PAGE_LIMIT + 1 rows to detect truncation
+    // and got clamped back down to MAX_PAGE_LIMIT, so its "older issues are
+    // not shown" warning could never fire. The over-fetch now happens inside
+    // this query, after the clamp.
+    #[test]
+    fn list_issues_page_reports_has_more_at_the_page_cap() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "CAP");
+        // One issue past a full capped page, inserted directly: this test is
+        // about the LIMIT arithmetic, not about issue creation.
+        for sequence in 1..=super::super::MAX_PAGE_LIMIT + 1 {
+            conn.execute(
+                "INSERT INTO issues (project_id, sequence, title) VALUES (?1, ?2, ?3)",
+                rusqlite::params![pid, sequence, format!("Issue {sequence}")],
+            )
+            .unwrap();
+        }
+
+        let capped = list_issues_page(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                limit: Some(super::super::MAX_PAGE_LIMIT),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(capped.items.len() as i64, super::super::MAX_PAGE_LIMIT);
+        assert!(
+            capped.has_more,
+            "a capped page with an issue past it must report has_more"
+        );
+
+        // The last page has nothing past it.
+        let tail = list_issues_page(
+            &conn,
+            &ListIssuesQuery {
+                project_id: Some(pid),
+                limit: Some(super::super::MAX_PAGE_LIMIT),
+                offset: Some(super::super::MAX_PAGE_LIMIT),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tail.items.len(), 1);
+        assert!(!tail.has_more);
     }
 
     #[test]
