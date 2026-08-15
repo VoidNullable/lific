@@ -441,13 +441,33 @@ struct AuthorizeParams {
     scope: Option<String>,
 }
 
+/// Validate the authorization request shape before rendering consent or
+/// issuing an authorization code. Lific supports one capability and requires
+/// PKCE for every authorization-code flow.
+fn valid_authorize_request(
+    response_type: &str,
+    scope: Option<&str>,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+) -> bool {
+    response_type == "code"
+        && scope == Some("mcp")
+        && code_challenge.is_some_and(|challenge| !challenge.is_empty())
+        && code_challenge_method == Some("S256")
+}
+
 async fn authorize_page(
     State(oauth): State<OAuthState>,
     headers: HeaderMap,
     Query(params): Query<AuthorizeParams>,
 ) -> Response {
-    let requested_scope = params.scope.as_deref().unwrap_or("mcp").trim();
-    if params.response_type != "code" || requested_scope != "mcp" {
+    let requested_scope = params.scope.as_deref().unwrap_or_default();
+    if !valid_authorize_request(
+        &params.response_type,
+        params.scope.as_deref(),
+        params.code_challenge.as_deref(),
+        params.code_challenge_method.as_deref(),
+    ) {
         return (
             StatusCode::BAD_REQUEST,
             Html("<h1>Unsupported OAuth request</h1><p>Only authorization-code access to the MCP capability is supported.</p>".to_string()),
@@ -514,6 +534,7 @@ async fn authorize_page(
         h1 {{ font-size: 1.4em; margin-bottom: 0.5em; }}
         p {{ color: #888; line-height: 1.5; }}
         .client {{ color: #fff; font-weight: 600; }}
+        .destination {{ color: #ddd; overflow-wrap: anywhere; }}
         label {{ display: block; margin-top: 1em; color: #aaa; font-size: 0.9em; }}
         select, input {{ width: 100%%; padding: 10px; margin-top: 4px; border-radius: 6px; border: 1px solid #333; background: #141414; color: #e0e0e0; box-sizing: border-box; }}
         form {{ margin-top: 2em; }}
@@ -525,6 +546,7 @@ async fn authorize_page(
     <h1>Authorize access to Lific</h1>
     <p><span class="client">{client_name}</span> wants access to your Lific issue tracker.</p>
     <p>Capability requested: <span class="client">MCP issue-tracker access</span>.</p>
+    <p>After approval, you will be redirected to:<br><span class="destination">{redirect_uri}</span></p>
     <form method="POST" action="/oauth/authorize">
         <input type="hidden" name="client_id" value="{client_id}">
         <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -535,7 +557,8 @@ async fn authorize_page(
         <input type="hidden" name="scope" value="{scope}">
         <input type="hidden" name="csrf_token" value="{csrf_token}">
         {tool_pick_list}
-        <button type="submit">Approve</button>
+        <button type="submit" name="decision" value="approve">Approve</button>
+        <button type="submit" name="decision" value="deny" style="background:#444">Deny</button>
     </form>
 </body>
 </html>"#,
@@ -573,6 +596,7 @@ struct ApproveForm {
     tool: Option<String>,
     /// Free-text tool name when `tool` is unset (an unrecognized tool).
     tool_custom: Option<String>,
+    decision: Option<String>,
 }
 
 /// The one page both approval handlers render when the presented credential is
@@ -680,13 +704,12 @@ async fn authorize_approve(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<ApproveForm>,
 ) -> Response {
-    if form.response_type != "code"
-        || form.scope.as_deref().unwrap_or("mcp") != "mcp"
-        || form
-            .code_challenge_method
-            .as_deref()
-            .is_some_and(|method| method != "S256")
-    {
+    if !valid_authorize_request(
+        &form.response_type,
+        form.scope.as_deref(),
+        form.code_challenge.as_deref(),
+        form.code_challenge_method.as_deref(),
+    ) {
         return (
             StatusCode::BAD_REQUEST,
             Html("<h1>Unsupported OAuth request</h1><p>Only authorization-code access to the MCP capability is supported.</p>".to_string()),
@@ -755,7 +778,24 @@ async fn authorize_approve(
             StatusCode::BAD_REQUEST,
             Html("Invalid client_id or redirect_uri does not match registered URIs.".to_string()),
         )
-            .into_response();
+        .into_response();
+    }
+
+    // Denial must never create an authorization code. The redirect was already
+    // checked against the registered client, and the CSRF check above binds
+    // the browser action to the session that rendered the consent page.
+    if form.decision.as_deref() == Some("deny") {
+        let mut redirect_url = form.redirect_uri.clone();
+        redirect_url.push_str(if redirect_url.contains('?') { "&" } else { "?" });
+        redirect_url.push_str("error=access_denied");
+        if let Some(state) = &form.state
+            && !state.is_empty()
+        {
+            let encoded = urlencoding::encode(state);
+            redirect_url.push_str(&format!("&state={encoded}"));
+        }
+        info!(client_id = %form.client_id, "OAuth authorization denied");
+        return Redirect::to(&redirect_url).into_response();
     }
 
     let code = uuid_v4();
@@ -2382,6 +2422,7 @@ mod tests {
             .unwrap();
         assert!(body.contains("Test Client"));
         assert!(body.contains("MCP issue-tracker access"));
+        assert!(body.contains("http://localhost/callback"));
         assert!(!body.contains("An application wants"));
     }
 
@@ -2406,6 +2447,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_consent_rejects_missing_scope_or_pkce() {
+        let (app, _db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let base = format!(
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code",
+            urlencoding::encode("http://localhost/callback")
+        );
+
+        for suffix in [
+            "&code_challenge=abc&code_challenge_method=S256",
+            "&scope=mcp&code_challenge_method=S256",
+            "&scope=mcp&code_challenge=abc",
+            "&scope=mcp&code_challenge=&code_challenge_method=S256",
+            "&scope=mcp&code_challenge=abc&code_challenge_method=plain",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{base}{suffix}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "suffix={suffix}");
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_deny_redirects_without_issuing_code() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let csrf = generate_csrf_token(&session_token);
+        let body = format!(
+            "client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256&state=opaque-state&csrf_token={csrf}&decision=deny",
+            urlencoding::encode("http://localhost/callback"),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if !resp.status().is_redirection() {
+            let status = resp.status();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            panic!("deny status={status}, body={}", String::from_utf8_lossy(&body));
+        }
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(location.starts_with("http://localhost/callback?error=access_denied"));
+        assert!(location.contains("state=opaque-state"));
+        let conn = db.read().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_codes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "denial must not mint an authorization code");
     }
 
     #[tokio::test]
@@ -3441,7 +3550,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3481,7 +3590,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
