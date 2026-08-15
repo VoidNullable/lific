@@ -1445,7 +1445,7 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     };
     let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
 
-    let conn = match state.db.write() {
+    let mut conn = match state.db.write() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
@@ -1538,19 +1538,33 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             }
             let scope = "mcp";
             let client_id = "device";
-            // Ensure a client row exists so the FK on oauth_tokens is satisfied.
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
-                 VALUES ('device', 'Device Authorization', '[]')",
-                [],
-            );
 
             let access_token = format!("lific_at_{}", uuid_v4());
             let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
             let expires_in: u64 = 3600 * 24 * 30; // 30 days
             let expires_at = now + chrono::Duration::seconds(expires_in as i64);
 
-            if let Err(e) = conn.execute(
+            // LIF-370: minting the token and burning the device code are one
+            // atomic step. Previously the consumed-UPDATE was `let _ =`, so a
+            // failed write handed out a token while leaving the code
+            // `approved` and replayable for as many tokens as the client cared
+            // to poll for. Either both writes land or neither does.
+            let tx = match conn.transaction() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to open device token transaction");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+            };
+
+            // Ensure a client row exists so the FK on oauth_tokens is satisfied.
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
+                 VALUES ('device', 'Device Authorization', '[]')",
+                [],
+            );
+
+            if let Err(e) = tx.execute(
                 "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![token_hash, client_id, expires_at.to_rfc3339(), scope, row.user_id],
@@ -1559,11 +1573,32 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
                 return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
             }
 
-            // Single-use: mark consumed so a replay returns invalid_grant.
-            let _ = conn.execute(
-                "UPDATE oauth_device_codes SET status = 'consumed' WHERE device_code_hash = ?1",
+            // Single-use: mark consumed so a replay returns invalid_grant. The
+            // `status = 'approved'` guard means exactly one exchange can win;
+            // anything other than one row changed rolls the token back.
+            match tx.execute(
+                "UPDATE oauth_device_codes SET status = 'consumed'
+                 WHERE device_code_hash = ?1 AND status = 'approved'",
                 params![device_code_hash],
-            );
+            ) {
+                Ok(1) => {}
+                Ok(n) => {
+                    tracing::error!(
+                        rows = n,
+                        "device code not consumed exactly once; refusing to issue token"
+                    );
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to consume device code");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+            }
+
+            if let Err(e) = tx.commit() {
+                tracing::error!(error = %e, "failed to commit device token exchange");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+            }
 
             info!(scope = %scope, "OAuth device token issued");
             Json(TokenResponse {
@@ -3489,6 +3524,94 @@ mod tests {
         let (status, body) = poll_device_token(&app, "totally-unknown-device-code").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_grant");
+    }
+
+    // ── LIF-370: token mint + code consumption are one transaction ───────
+
+    /// Approve a device code directly in the DB (the verification-page dance
+    /// is covered end-to-end above) and clear `last_polled_at` so the next
+    /// poll isn't answered with `slow_down`.
+    fn approve_device_code(db: &DbPool, device_hash: &str) {
+        let conn = db.write().unwrap();
+        conn.execute(
+            "UPDATE oauth_device_codes
+             SET status = 'approved', last_polled_at = NULL
+             WHERE device_code_hash = ?1",
+            params![device_hash],
+        )
+        .unwrap();
+    }
+
+    fn device_status(db: &DbPool, device_hash: &str) -> String {
+        let conn = db.read().unwrap();
+        conn.query_row(
+            "SELECT status FROM oauth_device_codes WHERE device_code_hash = ?1",
+            params![device_hash],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn token_count(db: &DbPool) -> i64 {
+        let conn = db.read().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn device_consumed_code_cannot_mint_a_second_token() {
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+        approve_device_code(&db, &hash);
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::OK, "expected token, got {body}");
+        assert_eq!(token_count(&db), 1);
+        assert_eq!(device_status(&db, &hash), "consumed");
+
+        // Replay the same code (interval waited): no second token, ever.
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE oauth_device_codes SET last_polled_at = NULL WHERE device_code_hash = ?1",
+                params![hash],
+            )
+            .unwrap();
+        }
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+        assert_eq!(token_count(&db), 1, "replay must not mint a second token");
+    }
+
+    #[tokio::test]
+    async fn device_token_is_rolled_back_when_the_code_cannot_be_consumed() {
+        // A failing consume-UPDATE used to be swallowed (`let _ = ...`),
+        // handing out a token while leaving the code approved and replayable.
+        // Now the whole exchange fails and nothing is written.
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+
+        approve_device_code(&db, &hash);
+        {
+            let conn = db.write().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER block_consume
+                 BEFORE UPDATE OF status ON oauth_device_codes
+                 WHEN NEW.status = 'consumed'
+                 BEGIN SELECT RAISE(ABORT, 'consume blocked'); END;",
+            )
+            .unwrap();
+        }
+
+        let (status, _) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(token_count(&db), 0, "no token may survive a failed consume");
+        assert_eq!(device_status(&db, &hash), "approved");
     }
 
     #[tokio::test]
