@@ -1,0 +1,78 @@
+# Mirror guard: alarm when a commit created on GitHub lands on master.
+#
+# This repo is a push mirror of magi forgejo (the canonical home). Every sync
+# force-updates refs to match magi, so a commit that exists only on the GitHub
+# side (merge button, web editor, revert button) used to be silently destroyed
+# by the next sync. That erased merged PRs #13 and #18 while GitHub kept
+# showing them as "merged". Two repo rulesets ("mirror-safety: ...") now
+# reject the destructive sync, which converts the hazard into a stuck mirror:
+# magi's pushes to master fail until someone reconciles.
+#
+# This workflow makes that state loud. Any commit whose committer is the
+# GitHub web UI (noreply@github.com) can only have been created on this side,
+# so it files an issue with the reconciliation runbook and fails the run.
+#
+# Reconciliation (workflow B, from AGENTS.md): on a checkout with both
+# remotes, `git fetch github && git merge github/master && git push`. Once the
+# GitHub-side commit is an ancestor of magi's master, the next sync is a
+# fast-forward and the mirror unsticks itself.
+
+name: Mirror guard
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  issues: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Flag commits created by the GitHub web UI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flagged=$(jq -r '
+            [((.commits // []) + [.head_commit])[]
+             | select(. != null)
+             | select(.committer.email == "noreply@github.com")
+             | .id]
+            | unique | join(" ")
+          ' "$GITHUB_EVENT_PATH")
+
+          if [ -z "$flagged" ]; then
+            echo "No GitHub-created commits in this push."
+            exit 0
+          fi
+
+          echo "GitHub-created commit(s) on master: $flagged"
+
+          short=$(for sha in $flagged; do printf '%s ' "${sha:0:10}"; done)
+          body_file=$(mktemp)
+          {
+            echo "The following commit(s) on \`master\` were created by the GitHub web UI (committer \`noreply@github.com\`), most likely the PR merge button or the web editor:"
+            echo
+            for sha in $flagged; do echo "- $sha"; done
+            echo
+            echo "If these commits were made directly on GitHub, they do **not** exist on magi (the mirror's source of truth). The mirror-safety ruleset will reject the next sync rather than destroy them, but the mirror is now stuck until reconciled."
+            echo
+            echo "**Runbook:** on a checkout with both remotes:"
+            echo
+            echo '```'
+            echo "git fetch github"
+            echo "git merge github/master"
+            echo "git push        # to magi; the next mirror sync fast-forwards"
+            echo '```'
+            echo
+            echo "**Possible false positive:** a contributor's web-edit commit made in their fork and merged through the normal magi flow also carries this committer. If every flagged commit is already on magi's master, close this issue."
+          } > "$body_file"
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Mirror guard: GitHub-created commit(s) on master: $short" \
+            --body-file "$body_file"
+
+          echo "::error::Commit(s) created on GitHub landed on master. Reconcile into magi (see the issue just filed)."
+          exit 1
