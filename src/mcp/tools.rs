@@ -3522,13 +3522,14 @@ impl LificMcp {
         let c = self.write(|conn| {
             // LIF-375: shared with the REST edit path; re-derives mentions and
             // attachment links from the new body (LIF-369).
-            queries::comments::update_comment_with_mentions(
+            let c = queries::comments::update_comment_with_mentions(
                 conn,
                 input.comment_id,
                 project_id,
                 &input.content,
                 member_scoped,
-            )
+            )?;
+            Ok(c)
         })?;
         // Don't echo the new content back — the agent already supplied it
         // (LIF-115). The id is the stable handle.

@@ -192,6 +192,25 @@ pub fn latest_version() -> i64 {
 
 /// Ensure the migrations table exists and apply any pending migrations.
 pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
+    // Serialize migration discovery and application across processes. Without
+    // an IMMEDIATE transaction, two fresh connections can observe the same
+    // version and both execute the next migration, racing on `_migrations`
+    // (notably on Windows where test/process startup is more concurrent).
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = run_inner(conn);
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn run_inner(conn: &Connection) -> Result<(), crate::error::LificError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             version    INTEGER PRIMARY KEY,

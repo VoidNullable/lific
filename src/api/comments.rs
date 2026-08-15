@@ -219,6 +219,11 @@ pub(super) async fn update_comment_handler(
     // (issue_id XOR page_id) — a page comment may have a NULL project
     // (workspace page), which `mention_candidates` handles.
     let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
+    // Editing remains subject to the current project membership even when
+    // the caller owns the comment.  This closes the revoked-member path in
+    // which ownership alone was enough to mutate a comment after access was
+    // removed.
+    require_comment_viewer(&db, &identity, project_id)?;
     let member_scoped = authz::authz_enforced(&db)?;
 
     let comment = with_write(&db, |conn| {
@@ -277,6 +282,9 @@ pub(super) async fn delete_comment_handler(
     }
 
     let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
+    // Match the edit path: ownership is not a substitute for current access
+    // to the comment's project (or workspace-admin access for workspace pages).
+    require_comment_viewer(&db, &identity, project_id)?;
     with_write(&db, |conn| {
         crate::db::queries::comments::delete_comment(conn, id)
     })?;
@@ -490,6 +498,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn revoked_member_cannot_edit_or_delete_own_comment() {
+        let (db, _admin, _lead, _maintainer, viewer, _non_member, project_id) =
+            crate::api::test_helpers::setup_membership_test();
+        let (edit_comment_id, delete_comment_id) = {
+            let conn = db.write().unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id,
+                    title: "Revocation test".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let parent = crate::db::queries::comments::CommentParent::Issue(issue.id);
+            let edit = crate::db::queries::comments::create_comment(
+                &conn,
+                parent,
+                viewer.id,
+                "Keep this comment",
+            )
+            .unwrap();
+            let delete = crate::db::queries::comments::create_comment(
+                &conn,
+                parent,
+                viewer.id,
+                "Keep this one too",
+            )
+            .unwrap();
+            crate::db::queries::members::remove_member(&conn, project_id, viewer.id).unwrap();
+            (edit.id, delete.id)
+        };
+
+        let app = crate::api::test_helpers::app_as_user(db.clone(), &viewer);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/comments/{edit_comment_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({"content": "tampered"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/comments/{delete_comment_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let conn = db.read().unwrap();
+        assert_eq!(
+            crate::db::queries::comments::get_comment(&conn, edit_comment_id)
+                .unwrap()
+                .content,
+            "Keep this comment"
+        );
+        assert!(crate::db::queries::comments::get_comment(&conn, delete_comment_id).is_ok());
     }
 
     #[tokio::test]
