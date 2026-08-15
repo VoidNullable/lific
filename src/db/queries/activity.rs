@@ -5,6 +5,7 @@
 //! along, degrading gracefully when the actor's account is gone.
 
 use rusqlite::Connection;
+use std::collections::HashSet;
 
 use crate::db::models::{Activity, ActivityFeed};
 use crate::error::LificError;
@@ -31,6 +32,48 @@ pub enum ActivityScope {
 /// restating it.
 pub const MAX_LIMIT: i64 = 200;
 const DEFAULT_LIMIT: i64 = super::DEFAULT_PAGE_LIMIT;
+
+/// Return trailing-24-hour logical mutations for the websocket's initial snapshot.
+/// Multi-field trigger rows are grouped by their realtime invalidation target so
+/// the result uses the same one-update unit as the client counter.
+/// `None` means unrestricted visibility; `Some` limits rows to visible projects.
+pub fn activity_count(
+    conn: &Connection,
+    visible_project_ids: Option<&HashSet<i64>>,
+) -> Result<i64, LificError> {
+    let Some(project_filter) = project_filter(visible_project_ids) else {
+        return Ok(0);
+    };
+
+    let sql = format!(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM audit_log a
+             WHERE a.ts >= datetime('now', '-24 hours'){project_filter}
+             GROUP BY a.ts, a.actor_user_id, a.transport, a.action,
+                      a.project_id, a.issue_id, a.page_id, a.entity_type, a.entity_id
+         )"
+    );
+    conn.prepare_cached(&sql)?
+        .query_row(
+            rusqlite::params_from_iter(visible_project_ids.into_iter().flatten()),
+            |row| row.get(0),
+        )
+        .map_err(LificError::Database)
+}
+
+fn project_filter(visible_project_ids: Option<&HashSet<i64>>) -> Option<String> {
+    match visible_project_ids {
+        None => Some(String::new()),
+        Some(ids) if ids.is_empty() => None,
+        Some(ids) => Some(format!(
+            " AND a.project_id IN ({})",
+            (1..=ids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
 
 /// List activity newest-first. `limit` is clamped to 1..=200 (default 50).
 /// Fetches limit+1 rows internally to compute `has_more` without a COUNT.
@@ -215,6 +258,67 @@ mod tests {
         list_activity(&conn, ActivityScope::Issue(issue_id), Some(100), None)
             .unwrap()
             .items
+    }
+
+    #[test]
+    fn activity_count_filters_to_last_day_and_visible_projects() {
+        let pool = crate::db::open_memory().expect("test db");
+        let (first_project, second_project) = {
+            let conn = pool.write().unwrap();
+            let first = queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "First".into(),
+                    identifier: "FIRST".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            let second = queries::create_project(
+                &conn,
+                &CreateProject {
+                    name: "Second".into(),
+                    identifier: "SECND".into(),
+                    description: String::new(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+
+            // Exclude setup activity so the fresh issue rows below are the
+            // only events inside the rolling 24-hour window.
+            conn.execute("UPDATE audit_log SET ts = datetime('now', '-25 hours')", [])
+                .unwrap();
+            let issue = queries::create_issue(&conn, &new_issue(first.id, "Fresh first")).unwrap();
+            queries::update_issue(
+                &conn,
+                issue.id,
+                &UpdateIssue {
+                    title: Some("Renamed first".into()),
+                    description: Some("Changed too".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            queries::create_issue(&conn, &new_issue(second.id, "Fresh second one")).unwrap();
+            queries::create_issue(&conn, &new_issue(second.id, "Fresh second two")).unwrap();
+            (first.id, second.id)
+        };
+
+        let conn = pool.read().unwrap();
+        assert_eq!(activity_count(&conn, None).unwrap(), 4);
+        assert_eq!(
+            activity_count(&conn, Some(&HashSet::from([first_project]))).unwrap(),
+            2
+        );
+        assert_eq!(
+            activity_count(&conn, Some(&HashSet::from([second_project]))).unwrap(),
+            2
+        );
+        assert_eq!(activity_count(&conn, Some(&HashSet::new())).unwrap(), 0);
     }
 
     // ── Capture: per-field diffs ─────────────────────────

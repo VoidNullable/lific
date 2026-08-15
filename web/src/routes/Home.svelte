@@ -21,6 +21,10 @@
     type Activity,
   } from "../lib/api";
   import { getRecents, type RecentEntry } from "../lib/home/recents";
+  import {
+    selectActivityRate,
+    type ActivityCountsReader,
+  } from "../lib/activityRate";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
@@ -55,13 +59,24 @@
     return () => topbarCtx?.set(undefined);
   });
 
-  let { navigate }: { navigate: (path: string) => void } = $props();
+  let {
+    navigate,
+    realtimeActivityCounts,
+    realtimeActivityReady,
+    realtimeActivityRevision,
+  }: {
+    navigate: (path: string) => void;
+    realtimeActivityCounts: ActivityCountsReader;
+    realtimeActivityReady: boolean;
+    realtimeActivityRevision: number;
+  } = $props();
 
   let user = $state<AuthUser | null>(null);
   let projects = $state<Project[]>([]);
   let myIssues = $state<Issue[]>([]);
   let allPages = $state<Page[]>([]);
   let activityItems = $state<Activity[]>([]);
+  let activityNow = $state(Date.now());
   let recents = $state<RecentEntry[]>([]);
   let loading = $state(true);
   let error = $state("");
@@ -70,6 +85,15 @@
   // reused as the destination for the "New issue" quick action so it lands
   // wherever the user has been most active rather than an arbitrary project.
   let digestProjectIds = $state<number[]>([]);
+
+  // The shortest displayed window is one second, so the shared 30-second
+  // relative-time clock is too coarse. Keep the finer timer local to Home.
+  $effect(() => {
+    const interval = setInterval(() => {
+      activityNow = Date.now();
+    }, 1_000);
+    return () => clearInterval(interval);
+  });
 
   $effect(() => {
     loadData();
@@ -243,6 +267,11 @@
   function activityActor(a: Activity): string {
     return a.actor_display_name || a.actor_username || "system";
   }
+
+  let activityRate = $derived.by(() => {
+    void realtimeActivityRevision;
+    return selectActivityRate(realtimeActivityCounts(activityNow));
+  });
 
   function activityDest(a: Activity): string | null {
     const ident = projectIdent(a.project_id);
@@ -616,23 +645,31 @@
             {#if activityItems.length > 0}
               <section>
                 <div class="flex items-center justify-between mb-3">
-                  <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-2 min-w-0">
                     <ArrowUpRight size={12} class="text-[var(--text-faint)]" />
                     <h2 class="text-micro font-semibold uppercase tracking-widest text-[var(--text-muted)]">
                       Recent activity
                     </h2>
                   </div>
+                  {#if realtimeActivityReady}
+                    <span
+                      class="text-micro text-[var(--text-faint)] tabular-nums text-right"
+                      title="Websocket activity rate; the day fallback includes the last 24 hours"
+                    >
+                      {activityRate.value} {activityRate.unit}
+                    </span>
+                  {/if}
                 </div>
                 <div class="flex flex-col gap-0.5">
                   {#each activityItems as a (a.id)}
                     {@const dest = activityDest(a)}
                     {@const ident = projectIdent(a.project_id)}
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <div
+                    <button
+                      type="button"
+                      disabled={!dest}
                       class="flex items-start gap-2 px-2.5 py-1.5 rounded-md text-body-sm leading-snug
-                             {dest ? 'cursor-pointer hover:bg-[var(--bg-subtle)]' : ''} transition-colors"
-                      role={dest ? "button" : undefined}
-                      tabindex={dest ? 0 : undefined}
+                             {dest ? 'hover:bg-[var(--bg-subtle)]' : ''}
+                             transition-colors disabled:cursor-default"
                       onclick={() => dest && navigate(dest)}
                     >
                       <span class="flex-1 min-w-0 text-[var(--text-muted)]">
@@ -644,7 +681,7 @@
                           </span>
                         {/if}
                       </span>
-                    </div>
+                    </button>
                   {/each}
                 </div>
               </section>

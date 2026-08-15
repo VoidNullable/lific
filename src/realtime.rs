@@ -115,6 +115,13 @@ pub struct RealtimeMessage {
     audience: RealtimeAudience,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RealtimeRequest {
+    #[serde(rename = "activity.baseline.request")]
+    ActivityBaselineRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RealtimeEvent {
@@ -149,6 +156,8 @@ pub enum RealtimeEvent {
     IssueLinked { project_id: i64, issue_id: i64 },
     #[serde(rename = "issue.unlinked")]
     IssueUnlinked { project_id: i64, issue_id: i64 },
+    #[serde(rename = "activity.baseline")]
+    ActivityBaseline { day_count: i64 },
 }
 
 pub async fn serve_socket(
@@ -191,7 +200,9 @@ pub async fn serve_socket(
             flow
         },
         event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
-        message = socket.recv() => handle_client_message(&mut socket, message).await,
+        message = socket.recv() => {
+            handle_client_message(&mut socket, &db, &auth_user, message).await
+        },
     } {}
 }
 
@@ -284,6 +295,8 @@ async fn forward_event(
 
 async fn handle_client_message(
     socket: &mut WebSocket,
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
     match message {
@@ -291,8 +304,38 @@ async fn handle_client_message(
             SocketFlow::from_send(socket.send(Message::Pong(payload)).await)
         }
         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => SocketFlow::Close,
+        Some(Ok(Message::Text(text))) => {
+            if matches!(
+                serde_json::from_str::<RealtimeRequest>(&text),
+                Ok(RealtimeRequest::ActivityBaselineRequest)
+            ) {
+                match activity_baseline(db, auth_user) {
+                    Ok(event) => send_event(socket, &event).await,
+                    Err(error) => {
+                        warn!(error = %error, "failed to load websocket activity baseline");
+                        SocketFlow::Open
+                    }
+                }
+            } else {
+                SocketFlow::Open
+            }
+        }
         Some(Ok(Message::Pong(_))) | Some(Ok(_)) => SocketFlow::Open,
     }
+}
+
+fn activity_baseline(
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
+) -> Result<RealtimeEvent, crate::error::LificError> {
+    let identity = crate::resolve_caller::ResolvedIdentity {
+        user: auth_user.clone(),
+        transport: crate::actor::Transport::Web,
+    };
+    let visible_projects = crate::authz::visible_project_ids(db, &Some(identity))?;
+    let conn = db.read()?;
+    let day_count = crate::db::queries::activity::activity_count(&conn, visible_projects.as_ref())?;
+    Ok(RealtimeEvent::ActivityBaseline { day_count })
 }
 
 async fn send_event(socket: &mut WebSocket, event: &RealtimeEvent) -> SocketFlow {
@@ -416,7 +459,10 @@ impl RealtimeEvent {
             | Self::IssueDeleted { project_id, .. }
             | Self::IssueLinked { project_id, .. }
             | Self::IssueUnlinked { project_id, .. } => Some(*project_id),
-            Self::ResyncRequired | Self::ProjectsReordered | Self::ProjectGroupsChanged => None,
+            Self::ResyncRequired
+            | Self::ProjectsReordered
+            | Self::ProjectGroupsChanged
+            | Self::ActivityBaseline { .. } => None,
         }
     }
 }
@@ -435,6 +481,56 @@ mod tests {
         assert_eq!(json["type"], "issue.updated");
         assert_eq!(json["project_id"], 7);
         assert_eq!(json["issue_id"], 42);
+    }
+
+    #[test]
+    fn activity_baseline_serializes_with_day_count() {
+        let event = RealtimeEvent::ActivityBaseline { day_count: 123 };
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(json["type"], "activity.baseline");
+        assert_eq!(json["day_count"], 123);
+    }
+
+    #[test]
+    fn activity_baseline_rechecks_current_project_visibility() {
+        let (db, auth_user, project_id, _) = visibility_fixture(true);
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE audit_log SET ts = datetime('now', '-25 hours')", [])
+                .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id,
+                    title: "Visible activity".into(),
+                    description: String::new(),
+                    status: crate::db::models::Status::Backlog,
+                    priority: crate::db::models::Priority::None,
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: vec![],
+                    source: None,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            activity_baseline(&db, &auth_user).unwrap(),
+            RealtimeEvent::ActivityBaseline { day_count: 1 }
+        );
+
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::remove_member(&conn, project_id, auth_user.id).unwrap();
+        }
+
+        assert_eq!(
+            activity_baseline(&db, &auth_user).unwrap(),
+            RealtimeEvent::ActivityBaseline { day_count: 0 }
+        );
     }
 
     #[tokio::test]

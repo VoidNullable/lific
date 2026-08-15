@@ -28,6 +28,11 @@
     routeWithCommentTarget,
     splitResourcePath,
   } from "./lib/commentLinks";
+  import {
+    createActivityRateCounter,
+    isActivityRealtimeEvent,
+    parseActivityBaseline,
+  } from "./lib/activityRate";
   import { motionReduced } from "./lib/theme";
   import { fade } from "svelte/transition";
   import { onDestroy, onMount } from "svelte";
@@ -71,6 +76,36 @@
   let realtimeDelayMs = 1000;
   let realtimeNeedsResync = false;
   let realtimeDisposed = false;
+  const realtimeActivity = createActivityRateCounter();
+  let realtimeActivityReady = $state(false);
+  let realtimeActivityRevision = $state(0);
+  let realtimeActivityRefresh: ReturnType<typeof setTimeout> | null = null;
+  let realtimeActivityBaselineRefresh: ReturnType<typeof setInterval> | null = null;
+  const REALTIME_ACTIVITY_BASELINE_REFRESH_MS = 3_600_000;
+
+  function refreshRealtimeActivity() {
+    realtimeActivityRefresh = null;
+    realtimeActivityRevision += 1;
+  }
+
+  function scheduleRealtimeActivityRefresh() {
+    if (realtimeActivityRefresh) clearTimeout(realtimeActivityRefresh);
+    realtimeActivityRefresh = setTimeout(refreshRealtimeActivity, 100);
+  }
+
+  function resetRealtimeActivity() {
+    if (realtimeActivityRefresh) {
+      clearTimeout(realtimeActivityRefresh);
+      realtimeActivityRefresh = null;
+    }
+    if (realtimeActivityBaselineRefresh) {
+      clearInterval(realtimeActivityBaselineRefresh);
+      realtimeActivityBaselineRefresh = null;
+    }
+    realtimeActivity.reset();
+    realtimeActivityReady = false;
+    realtimeActivityRevision += 1;
+  }
 
   onMount(async () => {
     // Probe the instance once; its auto-login flag decides single-user mode.
@@ -167,6 +202,7 @@
     }
     realtimeDelayMs = 1000;
     realtimeNeedsResync = false;
+    resetRealtimeActivity();
     const socket = realtimeSocket;
     realtimeSocket = null;
     if (socket) {
@@ -210,6 +246,24 @@
     );
   }
 
+  function requestRealtimeActivityBaseline() {
+    const socket = realtimeSocket;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "activity.baseline.request" }));
+    }
+  }
+
+  function startRealtimeActivityBaselineRefresh() {
+    if (realtimeActivityBaselineRefresh) {
+      clearInterval(realtimeActivityBaselineRefresh);
+    }
+    requestRealtimeActivityBaseline();
+    realtimeActivityBaselineRefresh = setInterval(
+      requestRealtimeActivityBaseline,
+      REALTIME_ACTIVITY_BASELINE_REFRESH_MS,
+    );
+  }
+
   async function reconnectAfterFailedRealtimeAttempt(sessionToken: string | null) {
     const session = await me();
 
@@ -237,15 +291,37 @@
       realtimeDelayMs = 1000;
       if (realtimeNeedsResync) {
         realtimeNeedsResync = false;
+        resetRealtimeActivity();
         dispatchRealtimeEvent({ type: "resync.required" });
       }
+      startRealtimeActivityBaselineRefresh();
     });
     socket.addEventListener("message", (message) => {
-      if (typeof message.data !== "string") return;
+      if (
+        realtimeSocket !== socket ||
+        realtimeDisposed ||
+        typeof message.data !== "string"
+      ) return;
       try {
         const event = JSON.parse(message.data) as RealtimeEvent;
         if (typeof event?.type === "string") {
-          dispatchRealtimeEvent(event);
+          if (event.type === "activity.baseline") {
+            const baseline = parseActivityBaseline(event.day_count);
+            if (!baseline) return;
+            realtimeActivity.seed(baseline, Date.now());
+            realtimeActivityReady = true;
+            scheduleRealtimeActivityRefresh();
+          } else if (event.type === "resync.required") {
+            resetRealtimeActivity();
+            dispatchRealtimeEvent(event);
+            startRealtimeActivityBaselineRefresh();
+          } else {
+            if (realtimeActivityReady && isActivityRealtimeEvent(event.type)) {
+              realtimeActivity.record(Date.now());
+              scheduleRealtimeActivityRefresh();
+            }
+            dispatchRealtimeEvent(event);
+          }
         }
       } catch {
         // HTTP refresh remains source of truth.
@@ -254,6 +330,7 @@
     socket.addEventListener("close", () => {
       if (realtimeSocket === socket) {
         realtimeSocket = null;
+        resetRealtimeActivity();
         realtimeNeedsResync = true;
         if (opened) {
           scheduleRealtimeReconnect();
@@ -502,7 +579,12 @@
     {#key routeTransitionKey}
     <div class="h-full" in:fade={routeFadeParams()}>
     {#if parsed.page === "home"}
-      <Home {navigate} />
+      <Home
+        {navigate}
+        realtimeActivityCounts={realtimeActivity.counts}
+        {realtimeActivityReady}
+        {realtimeActivityRevision}
+      />
     {:else if parsed.page === "settings"}
       <Settings {navigate} />
     {:else if parsed.page === "instance-settings"}
