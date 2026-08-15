@@ -31,6 +31,10 @@ use tower_http::cors::{self, CorsLayer};
 /// everything else stays capped at 2 MB.
 const UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
+// LIF-377: the cross-project read filter lives in authz, next to the
+// `visible_project_ids` that produces its input. Re-exported here so the
+// route modules keep reaching for it through `super::`.
+use crate::authz::filter_visible;
 use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 
@@ -502,26 +506,6 @@ fn require_project_delete(
     project_id: i64,
 ) -> Result<(), LificError> {
     crate::authz::require_project_delete_role(db, identity, project_id)
-}
-
-/// LIF-197: apply the `visible_project_ids` cross-project read filter to a
-/// list of items. `None` (unrestricted — admin, or enforcement off) keeps
-/// everything. `Some(ids)` keeps only items whose `project_id_of` result is
-/// `Some(pid)` with `pid` in `ids` — a workspace-level item (`None`
-/// project_id) is therefore excluded for any non-admin once enforcement is
-/// on, matching design decision #10 (workspace pages are admin-only).
-fn filter_visible<T>(
-    items: Vec<T>,
-    visible: &Option<std::collections::HashSet<i64>>,
-    project_id_of: impl Fn(&T) -> Option<i64>,
-) -> Vec<T> {
-    match visible {
-        None => items,
-        Some(ids) => items
-            .into_iter()
-            .filter(|it| project_id_of(it).is_some_and(|pid| ids.contains(&pid)))
-            .collect(),
-    }
 }
 
 /// Require any authenticated user, and hand back who they are (LIF-233,

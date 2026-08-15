@@ -381,6 +381,30 @@ pub fn visible_project_ids(
     Ok(Some(ids.into_iter().collect()))
 }
 
+/// LIF-197: apply the [`visible_project_ids`] cross-project read filter to a
+/// list of items. `None` (unrestricted — admin, or enforcement off) keeps
+/// everything. `Some(ids)` keeps only items whose `project_id_of` result is
+/// `Some(pid)` with `pid` in `ids` — a workspace-level item (`None`
+/// project_id) is therefore excluded for any non-admin once enforcement is
+/// on, matching design decision #10 (workspace pages are admin-only).
+///
+/// LIF-377: one implementation for both read surfaces. REST and MCP each had
+/// a byte-identical copy, so "silently absent, never an error" could drift on
+/// one transport without the other noticing.
+pub fn filter_visible<T>(
+    items: Vec<T>,
+    visible: &Option<HashSet<i64>>,
+    project_id_of: impl Fn(&T) -> Option<i64>,
+) -> Vec<T> {
+    match visible {
+        None => items,
+        Some(ids) => items
+            .into_iter()
+            .filter(|it| project_id_of(it).is_some_and(|pid| ids.contains(&pid)))
+            .collect(),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]

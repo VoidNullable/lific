@@ -8,6 +8,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
+    authz::filter_visible,
     db::{DbPool, models, queries},
     links::{IssueLinkContext, MarkdownReference},
 };
@@ -1242,23 +1243,6 @@ fn require_page_role_mcp(
     match project_id {
         Some(pid) => require_role_mcp(db, pid, min),
         None => require_workspace_admin_mcp(db),
-    }
-}
-
-/// The cross-project read filter (LIF-197 scope item 2, MCP-side): a
-/// non-visible project's items are silently absent, never an error. Mirrors
-/// `api::filter_visible`.
-fn filter_visible<T>(
-    items: Vec<T>,
-    visible: &Option<std::collections::HashSet<i64>>,
-    project_id_of: impl Fn(&T) -> Option<i64>,
-) -> Vec<T> {
-    match visible {
-        None => items,
-        Some(ids) => items
-            .into_iter()
-            .filter(|it| project_id_of(it).is_some_and(|pid| ids.contains(&pid)))
-            .collect(),
     }
 }
 
