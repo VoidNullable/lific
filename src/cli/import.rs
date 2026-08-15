@@ -170,7 +170,7 @@ fn run_jira(
     };
 
     let fetcher = jira::LiveJira::new(site, jira_project, email, token)?;
-    let fetched = jira::collect(&fetcher, site, &map)?;
+    let fetched = jira::collect(&fetcher, fetcher.site_slug(), &map)?;
     let summary = import::run_import(pool, project_id, bot, &fetched, dry_run)?;
     Ok(summary)
 }
