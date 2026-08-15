@@ -8,12 +8,16 @@
     createLabel,
     listComments,
     createComment,
+    updateComment,
+    deleteComment,
     listIssueActivity,
+    me,
     type Issue,
     type Module,
     type Label,
     type Comment,
     type Activity,
+    type AuthUser,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
@@ -28,6 +32,7 @@
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
+  import { removeComment, replaceComment } from "../lib/commentState";
   import { ArrowUpRight, ChevronDown } from "lucide-svelte";
 
   let {
@@ -76,9 +81,14 @@
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
   let comments = $state<Comment[]>([]);
+  let currentUser = $state<AuthUser | null>(null);
   let activity = $state<Activity[]>([]);
   let loading = $state(true);
   let error = $state("");
+
+  void me().then((res) => {
+    if (res.ok) currentUser = res.data;
+  });
 
   // Sidebar dropdown states (issue-specific; the body's read/edit mode
   // lives inside DocumentDetail).
@@ -347,6 +357,28 @@
     return res.data;
   }
 
+  async function handleUpdateComment(id: number, content: string) {
+    const res = await updateComment(id, content);
+    if (!res.ok) {
+      toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
+      return null;
+    }
+    comments = replaceComment(comments, res.data);
+    refreshActivity();
+    return res.data;
+  }
+
+  async function handleDeleteComment(id: number): Promise<boolean> {
+    const res = await deleteComment(id);
+    if (!res.ok) {
+      toast(`Couldn't delete comment: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    comments = removeComment(comments, id);
+    refreshActivity();
+    return true;
+  }
+
   async function exportMarkdown() {
     if (!issue || exporting) return;
     exporting = true;
@@ -497,6 +529,9 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  {currentUser}
+  onUpdateComment={handleUpdateComment}
+  onDeleteComment={handleDeleteComment}
   mentionProjectId={issue?.project_id ?? null}
   {activity}
   {paletteActions}

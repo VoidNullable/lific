@@ -6,6 +6,9 @@
     downloadPageExport,
     listPageComments,
     createPageComment,
+    updateComment,
+    deleteComment,
+    me,
     listLabels,
     listFolders,
     listPageActivity,
@@ -14,6 +17,7 @@
     type Label,
     type Folder,
     type Activity,
+    type AuthUser,
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
@@ -23,6 +27,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { projectRole, loadProjectRole, ensureMeAdmin } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
+  import { removeComment, replaceComment } from "../lib/commentState";
   import {
     PenLine,
     CircleDot,
@@ -78,6 +83,7 @@
   );
 
   let comments = $state<Comment[]>([]);
+  let currentUser = $state<AuthUser | null>(null);
   let activity = $state<Activity[]>([]);
   // LIF-105: project labels available for attachment. Stays empty for
   // workspace pages (project_id === null) — labels are project-scoped.
@@ -88,6 +94,10 @@
   let folders = $state<Folder[]>([]);
   let loading = $state(true);
   let error = $state("");
+
+  void me().then((res) => {
+    if (res.ok) currentUser = res.data;
+  });
 
   // Save indicator
   let saving = $state(false);
@@ -279,6 +289,26 @@
     return res.data;
   }
 
+  async function handleUpdateComment(id: number, content: string) {
+    const res = await updateComment(id, content);
+    if (!res.ok) {
+      toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
+      return null;
+    }
+    comments = replaceComment(comments, res.data);
+    return res.data;
+  }
+
+  async function handleDeleteComment(id: number): Promise<boolean> {
+    const res = await deleteComment(id);
+    if (!res.ok) {
+      toast(`Couldn't delete comment: ${res.error}`, { kind: "error" });
+      return false;
+    }
+    comments = removeComment(comments, id);
+    return true;
+  }
+
   async function exportMarkdown() {
     if (!page || exporting) return;
     exporting = true;
@@ -392,6 +422,9 @@
   onDelete={handleDelete}
   {comments}
   onNewComment={handleNewComment}
+  {currentUser}
+  onUpdateComment={handleUpdateComment}
+  onDeleteComment={handleDeleteComment}
   mentionProjectId={page?.project_id ?? null}
   {activity}
   {paletteActions}

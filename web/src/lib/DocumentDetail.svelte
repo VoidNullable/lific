@@ -30,7 +30,7 @@
   import Breadcrumbs, { type Crumb } from "./Breadcrumbs.svelte";
   import { Download, PanelRight, X } from "lucide-svelte";
   import { getContext, type Snippet } from "svelte";
-  import type { Activity, Comment } from "./api";
+  import type { Activity, AuthUser, Comment } from "./api";
   import { isTypingContext } from "./shortcuts";
   import { peekState } from "./issues/peek.svelte"; // LIF-248
   import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
@@ -86,6 +86,9 @@
     // Comments (optional)
     comments,
     onNewComment,
+    currentUser = null,
+    onUpdateComment,
+    onDeleteComment,
     // LIF-263: project id the comments belong to, used to fetch @mention
     // autocomplete candidates. Null for workspace pages (no member list).
     mentionProjectId = null,
@@ -154,6 +157,9 @@
     onDelete?: () => Promise<boolean>;
     comments?: Comment[];
     onNewComment?: (content: string) => Promise<Comment | null>;
+    currentUser?: AuthUser | null;
+    onUpdateComment?: (id: number, content: string) => Promise<Comment | null>;
+    onDeleteComment?: (id: number) => Promise<boolean>;
     mentionProjectId?: number | null;
     activity?: Activity[];
     paletteActions?: PaletteAction[];
@@ -482,12 +488,15 @@
     <Comments
       bind:this={commentsRef}
       {comments}
+      {currentUser}
       editable={commentsEnabled}
       onSubmit={async (content) => {
         const created = await onNewComment(content);
         if (created) attachmentRefresh += 1;
         return created;
       }}
+      onUpdate={onUpdateComment}
+      onDelete={onDeleteComment}
       projectId={mentionProjectId}
     />
   {/if}
