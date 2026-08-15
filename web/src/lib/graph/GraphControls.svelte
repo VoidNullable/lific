@@ -3,11 +3,24 @@
   // <Controls> plugin, but it carries its own visual language; this panel
   // reuses the app's button styling instead. Must render as a child of
   // <SvelteFlow> so useSvelteFlow() finds the store context.
-  import { Panel, useSvelteFlow } from "@xyflow/svelte";
+  import { Panel, useSvelteFlow, useUpdateNodeInternals, useNodes, type Node } from "@xyflow/svelte";
   import { Plus, Minus, Maximize } from "lucide-svelte";
 
   const { zoomIn, zoomOut, fitView } = useSvelteFlow();
   const FIT = { padding: 0.15, duration: 200 };
+
+  // Belt-and-suspenders re-measure after mount: edge anchor points need each
+  // node's handle bounds, which normally arrive via a ResizeObserver pass.
+  // Force one explicit pass for every node once the canvas is up so edges
+  // never stay missing if that initial pass was dropped.
+  const updateNodeInternals = useUpdateNodeInternals();
+  const nodes = useNodes();
+  $effect(() => {
+    const ids = nodes.current.map((n: Node) => n.id);
+    if (ids.length === 0) return;
+    const t = setTimeout(() => updateNodeInternals(ids), 100);
+    return () => clearTimeout(t);
+  });
 </script>
 
 <Panel position="bottom-right">

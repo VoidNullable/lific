@@ -19,7 +19,7 @@
    * project role (viewer = read-only, same as the rest of the UI; the
    * server enforces regardless).
    */
-  import { SvelteFlow, Background, type Node, type Edge, MarkerType, type Connection } from "@xyflow/svelte";
+  import { type Node, type Edge, MarkerType, Position, type Connection } from "@xyflow/svelte";
   import "@xyflow/svelte/dist/style.css";
   import {
     listProjects,
@@ -33,8 +33,7 @@
     type RelationType,
   } from "../lib/api";
   import { layoutGraph, layoutGrid } from "../lib/graph/layout";
-  import IssueNode from "../lib/graph/IssueNode.svelte";
-  import GraphControls from "../lib/graph/GraphControls.svelte";
+  import GraphCanvas from "../lib/graph/GraphCanvas.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
@@ -60,8 +59,6 @@
     navigate: (path: string) => void;
     projectIdentifier: string;
   } = $props();
-
-  const nodeTypes = { issue: IssueNode };
 
   // ── Geometry ──────────────────────────────────────────────
   const NODE_W = 200;
@@ -168,6 +165,18 @@
       position: layout.positions.get(issue.id) ?? { x: 0, y: 0 },
       data: { issue },
       deletable: false,
+      // Cards are fixed-size with fixed handle spots, so declare BOTH
+      // statically (xyflow's SSR path). Without this, nodes hide behind
+      // `visibility: hidden` and edges refuse to draw until a
+      // ResizeObserver measurement pass lands — declared dimensions and
+      // handle bounds make the whole graph render deterministically with
+      // no dependency on that pass.
+      width: NODE_W,
+      height: NODE_H,
+      handles: [
+        { type: "target" as const, position: Position.Left, x: 0, y: NODE_H / 2 },
+        { type: "source" as const, position: Position.Right, x: NODE_W, y: NODE_H / 2 },
+      ],
     }));
   });
 
@@ -401,32 +410,19 @@
             </div>
           </div>
         {:else}
-          <SvelteFlow
-            nodes={flowNodes}
-            edges={flowEdges}
-            {nodeTypes}
-            fitView
-            fitViewOptions={{ padding: 0.15 }}
-            minZoom={0.1}
-            maxZoom={2}
-            deleteKey={null}
-            nodesConnectable={editable}
-            connectionRadius={36}
-            connectionLineStyle="stroke: var(--accent); stroke-width: 2;"
-            defaultEdgeOptions={{}}
-            proOptions={{ hideAttribution: false }}
-            onnodeclick={({ node }) => {
-              const issue = (node.data as { issue: Issue }).issue;
-              navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
-            }}
+          <GraphCanvas
+            initialNodes={flowNodes}
+            initialEdges={flowEdges}
+            {editable}
             {onconnect}
             {onconnectend}
             {onedgeclick}
+            onnodeopen={(node) => {
+              const issue = (node.data as { issue: Issue }).issue;
+              navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
+            }}
             onpaneclick={() => (menu = null)}
-          >
-            <Background gap={24} patternColor="var(--border)" bgColor="var(--bg)" />
-            <GraphControls />
-          </SvelteFlow>
+          />
         {/if}
       {/key}
 
