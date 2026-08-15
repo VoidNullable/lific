@@ -529,10 +529,10 @@ pub fn run_restore(
             // The moved db is self-contained (WAL was checkpointed before the
             // move), so a bare rename back is enough.
             let _ = std::fs::remove_dir_all(&staging);
-            if let Some(moved) = &moved_existing_to {
-                let _ = std::fs::rename(moved, db_path);
-            }
-            return Err(e);
+            return Err(match &moved_existing_to {
+                Some(moved) => rollback_moved_db(moved, db_path, e),
+                None => e,
+            });
         }
     };
 
@@ -557,6 +557,29 @@ pub fn run_restore(
         db_path: db_path.to_path_buf(),
         moved_existing_to,
     })
+}
+
+/// Put the database that `--force` moved aside back at `db_path` after a failed
+/// restore, and decide which error the caller should surface.
+///
+/// On success the original failure (`cause`) is returned unchanged. If the
+/// rollback rename itself fails, swallowing it would tell the user only that
+/// the restore failed while their database sits at a path they were never
+/// shown, reading exactly like data loss (LIF-371). So that case returns a
+/// combined error carrying both failures and the exact path the original
+/// database still occupies, plus where to move it back to.
+fn rollback_moved_db(moved: &Path, db_path: &Path, cause: LificError) -> LificError {
+    match std::fs::rename(moved, db_path) {
+        Ok(()) => cause,
+        Err(rollback_err) => LificError::Internal(format!(
+            "restore failed ({cause}), and rolling the previous database back to {} failed too \
+             ({rollback_err}). Your original database was NOT deleted: it is still at {}. \
+             Move it back to {} by hand to recover it.",
+            db_path.display(),
+            moved.display(),
+            db_path.display()
+        )),
+    }
 }
 
 /// Checkpoint a database file's WAL into the main file, so the `.db` is
@@ -960,6 +983,59 @@ mod tests {
 
         fs::remove_dir_all(&src_dir).ok();
         fs::remove_dir_all(&dst_dir).ok();
+    }
+
+    #[test]
+    fn failed_rollback_error_names_both_failures_and_the_surviving_db_path() {
+        // LIF-371: when the moved-aside db cannot be renamed back, the user
+        // must be told the restore failed AND where their database still is.
+        let dir = temp_dir("rollback_fail");
+        let db_path = dir.join("lific.db");
+        // A source that does not exist makes the rollback rename fail.
+        let moved = dir.join("lific.db.pre-restore-gone");
+
+        let err = rollback_moved_db(
+            &moved,
+            &db_path,
+            LificError::BadRequest("read db from archive: unexpected eof".into()),
+        );
+        let msg = err.to_string();
+
+        assert!(matches!(err, LificError::Internal(_)), "got {err:?}");
+        assert!(
+            msg.contains("read db from archive: unexpected eof"),
+            "must carry the original failure: {msg}"
+        );
+        assert!(
+            msg.contains(&moved.display().to_string()),
+            "must name the path the original db still lives at: {msg}"
+        );
+        assert!(
+            msg.contains(&db_path.display().to_string()),
+            "must name where to move it back to: {msg}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn successful_rollback_surfaces_the_original_error_unchanged() {
+        let dir = temp_dir("rollback_ok");
+        let db_path = dir.join("lific.db");
+        let moved = dir.join("lific.db.pre-restore-1");
+        fs::write(&moved, b"original db bytes").unwrap();
+
+        let err = rollback_moved_db(
+            &moved,
+            &db_path,
+            LificError::BadRequest("archive is missing lific.db".into()),
+        );
+
+        assert!(matches!(err, LificError::BadRequest(ref m) if m == "archive is missing lific.db"));
+        assert_eq!(fs::read(&db_path).unwrap(), b"original db bytes");
+        assert!(!moved.exists());
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
