@@ -25,9 +25,13 @@ pub(super) fn split_csv(value: &str) -> impl Iterator<Item = &str> {
         .filter(|value| !value.is_empty())
 }
 
+/// Parse a `--labels` value into the owned list both backends put on a
+/// request. LIF-374: the HTTP backend used to borrow into its own request
+/// struct; it now fills the same `db::models` types the SQL backend does, so
+/// there is one parser and one shape.
 #[must_use = "use the parsed label values"]
-pub(super) fn borrowed_labels(value: Option<&str>) -> Option<Vec<&str>> {
-    value.map(|value| split_csv(value).collect())
+pub(super) fn owned_labels(value: Option<&str>) -> Option<Vec<String>> {
+    value.map(|value| split_csv(value).map(str::to_owned).collect())
 }
 
 #[must_use = "use the resolved HTTP credential"]
@@ -1226,12 +1230,12 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn borrowed_labels_preserve_values_without_owning_strings() {
+    fn owned_labels_preserve_values_and_discard_empty_items() {
         assert_eq!(
-            borrowed_labels(Some(" bug, ,urgent ")),
-            Some(vec!["bug", "urgent"])
+            owned_labels(Some(" bug, ,urgent ")),
+            Some(vec!["bug".to_owned(), "urgent".to_owned()])
         );
-        assert_eq!(borrowed_labels(None), None);
+        assert_eq!(owned_labels(None), None);
     }
 
     #[test]

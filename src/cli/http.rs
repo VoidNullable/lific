@@ -14,11 +14,12 @@ use reqwest::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::db::models;
 use crate::links::{IssueLinkContext, MarkdownReference, ResourceUrl};
 
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
-    PageAction, ProjectAction, borrowed_labels,
+    PageAction, ProjectAction, owned_labels,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,126 +30,6 @@ type QueryParam<'a> = (&'a str, Cow<'a, str>);
 struct ResolvedResource {
     id: i64,
     identifier: String,
-}
-
-#[derive(Serialize)]
-struct IssueCreate<'a> {
-    project_id: i64,
-    title: &'a str,
-    description: &'a str,
-    status: &'a str,
-    priority: &'a str,
-    module_id: Option<i64>,
-    start_date: Option<&'a str>,
-    target_date: Option<&'a str>,
-    labels: &'a [&'a str],
-    source: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct IssueUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    priority: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    module_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<&'a [&'a str]>,
-}
-
-#[derive(Serialize)]
-struct ProjectCreate<'a> {
-    name: &'a str,
-    identifier: &'a str,
-    description: &'a str,
-    emoji: Option<&'a str>,
-    lead_user_id: Option<i64>,
-}
-
-#[derive(Serialize)]
-struct ProjectUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct PageCreate<'a> {
-    project_id: Option<i64>,
-    folder_id: Option<i64>,
-    title: &'a str,
-    content: &'a str,
-    status: &'static str,
-    labels: &'a [&'a str],
-}
-
-#[derive(Serialize)]
-struct PageUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    folder_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<&'a [&'a str]>,
-}
-
-#[derive(Serialize)]
-struct CommentCreate<'a> {
-    content: &'a str,
-}
-
-#[derive(Serialize)]
-struct ModuleCreate<'a> {
-    project_id: i64,
-    name: &'a str,
-    description: &'a str,
-    status: &'a str,
-    emoji: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct ModuleUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct LabelCreate<'a> {
-    project_id: i64,
-    name: &'a str,
-    color: &'a str,
-}
-
-#[derive(Serialize)]
-struct LabelUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    color: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct FolderCreate<'a> {
-    project_id: i64,
-    parent_id: Option<i64>,
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct FolderUpdate<'a> {
-    name: &'a str,
 }
 
 pub async fn run(
@@ -313,17 +194,16 @@ impl HttpBackend {
                     Some(module) => Some(self.module_id(project_id, module).await?),
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref()).unwrap_or_default();
-                let body = IssueCreate {
+                let body = models::CreateIssue {
                     project_id,
-                    title,
-                    description,
-                    status,
-                    priority,
+                    title: title.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    priority: priority.clone(),
                     module_id,
                     start_date: None,
                     target_date: None,
-                    labels: &labels,
+                    labels: owned_labels(labels.as_deref()).unwrap_or_default(),
                     source: None,
                 };
                 self.send_json(Method::POST, "/api/issues", &body).await
@@ -345,14 +225,18 @@ impl HttpBackend {
                     }
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref());
-                let body = IssueUpdate {
-                    title: title.as_deref(),
-                    description: description.as_deref(),
-                    status: status.as_deref(),
-                    priority: priority.as_deref(),
-                    module_id,
-                    labels: labels.as_deref(),
+                let body = models::UpdateIssue {
+                    title: title.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    priority: priority.clone(),
+                    // LIF-145: module_id is tristate; the CLI only sets or
+                    // skips (no clear), so map Some(id) -> Some(Some(id)).
+                    module_id: module_id.map(Some),
+                    sort_order: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: owned_labels(labels.as_deref()),
                 };
                 self.send_json(Method::PUT, &format!("/api/issues/{id}"), &body)
                     .await
@@ -375,10 +259,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/projects",
-                    &ProjectCreate {
-                        name,
-                        identifier,
-                        description,
+                    &models::CreateProject {
+                        name: name.clone(),
+                        identifier: identifier.clone(),
+                        description: description.clone(),
                         emoji: None,
                         lead_user_id: None,
                     },
@@ -391,9 +275,12 @@ impl HttpBackend {
                 description,
             } => {
                 let id = self.project_id(identifier).await?;
-                let body = ProjectUpdate {
-                    name: name.as_deref(),
-                    description: description.as_deref(),
+                let body = models::UpdateProject {
+                    name: name.clone(),
+                    identifier: None,
+                    description: description.clone(),
+                    emoji: None,
+                    lead_user_id: None,
                 };
                 self.send_json(Method::PUT, &format!("/api/projects/{id}"), &body)
                     .await
@@ -437,17 +324,16 @@ impl HttpBackend {
                 let (project_id, folder_id) = self
                     .page_scope(project.as_deref(), folder.as_deref())
                     .await?;
-                let labels = borrowed_labels(labels.as_deref()).unwrap_or_default();
                 self.send_json(
                     Method::POST,
                     "/api/pages",
-                    &PageCreate {
+                    &models::CreatePage {
                         project_id,
                         folder_id,
-                        title,
-                        content,
-                        status: "draft",
-                        labels: &labels,
+                        title: title.clone(),
+                        content: content.clone(),
+                        status: "draft".into(),
+                        labels: owned_labels(labels.as_deref()).unwrap_or_default(),
                     },
                 )
                 .await
@@ -470,12 +356,14 @@ impl HttpBackend {
                     }
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref());
-                let body = PageUpdate {
-                    title: title.as_deref(),
-                    content: content.as_deref(),
-                    folder_id,
-                    labels: labels.as_deref(),
+                let body = models::UpdatePage {
+                    title: title.clone(),
+                    content: content.clone(),
+                    folder_id: folder_id.map(Some),
+                    sort_order: None,
+                    status: None,
+                    pinned: None,
+                    labels: owned_labels(labels.as_deref()),
                 };
                 self.send_json(Method::PUT, &format!("/api/pages/{id}"), &body)
                     .await
@@ -505,7 +393,9 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     &format!("/api/issues/{}/comments", issue.id),
-                    &CommentCreate { content },
+                    &models::CreateComment {
+                        content: content.clone(),
+                    },
                 )
                 .await
                 .map(|value| (value, issue.identifier))
@@ -534,11 +424,11 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/modules",
-                    &ModuleCreate {
+                    &models::CreateModule {
                         project_id: project.id,
-                        name,
-                        description,
-                        status,
+                        name: name.clone(),
+                        description: description.clone(),
+                        status: status.clone(),
                         emoji: None,
                     },
                 )
@@ -554,10 +444,11 @@ impl HttpBackend {
             } => {
                 let project = self.project_identity(project).await?;
                 let id = self.module_id(project.id, name).await?;
-                let body = ModuleUpdate {
-                    name: new_name.as_deref(),
-                    description: description.as_deref(),
-                    status: status.as_deref(),
+                let body = models::UpdateModule {
+                    name: new_name.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    emoji: None,
                 };
                 self.send_json(Method::PUT, &format!("/api/modules/{id}"), &body)
                     .await
@@ -589,10 +480,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/labels",
-                    &LabelCreate {
+                    &models::CreateLabel {
                         project_id,
-                        name,
-                        color,
+                        name: name.clone(),
+                        color: color.clone(),
                     },
                 )
                 .await
@@ -604,9 +495,9 @@ impl HttpBackend {
                 color,
             } => {
                 let id = self.label_id(self.project_id(project).await?, name).await?;
-                let body = LabelUpdate {
-                    name: new_name.as_deref(),
-                    color: color.as_deref(),
+                let body = models::UpdateLabel {
+                    name: new_name.clone(),
+                    color: color.clone(),
                 };
                 self.send_json(Method::PUT, &format!("/api/labels/{id}"), &body)
                     .await
@@ -634,10 +525,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/folders",
-                    &FolderCreate {
+                    &models::CreateFolder {
                         project_id,
                         parent_id: None,
-                        name,
+                        name: name.clone(),
                     },
                 )
                 .await
@@ -653,7 +544,9 @@ impl HttpBackend {
                 self.send_json(
                     Method::PUT,
                     &format!("/api/folders/{id}"),
-                    &FolderUpdate { name: new_name },
+                    &models::UpdateFolder {
+                        name: Some(new_name.clone()),
+                    },
                 )
                 .await
             }
@@ -952,13 +845,6 @@ fn sanitize_error_detail(detail: &str) -> String {
         .collect()
 }
 
-fn print_human(value: &Value) {
-    match value {
-        Value::Array(items) => println!("{} item(s):\n{}", items.len(), pretty(value)),
-        _ => println!("{}", pretty(value)),
-    }
-}
-
 #[derive(Clone, Copy)]
 enum IssueLinkOutput {
     Url,
@@ -1163,6 +1049,13 @@ fn with_string_field(
     object
 }
 
+fn print_human(value: &Value) {
+    match value {
+        Value::Array(items) => println!("{} item(s):\n{}", items.len(), pretty(value)),
+        _ => println!("{}", pretty(value)),
+    }
+}
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -1198,10 +1091,10 @@ mod tests {
     };
 
     use super::{
-        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueLinkOutput, IssueUpdate, PageCreate,
-        ProjectCreate, ResourceKind, error_detail, export_filename, find_resource,
-        is_loopback_host, linked_comments, linked_modules, linked_resources, resource_from_object,
-        resource_url, safe_filename, sanitize_error_detail, segment,
+        ERROR_BODY_LIMIT, HttpBackend, IssueLinkOutput, ResourceKind, error_detail,
+        export_filename, find_resource, is_loopback_host, linked_comments, linked_modules,
+        linked_resources, models, resource_from_object, resource_url, safe_filename,
+        sanitize_error_detail, segment,
     };
     use crate::links::IssueLinkContext;
 
@@ -1869,15 +1762,25 @@ mod tests {
         assert_eq!(error.to_string(), "folder 'Docs' not found");
     }
 
-    #[test]
-    fn preserves_optional_json_fields_only_when_set() {
-        let body = serde_json::to_value(IssueUpdate {
-            title: Some("Updated"),
+    fn issue_update() -> models::UpdateIssue {
+        models::UpdateIssue {
+            title: None,
             description: None,
             status: None,
             priority: None,
             module_id: None,
+            sort_order: None,
+            start_date: None,
+            target_date: None,
             labels: None,
+        }
+    }
+
+    #[test]
+    fn preserves_optional_json_fields_only_when_set() {
+        let body = serde_json::to_value(models::UpdateIssue {
+            title: Some("Updated".into()),
+            ..issue_update()
         })
         .unwrap();
         assert_eq!(body["title"], "Updated");
@@ -1886,16 +1789,58 @@ mod tests {
 
     #[test]
     fn preserves_empty_optional_json_values() {
-        let body = serde_json::to_value(IssueUpdate {
-            title: None,
-            description: Some(""),
-            status: None,
-            priority: None,
-            module_id: None,
-            labels: None,
+        let body = serde_json::to_value(models::UpdateIssue {
+            description: Some(String::new()),
+            ..issue_update()
         })
         .unwrap();
         assert_eq!(body["description"], "");
+    }
+
+    /// LIF-374: the HTTP backend used to declare its own `IssueUpdate` with a
+    /// flat `Option<i64>` module id, which cannot express "clear the module"
+    /// — `null` and "absent" collapsed into the same payload. Sending
+    /// `models::UpdateIssue` keeps all three states distinguishable the way
+    /// the server's `deserialize_nullable` reads them.
+    #[test]
+    fn distinguishes_absent_cleared_and_assigned_module_ids() {
+        let absent = serde_json::to_value(issue_update()).unwrap();
+        let cleared = serde_json::to_value(models::UpdateIssue {
+            module_id: Some(None),
+            ..issue_update()
+        })
+        .unwrap();
+        let assigned = serde_json::to_value(models::UpdateIssue {
+            module_id: Some(Some(7)),
+            ..issue_update()
+        })
+        .unwrap();
+
+        assert!(absent.get("module_id").is_none());
+        assert_eq!(cleared["module_id"], serde_json::Value::Null);
+        assert_eq!(assigned["module_id"], 7);
+    }
+
+    /// The flags `lific project update` exposes must reach the server
+    /// unchanged, and the fields it does not expose must stay absent rather
+    /// than being sent as nulls that would clear them (LIF-374: the old
+    /// shadow struct carried only 2 of the 5 fields).
+    #[test]
+    fn sends_only_the_project_fields_the_cli_sets() {
+        let body = serde_json::to_value(models::UpdateProject {
+            name: Some("Docs".into()),
+            identifier: None,
+            description: Some("Reference material".into()),
+            emoji: None,
+            lead_user_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(body["name"], "Docs");
+        assert_eq!(body["description"], "Reference material");
+        assert!(body.get("identifier").is_none());
+        assert!(body.get("emoji").is_none());
+        assert!(body.get("lead_user_id").is_none());
     }
 
     #[test]
@@ -1921,17 +1866,16 @@ mod tests {
 
     #[test]
     fn builds_issue_create_payload_with_nullable_fields() {
-        let labels = vec!["bug"];
-        let payload = serde_json::to_value(IssueCreate {
+        let payload = serde_json::to_value(models::CreateIssue {
             project_id: 7,
-            title: "Broken link",
-            description: "Details",
-            status: "backlog",
-            priority: "high",
+            title: "Broken link".into(),
+            description: "Details".into(),
+            status: "backlog".into(),
+            priority: "high".into(),
             module_id: None,
             start_date: None,
             target_date: None,
-            labels: &labels,
+            labels: vec!["bug".into()],
             source: None,
         })
         .unwrap();
@@ -1944,10 +1888,10 @@ mod tests {
 
     #[test]
     fn builds_project_create_payload_with_server_defaults() {
-        let payload = serde_json::to_value(ProjectCreate {
-            name: "Docs",
-            identifier: "DOC",
-            description: "Reference material",
+        let payload = serde_json::to_value(models::CreateProject {
+            name: "Docs".into(),
+            identifier: "DOC".into(),
+            description: "Reference material".into(),
             emoji: None,
             lead_user_id: None,
         })
@@ -1961,14 +1905,13 @@ mod tests {
 
     #[test]
     fn builds_page_create_payload_for_workspace_pages() {
-        let labels = Vec::new();
-        let payload = serde_json::to_value(PageCreate {
+        let payload = serde_json::to_value(models::CreatePage {
             project_id: None,
             folder_id: None,
-            title: "Runbook",
-            content: "# Steps",
-            status: "draft",
-            labels: &labels,
+            title: "Runbook".into(),
+            content: "# Steps".into(),
+            status: "draft".into(),
+            labels: Vec::new(),
         })
         .unwrap();
         assert!(payload["project_id"].is_null());
@@ -1979,14 +1922,13 @@ mod tests {
 
     #[test]
     fn builds_page_create_payload_with_project_folder_and_labels() {
-        let labels = vec!["ops", "ship"];
-        let payload = serde_json::to_value(PageCreate {
+        let payload = serde_json::to_value(models::CreatePage {
             project_id: Some(3),
             folder_id: Some(8),
-            title: "Release",
-            content: "Notes",
-            status: "draft",
-            labels: &labels,
+            title: "Release".into(),
+            content: "Notes".into(),
+            status: "draft".into(),
+            labels: vec!["ops".into(), "ship".into()],
         })
         .unwrap();
         assert_eq!(payload["project_id"], 3);
