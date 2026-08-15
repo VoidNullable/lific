@@ -5,11 +5,15 @@ pub mod doctor;
 pub mod exec;
 pub mod http;
 pub mod import;
+pub mod instance;
+pub mod key;
 pub mod login;
+pub mod member;
 pub mod render;
 pub mod service;
 pub mod term;
 pub mod ui;
+pub mod user;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;

@@ -23,7 +23,10 @@ pub fn run(pool: &DbPool, command: &Command, json: bool) -> Result<(), Box<dyn s
         Command::Module { action } => module(pool, action, json),
         Command::Label { action } => label(pool, action, json),
         Command::Folder { action } => folder(pool, action, json),
-        _ => unreachable!("non-CRUD commands are handled in main.rs"),
+        _ => unreachable!(
+            "non-CRUD commands are dispatched by main.rs to their own modules \
+             (cli::instance, cli::key, cli::user, cli::member, server::run, ...)"
+        ),
     }
 }
 

@@ -1077,95 +1077,36 @@ mod tests {
 
     // ── HTTP integration: spin up a real server in-process ───────────────
     //
-    // Builds the actual production wiring — oauth::router (for discovery) +
-    // require_api_key middleware in front of a real StreamableHttp /mcp service
-    // over an in-memory pool — binds it on an ephemeral loopback port, and runs
-    // the doctor HTTP check functions against it. This proves the three paths
-    // that matter: 401-with-WWW-Authenticate (no key), discovery 200, and an
-    // authorized `initialize` round-trip with a real key.
+    // LIF-390: this used to hand-assemble a lookalike router, which drifted
+    // from production (it ran `with_request_user` instead of
+    // `with_request_context` and wired no realtime hub, so doctor validated a
+    // stack nothing served). It now calls `server::build_app` — the exact
+    // router `lific start` builds — binds it on an ephemeral loopback port,
+    // and runs the doctor HTTP check functions against it. This proves the
+    // three paths that matter: 401-with-WWW-Authenticate (no key), discovery
+    // 200, and an authorized `initialize` round-trip with a real key.
 
-    use axum::body::Body;
-    use axum::extract::Request;
-    use axum::response::IntoResponse;
-    use axum::routing::any;
-    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-    use rmcp::transport::streamable_http_server::tower::{
-        StreamableHttpServerConfig, StreamableHttpService,
-    };
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
-    /// Assemble the same authed `/mcp` + oauth discovery app `lific start`
-    /// serves, minus the frontend/CORS extras that don't affect doctor.
+    /// Build the production app for an instance whose issuer is `issuer`.
     fn build_test_app(pool: crate::db::DbPool, issuer: &str) -> axum::Router {
-        let allowed_hosts = vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-            "::1".to_string(),
-        ];
-        let mcp_config = StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
-            .with_json_response(true)
-            .with_allowed_hosts(allowed_hosts);
-        let db_for_mcp = pool.clone();
-        let mcp_service = StreamableHttpService::new(
-            move || Ok(crate::mcp::LificMcp::new(db_for_mcp.clone())),
-            Arc::new(LocalSessionManager::default()),
-            mcp_config,
+        let mut cfg = Config::default();
+        // An explicit public_url is what makes the issuer authoritative
+        // (`issuer_is_explicit`), matching a deployed instance.
+        cfg.server.public_url = Some(issuer.to_string());
+        let trusted_proxies = Arc::<[crate::ratelimit::IpNetwork]>::from(
+            cfg.server
+                .trusted_proxy_ranges()
+                .expect("default trusted proxy ranges must parse"),
         );
-
-        let auth_state = crate::auth::AuthState {
-            db: pool.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
-            public_url: issuer.to_string(),
-            required: true,
-        };
-
-        let authed = axum::Router::new()
-            .route(
-                "/mcp",
-                any(move |request: Request<Body>| async move {
-                    let auth_user = request
-                        .extensions()
-                        .get::<Option<crate::db::models::AuthUser>>()
-                        .cloned()
-                        .flatten();
-                    crate::mcp::with_request_user(auth_user, || async {
-                        mcp_service.handle(request).await.into_response()
-                    })
-                    .await
-                }),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                auth_state,
-                crate::auth::require_api_key,
-            ))
-            // A tiny health route OUTSIDE the auth layer, mirroring production
-            // where `/api/health` is exempted from auth (auth_middleware_wrapper
-            // in main.rs). The reachability probe must see a 200 here.
-            .route("/api/health", axum::routing::get(|| async { "ok" }));
-
-        let oauth_state = crate::oauth::OAuthState {
-            db: pool,
-            issuer: issuer.to_string(),
-            issuer_is_explicit: true,
-            allowed_hosts: vec![
-                "localhost".to_string(),
-                "127.0.0.1".to_string(),
-                "::1".to_string(),
-            ]
-            .into(),
-            register_limiter: Arc::new(crate::ratelimit::RateLimiter::new(
-                100,
-                Duration::from_secs(60),
-            )),
-            trusted_proxies: Arc::<[crate::ratelimit::IpNetwork]>::from(
-                crate::config::ServerConfig::default()
-                    .trusted_proxy_ranges()
-                    .expect("default trusted proxy ranges must parse"),
-            ),
-        };
-
-        authed.merge(crate::oauth::router(oauth_state))
+        crate::server::build_app(
+            &cfg,
+            pool,
+            crate::auth::create_key_manager().unwrap(),
+            crate::realtime::RealtimeHub::new(),
+            trusted_proxies,
+        )
     }
 
     /// Bind an ephemeral loopback port, serve `app`, and return the base URL.
@@ -1173,7 +1114,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            // Connect info is part of the production service: the login and
+            // OAuth registration handlers extract `ConnectInfo<SocketAddr>`
+            // for their rate-limit keys.
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
         format!("http://127.0.0.1:{}", addr.port())
     }
