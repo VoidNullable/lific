@@ -5,7 +5,7 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::comments::{self, CommentContext, CommentParent};
-use crate::db::{DbPool, models::*};
+use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -21,6 +21,11 @@ pub(crate) fn validate_comment_content(content: &str) -> Result<(), LificError> 
     }
     Ok(())
 }
+
+/// Comments are gated at `Viewer` — anyone who can see a project
+/// can read and post comments on its issues/pages (the actual auth-required
+/// check for *who* the comment is attributed to is separate, below).
+/// Workspace-level pages (`project_id = None`) fall back to admin-only.
 fn require_comment_viewer(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -56,7 +61,7 @@ fn list_for_parent(
     parent: CommentParent,
     q: &ListCommentsQuery,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-
+    let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
     require_comment_viewer(db, identity, project_id)?;
     with_read(db, |conn| {
@@ -65,8 +70,8 @@ fn list_for_parent(
             parent,
             q.author.as_deref(),
             q.order.as_deref(),
-            Some(q.limit.unwrap_or(50).clamp(1, 500)),
-            Some(q.offset.unwrap_or(0).max(0)),
+            Some(limit),
+            Some(offset),
         )
     })
     .map(Json)
@@ -79,7 +84,6 @@ fn create_for_parent(
     parent: CommentParent,
     content: &str,
 ) -> Result<Json<Comment>, LificError> {
-    validate_comment_content(content)?;
     let user = require_user(identity)?;
     let (comment, project_id) = db.transaction(|conn| {
         let project_id = parent.project_id(conn)?;
@@ -120,7 +124,6 @@ pub(super) async fn create_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    validate_comment_content(&input.content)?;
     create_for_parent(
         &db,
         &realtime,
@@ -146,7 +149,6 @@ pub(super) async fn create_page_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    validate_comment_content(&input.content)?;
     create_for_parent(
         &db,
         &realtime,
@@ -189,7 +191,6 @@ pub(super) async fn update_comment_handler(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    validate_comment_content(&input.content)?;
     let user = require_user(&identity)?;
     let (comment, context) = db.transaction(|conn| {
         let existing = comments::get_comment(conn, id)?;
@@ -404,6 +405,34 @@ mod tests {
         let comments = comments.as_array().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0]["content"], "second");
+    }
+
+    #[tokio::test]
+    async fn issue_comment_list_defaults_to_shared_page_limit() {
+        let (app, issue_id, _) = setup_comment_test();
+        for index in 0..=crate::db::queries::DEFAULT_PAGE_LIMIT {
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": format!("comment-{index}")}),
+            )
+            .await;
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/issues/{issue_id}/comments"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            parse_json(response).await.as_array().unwrap().len(),
+            crate::db::queries::DEFAULT_PAGE_LIMIT as usize
+        );
     }
 
     #[tokio::test]

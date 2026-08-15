@@ -4,7 +4,7 @@ mod activity;
 /// module is crate-visible even though its handlers stay `pub(super)`.
 pub(crate) mod attachments;
 mod auth;
-pub(crate) mod comments;
+mod comments;
 mod export;
 mod insights;
 mod issues;
