@@ -494,6 +494,7 @@ impl LiveJira {
         use base64::Engine;
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent("lific-import/1.0")
             .build()
             .map_err(|e| format!("http client init failed: {e}"))?;
@@ -753,7 +754,19 @@ mod tests {
     #[test]
     fn jira_site_slug_rejects_host_and_path_injection() {
         assert_eq!(validate_site_slug("My-Team").unwrap(), "my-team");
-        for invalid in ["", "evil.example", "evil/path", "-leading", "trailing-", "a_b"] {
+        for invalid in [
+            "",
+            "evil.example",
+            "evil/path",
+            "evil:443",
+            "user@evil",
+            "evil?query",
+            "evil#fragment",
+            "evil%2fpath",
+            "-leading",
+            "trailing-",
+            "a_b",
+        ] {
             assert!(validate_site_slug(invalid).is_err(), "accepted {invalid:?}");
         }
     }
