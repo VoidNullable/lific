@@ -123,7 +123,12 @@ pub(super) async fn create_page(
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::create_page(conn, &input)?;
         // LIF-262: link any attachments the content references.
-        super::attachments::sync_links(conn, AttachmentEntity::Page, page.id, &page.content)?;
+        crate::db::queries::attachments::sync_links(
+            conn,
+            AttachmentEntity::Page,
+            page.id,
+            &page.content,
+        )?;
         Ok(page)
     })?;
     if let Some(project_id) = page.project_id {
@@ -144,7 +149,12 @@ pub(super) async fn update_page(
     let page = with_write(&db, |conn| {
         let page = crate::db::queries::update_page(conn, id, &input)?;
         // LIF-262: re-scan the (possibly edited) content and reconcile links.
-        super::attachments::sync_links(conn, AttachmentEntity::Page, page.id, &page.content)?;
+        crate::db::queries::attachments::sync_links(
+            conn,
+            AttachmentEntity::Page,
+            page.id,
+            &page.content,
+        )?;
         Ok(page)
     })?;
     if let Some(project_id) = page.project_id {

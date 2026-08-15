@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use crate::db::models::Comment;
+use crate::db::models::{AttachmentEntity, Comment};
 use crate::error::LificError;
 
 use super::unescape_text;
@@ -371,6 +371,61 @@ pub fn sync_mentions(
         )?;
     }
     Ok(resolved)
+}
+
+/// Create a comment and reconcile everything derived from its body in one
+/// write: the resolved `@mention` rows (LIF-263) and the attachment links its
+/// markdown references (LIF-262).
+///
+/// `member_scoped` is the live `authz_enforced` flag, resolved by the caller
+/// *before* it takes the write connection — reading it here would nest the
+/// pool's guards. `project_id` is the comment parent's project (`None` for a
+/// workspace-level page).
+///
+/// LIF-375: the single implementation behind both the REST handlers and the
+/// MCP `add_comment` tool. Both used to inline their own copy, and the MCP
+/// copies silently skipped attachment link sync (LIF-369).
+pub fn create_comment_with_mentions(
+    conn: &Connection,
+    parent: CommentParent,
+    project_id: Option<i64>,
+    user_id: i64,
+    content: &str,
+    member_scoped: bool,
+) -> Result<Comment, LificError> {
+    let candidates = mention_candidates(conn, project_id, member_scoped)?;
+    let comment = create_comment(conn, parent, user_id, content)?;
+    sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+    super::attachments::sync_links(
+        conn,
+        AttachmentEntity::Comment,
+        comment.id,
+        &comment.content,
+    )?;
+    Ok(comment)
+}
+
+/// Edit a comment's content and re-derive its mentions and attachment links,
+/// the update-side twin of [`create_comment_with_mentions`]. An edit that
+/// drops a mention or an attachment reference removes the corresponding row,
+/// so authorization data stays in step with the text.
+pub fn update_comment_with_mentions(
+    conn: &Connection,
+    comment_id: i64,
+    project_id: Option<i64>,
+    content: &str,
+    member_scoped: bool,
+) -> Result<Comment, LificError> {
+    let candidates = mention_candidates(conn, project_id, member_scoped)?;
+    let comment = update_comment(conn, comment_id, content)?;
+    sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+    super::attachments::sync_links(
+        conn,
+        AttachmentEntity::Comment,
+        comment.id,
+        &comment.content,
+    )?;
+    Ok(comment)
 }
 
 /// The user ids currently recorded as mentioned by a comment. Test-only
