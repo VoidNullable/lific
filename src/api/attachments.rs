@@ -34,7 +34,7 @@ use crate::ratelimit::RateLimiter;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 use crate::storage::{self, AttachmentStore};
 
-use super::{with_read, with_write};
+use super::{require_user, with_read, with_write};
 
 /// Runtime config for the upload endpoint. Injected as an `Extension` so it can
 /// be tuned per instance without threading through every call. `max_bytes`
@@ -79,10 +79,7 @@ pub(super) async fn upload_attachment(
     Extension(limiter): Extension<Arc<AttachmentUploadLimiter>>,
     mut multipart: Multipart,
 ) -> Result<Response, LificError> {
-    let user = identity
-        .as_ref()
-        .map(|i| i.user.clone())
-        .ok_or_else(|| LificError::Forbidden("authentication required to upload".into()))?;
+    let user = require_user(&identity)?;
 
     // Per-user rate limit (mirrors the signup/login limiter pattern).
     if !limiter.0.check(&format!("user:{}", user.id)) {
@@ -313,10 +310,7 @@ pub(super) async fn delete_attachment(
     Extension(store): Extension<AttachmentStore>,
     Path(id): Path<i64>,
 ) -> Result<axum::Json<serde_json::Value>, LificError> {
-    let user = identity
-        .as_ref()
-        .map(|i| i.user.clone())
-        .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
+    let user = require_user(&identity)?;
     let attachment = with_read(&db, |conn| q::get_attachment(conn, id))?;
 
     authorize_delete(&db, &identity, &user, &attachment)?;
