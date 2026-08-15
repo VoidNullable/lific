@@ -39,7 +39,7 @@ pub mod jira;
 pub mod linear;
 
 use crate::db::DbPool;
-use crate::db::models::{CreateIssue, CreateLabel};
+use crate::db::models::{CreateIssue, CreateLabel, Priority, Status};
 use crate::db::queries;
 use crate::error::LificError;
 
@@ -52,10 +52,10 @@ pub struct NormalizedIssue {
     pub title: String,
     /// Markdown body (already converted for Jira's ADF).
     pub description: String,
-    /// Mapped Lific status: backlog / todo / active / done / cancelled.
-    pub status: String,
-    /// Mapped Lific priority: urgent / high / medium / low / none.
-    pub priority: String,
+    /// Mapped Lific status.
+    pub status: Status,
+    /// Mapped Lific priority.
+    pub priority: Priority,
     /// Labels to attach, with the color the source reported (hex like
     /// `#EF4444`) or `None` to use the Lific default.
     pub labels: Vec<NormalizedLabel>,
@@ -264,8 +264,8 @@ pub fn apply_issue(
                 project_id,
                 title: issue.title.clone(),
                 description: issue.description.clone(),
-                status: issue.status.clone(),
-                priority: issue.priority.clone(),
+                status: issue.status,
+                priority: issue.priority,
                 labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
                 source: Some(issue.source.clone()),
                 ..Default::default()
@@ -352,17 +352,17 @@ pub fn run_import(
 /// A status-mapping table shared by importers: maps a source's state token to a
 /// Lific status, with per-flag overrides. `open`/`closed` naming echoes
 /// GitHub's flags but the mechanism is generic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StatusMap {
-    pub open: String,
-    pub closed: String,
+    pub open: Status,
+    pub closed: Status,
 }
 
 impl Default for StatusMap {
     fn default() -> Self {
         StatusMap {
-            open: "backlog".into(),
-            closed: "done".into(),
+            open: Status::Backlog,
+            closed: Status::Done,
         }
     }
 }
@@ -410,8 +410,8 @@ mod tests {
             source: source.into(),
             title: title.into(),
             description: "body".into(),
-            status: "backlog".into(),
-            priority: "none".into(),
+            status: Status::Backlog,
+            priority: Priority::None,
             labels: vec![],
             comments: vec![],
         }

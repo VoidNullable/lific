@@ -169,12 +169,12 @@ pub(super) async fn get_board(
         std::collections::BTreeMap::new();
     for issue in &issues {
         let key = match q.group_by.as_str() {
-            "priority" => issue.priority.clone(),
+            "priority" => issue.priority.to_string(),
             "module" => issue
                 .module_id
                 .and_then(|m| module_names.get(&m).cloned())
                 .unwrap_or("unassigned".into()),
-            _ => issue.status.clone(),
+            _ => issue.status.to_string(),
         };
         board.entry(key).or_default().push(issue);
     }
@@ -293,9 +293,12 @@ pub(super) fn import_github_with(
     state: crate::import::github::StateFilter,
     req: &GithubImportRequest,
 ) -> Result<crate::import::ImportSummary, LificError> {
+    // LIF-385: `map_open` / `map_closed` arrive as free text from the web
+    // Import panel; reject a bad one with 400 up front instead of letting every
+    // insert fail against the status CHECK constraint.
     let status_map = crate::import::StatusMap {
-        open: req.map_open.clone(),
-        closed: req.map_closed.clone(),
+        open: req.map_open.parse().map_err(LificError::BadRequest)?,
+        closed: req.map_closed.parse().map_err(LificError::BadRequest)?,
     };
     let fetched = crate::import::github::collect(fetcher, slug, state, &status_map)
         .map_err(LificError::Internal)?;

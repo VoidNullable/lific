@@ -14,7 +14,9 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::db::models::{Comment, Folder, Issue, Label, Module, Page, Project, SearchResult};
+use crate::db::models::{
+    Comment, Folder, Issue, Label, Module, Page, Priority, Project, SearchResult, Status,
+};
 
 /// `writeln!` into a `String` cannot fail, so the renderers would otherwise
 /// be littered with `let _ =`. With no format arguments this writes a bare
@@ -35,25 +37,24 @@ macro_rules! w {
 pub type ModuleName<'a> = &'a dyn Fn(i64) -> Option<String>;
 
 /// Format a priority with visual indicator for human output.
-pub fn fmt_priority(priority: &str) -> &str {
+pub fn fmt_priority(priority: Priority) -> &'static str {
     match priority {
-        "urgent" => "!!!  urgent",
-        "high" => "!!   high",
-        "medium" => "!    medium",
-        "low" => "     low",
-        _ => "     none",
+        Priority::Urgent => "!!!  urgent",
+        Priority::High => "!!   high",
+        Priority::Medium => "!    medium",
+        Priority::Low => "     low",
+        Priority::None => "     none",
     }
 }
 
 /// Format a status with visual indicator for human output.
-pub fn fmt_status(status: &str) -> &str {
+pub fn fmt_status(status: Status) -> &'static str {
     match status {
-        "backlog" => "[ ] backlog",
-        "todo" => "[.] todo",
-        "active" => "[~] active",
-        "done" => "[x] done",
-        "cancelled" => "[-] cancelled",
-        other => other,
+        Status::Backlog => "[ ] backlog",
+        Status::Todo => "[.] todo",
+        Status::Active => "[~] active",
+        Status::Done => "[x] done",
+        Status::Cancelled => "[-] cancelled",
     }
 }
 
@@ -92,8 +93,8 @@ pub fn issue_list(issues: &[Issue], module_name: ModuleName<'_>) -> String {
             out,
             "  {:<8} {} | {} | {}{}{}",
             issue.identifier,
-            fmt_status(&issue.status),
-            fmt_priority(&issue.priority),
+            fmt_status(issue.status),
+            fmt_priority(issue.priority),
             issue.title,
             bracketed_labels(&issue.labels),
             module
@@ -454,7 +455,7 @@ pub fn export_written(written: &[PathBuf], output: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn issue(identifier: &str, status: &str, priority: &str) -> Issue {
+    fn issue(identifier: &str, status: Status, priority: Priority) -> Issue {
         Issue {
             id: 1,
             project_id: 1,
@@ -462,8 +463,8 @@ mod tests {
             identifier: identifier.into(),
             title: "Fix the bug".into(),
             description: String::new(),
-            status: status.into(),
-            priority: priority.into(),
+            status,
+            priority,
             module_id: None,
             sort_order: 0.0,
             start_date: None,
@@ -482,15 +483,15 @@ mod tests {
 
     #[test]
     fn marks_statuses_and_priorities_with_indicators() {
-        assert_eq!(fmt_status("active"), "[~] active");
-        assert_eq!(fmt_status("unknown"), "unknown");
-        assert_eq!(fmt_priority("urgent"), "!!!  urgent");
-        assert_eq!(fmt_priority("nonsense"), "     none");
+        assert_eq!(fmt_status(Status::Active), "[~] active");
+        assert_eq!(fmt_status(Status::Cancelled), "[-] cancelled");
+        assert_eq!(fmt_priority(Priority::Urgent), "!!!  urgent");
+        assert_eq!(fmt_priority(Priority::None), "     none");
     }
 
     #[test]
     fn lists_issues_with_labels_and_module_name() {
-        let mut one = issue("TST-1", "active", "high");
+        let mut one = issue("TST-1", Status::Active, Priority::High);
         one.labels = vec!["bug".into(), "urgent".into()];
         one.module_id = Some(4);
 
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn omits_the_module_when_the_name_cannot_be_resolved() {
-        let mut one = issue("TST-1", "todo", "low");
+        let mut one = issue("TST-1", Status::Todo, Priority::Low);
         one.module_id = Some(9);
 
         let rendered = issue_list(std::slice::from_ref(&one), &|_| None);
@@ -531,7 +532,7 @@ mod tests {
 
     #[test]
     fn details_an_issue_with_its_relations_and_description() {
-        let mut one = issue("TST-1", "active", "urgent");
+        let mut one = issue("TST-1", Status::Active, Priority::Urgent);
         one.description = "Details".into();
         one.blocks = vec!["TST-2".into()];
         one.duplicated_by = vec!["TST-3".into()];

@@ -96,6 +96,159 @@ pub struct AssignProjectGroup {
     pub group_id: Option<i64>,
 }
 
+/// An issue's workflow state (LIF-385). Replaces the bare `String` that used
+/// to be validated only by the `issues.status` CHECK constraint and re-matched
+/// by hand at every call site.
+///
+/// String form matches that CHECK's values exactly
+/// ('backlog'/'todo'/'active'/'done'/'cancelled') via `FromSql`/`ToSql`, so
+/// `row.get::<_, Status>(..)` and `params![.., status]` work directly, and the
+/// serde representation is the same lowercase string the JSON API has always
+/// spoken.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    /// The default for a new issue, matching the old `default_status()`.
+    #[default]
+    Backlog,
+    Todo,
+    Active,
+    Done,
+    Cancelled,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Backlog => "backlog",
+            Status::Todo => "todo",
+            Status::Active => "active",
+            Status::Done => "done",
+            Status::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parse an optional wire string, for boundaries (MCP tool inputs, CLI
+    /// flags) that still carry `Option<String>`. `None` stays `None`.
+    pub fn parse_opt(value: Option<&str>) -> Result<Option<Self>, String> {
+        value.map(str::parse).transpose()
+    }
+
+    /// True for the two terminal states. Both `done` and `cancelled` take an
+    /// issue out of the workable set.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Status::Done | Status::Cancelled)
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Status {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "backlog" => Ok(Status::Backlog),
+            "todo" => Ok(Status::Todo),
+            "active" => Ok(Status::Active),
+            "done" => Ok(Status::Done),
+            "cancelled" => Ok(Status::Cancelled),
+            other => Err(format!(
+                "invalid status '{other}'. Use backlog, todo, active, done, or cancelled."
+            )),
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for Status {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|_| rusqlite::types::FromSqlError::InvalidType)
+    }
+}
+
+impl rusqlite::types::ToSql for Status {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+/// An issue's priority (LIF-385). Same deal as [`Status`]: the wire form is the
+/// lowercase string the API has always used, and the DB form matches the
+/// `issues.priority` column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Urgent,
+    High,
+    Medium,
+    Low,
+    /// The default for a new issue, matching the old `default_priority()`.
+    #[default]
+    None,
+}
+
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::Urgent => "urgent",
+            Priority::High => "high",
+            Priority::Medium => "medium",
+            Priority::Low => "low",
+            Priority::None => "none",
+        }
+    }
+
+    /// See [`Status::parse_opt`].
+    pub fn parse_opt(value: Option<&str>) -> Result<Option<Self>, String> {
+        value.map(str::parse).transpose()
+    }
+}
+
+impl std::fmt::Display for Priority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Priority {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "urgent" => Ok(Priority::Urgent),
+            "high" => Ok(Priority::High),
+            "medium" => Ok(Priority::Medium),
+            "low" => Ok(Priority::Low),
+            "none" => Ok(Priority::None),
+            other => Err(format!(
+                "invalid priority '{other}'. Use urgent, high, medium, low, or none."
+            )),
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for Priority {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|_| rusqlite::types::FromSqlError::InvalidType)
+    }
+}
+
+impl rusqlite::types::ToSql for Priority {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: i64,
@@ -105,8 +258,8 @@ pub struct Issue {
     pub identifier: String,
     pub title: String,
     pub description: String,
-    pub status: String,
-    pub priority: String,
+    pub status: Status,
+    pub priority: Priority,
     pub module_id: Option<i64>,
     pub sort_order: f64,
     pub start_date: Option<String>,
@@ -137,16 +290,21 @@ pub struct Issue {
     pub duplicated_by: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// `Default` is derived: `status` and `priority` fall back to
+/// [`Status::Backlog`] / [`Priority::None`], which is exactly what a JSON body
+/// omitting those fields produces (they carry `#[serde(default)]`). Before
+/// LIF-385 this needed a hand-written impl, because `String::default()` is
+/// `""` — a value the DB's CHECK constraint rejects.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CreateIssue {
     pub project_id: i64,
     pub title: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-    #[serde(default = "default_priority")]
-    pub priority: String,
+    #[serde(default)]
+    pub status: Status,
+    #[serde(default)]
+    pub priority: Priority,
     pub module_id: Option<i64>,
     pub start_date: Option<String>,
     pub target_date: Option<String>,
@@ -157,27 +315,6 @@ pub struct CreateIssue {
     pub source: Option<String>,
 }
 
-/// Hand-written rather than derived so `..Default::default()` produces the
-/// same issue a JSON body with those fields omitted would: `status` and
-/// `priority` come from [`default_status`] / [`default_priority`], not from
-/// `String::default()` (which would be `""`, a value the API rejects).
-impl Default for CreateIssue {
-    fn default() -> Self {
-        Self {
-            project_id: 0,
-            title: String::new(),
-            description: String::new(),
-            status: default_status(),
-            priority: default_priority(),
-            module_id: None,
-            start_date: None,
-            target_date: None,
-            labels: Vec::new(),
-            source: None,
-        }
-    }
-}
-
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateIssue {
@@ -186,9 +323,9 @@ pub struct UpdateIssue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub status: Option<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<String>,
+    pub priority: Option<Priority>,
     /// LIF-145: tristate so clients can clear an issue's module back to NULL.
     /// None = absent (don't change), Some(None) = unassign (NULL), Some(Some(id)) = set.
     #[serde(
@@ -210,8 +347,8 @@ pub struct UpdateIssue {
 #[derive(Debug, Default, Deserialize)]
 pub struct ListIssuesQuery {
     pub project_id: Option<i64>,
-    pub status: Option<String>,
-    pub priority: Option<String>,
+    pub status: Option<Status>,
+    pub priority: Option<Priority>,
     pub module_id: Option<i64>,
     pub label: Option<String>,
     pub workable: Option<bool>,
@@ -244,14 +381,6 @@ pub struct IssueStatusCounts {
     pub done: i64,
     pub cancelled: i64,
     pub total: i64,
-}
-
-fn default_status() -> String {
-    "backlog".to_string()
-}
-
-fn default_priority() -> String {
-    "none".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1024,4 +1153,155 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Some(Option::deserialize(deserializer)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::types::{FromSql, ToSql, ValueRef};
+
+    const STATUSES: [Status; 5] = [
+        Status::Backlog,
+        Status::Todo,
+        Status::Active,
+        Status::Done,
+        Status::Cancelled,
+    ];
+
+    const PRIORITIES: [Priority; 5] = [
+        Priority::Urgent,
+        Priority::High,
+        Priority::Medium,
+        Priority::Low,
+        Priority::None,
+    ];
+
+    /// The JSON wire format is the lowercase string it has always been, so
+    /// existing clients (web UI, MCP hosts, the HTTP CLI backend) can't tell
+    /// the enum from the old `String`.
+    #[test]
+    fn status_serde_round_trips_as_the_lowercase_wire_string() {
+        for status in STATUSES {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, format!("\"{}\"", status.as_str()));
+            assert_eq!(serde_json::from_str::<Status>(&json).unwrap(), status);
+            assert_eq!(status.to_string(), status.as_str());
+            assert_eq!(status.as_str().parse::<Status>().unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn priority_serde_round_trips_as_the_lowercase_wire_string() {
+        for priority in PRIORITIES {
+            let json = serde_json::to_string(&priority).unwrap();
+            assert_eq!(json, format!("\"{}\"", priority.as_str()));
+            assert_eq!(serde_json::from_str::<Priority>(&json).unwrap(), priority);
+            assert_eq!(priority.to_string(), priority.as_str());
+            assert_eq!(priority.as_str().parse::<Priority>().unwrap(), priority);
+        }
+    }
+
+    /// `ToSql`/`FromSql` must agree with the `issues` CHECK constraint values,
+    /// so a stored enum reads back as the same variant.
+    #[test]
+    fn status_and_priority_round_trip_through_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (
+                 status TEXT NOT NULL
+                     CHECK(status IN ('backlog','todo','active','done','cancelled')),
+                 priority TEXT NOT NULL
+                     CHECK(priority IN ('urgent','high','medium','low','none'))
+             )",
+        )
+        .unwrap();
+
+        for status in STATUSES {
+            for priority in PRIORITIES {
+                conn.execute(
+                    "INSERT INTO t (status, priority) VALUES (?1, ?2)",
+                    rusqlite::params![status, priority],
+                )
+                .unwrap();
+                let (got_status, got_priority) = conn
+                    .query_row("SELECT status, priority FROM t", [], |row| {
+                        Ok((row.get::<_, Status>(0)?, row.get::<_, Priority>(1)?))
+                    })
+                    .unwrap();
+                assert_eq!(got_status, status);
+                assert_eq!(got_priority, priority);
+                conn.execute("DELETE FROM t", []).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_column_values_fail_to_convert_rather_than_defaulting() {
+        assert!(Status::column_result(ValueRef::Text(b"shipped")).is_err());
+        assert!(Priority::column_result(ValueRef::Text(b"critical")).is_err());
+        assert_eq!(
+            Status::Done.to_sql().unwrap(),
+            rusqlite::types::ToSqlOutput::from("done")
+        );
+        assert_eq!(
+            Priority::Low.to_sql().unwrap(),
+            rusqlite::types::ToSqlOutput::from("low")
+        );
+    }
+
+    #[test]
+    fn parsing_an_unknown_value_names_the_valid_ones() {
+        assert_eq!(
+            "shipped".parse::<Status>().unwrap_err(),
+            "invalid status 'shipped'. Use backlog, todo, active, done, or cancelled."
+        );
+        assert_eq!(
+            "critical".parse::<Priority>().unwrap_err(),
+            "invalid priority 'critical'. Use urgent, high, medium, low, or none."
+        );
+        // Case matters: the wire format is lowercase.
+        assert!("Done".parse::<Status>().is_err());
+    }
+
+    #[test]
+    fn parse_opt_passes_absent_values_through() {
+        assert_eq!(Status::parse_opt(None).unwrap(), None);
+        assert_eq!(
+            Status::parse_opt(Some("active")).unwrap(),
+            Some(Status::Active)
+        );
+        assert!(Status::parse_opt(Some("nope")).is_err());
+        assert_eq!(Priority::parse_opt(None).unwrap(), None);
+        assert_eq!(
+            Priority::parse_opt(Some("low")).unwrap(),
+            Some(Priority::Low)
+        );
+        assert!(Priority::parse_opt(Some("nope")).is_err());
+    }
+
+    /// The old `default_status()` / `default_priority()` serde defaults, now
+    /// carried by the enums themselves.
+    #[test]
+    fn omitted_status_and_priority_default_to_backlog_and_none() {
+        assert_eq!(Status::default(), Status::Backlog);
+        assert_eq!(Priority::default(), Priority::None);
+
+        let created: CreateIssue =
+            serde_json::from_str(r#"{"project_id": 1, "title": "New"}"#).unwrap();
+        assert_eq!(created.status, Status::Backlog);
+        assert_eq!(created.priority, Priority::None);
+
+        let defaulted = CreateIssue::default();
+        assert_eq!(defaulted.status, Status::Backlog);
+        assert_eq!(defaulted.priority, Priority::None);
+    }
+
+    #[test]
+    fn only_done_and_cancelled_count_as_closed() {
+        assert!(Status::Done.is_closed());
+        assert!(Status::Cancelled.is_closed());
+        assert!(!Status::Backlog.is_closed());
+        assert!(!Status::Todo.is_closed());
+        assert!(!Status::Active.is_closed());
+    }
 }

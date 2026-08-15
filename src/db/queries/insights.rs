@@ -154,15 +154,16 @@ fn priority_counts(conn: &Connection, project_id: i64) -> Result<PriorityCounts,
     })?;
     for row in rows {
         let (priority, n) = row?;
-        match priority.as_str() {
-            "urgent" => counts.urgent = n,
-            "high" => counts.high = n,
-            "medium" => counts.medium = n,
-            "low" => counts.low = n,
-            "none" => counts.none = n,
-            // Priorities are validated on write, but a hand-edited DB row
-            // still counts toward the total (mirrors count_issues_by_status).
-            _ => {}
+        // Parsed rather than read as `Priority` directly, so a hand-edited DB
+        // row still counts toward the total instead of failing the whole query
+        // (mirrors count_issues_by_status).
+        match priority.parse() {
+            Ok(Priority::Urgent) => counts.urgent = n,
+            Ok(Priority::High) => counts.high = n,
+            Ok(Priority::Medium) => counts.medium = n,
+            Ok(Priority::Low) => counts.low = n,
+            Ok(Priority::None) => counts.none = n,
+            Err(_) => {}
         }
         counts.total += n;
     }
@@ -270,13 +271,13 @@ mod tests {
         (pool, project.id)
     }
 
-    fn quick_issue(conn: &Connection, pid: i64, title: &str, priority: &str) -> Issue {
+    fn quick_issue(conn: &Connection, pid: i64, title: &str, priority: Priority) -> Issue {
         queries::create_issue(
             conn,
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                priority: priority.into(),
+                priority,
                 ..Default::default()
             },
         )
@@ -323,8 +324,8 @@ mod tests {
     fn created_per_week_buckets_by_iso_week_and_fills_gaps() {
         let (pool, pid) = seeded();
         let conn = pool.write().unwrap();
-        quick_issue(&conn, pid, "A", "none");
-        quick_issue(&conn, pid, "B", "none");
+        quick_issue(&conn, pid, "A", Priority::None);
+        quick_issue(&conn, pid, "B", Priority::None);
         drop(conn);
 
         let conn = pool.read().unwrap();
@@ -350,11 +351,11 @@ mod tests {
     fn closed_per_week_counts_a_simple_close_once() {
         let (pool, pid) = seeded();
         let conn = pool.write().unwrap();
-        let issue = quick_issue(&conn, pid, "Close me", "none");
+        let issue = quick_issue(&conn, pid, "Close me", Priority::None);
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -369,18 +370,18 @@ mod tests {
     fn closed_per_week_excludes_reopened_issues() {
         let (pool, pid) = seeded();
         let conn = pool.write().unwrap();
-        let issue = quick_issue(&conn, pid, "Reopened", "none");
+        let issue = quick_issue(&conn, pid, "Reopened", Priority::None);
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
         )
         .unwrap();
         // Reopen: latest status transition is no longer terminal.
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("todo".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Todo), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -395,23 +396,23 @@ mod tests {
     fn closed_per_week_counts_reclosed_issue_once_not_twice() {
         let (pool, pid) = seeded();
         let conn = pool.write().unwrap();
-        let issue = quick_issue(&conn, pid, "Closed twice", "none");
+        let issue = quick_issue(&conn, pid, "Closed twice", Priority::None);
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("todo".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Todo), ..Default::default() },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("cancelled".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Cancelled), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -431,13 +432,13 @@ mod tests {
     fn status_and_priority_counts_match_seeded_issues() {
         let (pool, pid) = seeded();
         let conn = pool.write().unwrap();
-        quick_issue(&conn, pid, "A", "urgent");
-        quick_issue(&conn, pid, "B", "high");
-        let c = quick_issue(&conn, pid, "C", "none");
+        quick_issue(&conn, pid, "A", Priority::Urgent);
+        quick_issue(&conn, pid, "B", Priority::High);
+        let c = quick_issue(&conn, pid, "C", Priority::None);
         queries::update_issue(
             &conn,
             c.id,
-            &UpdateIssue { status: Some("done".into()), ..Default::default() },
+            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -468,14 +469,14 @@ mod tests {
             },
         )
         .unwrap();
-        let a = quick_issue(&conn, pid, "A", "none");
+        let a = quick_issue(&conn, pid, "A", Priority::None);
         queries::update_issue(
             &conn,
             a.id,
             &UpdateIssue { module_id: Some(Some(module.id)), ..Default::default() },
         )
         .unwrap();
-        quick_issue(&conn, pid, "B", "none");
+        quick_issue(&conn, pid, "B", Priority::None);
         drop(conn);
 
         let conn = pool.read().unwrap();
@@ -512,8 +513,8 @@ mod tests {
             &conn,
             &crate::actor::ActorCtx { user_id: Some(alice), transport: crate::actor::Transport::Web },
         );
-        quick_issue(&conn, pid, "A1", "none");
-        quick_issue(&conn, pid, "A2", "none");
+        quick_issue(&conn, pid, "A1", Priority::None);
+        quick_issue(&conn, pid, "A2", Priority::None);
         drop(conn);
 
         let conn = pool.read().unwrap();
@@ -542,9 +543,9 @@ mod tests {
             .id
         };
         let conn = pool.write().unwrap();
-        quick_issue(&conn, pid, "Mine", "none");
-        quick_issue(&conn, other_pid, "Not mine", "none");
-        quick_issue(&conn, other_pid, "Also not mine", "none");
+        quick_issue(&conn, pid, "Mine", Priority::None);
+        quick_issue(&conn, other_pid, "Not mine", Priority::None);
+        quick_issue(&conn, other_pid, "Also not mine", Priority::None);
         drop(conn);
 
         let conn = pool.read().unwrap();

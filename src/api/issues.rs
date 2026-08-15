@@ -322,4 +322,44 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    /// LIF-385: `status` and `priority` are enums, so a value outside the set
+    /// is refused by the extractor. Before, it travelled all the way to
+    /// SQLite's CHECK constraint and came back as a 500.
+    #[tokio::test]
+    async fn out_of_set_status_and_priority_are_refused() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+
+        for body in [
+            serde_json::json!({"project_id": project_id, "title": "T", "status": "shipped"}),
+            serde_json::json!({"project_id": project_id, "title": "T", "priority": "critical"}),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/issues")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/issues?project_id={project_id}&status=shipped"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

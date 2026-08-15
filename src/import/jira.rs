@@ -19,6 +19,7 @@
 use serde::Deserialize;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel};
+use crate::db::models::{Priority, Status};
 
 // ── ADF → markdown ───────────────────────────────────────────
 
@@ -320,44 +321,43 @@ pub struct JiraAuthor {
 }
 
 /// Configurable statusCategory → Lific status mapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct JiraStatusMap {
-    pub new: String,
-    pub indeterminate: String,
-    pub done: String,
+    pub new: Status,
+    pub indeterminate: Status,
+    pub done: Status,
 }
 
 impl Default for JiraStatusMap {
     fn default() -> Self {
         JiraStatusMap {
-            new: "backlog".into(),
-            indeterminate: "active".into(),
-            done: "done".into(),
+            new: Status::Backlog,
+            indeterminate: Status::Active,
+            done: Status::Done,
         }
     }
 }
 
 /// Map Jira's statusCategory.key to a Lific status.
-pub fn map_status(category_key: &str, map: &JiraStatusMap) -> String {
+pub fn map_status(category_key: &str, map: &JiraStatusMap) -> Status {
     match category_key {
-        "new" => map.new.clone(),
-        "indeterminate" => map.indeterminate.clone(),
-        "done" => map.done.clone(),
-        _ => map.new.clone(),
+        "new" => map.new,
+        "indeterminate" => map.indeterminate,
+        "done" => map.done,
+        _ => map.new,
     }
 }
 
 /// Map Jira priority names to Lific priorities. Highest/High → urgent/high,
 /// Medium → medium, Low/Lowest → low. Unknown → none.
-pub fn map_priority(name: &str) -> String {
+pub fn map_priority(name: &str) -> Priority {
     match name {
-        "Highest" => "urgent",
-        "High" => "high",
-        "Medium" => "medium",
-        "Low" | "Lowest" => "low",
-        _ => "none",
+        "Highest" => Priority::Urgent,
+        "High" => Priority::High,
+        "Medium" => Priority::Medium,
+        "Low" | "Lowest" => Priority::Low,
+        _ => Priority::None,
     }
-    .to_string()
 }
 
 /// Map one Jira issue + its comments to a [`NormalizedIssue`]. `site` is used
@@ -374,14 +374,14 @@ pub fn map_issue(
         .as_ref()
         .and_then(|s| s.status_category.as_ref())
         .map(|c| map_status(&c.key, map))
-        .unwrap_or_else(|| map.new.clone());
+        .unwrap_or(map.new);
 
     let priority = issue
         .fields
         .priority
         .as_ref()
         .map(|p| map_priority(&p.name))
-        .unwrap_or_else(|| "none".to_string());
+        .unwrap_or_default();
 
     let labels = issue
         .fields
@@ -587,20 +587,20 @@ mod tests {
     #[test]
     fn status_category_mapping() {
         let m = JiraStatusMap::default();
-        assert_eq!(map_status("new", &m), "backlog");
-        assert_eq!(map_status("indeterminate", &m), "active");
-        assert_eq!(map_status("done", &m), "done");
-        assert_eq!(map_status("weird", &m), "backlog");
+        assert_eq!(map_status("new", &m), Status::Backlog);
+        assert_eq!(map_status("indeterminate", &m), Status::Active);
+        assert_eq!(map_status("done", &m), Status::Done);
+        assert_eq!(map_status("weird", &m), Status::Backlog);
     }
 
     #[test]
     fn priority_mapping() {
-        assert_eq!(map_priority("Highest"), "urgent");
-        assert_eq!(map_priority("High"), "high");
-        assert_eq!(map_priority("Medium"), "medium");
-        assert_eq!(map_priority("Low"), "low");
-        assert_eq!(map_priority("Lowest"), "low");
-        assert_eq!(map_priority("Whatever"), "none");
+        assert_eq!(map_priority("Highest"), Priority::Urgent);
+        assert_eq!(map_priority("High"), Priority::High);
+        assert_eq!(map_priority("Medium"), Priority::Medium);
+        assert_eq!(map_priority("Low"), Priority::Low);
+        assert_eq!(map_priority("Lowest"), Priority::Low);
+        assert_eq!(map_priority("Whatever"), Priority::None);
     }
 
     #[test]
@@ -609,8 +609,8 @@ mod tests {
         let first = issues.iter().find(|i| i.key == "PROJ-1").unwrap();
         let mapped = map_issue("mycompany", first, &[], &JiraStatusMap::default());
         assert_eq!(mapped.source, "jira:mycompany:PROJ-1");
-        assert_eq!(mapped.status, "active"); // indeterminate
-        assert_eq!(mapped.priority, "high");
+        assert_eq!(mapped.status, Status::Active); // indeterminate
+        assert_eq!(mapped.priority, Priority::High);
         assert_eq!(mapped.title, "Implement search");
         // Labels are plain strings, no color.
         assert_eq!(mapped.labels.len(), 2);
@@ -625,7 +625,7 @@ mod tests {
         let second = issues.iter().find(|i| i.key == "PROJ-2").unwrap();
         let mapped = map_issue("mycompany", second, &[], &JiraStatusMap::default());
         assert_eq!(mapped.description, "");
-        assert_eq!(mapped.status, "done");
+        assert_eq!(mapped.status, Status::Done);
     }
 
     // ── ADF converter: covers every supported node + an unknown one ──

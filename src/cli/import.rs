@@ -100,9 +100,12 @@ fn run_github(
     let (owner, name) = github::parse_repo(repo)?;
     let state = StateFilter::parse(state)?;
     let project_id = resolve_project(pool, project)?;
+    // LIF-385: the `--map-open` / `--map-closed` flags are free text; parse
+    // them into `Status` here so a typo fails with a clear message before any
+    // network work, rather than as a CHECK-constraint error mid-import.
     let status_map = import::StatusMap {
-        open: map_open.to_string(),
-        closed: map_closed.to_string(),
+        open: map_open.parse()?,
+        closed: map_closed.parse()?,
     };
 
     let bot = if dry_run {

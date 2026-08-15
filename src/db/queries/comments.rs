@@ -497,8 +497,8 @@ mod tests {
             &CreateIssue {
                 project_id: project.id,
                 title: "Test issue".into(),
-                status: "todo".into(),
-                priority: "medium".into(),
+                status: Status::Todo,
+                priority: Priority::Medium,
                 ..Default::default()
             },
         )

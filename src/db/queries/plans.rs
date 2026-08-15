@@ -680,13 +680,13 @@ mod tests {
         .id
     }
 
-    fn seed_issue(conn: &Connection, pid: i64, title: &str, status: &str) -> Issue {
+    fn seed_issue(conn: &Connection, pid: i64, title: &str, status: Status) -> Issue {
         issues::create_issue(
             conn,
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                status: status.into(),
+                status,
                 ..Default::default()
             },
         )
@@ -757,7 +757,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Real work", "todo");
+        let issue = seed_issue(&conn, pid, "Real work", Status::Todo);
         let plan = create_plan(
             &conn,
             &CreatePlan {
@@ -774,7 +774,7 @@ mod tests {
         assert!(effect.issue_status_changed);
         assert_eq!(effect.issue_identifier.as_deref(), Some("TST-1"));
         let got = issues::get_issue(&conn, issue.id).unwrap();
-        assert_eq!(got.status, "done");
+        assert_eq!(got.status, Status::Done);
     }
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Work", "todo");
+        let issue = seed_issue(&conn, pid, "Work", Status::Todo);
         let plan = create_plan(
             &conn,
             &CreatePlan {
@@ -799,7 +799,7 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                status: Some("done".into()),
+                status: Some(Status::Done),
                 ..Default::default()
             },
         )
@@ -815,7 +815,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Work", "done");
+        let issue = seed_issue(&conn, pid, "Work", Status::Done);
         let plan = create_plan(
             &conn,
             &CreatePlan {
@@ -838,7 +838,7 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                status: Some("active".into()),
+                status: Some(Status::Active),
                 ..Default::default()
             },
         )
@@ -857,7 +857,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Work", "todo");
+        let issue = seed_issue(&conn, pid, "Work", Status::Todo);
         let plan = create_plan(
             &conn,
             &CreatePlan {
@@ -875,7 +875,7 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                status: Some("done".into()),
+                status: Some(Status::Done),
                 ..Default::default()
             },
         )
@@ -890,7 +890,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let anchor = seed_issue(&conn, pid, "Epic", "active");
+        let anchor = seed_issue(&conn, pid, "Epic", Status::Active);
         let plan = create_plan(
             &conn,
             &CreatePlan {
@@ -907,7 +907,7 @@ mod tests {
             &conn,
             anchor.id,
             &UpdateIssue {
-                status: Some("done".into()),
+                status: Some(Status::Done),
                 ..Default::default()
             },
         )
@@ -922,13 +922,13 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let anchor = seed_issue(&conn, pid, "Epic", "active");
+        let anchor = seed_issue(&conn, pid, "Epic", Status::Active);
         let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: Some(anchor.id), steps: vec![] }).unwrap();
 
         update_plan(&conn, plan.id, &UpdatePlan { status: Some("done".into()), ..Default::default() }).unwrap();
 
         let got = issues::get_issue(&conn, anchor.id).unwrap();
-        assert_eq!(got.status, "active", "plan completion must not close the anchor issue");
+        assert_eq!(got.status, Status::Active, "plan completion must not close the anchor issue");
     }
 
     #[test]
@@ -1159,11 +1159,11 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Work", "todo");
+        let issue = seed_issue(&conn, pid, "Work", Status::Todo);
         create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("mirror", Some(issue.id))] }).unwrap();
 
         issues::update_issue(&conn, issue.id, &UpdateIssue {
-            status: Some("done".into()),
+            status: Some(Status::Done),
             ..Default::default()
         }).unwrap();
 
@@ -1235,7 +1235,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = seed_issue(&conn, pid, "Linkable", "todo");
+        let issue = seed_issue(&conn, pid, "Linkable", Status::Todo);
         let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
         let step_id = plan.steps[0].id;
 

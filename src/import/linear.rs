@@ -12,6 +12,7 @@
 use serde::Deserialize;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel};
+use crate::db::models::{Priority, Status};
 
 /// The GraphQL response shape we deserialize (a subset of Linear's schema).
 #[derive(Debug, Clone, Deserialize)]
@@ -90,23 +91,23 @@ pub struct LinearComment {
 }
 
 /// Configurable state.type → Lific status mapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct LinearStatusMap {
-    pub backlog: String,
-    pub unstarted: String,
-    pub started: String,
-    pub completed: String,
-    pub canceled: String,
+    pub backlog: Status,
+    pub unstarted: Status,
+    pub started: Status,
+    pub completed: Status,
+    pub canceled: Status,
 }
 
 impl Default for LinearStatusMap {
     fn default() -> Self {
         LinearStatusMap {
-            backlog: "backlog".into(),
-            unstarted: "todo".into(),
-            started: "active".into(),
-            completed: "done".into(),
-            canceled: "cancelled".into(),
+            backlog: Status::Backlog,
+            unstarted: Status::Todo,
+            started: Status::Active,
+            completed: Status::Done,
+            canceled: Status::Cancelled,
         }
     }
 }
@@ -114,28 +115,27 @@ impl Default for LinearStatusMap {
 /// Map Linear's `state.type` to a Lific status. `backlog`/`triage` → backlog,
 /// `unstarted` → todo, `started` → active, `completed` → done, `canceled` →
 /// cancelled. Unknown types fall back to backlog.
-pub fn map_state_type(type_: &str, map: &LinearStatusMap) -> String {
+pub fn map_state_type(type_: &str, map: &LinearStatusMap) -> Status {
     match type_ {
-        "backlog" | "triage" => map.backlog.clone(),
-        "unstarted" => map.unstarted.clone(),
-        "started" => map.started.clone(),
-        "completed" => map.completed.clone(),
-        "canceled" | "cancelled" => map.canceled.clone(),
-        _ => map.backlog.clone(),
+        "backlog" | "triage" => map.backlog,
+        "unstarted" => map.unstarted,
+        "started" => map.started,
+        "completed" => map.completed,
+        "canceled" | "cancelled" => map.canceled,
+        _ => map.backlog,
     }
 }
 
 /// Map Linear's numeric priority (0 none, 1 urgent, 2 high, 3 medium, 4 low) to
-/// a Lific priority string.
-pub fn map_priority(priority: f64) -> String {
+/// a Lific [`Priority`].
+pub fn map_priority(priority: f64) -> Priority {
     match priority.round() as i64 {
-        1 => "urgent",
-        2 => "high",
-        3 => "medium",
-        4 => "low",
-        _ => "none",
+        1 => Priority::Urgent,
+        2 => Priority::High,
+        3 => Priority::Medium,
+        4 => Priority::Low,
+        _ => Priority::None,
     }
-    .to_string()
 }
 
 /// Map one Linear issue to a [`NormalizedIssue`]. `team` is the team key used
@@ -146,7 +146,7 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
         .state
         .as_ref()
         .map(|s| map_state_type(&s.type_, map))
-        .unwrap_or_else(|| map.backlog.clone());
+        .unwrap_or(map.backlog);
 
     let labels = issue
         .labels
@@ -357,31 +357,31 @@ mod tests {
     #[test]
     fn state_type_mapping_default() {
         let m = LinearStatusMap::default();
-        assert_eq!(map_state_type("backlog", &m), "backlog");
-        assert_eq!(map_state_type("triage", &m), "backlog");
-        assert_eq!(map_state_type("unstarted", &m), "todo");
-        assert_eq!(map_state_type("started", &m), "active");
-        assert_eq!(map_state_type("completed", &m), "done");
-        assert_eq!(map_state_type("canceled", &m), "cancelled");
-        assert_eq!(map_state_type("weird", &m), "backlog");
+        assert_eq!(map_state_type("backlog", &m), Status::Backlog);
+        assert_eq!(map_state_type("triage", &m), Status::Backlog);
+        assert_eq!(map_state_type("unstarted", &m), Status::Todo);
+        assert_eq!(map_state_type("started", &m), Status::Active);
+        assert_eq!(map_state_type("completed", &m), Status::Done);
+        assert_eq!(map_state_type("canceled", &m), Status::Cancelled);
+        assert_eq!(map_state_type("weird", &m), Status::Backlog);
     }
 
     #[test]
     fn state_type_mapping_custom() {
         let m = LinearStatusMap {
-            started: "todo".into(),
+            started: Status::Todo,
             ..LinearStatusMap::default()
         };
-        assert_eq!(map_state_type("started", &m), "todo");
+        assert_eq!(map_state_type("started", &m), Status::Todo);
     }
 
     #[test]
     fn priority_mapping() {
-        assert_eq!(map_priority(0.0), "none");
-        assert_eq!(map_priority(1.0), "urgent");
-        assert_eq!(map_priority(2.0), "high");
-        assert_eq!(map_priority(3.0), "medium");
-        assert_eq!(map_priority(4.0), "low");
+        assert_eq!(map_priority(0.0), Priority::None);
+        assert_eq!(map_priority(1.0), Priority::Urgent);
+        assert_eq!(map_priority(2.0), Priority::High);
+        assert_eq!(map_priority(3.0), Priority::Medium);
+        assert_eq!(map_priority(4.0), Priority::Low);
     }
 
     #[test]
@@ -390,8 +390,8 @@ mod tests {
         let first = &issues[0];
         let mapped = map_issue(first, &LinearStatusMap::default());
         assert_eq!(mapped.source, "linear:ENG-1");
-        assert_eq!(mapped.status, "active"); // state.type = started
-        assert_eq!(mapped.priority, "urgent"); // priority 1
+        assert_eq!(mapped.status, Status::Active); // state.type = started
+        assert_eq!(mapped.priority, Priority::Urgent); // priority 1
         assert_eq!(mapped.labels.len(), 1);
         assert_eq!(mapped.labels[0].name, "Bug");
         assert_eq!(mapped.labels[0].color.as_deref(), Some("#e11d48"));
