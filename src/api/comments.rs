@@ -66,19 +66,34 @@ pub(super) struct ListCommentsQuery {
     offset: Option<i64>,
 }
 
-pub(super) async fn list_comments(
-    State(db): State<DbPool>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Path(issue_id): Path<i64>,
-    Query(q): Query<ListCommentsQuery>,
+/// LIF-382: the project a comment's parent belongs to. Issues always have
+/// one; a workspace-level page may not, hence the `Option`.
+fn parent_project_id(db: &DbPool, parent: CommentParent) -> Result<Option<i64>, LificError> {
+    match parent {
+        CommentParent::Issue(issue_id) => Ok(Some(
+            with_read(db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id,
+        )),
+        CommentParent::Page(page_id) => {
+            Ok(with_read(db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id)
+        }
+    }
+}
+
+/// LIF-382: listing an issue's comments and listing a page's comments differ
+/// only in how the parent's project is resolved, which `parent_project_id`
+/// already handles. Both routes share this body.
+fn list_for_parent(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    parent: CommentParent,
+    q: &ListCommentsQuery,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    let project_id =
-        with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
-    require_comment_viewer(&db, &identity, Some(project_id))?;
-    with_read(&db, |conn| {
+    let project_id = parent_project_id(db, parent)?;
+    require_comment_viewer(db, identity, project_id)?;
+    with_read(db, |conn| {
         crate::db::queries::comments::list_comments_paginated(
             conn,
-            CommentParent::Issue(issue_id),
+            parent,
             q.author.as_deref(),
             q.order.as_deref(),
             q.limit,
@@ -86,6 +101,41 @@ pub(super) async fn list_comments(
         )
     })
     .map(Json)
+}
+
+/// LIF-382: shared body of the two comment-creation routes. Only the
+/// broadcast differs: an issue comment refreshes that issue, a page comment
+/// refreshes the project (and a workspace-level page refreshes nothing,
+/// there being no project to name).
+fn create_for_parent(
+    db: &DbPool,
+    realtime: &RealtimeHub,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    parent: CommentParent,
+    content: &str,
+) -> Result<Json<Comment>, LificError> {
+    let project_id = parent_project_id(db, parent)?;
+    require_comment_viewer(db, identity, project_id)?;
+
+    let user = require_user(identity)?;
+
+    let comment = create_comment_with_mentions(db, parent, project_id, user.id, content)?;
+    if let Some(project_id) = project_id {
+        realtime.send(match parent {
+            CommentParent::Issue(issue_id) => issue_updated_event(project_id, issue_id),
+            CommentParent::Page(_) => RealtimeEvent::ProjectUpdated { project_id },
+        });
+    }
+    Ok(Json(comment))
+}
+
+pub(super) async fn list_comments(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Path(issue_id): Path<i64>,
+    Query(q): Query<ListCommentsQuery>,
+) -> Result<Json<Vec<Comment>>, LificError> {
+    list_for_parent(&db, &identity, CommentParent::Issue(issue_id), &q)
 }
 
 pub(super) async fn create_comment(
@@ -95,21 +145,13 @@ pub(super) async fn create_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let project_id =
-        with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
-    require_comment_viewer(&db, &identity, Some(project_id))?;
-
-    let user = require_user(&identity)?;
-
-    let comment = create_comment_with_mentions(
+    create_for_parent(
         &db,
+        &realtime,
+        &identity,
         CommentParent::Issue(issue_id),
-        Some(project_id),
-        user.id,
         &input.content,
-    )?;
-    realtime.send(issue_updated_event(project_id, issue_id));
-    Ok(Json(comment))
+    )
 }
 
 pub(super) async fn list_page_comments(
@@ -118,19 +160,7 @@ pub(super) async fn list_page_comments(
     Path(page_id): Path<i64>,
     Query(q): Query<ListCommentsQuery>,
 ) -> Result<Json<Vec<Comment>>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
-    require_comment_viewer(&db, &identity, project_id)?;
-    with_read(&db, |conn| {
-        crate::db::queries::comments::list_comments_paginated(
-            conn,
-            CommentParent::Page(page_id),
-            q.author.as_deref(),
-            q.order.as_deref(),
-            q.limit,
-            q.offset,
-        )
-    })
-    .map(Json)
+    list_for_parent(&db, &identity, CommentParent::Page(page_id), &q)
 }
 
 pub(super) async fn create_page_comment(
@@ -140,22 +170,13 @@ pub(super) async fn create_page_comment(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
-    require_comment_viewer(&db, &identity, project_id)?;
-
-    let user = require_user(&identity)?;
-
-    let comment = create_comment_with_mentions(
+    create_for_parent(
         &db,
+        &realtime,
+        &identity,
         CommentParent::Page(page_id),
-        project_id,
-        user.id,
         &input.content,
-    )?;
-    if let Some(project_id) = project_id {
-        realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    }
-    Ok(Json(comment))
+    )
 }
 
 /// GET /api/projects/{id}/mention-candidates — the users who may be

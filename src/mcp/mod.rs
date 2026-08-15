@@ -484,7 +484,7 @@ mod tests {
             .unwrap();
         }
         let manager = crate::auth::create_key_manager().unwrap();
-        let unbound_key = crate::auth::create_api_key(&pool, &manager, "mcp-operator").unwrap();
+        let unbound_key = crate::auth::create_api_key(&pool, &manager, "mcp-operator", None).unwrap();
         let project = {
             let conn = pool.write().unwrap();
             crate::db::queries::settings::update(

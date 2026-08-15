@@ -46,12 +46,17 @@ pub fn create_key_manager() -> Result<ApiKeyManagerV0, String> {
 }
 
 /// Generate a new API key, store the hash, return the plaintext (shown once).
+///
+/// `user_id` binds the key to a user in the same insert (LIF-391). `None`
+/// leaves it unbound, which resolves as the operator identity, so pass a user
+/// whenever the key belongs to one.
 pub fn create_api_key(
     db: &DbPool,
     manager: &ApiKeyManagerV0,
     name: &str,
+    user_id: Option<i64>,
 ) -> Result<String, crate::error::LificError> {
-    create_api_key_with_expiry(db, manager, name, None)
+    create_api_key_with_expiry(db, manager, name, None, user_id)
 }
 
 /// Like [`create_api_key`] but writes an optional `expires_at` (ISO 8601). Once
@@ -61,6 +66,7 @@ pub fn create_api_key_with_expiry(
     manager: &ApiKeyManagerV0,
     name: &str,
     expires_at: Option<&str>,
+    user_id: Option<i64>,
 ) -> Result<String, crate::error::LificError> {
     let conn = db.write()?;
 
@@ -86,9 +92,13 @@ pub fn create_api_key_with_expiry(
     let hash = api_key.expose_hash().hash().to_string();
     let key_id = api_key.expose_hash().key_id().to_string();
 
+    // LIF-391: the user binding is part of this insert, not a follow-up
+    // update. A key is never briefly on disk unbound, so a crash mid-creation
+    // cannot leave behind an orphan key that resolves as the operator.
     conn.execute(
-        "INSERT INTO api_keys (name, key_hash, key_id, expires_at) VALUES (?1, ?2, ?3, ?4)",
-        params![name, hash, key_id, expires_at],
+        "INSERT INTO api_keys (name, key_hash, key_id, expires_at, user_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![name, hash, key_id, expires_at, user_id],
     )?;
 
     Ok(plaintext)
@@ -137,11 +147,24 @@ pub fn rotate_api_key(
     manager: &ApiKeyManagerV0,
     name: &str,
 ) -> Result<String, crate::error::LificError> {
+    rotate_api_key_bound(db, manager, name, None)
+}
+
+/// Like [`rotate_api_key`], but binds the new key to `user_id` rather than
+/// carrying the old binding over. `None` keeps the old binding. Used where
+/// the caller already knows the owner, e.g. `lific connect` re-minting a
+/// bot's key.
+pub fn rotate_api_key_bound(
+    db: &DbPool,
+    manager: &ApiKeyManagerV0,
+    name: &str,
+    user_id: Option<i64>,
+) -> Result<String, crate::error::LificError> {
     // Capture the user binding before deleting so it can be re-applied.
     // If multiple rows share the name (revoked leftovers), prefer the
     // binding of an active row.
     let conn = db.write()?;
-    let user_id: Option<i64> = conn
+    let previous_user_id: Option<i64> = conn
         .query_row(
             "SELECT user_id FROM api_keys WHERE name = ?1 ORDER BY revoked ASC, id DESC LIMIT 1",
             params![name],
@@ -158,14 +181,7 @@ pub fn rotate_api_key(
     conn.execute("DELETE FROM api_keys WHERE name = ?1", params![name])?;
     drop(conn);
 
-    let plaintext = create_api_key(db, manager, name)?;
-
-    if let Some(uid) = user_id {
-        let conn = db.write()?;
-        crate::db::queries::users::assign_key_to_user(&conn, name, uid)?;
-    }
-
-    Ok(plaintext)
+    create_api_key(db, manager, name, user_id.or(previous_user_id))
 }
 
 /// Check if any API keys exist.
@@ -774,7 +790,7 @@ mod tests {
     fn create_key_returns_valid_format() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "test-key").unwrap();
+        let key = create_api_key(&pool, &manager, "test-key", None).unwrap();
         assert!(key.starts_with("lific_sk-live-"));
     }
 
@@ -782,7 +798,7 @@ mod tests {
     fn verify_key_succeeds() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "test-key").unwrap();
+        let key = create_api_key(&pool, &manager, "test-key", None).unwrap();
 
         // Load the hash and verify
         let keys = list_api_keys(&pool).unwrap();
@@ -806,7 +822,7 @@ mod tests {
     fn wrong_key_fails() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "test-key").unwrap();
+        create_api_key(&pool, &manager, "test-key", None).unwrap();
 
         let conn = pool.read().unwrap();
         let hash: String = conn
@@ -831,7 +847,7 @@ mod tests {
     fn revoke_key_works() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "revoke-me").unwrap();
+        create_api_key(&pool, &manager, "revoke-me", None).unwrap();
 
         revoke_api_key(&pool, "revoke-me").unwrap();
 
@@ -843,7 +859,7 @@ mod tests {
     fn rotate_key_replaces_old() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let old_key = create_api_key(&pool, &manager, "rotate-me").unwrap();
+        let old_key = create_api_key(&pool, &manager, "rotate-me", None).unwrap();
         let new_key = rotate_api_key(&pool, &manager, "rotate-me").unwrap();
 
         assert_ne!(old_key, new_key);
@@ -855,6 +871,84 @@ mod tests {
         assert!(!keys[0].revoked);
     }
 
+    // LIF-391: a key that belongs to a user is bound by the insert that
+    // creates it. There is no window where the row exists unbound, which is
+    // what used to let a crash mid-creation strand a key that resolves as
+    // the operator.
+    #[test]
+    fn created_key_is_bound_by_the_insert() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('owner', 'owner@test.local', 'x', 'Owner', 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        create_api_key(&pool, &manager, "owned", Some(user_id)).unwrap();
+        create_api_key_with_expiry(&pool, &manager, "dated", Some("2030-06-01"), Some(user_id))
+            .unwrap();
+
+        let conn = pool.read().unwrap();
+        for name in ["owned", "dated"] {
+            let bound: Option<i64> = conn
+                .query_row(
+                    "SELECT user_id FROM api_keys WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(bound, Some(user_id), "key '{name}' must be created bound");
+        }
+
+        // No binding asked for, none written.
+        create_api_key(&pool, &manager, "anonymous", None).unwrap();
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT user_id FROM api_keys WHERE name = 'anonymous'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, None);
+    }
+
+    // LIF-391: `lific connect` re-minting a bot's key rotates an existing
+    // name; the new key must land on the bot even when the old row was
+    // unbound, since the rotate path no longer patches the binding after.
+    #[test]
+    fn rotate_bound_overrides_the_previous_binding() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "claude-code-owner", None).unwrap();
+        let bot_id = {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
+                 VALUES ('claude-code', 'bot@test.local', 'x', 'Claude Code', 0, 1)",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        rotate_api_key_bound(&pool, &manager, "claude-code-owner", Some(bot_id)).unwrap();
+
+        let conn = pool.read().unwrap();
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT user_id FROM api_keys WHERE name = 'claude-code-owner' AND revoked = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, Some(bot_id));
+    }
+
     // LIF-132: rotation must carry the user binding over to the new key.
     // Previously the old row was deleted (user_id and all) and the new key
     // was created unbound, silently de-attributing bot/user keys.
@@ -862,9 +956,7 @@ mod tests {
     fn rotate_key_preserves_user_binding() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "bot-key").unwrap();
-
-        // Bind the key to a user.
+        // A key bound to a user at creation.
         let user_id = {
             let conn = pool.write().unwrap();
             conn.execute(
@@ -873,10 +965,9 @@ mod tests {
                 [],
             )
             .unwrap();
-            let uid = conn.last_insert_rowid();
-            crate::db::queries::users::assign_key_to_user(&conn, "bot-key", uid).unwrap();
-            uid
+            conn.last_insert_rowid()
         };
+        create_api_key(&pool, &manager, "bot-key", Some(user_id)).unwrap();
 
         rotate_api_key(&pool, &manager, "bot-key").unwrap();
 
@@ -900,7 +991,7 @@ mod tests {
     fn rotate_unbound_key_stays_unbound() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "plain").unwrap();
+        create_api_key(&pool, &manager, "plain", None).unwrap();
         rotate_api_key(&pool, &manager, "plain").unwrap();
 
         let conn = pool.read().unwrap();
@@ -918,8 +1009,8 @@ mod tests {
     fn duplicate_name_rejected() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "unique").unwrap();
-        let result = create_api_key(&pool, &manager, "unique");
+        create_api_key(&pool, &manager, "unique", None).unwrap();
+        let result = create_api_key(&pool, &manager, "unique", None);
         assert!(result.is_err());
     }
 
@@ -929,7 +1020,7 @@ mod tests {
         assert!(!has_any_keys(&pool));
 
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "first").unwrap();
+        create_api_key(&pool, &manager, "first", None).unwrap();
         assert!(has_any_keys(&pool));
     }
 
@@ -955,7 +1046,7 @@ mod tests {
     fn should_mint_initial_key_false_when_any_key_exists() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "first").unwrap();
+        create_api_key(&pool, &manager, "first", None).unwrap();
         assert!(!should_mint_initial_key(&pool));
     }
 
@@ -963,7 +1054,7 @@ mod tests {
     fn create_key_stores_key_id() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "id-test").unwrap();
+        let key = create_api_key(&pool, &manager, "id-test", None).unwrap();
 
         let conn = pool.read().unwrap();
         let stored_key_id: Option<String> = conn
@@ -991,8 +1082,8 @@ mod tests {
         let manager = create_key_manager().unwrap();
 
         // Create multiple keys
-        let key1 = create_api_key(&pool, &manager, "key-1").unwrap();
-        let _key2 = create_api_key(&pool, &manager, "key-2").unwrap();
+        let key1 = create_api_key(&pool, &manager, "key-1", None).unwrap();
+        let _key2 = create_api_key(&pool, &manager, "key-2", None).unwrap();
 
         // Extract key_id from key1 and look it up
         let secure_key = SecureString::from(key1.clone());
@@ -1013,7 +1104,7 @@ mod tests {
     fn legacy_key_without_key_id_still_verifiable() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "legacy").unwrap();
+        let key = create_api_key(&pool, &manager, "legacy", None).unwrap();
 
         // Simulate a pre-migration key by clearing key_id
         let conn = pool.write().unwrap();
@@ -1183,7 +1274,7 @@ mod tests {
     async fn legacy_api_key_without_user_resolves_to_none_via_middleware() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "legacy-plain").unwrap();
+        let key = create_api_key(&pool, &manager, "legacy-plain", None).unwrap();
 
         let resp = echo_app(test_auth_state(&pool))
             .oneshot(
@@ -1416,7 +1507,7 @@ mod tests {
     async fn expired_key_id_lookup_is_rejected() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "expired").unwrap();
+        let key = create_api_key(&pool, &manager, "expired", None).unwrap();
         // Expire it well in the past.
         set_key_expiry(&pool, "expired", "2000-01-01T00:00:00Z");
 
@@ -1431,7 +1522,7 @@ mod tests {
     async fn unexpired_key_authenticates() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "future").unwrap();
+        let key = create_api_key(&pool, &manager, "future", None).unwrap();
         // Far-future expiry: still valid.
         set_key_expiry(&pool, "future", "2999-12-31T23:59:59Z");
 
@@ -1447,7 +1538,7 @@ mod tests {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
         // Default create leaves expires_at NULL — the never-expires case.
-        let key = create_api_key(&pool, &manager, "forever").unwrap();
+        let key = create_api_key(&pool, &manager, "forever", None).unwrap();
 
         assert_eq!(
             auth_status(&pool, &key).await,
@@ -1460,7 +1551,7 @@ mod tests {
     async fn expired_legacy_key_without_key_id_is_rejected() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "legacy-expired").unwrap();
+        let key = create_api_key(&pool, &manager, "legacy-expired", None).unwrap();
         // Simulate a pre-migration key (NULL key_id) that has also expired,
         // exercising the fallback scan path.
         {
@@ -1484,7 +1575,7 @@ mod tests {
     fn create_api_key_with_expiry_writes_column() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key_with_expiry(&pool, &manager, "dated", Some("2030-06-01")).unwrap();
+        create_api_key_with_expiry(&pool, &manager, "dated", Some("2030-06-01"), None).unwrap();
 
         let conn = pool.read().unwrap();
         let stored: Option<String> = conn
@@ -1573,7 +1664,7 @@ mod tests {
         let pool = test_db();
         seed_admin(&pool, "admin"); // resolve_caller needs a first_admin to resolve to
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "operator").unwrap(); // unbound
+        let key = create_api_key(&pool, &manager, "operator", None).unwrap(); // unbound
         let project = seed_project_id(&pool, "OPM");
         enable_enforcement(&pool);
 
@@ -1616,10 +1707,8 @@ mod tests {
     async fn enforced_user_bound_key_nonmember_is_forbidden_via_middleware() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        create_api_key(&pool, &manager, "bound").unwrap();
         let key = {
-            // Bind the key to a fresh non-admin user, then re-read plaintext by
-            // rotating is overkill; instead create bound key by assigning.
+            // A key bound to a fresh non-admin user at creation.
             let uid = {
                 let conn = pool.write().unwrap();
                 crate::db::queries::users::create_user(
@@ -1636,12 +1725,7 @@ mod tests {
                 .unwrap()
                 .id
             };
-            let conn = pool.write().unwrap();
-            crate::db::queries::users::assign_key_to_user(&conn, "bound", uid).unwrap();
-            drop(conn);
-            // Rotate to obtain a usable plaintext bound to that user (rotation
-            // carries the binding over — LIF-132).
-            rotate_api_key(&pool, &manager, "bound").unwrap()
+            create_api_key(&pool, &manager, "bound", Some(uid)).unwrap()
         };
         let project = seed_project_id(&pool, "BNM");
         enable_enforcement(&pool);
@@ -1841,10 +1925,9 @@ mod tests {
     async fn resolved_identity_bound_api_key_resolves_to_bound_user() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "bound").unwrap();
         let user_id = {
             let conn = pool.write().unwrap();
-            let u = crate::db::queries::users::create_user(
+            crate::db::queries::users::create_user(
                 &conn,
                 &crate::db::models::CreateUser {
                     username: "keyuser".into(),
@@ -1855,10 +1938,10 @@ mod tests {
                     is_bot: false,
                 },
             )
-            .unwrap();
-            crate::db::queries::users::assign_key_to_user(&conn, "bound", u.id).unwrap();
-            u.id
+            .unwrap()
+            .id
         };
+        let key = create_api_key(&pool, &manager, "bound", Some(user_id)).unwrap();
 
         let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&key)).await;
         assert_eq!(
@@ -1923,7 +2006,7 @@ mod tests {
         let pool = test_db();
         let admin_id = seed_admin(&pool, "admin");
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "operator").unwrap(); // unbound
+        let key = create_api_key(&pool, &manager, "operator", None).unwrap(); // unbound
 
         let body = identity_body(identity_echo_app(test_auth_state(&pool)), Some(&key)).await;
         assert_eq!(
@@ -1986,11 +2069,7 @@ mod tests {
             .unwrap()
             .id
         };
-        let key = create_api_key(&pool, &manager, "opencode-agent").unwrap();
-        {
-            let conn = pool.write().unwrap();
-            crate::db::queries::users::assign_key_to_user(&conn, "opencode-agent", uid).unwrap();
-        }
+        let key = create_api_key(&pool, &manager, "opencode-agent", Some(uid)).unwrap();
         let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
         let user = resolved.expect("bound key resolves to a user");
         assert_eq!(user.id, uid);
@@ -2001,7 +2080,7 @@ mod tests {
     fn resolve_api_key_user_unbound_key_is_ok_none() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
-        let key = create_api_key(&pool, &manager, "unbound").unwrap();
+        let key = create_api_key(&pool, &manager, "unbound", None).unwrap();
         let resolved = resolve_api_key_user(&pool, &manager, &key).unwrap();
         assert!(
             resolved.is_none(),
@@ -2051,11 +2130,7 @@ mod tests {
             .unwrap()
             .id
         };
-        let key = create_api_key(&pool, &manager, "codex-agent").unwrap();
-        {
-            let conn = pool.write().unwrap();
-            crate::db::queries::users::assign_key_to_user(&conn, "codex-agent", uid).unwrap();
-        }
+        let key = create_api_key(&pool, &manager, "codex-agent", Some(uid)).unwrap();
         // SAFETY: guarded by ENV_LOCK; restored every path below.
         unsafe { std::env::set_var("LIFIC_TOKEN", &key) };
         let resolved = resolve_stdio_token(&pool, &manager).unwrap();

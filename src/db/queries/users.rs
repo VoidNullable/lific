@@ -500,7 +500,12 @@ fn generate_session_token() -> String {
 
 // ── API key ownership ────────────────────────────────────────
 
-/// Assign an existing API key to a user.
+/// Rebind an existing API key to a user.
+///
+/// LIF-391: this is no longer part of key creation. `auth::create_api_key`
+/// takes the owner and writes the binding in the same insert, so nothing
+/// creates a key unbound and patches it afterwards. The one remaining caller
+/// is `lific key assign`, which rebinds a key that already exists.
 pub fn assign_key_to_user(
     conn: &Connection,
     key_name: &str,
@@ -545,7 +550,7 @@ pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<Use
 
 /// Create a bot user owned by the given human user.
 /// Returns the bot user. API key creation is handled separately by the caller
-/// using `auth::create_api_key` + `assign_key_to_user`.
+/// using `auth::create_api_key`, which binds the new key to the bot.
 /// Generate an unusable password hash: a random value with no known plaintext.
 ///
 /// Used for identities that must never be signed into by password (passwordless
@@ -1323,11 +1328,7 @@ mod tests {
             get_user_by_id(&conn, owner).unwrap().username
         });
         let manager = crate::auth::create_key_manager().unwrap();
-        let _ = crate::auth::create_api_key(&pool, &manager, &name).unwrap();
-        {
-            let conn = pool.write().unwrap();
-            crate::db::queries::users::assign_key_to_user(&conn, &name, bot).unwrap();
-        }
+        let _ = crate::auth::create_api_key(&pool, &manager, &name, Some(bot)).unwrap();
 
         let listed = {
             let conn = pool.read().unwrap();

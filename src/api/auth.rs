@@ -590,10 +590,8 @@ pub(super) async fn create_key(
         return Err(LificError::BadRequest("key name cannot be empty".into()));
     }
 
-    // Create the key and assign it to the user in one go
-    let plaintext = crate::auth::create_api_key(&db, &manager, &name)?;
-    let conn = db.write()?;
-    crate::db::queries::users::assign_key_to_user(&conn, &name, user.id)?;
+    // LIF-391: the key is created already bound to the caller, in one write.
+    let plaintext = crate::auth::create_api_key(&db, &manager, &name, Some(user.id))?;
 
     Ok(Json(serde_json::json!({
         "name": name,
@@ -676,12 +674,9 @@ pub(super) async fn create_bot(
         )));
     }
 
-    // Generate a new API key for the bot
-    let plaintext_key = crate::auth::create_api_key(&db, &manager, &bot_username)?;
-
-    // Assign the key to the bot user
-    let conn = db.write()?;
-    crate::db::queries::users::assign_key_to_user(&conn, &bot_username, bot_user.id)?;
+    // Generate a new API key, bound to the bot user by the same insert (LIF-391)
+    let plaintext_key =
+        crate::auth::create_api_key(&db, &manager, &bot_username, Some(bot_user.id))?;
 
     Ok(Json(serde_json::json!({
         "bot": {

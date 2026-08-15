@@ -1338,7 +1338,7 @@ mod cookie_fallback_tests {
         // A genuinely valid API key — must still be refused via the cookie,
         // because the cookie path accepts ONLY session tokens.
         let manager = crate::auth::create_key_manager().unwrap();
-        let key = crate::auth::create_api_key(&db, &manager, "cookie-key").unwrap();
+        let key = crate::auth::create_api_key(&db, &manager, "cookie-key", None).unwrap();
 
         let resp = app
             .clone()

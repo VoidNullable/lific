@@ -502,20 +502,16 @@ fn mint_for_tool(
                     .map_err(|e| e.to_string())?
                     .id
             };
-            let key = mint_or_rotate(pool, manager, &bot_username)?;
-            {
-                let conn = pool.write().map_err(|e| e.to_string())?;
-                crate::db::queries::users::assign_key_to_user(&conn, &bot_username, bot_id)
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(key)
+            // LIF-391: the key is bound to the bot as it is minted, never
+            // created unbound and patched afterwards.
+            mint_or_rotate(pool, manager, &bot_username, Some(bot_id))
         }
         KeySource::FreshInstall => {
             // Zero human users: enforcement can't be on (needs an admin to
             // enable), so a plain unassigned key behaves like `lific start`'s
             // first-run default key. Named just `{tool}` — per-tool attribution
             // in the key name even without a human owner.
-            mint_or_rotate(pool, manager, spec.id)
+            mint_or_rotate(pool, manager, spec.id, None)
         }
     }
 }
@@ -523,11 +519,13 @@ fn mint_for_tool(
 /// Create a key named `name`, or — if an active key with that name already
 /// exists (a previous `connect` run) — rotate it instead so re-running
 /// `connect` (e.g. to add another client later) always succeeds with a fresh
-/// plaintext. Rotation preserves any existing user binding.
+/// plaintext. `user_id` is the owner the key is bound to; `None` mints an
+/// unbound key and, on the rotate path, preserves any existing binding.
 fn mint_or_rotate(
     pool: &DbPool,
     manager: &api_keys_simplified::ApiKeyManagerV0,
     name: &str,
+    user_id: Option<i64>,
 ) -> Result<String, String> {
     let active_exists = {
         let conn = pool.read().map_err(|e| e.to_string())?;
@@ -539,9 +537,9 @@ fn mint_or_rotate(
         .unwrap_or(false)
     };
     if active_exists {
-        crate::auth::rotate_api_key(pool, manager, name).map_err(|e| e.to_string())
+        crate::auth::rotate_api_key_bound(pool, manager, name, user_id).map_err(|e| e.to_string())
     } else {
-        crate::auth::create_api_key(pool, manager, name).map_err(|e| e.to_string())
+        crate::auth::create_api_key(pool, manager, name, user_id).map_err(|e| e.to_string())
     }
 }
 
