@@ -341,8 +341,8 @@ mod tests {
             &CreateIssue {
                 project_id: project.id,
                 title: "Comment test issue".into(),
-                status: "todo".into(),
-                priority: "medium".into(),
+                status: Status::Todo,
+                priority: Priority::Medium,
                 ..Default::default()
             },
         )
@@ -538,8 +538,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Test".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )
@@ -655,8 +655,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Test".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )
@@ -1133,8 +1133,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Mention target".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )
@@ -1234,8 +1234,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Edit target".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )
@@ -1301,8 +1301,8 @@ mod tests {
                 &CreateIssue {
                     project_id,
                     title: "Enforced".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )
@@ -1389,8 +1389,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "i".into(),
-                    status: "todo".into(),
-                    priority: "medium".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
                     ..Default::default()
                 },
             )

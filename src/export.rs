@@ -160,8 +160,8 @@ fn render_issue_markdown(
         identifier: &'a str,
         title: &'a str,
         project: &'a str,
-        status: &'a str,
-        priority: &'a str,
+        status: crate::db::models::Status,
+        priority: crate::db::models::Priority,
         module: Option<String>,
         labels: &'a [String],
         blocks: &'a [String],
@@ -184,8 +184,8 @@ fn render_issue_markdown(
             identifier: &issue.identifier,
             title: &issue.title,
             project: &project.identifier,
-            status: &issue.status,
-            priority: &issue.priority,
+            status: issue.status,
+            priority: issue.priority,
             module,
             labels: &issue.labels,
             blocks: &issue.blocks,
@@ -314,7 +314,9 @@ fn zip_error(err: zip::result::ZipError) -> LificError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{CreateFolder, CreateIssue, CreatePage, CreateProject};
+    use crate::db::models::{
+        CreateFolder, CreateIssue, CreatePage, CreateProject, Priority, Status,
+    };
     use crate::db::{open_memory, queries};
 
     #[test]
@@ -336,8 +338,8 @@ mod tests {
                 project_id: project.id,
                 title: "Ship export".into(),
                 description: "Need markdown output".into(),
-                status: "todo".into(),
-                priority: "high".into(),
+                status: Status::Todo,
+                priority: Priority::High,
                 labels: vec!["feature".into()],
                 ..Default::default()
             },
@@ -432,7 +434,7 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: title.into(),
-                    status: "todo".into(),
+                    status: Status::Todo,
                     ..Default::default()
                 },
             )

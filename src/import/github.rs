@@ -16,6 +16,7 @@
 use serde::Deserialize;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel, StatusMap};
+use crate::db::models::{Priority, Status};
 
 /// One issue as returned by the GitHub REST API (fields we use).
 #[derive(Debug, Clone, Deserialize)]
@@ -92,18 +93,18 @@ pub fn is_pull_request(issue: &GithubIssue) -> bool {
 }
 
 /// Map GitHub's `state` ("open"/"closed") to a Lific status via `map`.
-pub fn map_status(state: &str, map: &StatusMap) -> String {
+pub fn map_status(state: &str, map: &StatusMap) -> Status {
     match state {
-        "closed" => map.closed.clone(),
-        _ => map.open.clone(),
+        "closed" => map.closed,
+        _ => map.open,
     }
 }
 
 /// GitHub has no issue priority; every imported issue is `none`. Kept as a
 /// function for symmetry with the other importers and future label-driven
 /// priority inference.
-pub fn map_priority(_issue: &GithubIssue) -> String {
-    "none".to_string()
+pub fn map_priority(_issue: &GithubIssue) -> Priority {
+    Priority::None
 }
 
 /// Normalize a GitHub label's color: the API returns 6 hex digits with no `#`
@@ -386,14 +387,14 @@ mod tests {
     #[test]
     fn status_mapping_default_and_custom() {
         let d = StatusMap::default();
-        assert_eq!(map_status("open", &d), "backlog");
-        assert_eq!(map_status("closed", &d), "done");
+        assert_eq!(map_status("open", &d), Status::Backlog);
+        assert_eq!(map_status("closed", &d), Status::Done);
         let custom = StatusMap {
-            open: "todo".into(),
-            closed: "cancelled".into(),
+            open: Status::Todo,
+            closed: Status::Cancelled,
         };
-        assert_eq!(map_status("open", &custom), "todo");
-        assert_eq!(map_status("closed", &custom), "cancelled");
+        assert_eq!(map_status("open", &custom), Status::Todo);
+        assert_eq!(map_status("closed", &custom), Status::Cancelled);
     }
 
     #[test]
@@ -410,7 +411,7 @@ mod tests {
         let open = issues.iter().find(|i| i.number == 100).unwrap();
         let mapped = map_issue("octocat/hello", open, &[], &StatusMap::default());
         assert_eq!(mapped.source, "github:octocat/hello#100");
-        assert_eq!(mapped.status, "backlog");
+        assert_eq!(mapped.status, Status::Backlog);
         assert_eq!(mapped.title, "Bug: crash on startup");
         assert!(mapped.description.contains("crashes"));
         // Two labels, one with a color.
@@ -424,7 +425,7 @@ mod tests {
         let issues = fixture_issues();
         let closed = issues.iter().find(|i| i.number == 101).unwrap();
         let mapped = map_issue("octocat/hello", closed, &[], &StatusMap::default());
-        assert_eq!(mapped.status, "done");
+        assert_eq!(mapped.status, Status::Done);
     }
 
     #[test]

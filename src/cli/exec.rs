@@ -104,8 +104,8 @@ fn issue(
                 &conn,
                 &ListIssuesQuery {
                     project_id: Some(project_id),
-                    status: status.clone(),
-                    priority: priority.clone(),
+                    status: Status::parse_opt(status.as_deref())?,
+                    priority: Priority::parse_opt(priority.as_deref())?,
                     module_id,
                     label: label.clone(),
                     workable: if *workable { Some(true) } else { None },
@@ -160,8 +160,8 @@ fn issue(
                     project_id,
                     title: title.clone(),
                     description: description.clone(),
-                    status: status.clone(),
-                    priority: priority.clone(),
+                    status: status.parse()?,
+                    priority: priority.parse()?,
                     module_id,
                     labels: label_list,
                     ..Default::default()
@@ -203,8 +203,8 @@ fn issue(
                 &UpdateIssue {
                     title: title.clone(),
                     description: description.clone(),
-                    status: status.clone(),
-                    priority: priority.clone(),
+                    status: Status::parse_opt(status.as_deref())?,
+                    priority: Priority::parse_opt(priority.as_deref())?,
                     // LIF-145: module_id is now tristate; the CLI only sets or
                     // skips (no clear), so map Some(id) -> Some(Some(id)).
                     module_id: module_id.map(Some),
@@ -921,7 +921,7 @@ mod tests {
         let id = queries::resolve_identifier(&conn, "TST-1").unwrap();
         let issue = queries::get_issue(&conn, id).unwrap();
         assert_eq!(issue.title, "Updated");
-        assert_eq!(issue.status, "active");
+        assert_eq!(issue.status, Status::Active);
     }
 
     #[test]
@@ -936,8 +936,8 @@ mod tests {
                 &CreateIssue {
                     project_id: pid,
                     title: "Active one".into(),
-                    status: "active".into(),
-                    priority: "high".into(),
+                    status: Status::Active,
+                    priority: Priority::High,
                     ..Default::default()
                 },
             )
@@ -947,8 +947,8 @@ mod tests {
                 &CreateIssue {
                     project_id: pid,
                     title: "Done one".into(),
-                    status: "done".into(),
-                    priority: "low".into(),
+                    status: Status::Done,
+                    priority: Priority::Low,
                     ..Default::default()
                 },
             )

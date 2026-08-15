@@ -1603,8 +1603,10 @@ impl LificMcp {
                 conn,
                 &models::ListIssuesQuery {
                     project_id: Some(pid),
-                    status: input.status.clone(),
-                    priority: input.priority.clone(),
+                    status: models::Status::parse_opt(input.status.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
+                    priority: models::Priority::parse_opt(input.priority.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
                     label: input.label.clone(),
                     workable: input.workable,
@@ -1862,8 +1864,12 @@ impl LificMcp {
                     project_id: pid,
                     title: input.title.clone(),
                     description: input.description.clone().unwrap_or_default(),
-                    status: input.status.clone().unwrap_or("backlog".into()),
-                    priority: input.priority.clone().unwrap_or("none".into()),
+                    status: models::Status::parse_opt(input.status.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?
+                        .unwrap_or_default(),
+                    priority: models::Priority::parse_opt(input.priority.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?
+                        .unwrap_or_default(),
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
@@ -1943,8 +1949,10 @@ impl LificMcp {
                 &models::UpdateIssue {
                     title: input.title.clone(),
                     description: input.description.clone(),
-                    status: input.status.clone(),
-                    priority: input.priority.clone(),
+                    status: models::Status::parse_opt(input.status.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
+                    priority: models::Priority::parse_opt(input.priority.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
@@ -2037,8 +2045,10 @@ impl LificMcp {
                 conn,
                 &models::ListIssuesQuery {
                     project_id: Some(pid),
-                    status: input.filter_status.clone(),
-                    priority: input.filter_priority.clone(),
+                    status: models::Status::parse_opt(input.filter_status.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
+                    priority: models::Priority::parse_opt(input.filter_priority.as_deref())
+                        .map_err(crate::error::LificError::BadRequest)?,
                     module_id: filter_module_id,
                     label: input.filter_label.clone(),
                     limit: Some(BULK_CAP),
@@ -2052,8 +2062,10 @@ impl LificMcp {
                         conn,
                         issue.id,
                         &models::UpdateIssue {
-                            status: input.set_status.clone(),
-                            priority: input.set_priority.clone(),
+                            status: models::Status::parse_opt(input.set_status.as_deref())
+                                .map_err(crate::error::LificError::BadRequest)?,
+                            priority: models::Priority::parse_opt(input.set_priority.as_deref())
+                                .map_err(crate::error::LificError::BadRequest)?,
                             module_id: set_module_id.map(Some),
                             ..Default::default()
                         },
@@ -2187,7 +2199,7 @@ impl LificMcp {
         let mut issues = board.items;
         let group_by = input.group_by.as_deref().unwrap_or("status");
         let include_closed = input.include_closed.unwrap_or(false);
-        let is_closed = |i: &models::Issue| i.status == "done" || i.status == "cancelled";
+        let is_closed = |i: &models::Issue| i.status.is_closed();
         // For priority/module grouping, closed issues are dropped from
         // every column entirely (a status column would be meaningless
         // there); count how many we drop so a trailing note can report
@@ -2216,12 +2228,12 @@ impl LificMcp {
             std::collections::BTreeMap::new();
         for issue in &issues {
             let key = match group_by {
-                "priority" => issue.priority.clone(),
+                "priority" => issue.priority.to_string(),
                 "module" => issue
                     .module_id
                     .and_then(|m| module_names.get(&m).cloned())
                     .unwrap_or("unassigned".into()),
-                _ => issue.status.clone(),
+                _ => issue.status.to_string(),
             };
             groups.entry(key).or_default().push(issue);
         }
@@ -5939,8 +5951,8 @@ mod tests {
             identifier: "T-1".into(),
             title: "Test".into(),
             description: String::new(),
-            status: "todo".into(),
-            priority: "high".into(),
+            status: models::Status::Todo,
+            priority: models::Priority::High,
             module_id: None,
             sort_order: 0.0,
             start_date: None,

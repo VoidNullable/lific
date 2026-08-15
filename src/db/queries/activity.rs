@@ -245,8 +245,8 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 title: Some("Renamed".into()),
-                status: Some("active".into()),
-                priority: Some("high".into()),
+                status: Some(Status::Active),
+                priority: Some(Priority::High),
                 ..Default::default()
             },
         )

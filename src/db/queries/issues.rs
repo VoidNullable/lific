@@ -207,13 +207,13 @@ pub fn list_issues_page(
         conditions.push(format!("i.project_id = ?{}", param_values.len() + 1));
         param_values.push(Box::new(pid));
     }
-    if let Some(ref status) = q.status {
+    if let Some(status) = q.status {
         conditions.push(format!("i.status = ?{}", param_values.len() + 1));
-        param_values.push(Box::new(status.clone()));
+        param_values.push(Box::new(status));
     }
-    if let Some(ref priority) = q.priority {
+    if let Some(priority) = q.priority {
         conditions.push(format!("i.priority = ?{}", param_values.len() + 1));
-        param_values.push(Box::new(priority.clone()));
+        param_values.push(Box::new(priority));
     }
     if let Some(mid) = q.module_id {
         conditions.push(format!("i.module_id = ?{}", param_values.len() + 1));
@@ -435,15 +435,16 @@ pub fn count_issues_by_status(
     })?;
     for row in rows {
         let (status, n) = row?;
-        match status.as_str() {
-            "backlog" => counts.backlog = n,
-            "todo" => counts.todo = n,
-            "active" => counts.active = n,
-            "done" => counts.done = n,
-            "cancelled" => counts.cancelled = n,
-            // Unknown statuses can't be created through the API, but a
-            // hand-edited DB row still counts toward the total.
-            _ => {}
+        // Parsed rather than read as `Status` directly: an unparseable value
+        // can't be created through the API, but a hand-edited DB row still
+        // counts toward the total instead of failing the whole query.
+        match status.parse() {
+            Ok(Status::Backlog) => counts.backlog = n,
+            Ok(Status::Todo) => counts.todo = n,
+            Ok(Status::Active) => counts.active = n,
+            Ok(Status::Done) => counts.done = n,
+            Ok(Status::Cancelled) => counts.cancelled = n,
+            Err(_) => {}
         }
         counts.total += n;
     }
@@ -693,16 +694,16 @@ mod tests {
         conn: &rusqlite::Connection,
         pid: i64,
         title: &str,
-        status: &str,
-        priority: &str,
+        status: Status,
+        priority: Priority,
     ) -> Issue {
         create_issue(
             conn,
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                status: status.into(),
-                priority: priority.into(),
+                status,
+                priority,
                 ..Default::default()
             },
         )
@@ -764,8 +765,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i1 = quick_issue(&conn, pid, "First", "backlog", "none");
-        let i2 = quick_issue(&conn, pid, "Second", "backlog", "none");
+        let i1 = quick_issue(&conn, pid, "First", Status::Backlog, Priority::None);
+        let i2 = quick_issue(&conn, pid, "Second", Status::Backlog, Priority::None);
         assert_eq!(i1.sequence, 1);
         assert_eq!(i2.sequence, 2);
         assert_eq!(i1.identifier, "TST-1");
@@ -778,8 +779,8 @@ mod tests {
         let conn = pool.write().unwrap();
         let p1 = seed_project(&conn, "AAA");
         let p2 = seed_project(&conn, "BBB");
-        let a1 = quick_issue(&conn, p1, "A1", "backlog", "none");
-        let b1 = quick_issue(&conn, p2, "B1", "backlog", "none");
+        let a1 = quick_issue(&conn, p1, "A1", Status::Backlog, Priority::None);
+        let b1 = quick_issue(&conn, p2, "B1", Status::Backlog, Priority::None);
         assert_eq!(a1.identifier, "AAA-1");
         assert_eq!(b1.identifier, "BBB-1");
     }
@@ -889,7 +890,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "PRO");
-        quick_issue(&conn, pid, "Resolvable", "backlog", "none");
+        quick_issue(&conn, pid, "Resolvable", Status::Backlog, Priority::None);
         let id = resolve_identifier(&conn, "PRO-1").unwrap();
         let issue = get_issue(&conn, id).unwrap();
         assert_eq!(issue.title, "Resolvable");
@@ -909,14 +910,14 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        for s in &["backlog", "todo", "active", "done"] {
-            quick_issue(&conn, pid, &format!("Issue {s}"), s, "none");
+        for s in [Status::Backlog, Status::Todo, Status::Active, Status::Done] {
+            quick_issue(&conn, pid, &format!("Issue {s}"), s, Priority::None);
         }
         let active = list_issues(
             &conn,
             &ListIssuesQuery {
                 project_id: Some(pid),
-                status: Some("active".into()),
+                status: Some(Status::Active),
                 priority: None,
                 module_id: None,
                 label: None,
@@ -928,7 +929,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].status, "active");
+        assert_eq!(active[0].status, Status::Active);
     }
 
     // LIF-141: `?limit=-1` must not become SQLite's "no limit" and dump the
@@ -939,7 +940,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         for i in 0..3 {
-            quick_issue(&conn, pid, &format!("Issue {i}"), "backlog", "none");
+            quick_issue(&conn, pid, &format!("Issue {i}"), Status::Backlog, Priority::None);
         }
         let got = list_issues(
             &conn,
@@ -959,9 +960,9 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         // 2 backlog, 1 todo, 3 done; active/cancelled stay 0.
-        for (status, n) in [("backlog", 2), ("todo", 1), ("done", 3)] {
+        for (status, n) in [(Status::Backlog, 2), (Status::Todo, 1), (Status::Done, 3)] {
             for i in 0..n {
-                quick_issue(&conn, pid, &format!("{status} {i}"), status, "none");
+                quick_issue(&conn, pid, &format!("{status} {i}"), status, Priority::None);
             }
         }
         let counts = count_issues_by_status(&conn, pid).unwrap();
@@ -979,9 +980,9 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid_a = seed_project(&conn, "AAA");
         let pid_b = seed_project(&conn, "BBB");
-        quick_issue(&conn, pid_a, "Mine", "todo", "none");
-        quick_issue(&conn, pid_b, "Not mine", "todo", "none");
-        quick_issue(&conn, pid_b, "Also not mine", "done", "none");
+        quick_issue(&conn, pid_a, "Mine", Status::Todo, Priority::None);
+        quick_issue(&conn, pid_b, "Not mine", Status::Todo, Priority::None);
+        quick_issue(&conn, pid_b, "Also not mine", Status::Done, Priority::None);
 
         let counts = count_issues_by_status(&conn, pid_a).unwrap();
         assert_eq!(counts.total, 1, "must not count other projects' issues");
@@ -996,15 +997,21 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        for p in &["urgent", "high", "medium", "low", "none"] {
-            quick_issue(&conn, pid, &format!("Issue {p}"), "backlog", p);
+        for p in [
+            Priority::Urgent,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low,
+            Priority::None,
+        ] {
+            quick_issue(&conn, pid, &format!("Issue {p}"), Status::Backlog, p);
         }
         let urgent = list_issues(
             &conn,
             &ListIssuesQuery {
                 project_id: Some(pid),
                 status: None,
-                priority: Some("urgent".into()),
+                priority: Some(Priority::Urgent),
                 module_id: None,
                 label: None,
                 workable: None,
@@ -1015,7 +1022,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(urgent.len(), 1);
-        assert_eq!(urgent[0].priority, "urgent");
+        assert_eq!(urgent[0].priority, Priority::Urgent);
     }
 
     #[test]
@@ -1034,7 +1041,7 @@ mod tests {
             },
         )
         .unwrap();
-        quick_issue(&conn, pid, "No module", "backlog", "none");
+        quick_issue(&conn, pid, "No module", Status::Backlog, Priority::None);
 
         let filtered = list_issues(
             &conn,
@@ -1071,7 +1078,7 @@ mod tests {
             },
         )
         .unwrap();
-        quick_issue(&conn, pid, "Clean", "backlog", "none");
+        quick_issue(&conn, pid, "Clean", Status::Backlog, Priority::None);
 
         let bugs = list_issues(
             &conn,
@@ -1097,8 +1104,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let blocker = quick_issue(&conn, pid, "Blocker", "todo", "none");
-        let blocked = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        let blocker = quick_issue(&conn, pid, "Blocker", Status::Todo, Priority::None);
+        let blocked = quick_issue(&conn, pid, "Blocked", Status::Todo, Priority::None);
         link_issues(&conn, blocker.id, blocked.id, "blocks").unwrap();
 
         let workable = list_issues(
@@ -1125,8 +1132,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let blocker = quick_issue(&conn, pid, "Blocker", "done", "none");
-        let was_blocked = quick_issue(&conn, pid, "Was blocked", "todo", "none");
+        let blocker = quick_issue(&conn, pid, "Blocker", Status::Done, Priority::None);
+        let was_blocked = quick_issue(&conn, pid, "Was blocked", Status::Todo, Priority::None);
         link_issues(&conn, blocker.id, was_blocked.id, "blocks").unwrap();
 
         let workable = list_issues(
@@ -1153,8 +1160,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let blocker = quick_issue(&conn, pid, "Blocker", "todo", "none");
-        let blocked = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        let blocker = quick_issue(&conn, pid, "Blocker", Status::Todo, Priority::None);
+        let blocked = quick_issue(&conn, pid, "Blocked", Status::Todo, Priority::None);
         link_issues(&conn, blocker.id, blocked.id, "blocks").unwrap();
 
         let result = list_issues(
@@ -1178,8 +1185,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let blocker = quick_issue(&conn, pid, "Blocker", "done", "none");
-        let was_blocked = quick_issue(&conn, pid, "Was blocked", "todo", "none");
+        let blocker = quick_issue(&conn, pid, "Blocker", Status::Done, Priority::None);
+        let was_blocked = quick_issue(&conn, pid, "Was blocked", Status::Todo, Priority::None);
         link_issues(&conn, blocker.id, was_blocked.id, "blocks").unwrap();
 
         let result = list_issues(
@@ -1200,8 +1207,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let blocker = quick_issue(&conn, pid, "Blocker", "todo", "none");
-        let blocked = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        let blocker = quick_issue(&conn, pid, "Blocker", Status::Todo, Priority::None);
+        let blocked = quick_issue(&conn, pid, "Blocked", Status::Todo, Priority::None);
         link_issues(&conn, blocker.id, blocked.id, "blocks").unwrap();
 
         let workable = list_issues(
@@ -1232,9 +1239,9 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        quick_issue(&conn, pid, "Active", "active", "none");
-        quick_issue(&conn, pid, "Done", "done", "none");
-        quick_issue(&conn, pid, "Cancelled", "cancelled", "none");
+        quick_issue(&conn, pid, "Active", Status::Active, Priority::None);
+        quick_issue(&conn, pid, "Done", Status::Done, Priority::None);
+        quick_issue(&conn, pid, "Cancelled", Status::Cancelled, Priority::None);
 
         let workable = list_issues(
             &conn,
@@ -1260,8 +1267,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i1 = quick_issue(&conn, pid, "Blocker", "todo", "none");
-        let i2 = quick_issue(&conn, pid, "Blocked", "todo", "none");
+        let i1 = quick_issue(&conn, pid, "Blocker", Status::Todo, Priority::None);
+        let i2 = quick_issue(&conn, pid, "Blocked", Status::Todo, Priority::None);
         link_issues(&conn, i1.id, i2.id, "blocks").unwrap();
 
         let blocker = get_issue(&conn, i1.id).unwrap();
@@ -1276,7 +1283,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i = quick_issue(&conn, pid, "Some issue", "active", "none");
+        let i = quick_issue(&conn, pid, "Some issue", Status::Active, Priority::None);
         assert_eq!(issue_status(&conn, i.id).unwrap(), "active");
         assert!(issue_status(&conn, 999_999).is_err());
     }
@@ -1289,8 +1296,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let dup = quick_issue(&conn, pid, "Dup", "todo", "none");
-        let canonical = quick_issue(&conn, pid, "Canonical", "todo", "none");
+        let dup = quick_issue(&conn, pid, "Dup", Status::Todo, Priority::None);
+        let canonical = quick_issue(&conn, pid, "Canonical", Status::Todo, Priority::None);
         link_issues(&conn, dup.id, canonical.id, "duplicate").unwrap();
 
         let got_dup = get_issue(&conn, dup.id).unwrap();
@@ -1309,9 +1316,9 @@ mod tests {
         let pid_a = seed_project(&conn, "AAA");
         let pid_b = seed_project(&conn, "BBB");
         // AAA-1 blocks BBB-1; AAA-2 relates_to BBB-1
-        let a1 = quick_issue(&conn, pid_a, "A one", "todo", "none");
-        let a2 = quick_issue(&conn, pid_a, "A two", "todo", "none");
-        let b1 = quick_issue(&conn, pid_b, "B one", "todo", "none");
+        let a1 = quick_issue(&conn, pid_a, "A one", Status::Todo, Priority::None);
+        let a2 = quick_issue(&conn, pid_a, "A two", Status::Todo, Priority::None);
+        let b1 = quick_issue(&conn, pid_b, "B one", Status::Todo, Priority::None);
         link_issues(&conn, a1.id, b1.id, "blocks").unwrap();
         link_issues(&conn, a2.id, b1.id, "relates_to").unwrap();
 
@@ -1331,8 +1338,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i1 = quick_issue(&conn, pid, "A", "todo", "none");
-        let i2 = quick_issue(&conn, pid, "B", "todo", "none");
+        let i1 = quick_issue(&conn, pid, "A", Status::Todo, Priority::None);
+        let i2 = quick_issue(&conn, pid, "B", Status::Todo, Priority::None);
         link_issues(&conn, i1.id, i2.id, "blocks").unwrap();
         unlink_issues(&conn, i1.id, i2.id).unwrap();
         assert!(get_issue(&conn, i1.id).unwrap().blocks.is_empty());
@@ -1343,22 +1350,22 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = quick_issue(&conn, pid, "Original", "backlog", "low");
+        let issue = quick_issue(&conn, pid, "Original", Status::Backlog, Priority::Low);
 
         let updated = update_issue(
             &conn,
             issue.id,
             &UpdateIssue {
-                status: Some("active".into()),
-                priority: Some("urgent".into()),
+                status: Some(Status::Active),
+                priority: Some(Priority::Urgent),
                 ..Default::default()
             },
         )
         .unwrap();
 
         assert_eq!(updated.title, "Original");
-        assert_eq!(updated.status, "active");
-        assert_eq!(updated.priority, "urgent");
+        assert_eq!(updated.status, Status::Active);
+        assert_eq!(updated.priority, Priority::Urgent);
     }
 
     #[test]
@@ -1368,7 +1375,7 @@ mod tests {
         let issue_project_id = seed_project(&conn, "ISS");
         let module_project_id = seed_project(&conn, "MOD");
         let module_id = seed_module(&conn, module_project_id, "Other project");
-        let issue = quick_issue(&conn, issue_project_id, "Wrong module", "backlog", "none");
+        let issue = quick_issue(&conn, issue_project_id, "Wrong module", Status::Backlog, Priority::None);
 
         let err = update_issue(
             &conn,
@@ -1425,8 +1432,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i1 = quick_issue(&conn, pid, "Doomed", "todo", "none");
-        let i2 = quick_issue(&conn, pid, "Survivor", "todo", "none");
+        let i1 = quick_issue(&conn, pid, "Doomed", Status::Todo, Priority::None);
+        let i2 = quick_issue(&conn, pid, "Survivor", Status::Todo, Priority::None);
         link_issues(&conn, i1.id, i2.id, "blocks").unwrap();
         delete_issue(&conn, i1.id).unwrap();
         assert!(get_issue(&conn, i2.id).unwrap().blocked_by.is_empty());
@@ -1439,7 +1446,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = quick_issue(&conn, pid, "Loner", "todo", "none");
+        let issue = quick_issue(&conn, pid, "Loner", Status::Todo, Priority::None);
 
         for rel in ["blocks", "relates_to", "duplicate"] {
             let err = link_issues(&conn, issue.id, issue.id, rel).unwrap_err();
@@ -1460,8 +1467,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let i1 = quick_issue(&conn, pid, "A", "todo", "none");
-        let i2 = quick_issue(&conn, pid, "B", "todo", "none");
+        let i1 = quick_issue(&conn, pid, "A", Status::Todo, Priority::None);
+        let i2 = quick_issue(&conn, pid, "B", Status::Todo, Priority::None);
         assert!(link_issues(&conn, i1.id, i2.id, "invalid_type").is_err());
     }
 
@@ -1471,7 +1478,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         for i in 0..10 {
-            quick_issue(&conn, pid, &format!("Issue {i}"), "backlog", "none");
+            quick_issue(&conn, pid, &format!("Issue {i}"), Status::Backlog, Priority::None);
         }
 
         let limited = list_issues(
@@ -1511,7 +1518,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let label_id = seed_label(&conn, pid, "bug");
-        let issue = quick_issue(&conn, pid, "Labelable", "todo", "none");
+        let issue = quick_issue(&conn, pid, "Labelable", Status::Todo, Priority::None);
 
         let before = issue_updated_at(&conn, issue.id);
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1536,7 +1543,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let label_id = seed_label(&conn, pid, "bug");
-        let issue = quick_issue(&conn, pid, "Labelable", "todo", "none");
+        let issue = quick_issue(&conn, pid, "Labelable", Status::Todo, Priority::None);
         conn.execute(
             "INSERT INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
             params![issue.id, label_id],
@@ -1579,8 +1586,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let old = quick_issue(&conn, pid, "Old", "todo", "none");
-        let new = quick_issue(&conn, pid, "New", "todo", "none");
+        let old = quick_issue(&conn, pid, "Old", Status::Todo, Priority::None);
+        let new = quick_issue(&conn, pid, "New", Status::Todo, Priority::None);
         pin_timestamps(&conn, old.id, "2026-01-05 10:00:00", "2026-01-05 10:00:00");
         pin_timestamps(&conn, new.id, "2026-03-20 10:00:00", "2026-03-20 10:00:00");
 
@@ -1615,8 +1622,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let stale = quick_issue(&conn, pid, "Stale", "todo", "none");
-        let fresh = quick_issue(&conn, pid, "Fresh", "todo", "none");
+        let stale = quick_issue(&conn, pid, "Stale", Status::Todo, Priority::None);
+        let fresh = quick_issue(&conn, pid, "Fresh", Status::Todo, Priority::None);
         pin_timestamps(&conn, stale.id, "2026-01-01 00:00:00", "2026-01-02 00:00:00");
         pin_timestamps(&conn, fresh.id, "2026-01-01 00:00:00", "2026-06-01 12:00:00");
 
@@ -1642,7 +1649,7 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let issue = quick_issue(&conn, pid, "Edge", "todo", "none");
+        let issue = quick_issue(&conn, pid, "Edge", Status::Todo, Priority::None);
         pin_timestamps(&conn, issue.id, "2026-06-01 12:00:00", "2026-06-01 12:00:00");
 
         let hit = list_issues(
@@ -1662,8 +1669,8 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let a = quick_issue(&conn, pid, "First", "todo", "none");
-        let b = quick_issue(&conn, pid, "Second", "todo", "none");
+        let a = quick_issue(&conn, pid, "First", Status::Todo, Priority::None);
+        let b = quick_issue(&conn, pid, "Second", Status::Todo, Priority::None);
         pin_timestamps(&conn, a.id, "2026-01-01 00:00:00", "2026-01-01 00:00:00");
         pin_timestamps(&conn, b.id, "2026-02-01 00:00:00", "2026-02-01 00:00:00");
 
@@ -1686,8 +1693,14 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        for priority in ["none", "low", "urgent", "medium", "high"] {
-            quick_issue(&conn, pid, priority, "todo", priority);
+        for priority in [
+            Priority::None,
+            Priority::Low,
+            Priority::Urgent,
+            Priority::Medium,
+            Priority::High,
+        ] {
+            quick_issue(&conn, pid, priority.as_str(), Status::Todo, priority);
         }
 
         let issues = list_issues(
@@ -1708,8 +1721,14 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        for priority in ["none", "low", "urgent", "medium", "high"] {
-            quick_issue(&conn, pid, priority, "todo", priority);
+        for priority in [
+            Priority::None,
+            Priority::Low,
+            Priority::Urgent,
+            Priority::Medium,
+            Priority::High,
+        ] {
+            quick_issue(&conn, pid, priority.as_str(), Status::Todo, priority);
         }
 
         let issues = list_issues(
