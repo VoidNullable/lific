@@ -1520,7 +1520,9 @@ mod tests {
             Ok(_) => panic!("remote plaintext bearer transport must be rejected"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("plaintext http"));
+        let message = error.to_string();
+        assert!(message.contains("plaintext http"));
+        assert!(!message.contains("secret-key"));
         assert!(HttpBackend::new("http://127.0.0.1:3456", Some("secret-key")).is_ok());
         assert!(HttpBackend::new("http://tracker.example", None).is_ok());
     }

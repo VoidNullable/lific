@@ -514,6 +514,11 @@ impl LiveJira {
     fn base(&self) -> String {
         format!("https://{}.atlassian.net/rest/api/3", self.site)
     }
+
+    /// Return the canonical site slug used for both requests and identities.
+    pub fn site_slug(&self) -> &str {
+        &self.site
+    }
 }
 
 /// Jira Cloud site names become the hostname component of the request URL.
