@@ -328,7 +328,11 @@ fn activity_baseline(
     db: &crate::db::DbPool,
     auth_user: &crate::db::models::AuthUser,
 ) -> Result<RealtimeEvent, crate::error::LificError> {
-    let visible_projects = crate::authz::visible_project_ids(db, &Some(auth_user.clone()))?;
+    let identity = crate::resolve_caller::ResolvedIdentity {
+        user: auth_user.clone(),
+        transport: crate::actor::Transport::Web,
+    };
+    let visible_projects = crate::authz::visible_project_ids(db, &Some(identity))?;
     let conn = db.read()?;
     let day_count = crate::db::queries::activity::activity_count(&conn, visible_projects.as_ref())?;
     Ok(RealtimeEvent::ActivityBaseline { day_count })
@@ -501,8 +505,8 @@ mod tests {
                     project_id,
                     title: "Visible activity".into(),
                     description: String::new(),
-                    status: "backlog".into(),
-                    priority: "none".into(),
+                    status: crate::db::models::Status::Backlog,
+                    priority: crate::db::models::Priority::None,
                     module_id: None,
                     start_date: None,
                     target_date: None,

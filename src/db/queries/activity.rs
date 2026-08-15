@@ -299,7 +299,7 @@ mod tests {
                 &UpdateIssue {
                     title: Some("Renamed first".into()),
                     description: Some("Changed too".into()),
-                    ..no_update()
+                    ..Default::default()
                 },
             )
             .unwrap();
