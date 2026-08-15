@@ -3,11 +3,18 @@ use rusqlite::Connection;
 use crate::db::models::*;
 use crate::error::LificError;
 
+/// Default hits per search page. Smaller than the shared page default on purpose.
+const DEFAULT_SEARCH_LIMIT: i64 = 20;
+
 pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, LificError> {
-    // Clamp limit to a sane range (LIF-141 class): SQLite treats LIMIT -1 as
-    // "no limit", so an unclamped `?limit=-1` would return the whole FTS set.
-    let limit = q.limit.unwrap_or(20).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0).max(0);
+    // Search publishes a smaller default page than the shared 50: an FTS hit
+    // list is a preview, not a data dump. The cap stays the shared one.
+    let (limit, offset) = super::page_with(
+        q.limit,
+        q.offset,
+        DEFAULT_SEARCH_LIMIT,
+        super::MAX_PAGE_LIMIT,
+    );
 
     // Validate enum-ish params up front so a typo'd filter errors instead
     // of silently returning everything.

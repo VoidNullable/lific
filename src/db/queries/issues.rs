@@ -287,11 +287,7 @@ pub fn list_issues(conn: &Connection, q: &ListIssuesQuery) -> Result<Vec<Issue>,
     };
     sql.push_str(&format!(" ORDER BY {order_clause}"));
 
-    // Clamp to a sane range (LIF-141): SQLite treats LIMIT -1 as "no limit",
-    // so an unclamped `?limit=-1` would dump the whole table. Cap at 500 to
-    // match MCP conventions; floor at 1 so a 0/negative value still paginates.
-    let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0).max(0);
+    let (limit, offset) = super::page(q.limit, q.offset);
     sql.push_str(&format!(
         " LIMIT ?{} OFFSET ?{}",
         param_values.len() + 1,
