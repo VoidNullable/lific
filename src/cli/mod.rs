@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod exec;
 pub mod http;
 pub mod import;
+pub mod instance;
 pub mod login;
 pub mod service;
 pub mod term;
