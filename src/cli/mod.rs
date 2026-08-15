@@ -8,6 +8,7 @@ pub mod import;
 pub mod instance;
 pub mod key;
 pub mod login;
+pub mod member;
 pub mod service;
 pub mod term;
 pub mod ui;
