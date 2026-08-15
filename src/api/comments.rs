@@ -80,14 +80,6 @@ fn create_for_parent(
             content,
             member_scoped,
         )?;
-        super::attachments::sync_links_scoped(
-            conn,
-            crate::db::models::AttachmentEntity::Comment,
-            comment.id,
-            &comment.content,
-            &user,
-            project_id,
-        )?;
         Ok((comment, project_id))
     })?;
     if let Some(project_id) = project_id {
@@ -206,14 +198,6 @@ pub(super) async fn update_comment_handler(
             CommentActor::from(&user),
             &input.content,
             member_scoped,
-        )?;
-        super::attachments::sync_links_scoped(
-            conn,
-            crate::db::models::AttachmentEntity::Comment,
-            comment.id,
-            &comment.content,
-            &user,
-            project_id,
         )?;
         Ok((comment, context))
     })?;

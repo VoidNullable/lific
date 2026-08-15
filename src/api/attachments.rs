@@ -165,6 +165,17 @@ pub(super) async fn upload_attachment(
         )));
     }
 
+    // An upload may link immediately only when the caller can mutate the
+    // target entity. Do this before writing the blob/metadata so a denied
+    // cross-project target cannot leave an orphaned upload behind.
+    if let (Some(entity), Some(entity_id)) = (link_entity, link_entity_id) {
+        authorize_link_target(&db, &identity, entity, entity_id)?;
+    } else if link_entity.is_some() || link_entity_id.is_some() {
+        return Err(LificError::BadRequest(
+            "entity_type and entity_id must be provided together".into(),
+        ));
+    }
+
     let size = bytes.len() as i64;
     // Store bytes first (content-addressed), then record metadata.
     let sha = store.write(&bytes)?;
@@ -225,6 +236,38 @@ pub(super) async fn upload_attachment(
         has_thumbnail: attachment.has_thumbnail,
     };
     Ok((StatusCode::OK, axum::Json(resp)).into_response())
+}
+
+fn authorize_link_target(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    entity: AttachmentEntity,
+    entity_id: i64,
+) -> Result<(), LificError> {
+    match entity {
+        AttachmentEntity::Issue => {
+            let project_id = with_read(db, |conn| {
+                Ok(queries::get_issue(conn, entity_id)?.project_id)
+            })?;
+            authz::require_role(db, identity, project_id, Role::Maintainer)
+        }
+        AttachmentEntity::Page => {
+            let project_id = with_read(db, |conn| {
+                queries::get_page(conn, entity_id).map(|p| p.project_id)
+            })?;
+            match project_id {
+                Some(pid) => authz::require_role(db, identity, pid, Role::Maintainer),
+                None => authz::require_workspace_admin(db, identity),
+            }
+        }
+        AttachmentEntity::Comment => {
+            let project_id = resolve_entity_project(db, entity, entity_id)?;
+            match project_id {
+                Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
+                None => authz::require_workspace_admin(db, identity),
+            }
+        }
+    }
 }
 
 /// Query params for `GET /api/attachments?entity_type=&entity_id=` — lists the

@@ -1119,9 +1119,12 @@ pub fn sync_links(
     entity: AttachmentEntity,
     entity_id: i64,
     markdown: &str,
+    user_id: i64,
+    is_admin: bool,
+    project_id: Option<i64>,
 ) -> Result<(), LificError> {
     let ids = parse_referenced_ids(markdown);
-    sync_entity_links(conn, entity, entity_id, &ids, 0, false, None)
+    sync_entity_links(conn, entity, entity_id, &ids, user_id, is_admin, project_id)
 }
 
 /// Reconcile attachment links without allowing references to import an
@@ -1140,7 +1143,15 @@ pub fn sync_links_scoped(
             allowed.push(attachment_id);
         }
     }
-    sync_entity_links(conn, entity, entity_id, &allowed)
+    sync_entity_links(
+        conn,
+        entity,
+        entity_id,
+        &allowed,
+        actor.user_id,
+        actor.is_admin,
+        project_id,
+    )
 }
 
 #[cfg(test)]
@@ -1366,8 +1377,8 @@ mod tests {
                 project_id: queries::get_issue(&conn, issue).unwrap().project_id,
                 title: "second".into(),
                 description: String::new(),
-                status: "todo".into(),
-                priority: "medium".into(),
+                status: crate::db::models::Status::Todo,
+                priority: crate::db::models::Priority::Medium,
                 module_id: None,
                 start_date: None,
                 target_date: None,

@@ -1307,6 +1307,11 @@ impl LificMcp {
         require_page_role_mcp(&self.db, project_id, minimum_role)
     }
 
+    fn resolve_mcp_actor(&self) -> Result<(i64, bool), String> {
+        self.read(resolve_comment_actor_conn)
+            .map(|identity| (identity.user.id, identity.user.is_admin))
+    }
+
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
     /// issue's own project too — the same "both sides" check `link_issues`
     /// applies, since a step's issue can live in a different project than
@@ -1907,6 +1912,7 @@ impl LificMcp {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         drop(conn);
         let issue = self.write(|conn| {
             let issue = queries::create_issue(
@@ -1935,6 +1941,9 @@ impl LificMcp {
                 models::AttachmentEntity::Issue,
                 issue.id,
                 &issue.description,
+                actor_id,
+                actor_is_admin,
+                Some(issue.project_id),
             )?;
             Ok(issue)
         })?;
@@ -1968,6 +1977,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let (issue, cascade_action, cascaded_steps) = self.write(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
@@ -2018,6 +2028,9 @@ impl LificMcp {
                 models::AttachmentEntity::Issue,
                 issue.id,
                 &issue.description,
+                actor_id,
+                actor_is_admin,
+                Some(issue.project_id),
             )?;
             let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
                 (previous, "done") if previous != "done" => {
@@ -2155,6 +2168,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let issue = self.write(|conn| {
             let issue = queries::get_issue(conn, id)?;
 
@@ -2201,6 +2215,9 @@ impl LificMcp {
                 models::AttachmentEntity::Issue,
                 issue.id,
                 &issue.description,
+                actor_id,
+                actor_is_admin,
+                Some(issue.project_id),
             )?;
             Ok(issue)
         })?;
@@ -2512,6 +2529,7 @@ impl LificMcp {
             None => None,
         };
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let folder_id = match (&input.folder, project_id) {
             (Some(name), Some(pid)) => Some(resolve_folder(&conn, pid, name)?),
             (Some(_), None) => return Err("folder requires a project".into()),
@@ -2537,6 +2555,9 @@ impl LificMcp {
                 models::AttachmentEntity::Page,
                 page.id,
                 &page.content,
+                actor_id,
+                actor_is_admin,
+                page.project_id,
             )?;
             Ok(page)
         })?;
@@ -2566,6 +2587,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let page = self.write(|conn| {
             // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
             // (move page to root), non-empty = resolve folder + set.
@@ -2602,6 +2624,9 @@ impl LificMcp {
                 models::AttachmentEntity::Page,
                 page.id,
                 &page.content,
+                actor_id,
+                actor_is_admin,
+                page.project_id,
             )?;
             Ok(page)
         })?;
@@ -2633,6 +2658,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
+        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let page = self.write(|conn| {
             let page = queries::get_page(conn, id)?;
 
@@ -2678,6 +2704,9 @@ impl LificMcp {
                 models::AttachmentEntity::Page,
                 page.id,
                 &page.content,
+                actor_id,
+                actor_is_admin,
+                page.project_id,
             )?;
             Ok(page)
         })?;
