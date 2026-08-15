@@ -13,7 +13,6 @@ use crate::db::models::{MemberWithUser, ProjectMember, Role};
 use crate::error::LificError;
 
 /// List a project's members, oldest membership first.
-#[allow(dead_code)]
 pub fn list_members(conn: &Connection, project_id: i64) -> Result<Vec<ProjectMember>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT project_id, user_id, role, created_at FROM project_members

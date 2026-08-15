@@ -40,14 +40,17 @@ impl AttachmentStore {
         Self { dir }
     }
 
-    /// Construct a store at an explicit directory (tests use a tempdir).
-    #[allow(dead_code)]
+    /// Construct a store at an explicit directory. Production always resolves
+    /// the directory from the database path via [`Self::from_db_path`]; only
+    /// tests point a store at a tempdir, hence the test-scoped allow.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
-    /// The attachments directory itself (for the backup set / diagnostics).
-    #[allow(dead_code)]
+    /// The attachments directory itself. Callers reach the files through
+    /// `read`/`write`/`delete`, so only tests need the raw path today.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dir(&self) -> &Path {
         &self.dir
     }

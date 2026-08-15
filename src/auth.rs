@@ -570,7 +570,6 @@ pub async fn require_api_key(
 /// Internal struct for loading API key rows during auth.
 #[derive(Debug)]
 struct ApiKeyRow {
-    #[allow(dead_code)]
     id: i64,
     hash: String,
     user_id: Option<i64>,

@@ -17,7 +17,7 @@
 //! doesn't need this: it only ever queries by `(project_id, user_id)`, so
 //! there's no id to leak through.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::db::models::{CreateSavedView, SavedView, UpdateSavedView};
 use crate::error::LificError;
@@ -215,28 +215,6 @@ fn clear_other_defaults(
         ),
     }?;
     Ok(())
-}
-
-/// Look up a user's default view for a project, if any. Used by the
-/// frontend's "auto-apply my default view on project load" flow (LIF-242) —
-/// exposed here mainly so that flow can be exercised without a full
-/// `list_views` round trip, though today's REST surface just filters
-/// client-side; kept `#[allow(dead_code)]`-free by being reachable from
-/// tests and any future dedicated endpoint.
-#[allow(dead_code)]
-pub fn get_default_view(
-    conn: &Connection,
-    project_id: i64,
-    user_id: i64,
-) -> Result<Option<SavedView>, LificError> {
-    conn.query_row(
-        "SELECT id, project_id, user_id, name, config, is_default, created_at, updated_at
-         FROM saved_views WHERE project_id = ?1 AND user_id = ?2 AND is_default = 1",
-        params![project_id, user_id],
-        row_to_view,
-    )
-    .optional()
-    .map_err(Into::into)
 }
 
 fn row_to_view(row: &rusqlite::Row) -> Result<SavedView, rusqlite::Error> {
@@ -510,29 +488,6 @@ mod tests {
 
         assert!(alice_default.is_default);
         assert!(bob_default.is_default, "bob's default must not be cleared by alice's");
-    }
-
-    #[test]
-    fn get_default_view_returns_none_when_no_default_set() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let project = seed_project(&conn, "NDF");
-        let alice = seed_user(&conn, "alice");
-        create_view(&conn, project, alice, &view_input("Not default", false)).unwrap();
-
-        assert!(get_default_view(&conn, project, alice).unwrap().is_none());
-    }
-
-    #[test]
-    fn get_default_view_returns_the_default() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let project = seed_project(&conn, "GDV");
-        let alice = seed_user(&conn, "alice");
-        let created = create_view(&conn, project, alice, &view_input("Default", true)).unwrap();
-
-        let found = get_default_view(&conn, project, alice).unwrap().unwrap();
-        assert_eq!(found.id, created.id);
     }
 
     // ── Validation ──────────────────────────────────────────────

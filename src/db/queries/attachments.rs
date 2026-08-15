@@ -105,18 +105,6 @@ pub fn unlink_attachment(
     Ok(())
 }
 
-/// Total number of links an attachment currently has (across every entity).
-/// Exposed for tests and future callers (e.g. a "safe to delete?" precheck).
-#[allow(dead_code)]
-pub fn count_links(conn: &Connection, attachment_id: i64) -> Result<i64, LificError> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM attachment_links WHERE attachment_id = ?1",
-        params![attachment_id],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
-}
-
 /// List the attachments linked to a given entity, newest-linked last (stable
 /// display order for the detail-view "Attachments (n)" section).
 pub fn list_for_entity(
@@ -323,23 +311,24 @@ mod tests {
     }
 
     #[test]
-    fn link_list_and_count() {
+    fn linking_is_idempotent_and_unlink_clears_it() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let issue = seed_issue(&conn);
         let att = create_attachment(&conn, "h1", "a.pdf", "application/pdf", 10, None).unwrap();
 
-        assert_eq!(count_links(&conn, att.id).unwrap(), 0);
+        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap(); // idempotent
-        assert_eq!(count_links(&conn, att.id).unwrap(), 1);
 
         let listed = list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap();
-        assert_eq!(listed.len(), 1);
+        assert_eq!(listed.len(), 1, "the second link must not duplicate the row");
         assert_eq!(listed[0].id, att.id);
 
         unlink_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
-        assert_eq!(count_links(&conn, att.id).unwrap(), 0);
+        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
+        // With no links left the attachment is collectable by the orphan GC.
+        assert_eq!(find_orphans(&conn, -1).unwrap().len(), 1);
     }
 
     #[test]
@@ -422,11 +411,16 @@ mod tests {
         let issue = seed_issue(&conn);
         let att = create_attachment(&conn, "h", "a.png", "image/png", 1, None).unwrap();
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
-        assert_eq!(count_links(&conn, att.id).unwrap(), 1);
+        assert_eq!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().len(), 1);
 
         queries::delete_issue(&conn, issue).unwrap();
         // Trigger drops the link; the attachment row itself survives (GC's job).
-        assert_eq!(count_links(&conn, att.id).unwrap(), 0);
+        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
+        assert_eq!(
+            find_orphans(&conn, -1).unwrap().len(),
+            1,
+            "the now-unlinked attachment is collectable"
+        );
         assert!(get_attachment(&conn, att.id).is_ok());
     }
 

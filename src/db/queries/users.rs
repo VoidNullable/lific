@@ -487,7 +487,6 @@ pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> 
 }
 
 /// Delete all sessions for a user.
-#[allow(dead_code)]
 pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificError> {
     conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
     Ok(())
@@ -520,28 +519,6 @@ pub fn assign_key_to_user(
     Ok(())
 }
 
-/// Get the user_id associated with an API key (by hash match).
-/// Returns None if the key has no user_id assigned.
-#[allow(dead_code)]
-pub fn get_user_for_api_key(conn: &Connection, key_id: i64) -> Result<Option<User>, LificError> {
-    let user_id: Option<i64> = conn
-        .query_row(
-            "SELECT user_id FROM api_keys WHERE id = ?1",
-            params![key_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                LificError::NotFound("api key not found".into())
-            }
-            other => other.into(),
-        })?;
-
-    match user_id {
-        Some(uid) => Ok(Some(get_user_by_id(conn, uid)?)),
-        None => Ok(None),
-    }
-}
 
 // ── Bots (connected tools) ───────────────────────────────────
 
@@ -1711,17 +1688,23 @@ mod tests {
             )
             .unwrap();
 
+        let owner = |conn: &Connection| -> Option<i64> {
+            conn.query_row(
+                "SELECT user_id FROM api_keys WHERE id = ?1",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
         // Before assignment: no user
-        let owner = get_user_for_api_key(&conn, key_id).unwrap();
-        assert!(owner.is_none());
+        assert!(owner(&conn).is_none());
 
         // Assign
         assign_key_to_user(&conn, "opencode", user.id).unwrap();
 
-        // After assignment: user returned
-        let owner = get_user_for_api_key(&conn, key_id).unwrap();
-        assert!(owner.is_some());
-        assert_eq!(owner.unwrap().username, "blake");
+        // After assignment: the key points at the user
+        assert_eq!(owner(&conn), Some(user.id));
     }
 
     #[test]
