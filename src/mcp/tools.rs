@@ -780,26 +780,30 @@ fn apply_edit(
     }
 }
 
-fn resolve_project(db: &Arc<DbPool>, ident: &str) -> Result<i64, String> {
-    let conn = db.read().map_err(|e| e.to_string())?;
-    queries::resolve_project_identifier(&conn, ident).map_err(|e| e.to_string())
+// LIF-387: the pre-flight resolvers take a borrowed connection rather than
+// the pool, so a tool that resolves a project *and* a module (create_issue,
+// bulk_update, manage_resource) does it on one checkout instead of one per
+// name. Call sites get their connection from `LificMcp::read_conn`.
+
+fn resolve_project(conn: &rusqlite::Connection, ident: &str) -> Result<i64, String> {
+    queries::resolve_project_identifier(conn, ident).map_err(|e| e.to_string())
 }
 
-fn canonical_project_identifier(db: &Arc<DbPool>, project_id: i64) -> Result<String, String> {
-    let conn = db.read().map_err(|e| e.to_string())?;
-    queries::get_project(&conn, project_id)
+fn canonical_project_identifier(
+    conn: &rusqlite::Connection,
+    project_id: i64,
+) -> Result<String, String> {
+    queries::get_project(conn, project_id)
         .map(|project| project.identifier)
         .map_err(|e| e.to_string())
 }
 
-fn resolve_module(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, String> {
-    let conn = db.read().map_err(|e| e.to_string())?;
-    queries::resolve_module_name(&conn, project_id, name).map_err(|e| e.to_string())
+fn resolve_module(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
+    queries::resolve_module_name(conn, project_id, name).map_err(|e| e.to_string())
 }
 
-fn resolve_folder(db: &Arc<DbPool>, project_id: i64, name: &str) -> Result<i64, String> {
-    let conn = db.read().map_err(|e| e.to_string())?;
-    queries::resolve_folder_name(&conn, project_id, name).map_err(|e| e.to_string())
+fn resolve_folder(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
+    queries::resolve_folder_name(conn, project_id, name).map_err(|e| e.to_string())
 }
 
 /// LIF-145 sentinel for a create's simple `Option<String>` icon field: field
@@ -1356,7 +1360,7 @@ impl LificMcp {
 
     fn search_inner(&self, input: SearchInput) -> Result<String, String> {
         let project_id = match &input.project {
-            Some(p) => Some(resolve_project(&self.db, p)?),
+            Some(p) => Some(resolve_project(&*self.read_conn()?, p)?),
             None => None,
         };
         let limit = input.limit.unwrap_or(20).max(1);
@@ -1582,12 +1586,14 @@ impl LificMcp {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
-        let pid = resolve_project(&self.db, &input.project)?;
+        let conn = self.read_conn()?;
+        let pid = resolve_project(&conn, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
         let module_id = match &input.module {
-            Some(name) => Some(resolve_module(&self.db, pid, name)?),
+            Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
+        drop(conn);
         let limit = input.limit.unwrap_or(50).max(1);
         let offset = input.offset.unwrap_or(0).max(0);
         // Over-fetch by one to detect whether more results exist beyond this page.
@@ -1821,7 +1827,8 @@ impl LificMcp {
                 .map(|file| file.content)
                 .unwrap_or_else(|| "Error: issue export produced no files".into()))
         } else {
-            let pid = resolve_project(&self.db, ident).map_err(|_| unknown_identifier(ident))?;
+            let pid = resolve_project(&*self.read_conn()?, ident)
+                .map_err(|_| unknown_identifier(ident))?;
             require_role_mcp(&self.db, pid, models::Role::Viewer)?;
             let bundle = self.read(|conn| crate::export::export_project(conn, ident))?;
             Ok(render_response(|output| {
@@ -1841,12 +1848,14 @@ impl LificMcp {
     }
 
     fn create_issue_inner(&self, input: CreateIssueInput) -> Result<String, String> {
-        let pid = resolve_project(&self.db, &input.project)?;
+        let conn = self.read_conn()?;
+        let pid = resolve_project(&conn, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let module_id = match &input.module {
-            Some(name) => Some(resolve_module(&self.db, pid, name)?),
+            Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
+        drop(conn);
         let issue = self.write(|conn| {
             let issue = queries::create_issue(
                 conn,
@@ -2007,18 +2016,20 @@ impl LificMcp {
     }
 
     fn bulk_update_inner(&self, input: BulkUpdateInput) -> Result<String, String> {
-        let pid = resolve_project(&self.db, &input.project)?;
+        let conn = self.read_conn()?;
+        let pid = resolve_project(&conn, &input.project)?;
         // Authz: mirror update_issue — project-scoped Maintainer gate.
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let filter_module_id = match &input.filter_module {
-            Some(name) => Some(resolve_module(&self.db, pid, name)?),
+            Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
         // Resolve the target module once (present => set it on every match).
         let set_module_id = match &input.set_module {
-            Some(name) => Some(resolve_module(&self.db, pid, name)?),
+            Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
+        drop(conn);
         // Cap the selection like get_board does; bulk changes over 500 issues
         // in a single call are out of scope for this tool.
         const BULK_CAP: i64 = 500;
@@ -2156,7 +2167,7 @@ impl LificMcp {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
-        let pid = resolve_project(&self.db, &input.project)?;
+        let pid = resolve_project(&*self.read_conn()?, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
         const BOARD_CAP: i64 = 500;
         let mut issues = self.read(|conn| {
@@ -2425,16 +2436,18 @@ impl LificMcp {
     }
 
     fn create_page_inner(&self, input: CreatePageInput) -> Result<String, String> {
+        let conn = self.read_conn()?;
         let project_id = match &input.project {
-            Some(p) => Some(resolve_project(&self.db, p)?),
+            Some(p) => Some(resolve_project(&conn, p)?),
             None => None,
         };
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let folder_id = match (&input.folder, project_id) {
-            (Some(name), Some(pid)) => Some(resolve_folder(&self.db, pid, name)?),
+            (Some(name), Some(pid)) => Some(resolve_folder(&conn, pid, name)?),
             (Some(_), None) => return Err("folder requires a project".into()),
             _ => None,
         };
+        drop(conn);
         let page = self.write(|conn| {
             let page = queries::create_page(
                 conn,
@@ -2680,7 +2693,7 @@ impl LificMcp {
                         input.resource_type
                     ));
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
                 let reference = match input.resource_type.as_str() {
                     "module" => self.write(|conn| {
@@ -2725,7 +2738,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let limit = input.limit.unwrap_or(50).clamp(1, 500);
                 let offset = input.offset.unwrap_or(0).max(0);
@@ -2808,7 +2821,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let limit = input.limit.unwrap_or(100).max(1);
                 let offset = input.offset.unwrap_or(0).max(0);
@@ -2846,8 +2859,9 @@ impl LificMcp {
                 }))
             }
             "page" => {
+                let resolver = self.read_conn()?;
                 let project_id = match &input.project {
-                    Some(p) => Some(resolve_project(&self.db, p)?),
+                    Some(p) => Some(resolve_project(&resolver, p)?),
                     None => None,
                 };
                 // Project-scoped: Viewer gate. Cross-project (no `project`
@@ -2861,9 +2875,10 @@ impl LificMcp {
                     visible_project_ids_mcp(&self.db)?
                 };
                 let folder_id = match (&input.folder, project_id) {
-                    (Some(name), Some(pid)) => Some(resolve_folder(&self.db, pid, name)?),
+                    (Some(name), Some(pid)) => Some(resolve_folder(&resolver, pid, name)?),
                     _ => None,
                 };
+                drop(resolver);
                 let label = input.label.as_deref();
                 let status = input.status.as_deref();
                 let order_by = input.order_by.as_deref();
@@ -2946,10 +2961,11 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let resolver = self.read_conn()?;
+                let pid = resolve_project(&resolver, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
-                let canonical_project = canonical_project_identifier(&self.db, pid)?;
-                let modules = self.read(|conn| queries::list_modules(conn, pid))?;
+                let canonical_project = canonical_project_identifier(&resolver, pid)?;
+                let modules = queries::list_modules(&resolver, pid).map_err(|e| e.to_string())?;
                 Ok(render_response(|output| {
                     writeln!(output, "{} modules:", modules.len())?;
                     modules.iter().try_for_each(|module| {
@@ -2970,7 +2986,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let labels = self.read(|conn| queries::list_labels(conn, pid))?;
                 Ok(render_response(|output| {
@@ -2984,7 +3000,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let folders = self.read(|conn| queries::list_folders(conn, pid))?;
                 Ok(render_response(|output| {
@@ -3068,7 +3084,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project identifier required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Lead)?;
                 let p = self.write(|conn| {
                     queries::update_project(
@@ -3097,9 +3113,11 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let resolver = self.read_conn()?;
+                let pid = resolve_project(&resolver, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
-                let canonical_project = canonical_project_identifier(&self.db, pid)?;
+                let canonical_project = canonical_project_identifier(&resolver, pid)?;
+                drop(resolver);
                 let Some(ref name) = input.name else {
                     return Err("name required".into());
                 };
@@ -3128,13 +3146,15 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let resolver = self.read_conn()?;
+                let pid = resolve_project(&resolver, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
-                let canonical_project = canonical_project_identifier(&self.db, pid)?;
+                let canonical_project = canonical_project_identifier(&resolver, pid)?;
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify module".into());
                 };
-                let mid = resolve_module(&self.db, pid, current)?;
+                let mid = resolve_module(&resolver, pid, current)?;
+                drop(resolver);
                 let m = self.write(|conn| {
                     queries::update_module(
                         conn,
@@ -3160,7 +3180,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
                 let Some(ref name) = input.name else {
                     return Err("name required".into());
@@ -3182,7 +3202,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify label".into());
@@ -3205,7 +3225,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
                 let Some(ref name) = input.name else {
                     return Err("name required".into());
@@ -3227,7 +3247,7 @@ impl LificMcp {
                 let Some(ref proj) = input.project else {
                     return Err("project required".into());
                 };
-                let pid = resolve_project(&self.db, proj)?;
+                let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_structure_role_mcp(&self.db, pid)?;
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify folder".into());
@@ -3576,7 +3596,7 @@ impl LificMcp {
     }
 
     fn create_plan_inner(&self, input: CreatePlanInput) -> Result<String, String> {
-        let pid = resolve_project(&self.db, &input.project)?;
+        let pid = resolve_project(&*self.read_conn()?, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let plan = self.write(|conn| {
             let anchor = match &input.anchor_issue {
@@ -4067,7 +4087,7 @@ mod tests {
         let project_id = project_id_for(&m, "CAN");
 
         assert_eq!(
-            canonical_project_identifier(&m.db, project_id).unwrap(),
+            canonical_project_identifier(&m.read_conn().unwrap(), project_id).unwrap(),
             "CAN"
         );
     }
@@ -4119,11 +4139,15 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Resolver Project", "RSL");
 
-        assert!(resolve_project(&m.db, "RSL").expect("exact identifier should resolve") > 0);
+        assert!(
+            resolve_project(&m.read_conn().unwrap(), "RSL")
+                .expect("exact identifier should resolve")
+                > 0
+        );
 
         for identifier in ["rsl", "RS", "MISSING"] {
-            let error =
-                resolve_project(&m.db, identifier).expect_err("identifier should not resolve");
+            let error = resolve_project(&m.read_conn().unwrap(), identifier)
+                .expect_err("identifier should not resolve");
             assert!(
                 error.contains(&format!("project '{identifier}' not found")),
                 "got: {error}"
@@ -4136,7 +4160,8 @@ mod tests {
         let (m, _guard) = mcp();
         let _ag = first_admin_guard();
         seed_project(&m, "Resolver Project", "MOD");
-        let project_id = resolve_project(&m.db, "MOD").expect("project should resolve");
+        let project_id =
+            resolve_project(&m.read_conn().unwrap(), "MOD").expect("project should resolve");
         let created = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "module".into(),
             action: "create".into(),
@@ -4146,17 +4171,17 @@ mod tests {
         }));
         assert!(created.starts_with("Created module"), "got: {created}");
 
-        let exact =
-            resolve_module(&m.db, project_id, "Backend").expect("exact name should resolve");
+        let exact = resolve_module(&m.read_conn().unwrap(), project_id, "Backend")
+            .expect("exact name should resolve");
         assert_eq!(
-            resolve_module(&m.db, project_id, "backend")
+            resolve_module(&m.read_conn().unwrap(), project_id, "backend")
                 .expect("case-insensitive name should resolve"),
             exact
         );
 
         for name in ["Back", "Missing"] {
-            let error =
-                resolve_module(&m.db, project_id, name).expect_err("name should not resolve");
+            let error = resolve_module(&m.read_conn().unwrap(), project_id, name)
+                .expect_err("name should not resolve");
             assert!(
                 error.contains(&format!("module '{name}' not found in project")),
                 "got: {error}"
@@ -4169,7 +4194,8 @@ mod tests {
         let (m, _guard) = mcp();
         let _ag = first_admin_guard();
         seed_project(&m, "Resolver Project", "FLD");
-        let project_id = resolve_project(&m.db, "FLD").expect("project should resolve");
+        let project_id =
+            resolve_project(&m.read_conn().unwrap(), "FLD").expect("project should resolve");
         let created = m.manage_resource(Parameters(ManageResourceInput {
             resource_type: "folder".into(),
             action: "create".into(),
@@ -4179,17 +4205,17 @@ mod tests {
         }));
         assert!(created.starts_with("Created folder"), "got: {created}");
 
-        let exact =
-            resolve_folder(&m.db, project_id, "Documentation").expect("exact name should resolve");
+        let exact = resolve_folder(&m.read_conn().unwrap(), project_id, "Documentation")
+            .expect("exact name should resolve");
         assert_eq!(
-            resolve_folder(&m.db, project_id, "documentation")
+            resolve_folder(&m.read_conn().unwrap(), project_id, "documentation")
                 .expect("case-insensitive name should resolve"),
             exact
         );
 
         for name in ["Document", "Missing"] {
-            let error =
-                resolve_folder(&m.db, project_id, name).expect_err("name should not resolve");
+            let error = resolve_folder(&m.read_conn().unwrap(), project_id, name)
+                .expect_err("name should not resolve");
             assert!(
                 error.contains(&format!("folder '{name}' not found in project")),
                 "got: {error}"

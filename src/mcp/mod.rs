@@ -213,6 +213,14 @@ impl LificMcp {
         self.realtime.send(event);
     }
 
+    /// LIF-387: one borrowed read connection for a tool's whole pre-flight
+    /// (resolve the project, then its module or folder), instead of a fresh
+    /// checkout per resolver. Reads never block each other, so holding it
+    /// across the authz gates that follow costs nothing.
+    pub(crate) fn read_conn(&self) -> Result<crate::db::ReadConn, String> {
+        self.db.read().map_err(|e| e.to_string())
+    }
+
     fn read<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
