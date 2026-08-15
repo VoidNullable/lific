@@ -666,6 +666,30 @@ export async function listProjectRelations(projectId: number) {
   return request<ProjectRelation[]>(`/projects/${projectId}/relations`);
 }
 
+export type RelationType = "blocks" | "relates_to" | "duplicate";
+
+/** Create a relation between two issues (by identifier, e.g. "LIF-1").
+ *  Directional for blocks/duplicate: source blocks target, source
+ *  duplicates target. Maintainer-gated server-side on both projects. */
+export async function linkIssues(
+  source: string,
+  target: string,
+  relationType: RelationType,
+) {
+  return request<{ linked: boolean }>("/issues/link", {
+    method: "POST",
+    body: JSON.stringify({ source, target, relation_type: relationType }),
+  });
+}
+
+/** Remove whatever relation exists between two issues (by identifier). */
+export async function unlinkIssues(source: string, target: string) {
+  return request<{ unlinked: boolean }>("/issues/unlink", {
+    method: "POST",
+    body: JSON.stringify({ source, target }),
+  });
+}
+
 // ── Modules ─────────────────────────────────────────────────
 
 export interface Module {

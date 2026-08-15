@@ -239,21 +239,31 @@ function layoutComponent(
 /**
  * Lay out the full graph: components stacked vertically, largest first.
  * `nodeIds` should already be filtered to the nodes the caller wants drawn.
+ *
+ * `edges` drive the left-to-right layering (blocks relations). The optional
+ * `clusterEdges` (all relation types) only affect which nodes share a
+ * component — so two issues joined by a mere relates_to sit near each other
+ * without the undirected relation pretending to be a blocking step.
  */
 export function layoutGraph(
   nodeIds: number[],
   edges: LayoutEdge[],
   opts: LayoutOptions,
+  clusterEdges: LayoutEdge[] = edges,
 ): GraphLayout {
   if (nodeIds.length === 0) {
     return { positions: new Map(), width: 0, height: 0 };
   }
-  const comps = components(nodeIds, edges);
+  const comps = components(nodeIds, clusterEdges);
+  const idSetPerComp = comps.map((c) => new Set(c.nodes));
   const positions = new Map<number, PlacedNode>();
   let width = 0;
   let y = 0;
-  for (const comp of comps) {
-    const laid = layoutComponent(comp, opts);
+  for (let i = 0; i < comps.length; i++) {
+    const layerEdges = edges.filter(
+      (e) => idSetPerComp[i].has(e.source) && idSetPerComp[i].has(e.target),
+    );
+    const laid = layoutComponent({ nodes: comps[i].nodes, edges: layerEdges }, opts);
     for (const p of laid.positions.values()) {
       positions.set(p.id, { id: p.id, x: p.x, y: p.y + y });
     }
@@ -261,4 +271,35 @@ export function layoutGraph(
     y += laid.height + opts.componentGap;
   }
   return { positions, width, height: y - opts.componentGap };
+}
+
+/**
+ * Simple grid for the Unlinked canvas: no edges to respect, so pack the
+ * nodes into rows roughly square-ish (slightly wide, matching landscape
+ * viewports). Order is the caller's (issue list order).
+ */
+export function layoutGrid(
+  nodeIds: number[],
+  opts: Pick<LayoutOptions, "nodeWidth" | "nodeHeight" | "gapX" | "gapY">,
+): GraphLayout {
+  if (nodeIds.length === 0) {
+    return { positions: new Map(), width: 0, height: 0 };
+  }
+  const cols = Math.max(1, Math.ceil(Math.sqrt(nodeIds.length * 1.6)));
+  const positions = new Map<number, PlacedNode>();
+  nodeIds.forEach((id, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    positions.set(id, {
+      id,
+      x: col * (opts.nodeWidth + opts.gapX),
+      y: row * (opts.nodeHeight + opts.gapY),
+    });
+  });
+  const rows = Math.ceil(nodeIds.length / cols);
+  return {
+    positions,
+    width: Math.min(nodeIds.length, cols) * (opts.nodeWidth + opts.gapX) - opts.gapX,
+    height: rows * (opts.nodeHeight + opts.gapY) - opts.gapY,
+  };
 }

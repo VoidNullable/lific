@@ -1,35 +1,47 @@
 <script lang="ts">
   /*
-   * LIF-363 — Dependency graph: a project's issues as nodes, `blocks`
-   * relations as edges, laid out left-to-right so blockers sit left of the
-   * work they hold up. Requested by jbakesthefirst in Discord.
+   * LIF-363 — Dependency graph, now on Svelte Flow (@xyflow/svelte).
    *
-   * Rendering approach: HTML node cards absolutely positioned over an SVG
-   * edge layer, both inside ONE pan/zoom-transformed container. Not SVG
-   * foreignObject (mobile Safari transform bugs), not mermaid (static SVG,
-   * no click handlers). HTML cards get CSS truncation, the shared
-   * StatusIcon/PriorityIcon vocabulary, and real <button> semantics for free.
+   * Two canvases behind one toggle:
+   *   Linked   — issues with at least one visible relation, laid out as a
+   *              layered DAG (blocks edges drive the layering, other
+   *              relation types only cluster). The default view.
+   *   Unlinked — issues with no visible relations, packed in a grid so they
+   *              can be wired up: drag from a card's right dot onto another
+   *              card and a menu asks what kind of relation to create.
    *
-   * Interaction model: drag anywhere to pan (including starting on a node —
-   * essential on touch), wheel scrolls, ctrl/cmd+wheel or pinch zooms,
-   * arrow keys pan, +/- zoom, 0 refits. A click only counts as a click when
-   * the gesture didn't travel, so panning over a node never navigates.
+   * Positions are never persisted. Both canvases relayout from scratch on
+   * every load (and after every link/unlink) via {#key} remounts — the
+   * layout algorithm is the source of truth, not saved coordinates.
+   *
+   * Editing: drag-to-connect opens the relation-type menu; clicking an edge
+   * opens a manage menu (reverse / remove). Both are gated on the caller's
+   * project role (viewer = read-only, same as the rest of the UI; the
+   * server enforces regardless).
    */
+  import { SvelteFlow, Background, type Node, type Edge, MarkerType, type Connection } from "@xyflow/svelte";
+  import "@xyflow/svelte/dist/style.css";
   import {
     listProjects,
     listIssues,
     listProjectRelations,
+    linkIssues,
+    unlinkIssues,
     type Project,
     type Issue,
     type ProjectRelation,
+    type RelationType,
   } from "../lib/api";
-  import { layoutGraph } from "../lib/graph/layout";
-  import StatusIcon from "../lib/StatusIcon.svelte";
-  import PriorityIcon from "../lib/PriorityIcon.svelte";
+  import { layoutGraph, layoutGrid } from "../lib/graph/layout";
+  import IssueNode from "../lib/graph/IssueNode.svelte";
+  import GraphControls from "../lib/graph/GraphControls.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
-  import { ChevronRight, Plus, Minus, Maximize, MoveRight } from "lucide-svelte";
+  import StatusIcon from "../lib/StatusIcon.svelte";
+  import { toast } from "../lib/toast/toast.svelte";
+  import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
+  import { ChevronRight, MoveRight, ArrowLeftRight, Unlink, X } from "lucide-svelte";
   import { getContext } from "svelte";
 
   const topbarCtx = getContext<{
@@ -49,15 +61,13 @@
     projectIdentifier: string;
   } = $props();
 
-  // ── Geometry constants ────────────────────────────────────
+  const nodeTypes = { issue: IssueNode };
+
+  // ── Geometry ──────────────────────────────────────────────
   const NODE_W = 200;
   const NODE_H = 58;
-  const GAP_X = 90;
-  const GAP_Y = 18;
-  const COMPONENT_GAP = 48;
-  const FIT_PAD = 40;
-  const MIN_SCALE = 0.2;
-  const MAX_SCALE = 2;
+  const DAG_OPTS = { nodeWidth: NODE_W, nodeHeight: NODE_H, gapX: 90, gapY: 18, componentGap: 48 };
+  const GRID_OPTS = { nodeWidth: NODE_W, nodeHeight: NODE_H, gapX: 24, gapY: 16 };
 
   // ── Data ──────────────────────────────────────────────────
   let project = $state<Project | null>(null);
@@ -66,11 +76,15 @@
   let loading = $state(true);
   let error = $state("");
   let showClosed = $state(false);
+  let view = $state<"linked" | "unlinked">("linked");
+  /** Bumped after every successful link/unlink; keys the canvas remount so
+   *  both views relayout with fresh data (positions are never persisted). */
+  let revision = $state(0);
 
   $effect(() => {
     const id = projectIdentifier;
     showClosed = false;
-    fitted = false;
+    view = "linked";
     loadProject(id);
   });
 
@@ -82,18 +96,26 @@
     const found = projRes.data.find((p) => p.identifier === ident);
     if (!found) { error = `Project ${ident} not found`; loading = false; return; }
     project = found;
-    const [issueRes, relRes] = await Promise.all([
-      listIssues({ project_id: found.id, limit: 1000 }),
-      listProjectRelations(found.id),
-    ]);
-    if (!issueRes.ok) { error = issueRes.error; loading = false; return; }
-    if (!relRes.ok) { error = relRes.error; loading = false; return; }
-    issues = issueRes.data;
-    relations = relRes.data;
+    loadProjectRole(found.id); // role-gates editing affordances (LIF-234)
+    const ok = await reloadData();
     loading = false;
+    if (ok) revision++;
   }
 
-  // ── Graph derivation ──────────────────────────────────────
+  async function reloadData(): Promise<boolean> {
+    if (!project) return false;
+    const [issueRes, relRes] = await Promise.all([
+      listIssues({ project_id: project.id, limit: 1000 }),
+      listProjectRelations(project.id),
+    ]);
+    if (!issueRes.ok) { error = issueRes.error; return false; }
+    if (!relRes.ok) { error = relRes.error; return false; }
+    issues = issueRes.data;
+    relations = relRes.data;
+    return true;
+  }
+
+  // ── Partition: linked vs unlinked ─────────────────────────
   const OPEN = new Set(["backlog", "todo", "active"]);
 
   let visibleIssues = $derived(
@@ -102,208 +124,207 @@
   let visibleIds = $derived(new Set(visibleIssues.map((i) => i.id)));
   let issueById = $derived(new Map(issues.map((i) => [i.id, i])));
 
-  let blockEdges = $derived(
+  /** Relations whose endpoints are both on-screen under the current filter. */
+  let visibleRelations = $derived(
     relations.filter(
-      (r) =>
-        r.relation_type === "blocks" &&
-        visibleIds.has(r.source_id) &&
-        visibleIds.has(r.target_id),
+      (r) => visibleIds.has(r.source_id) && visibleIds.has(r.target_id),
     ),
   );
 
-  // Singletons (no blocking edge either way) are excluded from the canvas —
-  // the acceptance criteria call for hiding them so the graph reads as
-  // structure, not a soup of disconnected dots. A count chip says how many
-  // sit outside the chains.
-  let connectedIds = $derived.by(() => {
+  let linkedIds = $derived.by(() => {
     const s = new Set<number>();
-    for (const e of blockEdges) {
-      s.add(e.source_id);
-      s.add(e.target_id);
+    for (const r of visibleRelations) {
+      s.add(r.source_id);
+      s.add(r.target_id);
     }
     return s;
   });
-  let graphIssues = $derived(visibleIssues.filter((i) => connectedIds.has(i.id)));
-  let singletonCount = $derived(visibleIssues.length - graphIssues.length);
+  let linkedIssues = $derived(visibleIssues.filter((i) => linkedIds.has(i.id)));
+  let unlinkedIssues = $derived(visibleIssues.filter((i) => !linkedIds.has(i.id)));
 
-  let layout = $derived(
+  // ── Layouts → flow nodes/edges ────────────────────────────
+  let linkedLayout = $derived(
     layoutGraph(
-      graphIssues.map((i) => i.id),
-      blockEdges.map((e) => ({ source: e.source_id, target: e.target_id })),
-      {
-        nodeWidth: NODE_W,
-        nodeHeight: NODE_H,
-        gapX: GAP_X,
-        gapY: GAP_Y,
-        componentGap: COMPONENT_GAP,
-      },
+      linkedIssues.map((i) => i.id),
+      visibleRelations
+        .filter((r) => r.relation_type === "blocks")
+        .map((r) => ({ source: r.source_id, target: r.target_id })),
+      DAG_OPTS,
+      visibleRelations.map((r) => ({ source: r.source_id, target: r.target_id })),
+    ),
+  );
+  let unlinkedLayout = $derived(
+    layoutGrid(unlinkedIssues.map((i) => i.id), GRID_OPTS),
+  );
+
+  let flowNodes = $derived.by<Node[]>(() => {
+    const [list, layout] =
+      view === "linked"
+        ? [linkedIssues, linkedLayout]
+        : [unlinkedIssues, unlinkedLayout];
+    return list.map((issue) => ({
+      id: String(issue.id),
+      type: "issue",
+      position: layout.positions.get(issue.id) ?? { x: 0, y: 0 },
+      data: { issue },
+      deletable: false,
+    }));
+  });
+
+  function edgeStyle(t: string): { style: string; marker: boolean } {
+    switch (t) {
+      case "blocks":
+        return { style: "stroke: var(--text-faint); stroke-opacity: 0.55; stroke-width: 1.5;", marker: true };
+      case "duplicate":
+        return { style: "stroke: var(--text-faint); stroke-opacity: 0.4; stroke-width: 1.5; stroke-dasharray: 2 3;", marker: true };
+      default: // relates_to — undirected, drawn quietest
+        return { style: "stroke: var(--text-faint); stroke-opacity: 0.4; stroke-width: 1.5; stroke-dasharray: 5 4;", marker: false };
+    }
+  }
+
+  let relationByEdgeId = $derived(
+    new Map(
+      visibleRelations.map((r) => [
+        `${r.source_id}:${r.target_id}:${r.relation_type}`,
+        r,
+      ]),
     ),
   );
 
-  function edgePath(e: ProjectRelation): string {
-    const s = layout.positions.get(e.source_id);
-    const t = layout.positions.get(e.target_id);
-    if (!s || !t) return "";
-    const x1 = s.x + NODE_W;
-    const y1 = s.y + NODE_H / 2;
-    const x2 = t.x;
-    const y2 = t.y + NODE_H / 2;
-    const dx = Math.max(40, Math.abs(x2 - x1) / 2);
-    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-  }
-
-  // ── Pan / zoom ────────────────────────────────────────────
-  let viewportEl = $state<HTMLElement | null>(null);
-  let viewportW = $state(0);
-  let viewportH = $state(0);
-  let tx = $state(0);
-  let ty = $state(0);
-  let scale = $state(1);
-  let fitted = $state(false);
-
-  function clampScale(s: number): number {
-    return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
-  }
-
-  function fit() {
-    if (layout.width <= 0 || viewportW <= 0) return;
-    scale = clampScale(
-      Math.min(
-        (viewportW - FIT_PAD * 2) / layout.width,
-        (viewportH - FIT_PAD * 2) / layout.height,
-        1,
-      ),
-    );
-    tx = (viewportW - layout.width * scale) / 2;
-    ty = (viewportH - layout.height * scale) / 2;
-  }
-
-  // Auto-fit once the layout and the viewport are both known; refits after
-  // a project switch or a show-closed toggle (both reset `fitted`).
-  $effect(() => {
-    void layout;
-    if (!fitted && viewportW > 0 && layout.width > 0) {
-      fit();
-      fitted = true;
-    }
-  });
-
-  function zoomAt(cx: number, cy: number, factor: number) {
-    const next = clampScale(scale * factor);
-    // Keep the graph point under (cx, cy) stationary.
-    tx = cx - ((cx - tx) / scale) * next;
-    ty = cy - ((cy - ty) / scale) * next;
-    scale = next;
-  }
-
-  // Svelte 5 registers `onwheel` passively, so preventDefault (needed to keep
-  // the page from scrolling/zooming under the canvas) requires a manual
-  // non-passive listener.
-  $effect(() => {
-    const el = viewportEl;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      if (e.ctrlKey || e.metaKey) {
-        zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(-e.deltaY * 0.01));
-      } else {
-        tx -= e.deltaX;
-        ty -= e.deltaY;
-      }
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  });
-
-  // One gesture model for mouse-drag pan, touch pan, and pinch zoom. A
-  // gesture accumulates travel; node clicks are suppressed when it moved.
-  const pointers = new Map<number, { x: number; y: number }>();
-  let panning = $state(false);
-  let gestureTravel = 0;
-  let pinch: { dist: number; scale: number; gx: number; gy: number } | null = null;
-
-  function viewportPoint(e: PointerEvent): { x: number; y: number } {
-    const rect = viewportEl!.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  }
-
-  function onPointerDown(e: PointerEvent) {
-    if (e.button !== 0 && e.pointerType === "mouse") return;
-    pointers.set(e.pointerId, viewportPoint(e));
-    gestureTravel = 0;
-    panning = true;
-    if (pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      pinch = {
-        dist: Math.hypot(a.x - b.x, a.y - b.y),
-        scale,
-        gx: (mid.x - tx) / scale,
-        gy: (mid.y - ty) / scale,
+  let flowEdges = $derived.by<Edge[]>(() => {
+    if (view !== "linked") return [];
+    return visibleRelations.map((r) => {
+      const { style, marker } = edgeStyle(r.relation_type);
+      return {
+        id: `${r.source_id}:${r.target_id}:${r.relation_type}`,
+        source: String(r.source_id),
+        target: String(r.target_id),
+        style,
+        deletable: false,
+        ...(marker
+          ? { markerEnd: { type: MarkerType.ArrowClosed, color: "var(--text-faint)", width: 16, height: 16 } }
+          : {}),
       };
+    });
+  });
+
+  let editable = $derived(projectRole.canEdit);
+
+  // ── Relation menus ────────────────────────────────────────
+  type Menu =
+    | { kind: "create"; source: Issue; target: Issue; x: number; y: number }
+    | { kind: "edge"; relation: ProjectRelation; x: number; y: number };
+  let menu = $state<Menu | null>(null);
+  let busy = $state(false);
+
+  /** Clamp a client-coords anchor so the menu never renders off-screen. */
+  function anchored(x: number, y: number): { x: number; y: number } {
+    return {
+      x: Math.max(8, Math.min(x, window.innerWidth - 288)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 260)),
+    };
+  }
+
+  // onconnect delivers the node pair but no pointer position; the position
+  // arrives one tick later in onconnectend. Stash the pair, then place the
+  // menu where the finger/cursor actually let go.
+  let pendingPair: { source: Issue; target: Issue } | null = null;
+
+  function onconnect(conn: Connection) {
+    if (!editable || conn.source === conn.target) return;
+    const source = issueById.get(Number(conn.source));
+    const target = issueById.get(Number(conn.target));
+    if (!source || !target) return;
+    pendingPair = { source, target };
+  }
+
+  function onconnectend(event: MouseEvent | TouchEvent) {
+    if (!pendingPair) return;
+    const p = "changedTouches" in event ? event.changedTouches[0] : event;
+    menu = { kind: "create", ...pendingPair, ...anchored(p.clientX, p.clientY) };
+    pendingPair = null;
+  }
+
+  function onedgeclick({ edge, event }: { edge: Edge; event: MouseEvent | TouchEvent }) {
+    if (!editable) return;
+    const relation = relationByEdgeId.get(edge.id);
+    if (!relation) return;
+    const p = "changedTouches" in event ? event.changedTouches[0] : event;
+    menu = { kind: "edge", relation, ...anchored(p.clientX, p.clientY) };
+  }
+
+  async function createRelation(source: Issue, target: Issue, type: RelationType) {
+    busy = true;
+    const res = await linkIssues(source.identifier, target.identifier, type);
+    busy = false;
+    menu = null;
+    if (!res.ok) {
+      toast(res.error, { kind: "error" });
+      return;
     }
+    const wasUnlinked = view === "unlinked";
+    await reloadData();
+    revision++;
+    toast(
+      wasUnlinked
+        ? `Linked — ${source.identifier} and ${target.identifier} moved to the Linked view.`
+        : `Linked ${source.identifier} and ${target.identifier}.`,
+      { kind: "success" },
+    );
   }
 
-  function onPointerMove(e: PointerEvent) {
-    const prev = pointers.get(e.pointerId);
-    if (!prev) return;
-    const p = viewportPoint(e);
-    pointers.set(e.pointerId, p);
-    gestureTravel += Math.hypot(p.x - prev.x, p.y - prev.y);
-
-    if (pinch && pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      const dist = Math.hypot(a.x - b.x, a.y - b.y);
-      const next = clampScale(pinch.scale * (dist / pinch.dist));
-      scale = next;
-      tx = mid.x - pinch.gx * next;
-      ty = mid.y - pinch.gy * next;
-    } else if (pointers.size === 1) {
-      tx += p.x - prev.x;
-      ty += p.y - prev.y;
+  async function removeRelation(r: ProjectRelation) {
+    busy = true;
+    const res = await unlinkIssues(r.source_identifier, r.target_identifier);
+    busy = false;
+    menu = null;
+    if (!res.ok) {
+      toast(res.error, { kind: "error" });
+      return;
     }
+    await reloadData();
+    revision++;
+    toast(`Removed the link between ${r.source_identifier} and ${r.target_identifier}.`, { kind: "success" });
   }
 
-  function onPointerEnd(e: PointerEvent) {
-    pointers.delete(e.pointerId);
-    if (pointers.size < 2) pinch = null;
-    if (pointers.size === 0) panning = false;
+  async function reverseRelation(r: ProjectRelation) {
+    busy = true;
+    const un = await unlinkIssues(r.source_identifier, r.target_identifier);
+    if (!un.ok) {
+      busy = false;
+      menu = null;
+      toast(un.error, { kind: "error" });
+      return;
+    }
+    const re = await linkIssues(
+      r.target_identifier,
+      r.source_identifier,
+      r.relation_type as RelationType,
+    );
+    busy = false;
+    menu = null;
+    if (!re.ok) {
+      toast(re.error, { kind: "error" });
+    }
+    await reloadData();
+    revision++;
   }
 
-  function nodeClick(issue: Issue) {
-    // A pan that started on a node ends with a click event; ignore it.
-    if (gestureTravel > 6) return;
-    navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
+  function relationVerb(t: string): string {
+    return t === "blocks" ? "blocks" : t === "duplicate" ? "duplicates" : "relates to";
   }
 
   function onKeydown(e: KeyboardEvent) {
-    const PAN = 60;
-    if (e.key === "ArrowLeft") { tx += PAN; e.preventDefault(); }
-    else if (e.key === "ArrowRight") { tx -= PAN; e.preventDefault(); }
-    else if (e.key === "ArrowUp") { ty += PAN; e.preventDefault(); }
-    else if (e.key === "ArrowDown") { ty -= PAN; e.preventDefault(); }
-    else if (e.key === "+" || e.key === "=") { zoomAt(viewportW / 2, viewportH / 2, 1.2); e.preventDefault(); }
-    else if (e.key === "-") { zoomAt(viewportW / 2, viewportH / 2, 1 / 1.2); e.preventDefault(); }
-    else if (e.key === "0") { fit(); e.preventDefault(); }
+    if (e.key === "Escape" && menu) {
+      menu = null;
+      e.stopPropagation();
+    }
   }
 
-  function toggleClosed() {
-    showClosed = !showClosed;
-    fitted = false; // effect refits with the new node set
-  }
-
-  // ── Hover highlighting ────────────────────────────────────
-  let hoveredId = $state<number | null>(null);
-  function edgeHot(e: ProjectRelation): boolean {
-    return hoveredId !== null && (e.source_id === hoveredId || e.target_id === hoveredId);
-  }
-
-  let isClosed = (i: Issue) => i.status === "done" || i.status === "cancelled";
   let hasAnyIssues = $derived(issues.length > 0);
-  let hasGraph = $derived(blockEdges.length > 0);
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 {#snippet topbarContent()}
   <div class="flex items-center gap-3 px-6 py-2 w-full">
@@ -342,154 +363,101 @@
         <p class="text-heading font-medium text-[var(--text)]">Nothing to graph yet</p>
         <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
           The graph draws this project's blocking structure. Create some issues
-          first, then link them with block relations.
+          first, then link them up right here.
         </p>
-      </div>
-    </div>
-  {:else if !hasGraph}
-    <div class="flex flex-col items-center py-20 gap-4 px-6 max-w-[520px] mx-auto text-center">
-      <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.25} />
-      <div class="flex flex-col items-center gap-1.5">
-        <p class="text-heading font-medium text-[var(--text)]">
-          {showClosed ? "No dependencies yet" : "No open dependencies"}
-        </p>
-        <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
-          {#if showClosed}
-            No issues block each other yet. Add a block relation from an
-            issue's detail page (or via <code class="font-mono text-caption">link_issues</code> over MCP)
-            and the chains will draw themselves here.
-          {:else}
-            Every blocking chain is closed out. Toggle closed issues to see
-            resolved history, or link open issues to map what's in the way.
-          {/if}
-        </p>
-      </div>
-      <div class="flex items-center gap-2">
-        {#if !showClosed}
-          <button
-            class="text-body-sm text-[var(--text-muted)] border border-[var(--border)]
-                   px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
-            onclick={toggleClosed}
-          >
-            Show closed issues
-          </button>
-        {/if}
-        <button
-          class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                 px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors"
-          onclick={() => navigate(`/${projectIdentifier}/issues`)}
-        >
-          Go to issues
-        </button>
       </div>
     </div>
   {:else}
-    <!-- ── The canvas ─────────────────────────────────────── -->
-    <!-- The canvas takes focus deliberately: arrow keys pan, +/- zoom, 0
-         refits (announced via aria-label). The a11y rule can't see that. -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
-    <div
-      bind:this={viewportEl}
-      bind:clientWidth={viewportW}
-      bind:clientHeight={viewportH}
-      class="relative flex-1 min-h-0 overflow-hidden select-none
-             {panning ? 'cursor-grabbing' : 'cursor-grab'}"
-      style="touch-action: none;
-             background-image: radial-gradient(color-mix(in srgb, var(--border) 60%, transparent) 1px, transparent 1px);
-             background-size: {24 * scale}px {24 * scale}px;
-             background-position: {tx}px {ty}px;"
-      role="application"
-      aria-label="Dependency graph. Drag to pan, pinch or ctrl+scroll to zoom, arrow keys to pan, 0 to re-center."
-      tabindex="0"
-      onpointerdown={onPointerDown}
-      onpointermove={onPointerMove}
-      onpointerup={onPointerEnd}
-      onpointercancel={onPointerEnd}
-      onkeydown={onKeydown}
-    >
-      <div
-        class="absolute top-0 left-0 will-change-transform"
-        style="transform: translate({tx}px, {ty}px) scale({scale}); transform-origin: 0 0;"
-      >
-        <svg
-          class="absolute top-0 left-0 overflow-visible pointer-events-none"
-          width={Math.max(1, layout.width)}
-          height={Math.max(1, layout.height)}
-          aria-hidden="true"
+    <div class="relative flex-1 min-h-0 dep-graph">
+      {#key `${view}-${showClosed}-${revision}`}
+        {#if flowNodes.length === 0}
+          <!-- Empty state for the current canvas; the switcher stays usable. -->
+          <div class="h-full flex flex-col items-center justify-center gap-4 px-6 text-center">
+            <Mascot src="/LizzySleep2.png" nativeW={1000} nativeH={420} scale={0.22} />
+            <div class="flex flex-col items-center gap-1.5 max-w-[440px]">
+              {#if view === "linked"}
+                <p class="text-heading font-medium text-[var(--text)]">
+                  {showClosed ? "No links yet" : "No open links"}
+                </p>
+                <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
+                  {#if unlinkedIssues.length > 0}
+                    Switch to Unlinked and drag between cards to start
+                    building chains — drag from a card's right dot onto
+                    another card.
+                  {:else if !showClosed}
+                    Every linked chain is closed out. Toggle closed issues to
+                    see the history.
+                  {:else}
+                    No issues are linked to each other yet.
+                  {/if}
+                </p>
+              {:else}
+                <p class="text-heading font-medium text-[var(--text)]">Everything is linked</p>
+                <p class="text-body-sm text-[var(--text-muted)] leading-relaxed">
+                  No loose issues under the current filter — every visible
+                  issue is part of a chain.
+                </p>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <SvelteFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            {nodeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.15 }}
+            minZoom={0.1}
+            maxZoom={2}
+            deleteKey={null}
+            nodesConnectable={editable}
+            connectionRadius={36}
+            connectionLineStyle="stroke: var(--accent); stroke-width: 2;"
+            defaultEdgeOptions={{}}
+            proOptions={{ hideAttribution: false }}
+            onnodeclick={({ node }) => {
+              const issue = (node.data as { issue: Issue }).issue;
+              navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
+            }}
+            {onconnect}
+            {onconnectend}
+            {onedgeclick}
+            onpaneclick={() => (menu = null)}
+          >
+            <Background gap={24} patternColor="var(--border)" bgColor="var(--bg)" />
+            <GraphControls />
+          </SvelteFlow>
+        {/if}
+      {/key}
+
+      <!-- ── View switcher + filters (floating, works on all canvases) ── -->
+      <div class="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-2 max-w-[calc(100%-1.5rem)]">
+        <div
+          class="inline-flex p-0.5 rounded-lg bg-[var(--surface)] border border-[var(--border)]
+                 shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
         >
-          <defs>
-            <marker
-              id="dep-arrow"
-              viewBox="0 0 8 8"
-              refX="7"
-              refY="4"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--text-faint)" />
-            </marker>
-            <marker
-              id="dep-arrow-hot"
-              viewBox="0 0 8 8"
-              refX="7"
-              refY="4"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--accent)" />
-            </marker>
-          </defs>
-          {#each blockEdges as e (e.source_id + "-" + e.target_id)}
-            <path
-              d={edgePath(e)}
-              fill="none"
-              stroke={edgeHot(e) ? "var(--accent)" : "var(--text-faint)"}
-              stroke-width={edgeHot(e) ? 2 : 1.5}
-              stroke-opacity={edgeHot(e) ? 1 : 0.55}
-              marker-end="url(#{edgeHot(e) ? 'dep-arrow-hot' : 'dep-arrow'})"
-            />
-          {/each}
-        </svg>
+          <button
+            class="px-2.5 py-1 rounded-md text-caption font-medium transition
+                   {view === 'linked'
+              ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
+              : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+            onclick={() => (view = "linked")}
+          >
+            Linked
+            <span class="text-[var(--text-faint)] tabular-nums ml-0.5">{linkedIssues.length}</span>
+          </button>
+          <button
+            class="px-2.5 py-1 rounded-md text-caption font-medium transition
+                   {view === 'unlinked'
+              ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
+              : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
+            onclick={() => (view = "unlinked")}
+          >
+            Unlinked
+            <span class="text-[var(--text-faint)] tabular-nums ml-0.5">{unlinkedIssues.length}</span>
+          </button>
+        </div>
 
-        {#each graphIssues as issue (issue.id)}
-          {@const pos = layout.positions.get(issue.id)}
-          {#if pos}
-            <button
-              class="absolute text-left rounded-lg border bg-[var(--surface)]
-                     shadow-[0_1px_2px_rgba(0,0,0,0.06)] px-2.5 py-1.5
-                     transition-colors overflow-hidden
-                     {hoveredId === issue.id
-                ? 'border-[var(--accent)]'
-                : 'border-[var(--border)] hover:border-[var(--accent)]'}
-                     {isClosed(issue) ? 'opacity-50' : ''}"
-              style="left: {pos.x}px; top: {pos.y}px; width: {NODE_W}px; height: {NODE_H}px;"
-              onmouseenter={() => (hoveredId = issue.id)}
-              onmouseleave={() => (hoveredId = null)}
-              onclick={() => nodeClick(issue)}
-            >
-              <span class="flex items-center gap-1.5">
-                <StatusIcon status={issue.status} size={12} />
-                <span class="font-mono text-micro text-[var(--text-faint)]">
-                  {issue.identifier}
-                </span>
-                <span class="ml-auto">
-                  <PriorityIcon priority={issue.priority} size={12} />
-                </span>
-              </span>
-              <span class="block text-caption text-[var(--text)] truncate leading-snug mt-0.5">
-                {issue.title}
-              </span>
-            </button>
-          {/if}
-        {/each}
-      </div>
-
-      <!-- ── Floating controls ──────────────────────────────── -->
-      <div
-        class="absolute top-3 left-3 flex flex-wrap items-center gap-2 max-w-[calc(100%-1.5rem)]"
-      >
         <button
           class="flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-caption font-medium
                  border transition-colors
@@ -497,65 +465,160 @@
             ? 'bg-[var(--accent-subtle)] border-[var(--accent)] text-[var(--text)]'
             : 'bg-[var(--surface)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]'}"
           aria-pressed={showClosed}
-          onclick={toggleClosed}
+          onclick={() => (showClosed = !showClosed)}
         >
           <StatusIcon status="done" size={12} />
           Closed issues
         </button>
-        <span
-          class="flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-caption
-                 bg-[var(--surface)] border border-[var(--border)] text-[var(--text-faint)]"
-        >
-          blocker <MoveRight size={12} /> blocked
-        </span>
-        {#if singletonCount > 0}
+
+        {#if view === "linked"}
           <span
-            class="flex items-center h-8 px-2.5 rounded-lg text-caption
+            class="hidden sm:flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-caption
                    bg-[var(--surface)] border border-[var(--border)] text-[var(--text-faint)]"
           >
-            {singletonCount} issue{singletonCount === 1 ? "" : "s"} outside the chains
+            blocker <MoveRight size={12} /> blocked
+          </span>
+        {:else if editable}
+          <span
+            class="hidden sm:flex items-center h-8 px-2.5 rounded-lg text-caption
+                   bg-[var(--surface)] border border-[var(--border)] text-[var(--text-faint)]"
+          >
+            Drag between cards to link them
           </span>
         {/if}
       </div>
 
-      <div class="absolute bottom-3 right-3 flex items-center gap-1">
+      <!-- ── Relation menu ─────────────────────────────────── -->
+      {#if menu}
         <div
-          class="flex items-center rounded-lg bg-[var(--surface)] border border-[var(--border)]
-                 shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden"
+          class="fixed z-50 w-70 rounded-lg bg-[var(--surface)] border border-[var(--border)]
+                 shadow-[0_8px_24px_rgba(0,0,0,0.16)] py-1.5"
+          style="left: {menu.x}px; top: {menu.y}px;"
+          role="menu"
         >
-          <button
-            class="size-9 grid place-items-center text-[var(--text-muted)]
-                   hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Zoom out"
-            onclick={() => zoomAt(viewportW / 2, viewportH / 2, 1 / 1.2)}
-          >
-            <Minus size={15} />
-          </button>
-          <span
-            class="w-11 text-center text-micro tabular-nums text-[var(--text-faint)] select-none"
-          >
-            {Math.round(scale * 100)}%
-          </span>
-          <button
-            class="size-9 grid place-items-center text-[var(--text-muted)]
-                   hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-            aria-label="Zoom in"
-            onclick={() => zoomAt(viewportW / 2, viewportH / 2, 1.2)}
-          >
-            <Plus size={15} />
-          </button>
+          {#if menu.kind === "create"}
+            {@const m = menu}
+            <div class="flex items-center gap-2 px-3 pb-1.5 border-b border-[var(--border)]">
+              <span class="text-caption font-medium text-[var(--text-muted)]">
+                Link {m.source.identifier} and {m.target.identifier}
+              </span>
+              <button
+                class="ml-auto size-6 grid place-items-center rounded text-[var(--text-faint)]
+                       hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                aria-label="Cancel"
+                onclick={() => (menu = null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div class="pt-1">
+              <button
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={busy}
+                onclick={() => createRelation(m.source, m.target, "blocks")}
+              >
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.source.identifier}</span>
+                <MoveRight size={12} class="text-[var(--text-faint)]" />
+                blocks
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.target.identifier}</span>
+              </button>
+              <button
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={busy}
+                onclick={() => createRelation(m.target, m.source, "blocks")}
+              >
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.target.identifier}</span>
+                <MoveRight size={12} class="text-[var(--text-faint)]" />
+                blocks
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.source.identifier}</span>
+              </button>
+              <button
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={busy}
+                onclick={() => createRelation(m.source, m.target, "relates_to")}
+              >
+                <ArrowLeftRight size={12} class="text-[var(--text-faint)]" />
+                Relates to <span class="text-micro text-[var(--text-faint)]">(no direction)</span>
+              </button>
+              <button
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--text)]
+                       hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={busy}
+                onclick={() => createRelation(m.source, m.target, "duplicate")}
+              >
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.source.identifier}</span>
+                duplicates
+                <span class="font-mono text-micro text-[var(--text-faint)]">{m.target.identifier}</span>
+              </button>
+            </div>
+          {:else}
+            {@const r = menu.relation}
+            <div class="flex items-center gap-2 px-3 pb-1.5 border-b border-[var(--border)]">
+              <span class="text-caption font-medium text-[var(--text-muted)]">
+                {r.source_identifier} {relationVerb(r.relation_type)} {r.target_identifier}
+              </span>
+              <button
+                class="ml-auto size-6 grid place-items-center rounded text-[var(--text-faint)]
+                       hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                aria-label="Close"
+                onclick={() => (menu = null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div class="pt-1">
+              {#if r.relation_type !== "relates_to"}
+                <button
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--text)]
+                         hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                  disabled={busy}
+                  onclick={() => reverseRelation(r)}
+                >
+                  <ArrowLeftRight size={13} class="text-[var(--text-faint)]" />
+                  Reverse direction
+                </button>
+              {/if}
+              <button
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-body-sm text-[var(--error)]
+                       hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={busy}
+                onclick={() => removeRelation(r)}
+              >
+                <Unlink size={13} />
+                Remove link
+              </button>
+            </div>
+          {/if}
         </div>
-        <button
-          class="size-9 grid place-items-center rounded-lg bg-[var(--surface)]
-                 border border-[var(--border)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]
-                 text-[var(--text-muted)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors"
-          aria-label="Fit graph to view"
-          onclick={fit}
-        >
-          <Maximize size={15} />
-        </button>
-      </div>
+      {/if}
     </div>
   {/if}
 </div>
+
+<style>
+  /* Svelte Flow theming: its defaults assume white; point the pieces we
+     actually use at the app's CSS vars so dark mode just works. */
+  .dep-graph :global(.svelte-flow) {
+    background: var(--bg);
+  }
+  .dep-graph :global(.svelte-flow__attribution) {
+    background: transparent;
+    color: var(--text-faint);
+  }
+  .dep-graph :global(.svelte-flow__handle) {
+    /* Handles are styled per-node (IssueNode); keep hit area finger-sized
+       without inflating the visible dot. */
+    min-width: 10px;
+    min-height: 10px;
+  }
+  .dep-graph :global(.svelte-flow__edge) {
+    cursor: pointer;
+  }
+  .dep-graph :global(.svelte-flow__edge.selected .svelte-flow__edge-path) {
+    stroke: var(--accent);
+    stroke-opacity: 1;
+  }
+</style>
