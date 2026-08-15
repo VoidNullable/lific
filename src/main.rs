@@ -397,24 +397,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     user,
                     expires,
                 } => {
+                    // LIF-391: resolve --user first, so the key is created
+                    // already bound and an unknown username fails before any
+                    // key exists.
+                    let owner = if let Some(ref username) = user {
+                        let conn = pool.read()?;
+                        Some(db::queries::users::get_user_by_username(&conn, username)?.id)
+                    } else {
+                        None
+                    };
                     let key = auth::create_api_key_with_expiry(
                         &pool,
                         &manager,
                         &name,
                         expires.as_deref(),
+                        owner,
                     )?;
-
-                    // If --user was provided, assign the key to that user
-                    let assigned = if let Some(ref username) = user {
-                        let conn = pool.read()?;
-                        let u = db::queries::users::get_user_by_username(&conn, username)?;
-                        drop(conn);
-                        let conn = pool.write()?;
-                        db::queries::users::assign_key_to_user(&conn, &name, u.id)?;
-                        Some(username.clone())
-                    } else {
-                        None
-                    };
+                    let assigned = user.clone();
 
                     if json {
                         let out = serde_json::json!({
@@ -914,7 +913,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             //   2. human present, still no keys → passwordless mode
             //   3. keys exist → plain count
             if auth::should_mint_initial_key(&pool) {
-                let key = auth::create_api_key(&pool, &manager, "default")?;
+                let key = auth::create_api_key(&pool, &manager, "default", None)?;
                 info!("no API keys found, auto-generated initial key");
                 print_initial_key(&key);
             } else if !auth::has_any_keys(&pool) {
@@ -1694,7 +1693,7 @@ async fn cmd_init(
     let new_key = if auth::should_mint_initial_key(&pool) {
         let manager =
             auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
-        Some(auth::create_api_key(&pool, &manager, "default")?)
+        Some(auth::create_api_key(&pool, &manager, "default", None)?)
     } else {
         None
     };

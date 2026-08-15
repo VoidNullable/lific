@@ -1230,7 +1230,7 @@ mod tests {
     async fn mcp_with_real_key_completes_initialize() {
         let pool = crate::db::open_memory().unwrap();
         let manager = crate::auth::create_key_manager().unwrap();
-        let key = crate::auth::create_api_key(&pool, &manager, "doctor-test").unwrap();
+        let key = crate::auth::create_api_key(&pool, &manager, "doctor-test", None).unwrap();
         let app = build_test_app(pool, "http://127.0.0.1");
         let base = serve_ephemeral(app).await;
 

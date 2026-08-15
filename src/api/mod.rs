@@ -1013,7 +1013,7 @@ mod tests {
 
         let db = crate::db::open_memory().expect("test db");
         let manager = crate::auth::create_key_manager().expect("key manager");
-        let valid_key = crate::auth::create_api_key(&db, &manager, "valid-test-key")
+        let valid_key = crate::auth::create_api_key(&db, &manager, "valid-test-key", None)
             .expect("create valid key");
         let invalid_key = manager
             .generate(Environment::production())
