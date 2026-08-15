@@ -24,7 +24,7 @@ pub struct ReorderProjects {
     pub ids: Vec<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CreateProject {
     pub name: String,
     pub identifier: String,
@@ -39,7 +39,7 @@ pub struct CreateProject {
 /// skips absent fields, which keeps "field omitted" (don't change) distinct
 /// from an explicit `null` — the distinction `deserialize_nullable` reads on
 /// the tristate fields below.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateProject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -83,7 +83,7 @@ pub struct CreateProjectGroup {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateProjectGroup {
     pub name: Option<String>,
 }
@@ -157,8 +157,29 @@ pub struct CreateIssue {
     pub source: Option<String>,
 }
 
+/// Hand-written rather than derived so `..Default::default()` produces the
+/// same issue a JSON body with those fields omitted would: `status` and
+/// `priority` come from [`default_status`] / [`default_priority`], not from
+/// `String::default()` (which would be `""`, a value the API rejects).
+impl Default for CreateIssue {
+    fn default() -> Self {
+        Self {
+            project_id: 0,
+            title: String::new(),
+            description: String::new(),
+            status: default_status(),
+            priority: default_priority(),
+            module_id: None,
+            start_date: None,
+            target_date: None,
+            labels: Vec::new(),
+            source: None,
+        }
+    }
+}
+
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateIssue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -258,7 +279,7 @@ pub struct CreateModule {
 }
 
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateModule {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -297,7 +318,7 @@ pub struct CreateLabel {
 }
 
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateLabel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -310,7 +331,7 @@ fn default_label_color() -> String {
 }
 
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateFolder {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -356,8 +377,23 @@ pub struct CreatePage {
     pub labels: Vec<String>,
 }
 
+/// Hand-written for the same reason as [`CreateIssue`]'s: `status` must come
+/// from [`default_page_status`] ("draft"), not `String::default()`.
+impl Default for CreatePage {
+    fn default() -> Self {
+        Self {
+            project_id: None,
+            folder_id: None,
+            title: String::new(),
+            content: String::new(),
+            status: default_page_status(),
+            labels: Vec::new(),
+        }
+    }
+}
+
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdatePage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

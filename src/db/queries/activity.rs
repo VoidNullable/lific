@@ -179,9 +179,7 @@ mod tests {
                 &CreateProject {
                     name: "Audit Test".into(),
                     identifier: "AUD".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -193,28 +191,7 @@ mod tests {
         CreateIssue {
             project_id: pid,
             title: title.into(),
-            description: String::new(),
-            status: "backlog".into(),
-            priority: "none".into(),
-            module_id: None,
-            start_date: None,
-            target_date: None,
-            labels: vec![],
-            source: None,
-        }
-    }
-
-    fn no_update() -> UpdateIssue {
-        UpdateIssue {
-            title: None,
-            description: None,
-            status: None,
-            priority: None,
-            module_id: None,
-            sort_order: None,
-            start_date: None,
-            target_date: None,
-            labels: None,
+            ..Default::default()
         }
     }
 
@@ -265,7 +242,7 @@ mod tests {
                 title: Some("Renamed".into()),
                 status: Some("active".into()),
                 priority: Some("high".into()),
-                ..no_update()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -301,7 +278,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 title: Some("Same".into()),
-                ..no_update()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -336,7 +313,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 module_id: Some(Some(module.id)),
-                ..no_update()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -397,7 +374,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 labels: Some(vec!["bug".into()]),
-                ..no_update()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -446,11 +423,8 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Notes".into(),
-                content: String::new(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -458,13 +432,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
                 content: Some("# new content".into()),
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -502,14 +502,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -522,9 +515,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -541,14 +532,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Implement authentication flow".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -581,14 +565,7 @@ mod tests {
                 &CreateIssue {
                     project_id: pid,
                     title: format!("authentication case {i}"),
-                    description: String::new(),
-                    status: "backlog".into(),
-                    priority: "none".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -618,14 +595,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Findable issue".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -654,11 +624,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Design Doc".into(),
                 content: "This covers the WebSocket protocol design".into(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -688,14 +656,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Implement authentication system".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -725,14 +686,7 @@ mod tests {
             &CreateIssue {
                 project_id: p1,
                 title: "Alpha feature".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -741,14 +695,7 @@ mod tests {
             &CreateIssue {
                 project_id: p2,
                 title: "Beta feature".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -777,14 +724,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Fix the rendering pipeline".into(),
-                description: String::new(), // empty body
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                description: String::new(), // empty body: the subject of this test
+                ..Default::default()
             },
         )
         .unwrap();
@@ -813,14 +754,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "shared concern in the API".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -828,11 +762,8 @@ mod tests {
             conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "shared design notes".into(),
-                content: String::new(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1005,11 +936,8 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Design Doc".into(),
-                content: String::new(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1229,14 +1157,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "wire up core:sodom pipeline".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1271,11 +1192,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Spec".into(),
                 content: "see [RequiredSpecs] for the contract".into(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1343,11 +1262,8 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "widget:alpha page".into(),
-                content: String::new(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();

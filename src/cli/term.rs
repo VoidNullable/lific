@@ -44,11 +44,6 @@ pub fn wants_json_inner(json_flag: bool, stdout_tty: bool) -> bool {
 /// If stdin is not a TTY we cannot prompt, so rather than hang forever we
 /// return an error naming `bypass_flag` — the flag a non-interactive caller
 /// (agent, CI) should pass to proceed without a prompt.
-///
-/// Nothing prompts today; this exists for commands landing next (e.g.
-/// `lific connect`), so it is marked `dead_code` to keep clippy quiet until a
-/// caller appears.
-#[allow(dead_code)]
 pub fn confirm(prompt: &str, bypass_flag: &str) -> Result<bool, String> {
     confirm_inner(
         prompt,
@@ -61,7 +56,6 @@ pub fn confirm(prompt: &str, bypass_flag: &str) -> Result<bool, String> {
 
 /// Pure/injected implementation of [`confirm`], factored out so the non-TTY
 /// refusal branch (and the reader/writer plumbing) is testable.
-#[allow(dead_code)]
 pub fn confirm_inner<R: std::io::BufRead, W: std::io::Write>(
     prompt: &str,
     bypass_flag: &str,

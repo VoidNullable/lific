@@ -415,9 +415,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -454,11 +452,9 @@ mod tests {
     fn blank_page(project_id: Option<i64>, title: &str) -> CreatePage {
         CreatePage {
             project_id,
-            folder_id: None,
             title: title.into(),
-            content: String::new(),
             status: "draft".into(),
-            labels: vec![],
+            ..Default::default()
         }
     }
 
@@ -533,11 +529,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Original".into(),
                 content: "# Hello".into(),
                 status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -549,12 +544,7 @@ mod tests {
             page.id,
             &UpdatePage {
                 title: Some("Renamed".into()),
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -575,11 +565,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Escaped".into(),
                 content: "# Title\\n\\nParagraph".into(),
                 status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -602,9 +591,8 @@ mod tests {
                 project_id: Some(page_project_id),
                 folder_id: Some(folder_id),
                 title: "Invalid folder".into(),
-                content: String::new(),
                 status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         );
 
@@ -630,13 +618,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
                 folder_id: Some(Some(folder_id)),
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         );
 
@@ -660,12 +643,10 @@ mod tests {
         let create_result = create_page(
             &conn,
             &CreatePage {
-                project_id: None,
                 folder_id: Some(folder_id),
                 title: "Workspace page".into(),
-                content: String::new(),
                 status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         );
         assert!(matches!(
@@ -678,13 +659,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
                 folder_id: Some(Some(folder_id)),
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         );
         assert!(matches!(
@@ -705,9 +681,8 @@ mod tests {
                 project_id: Some(project_id),
                 folder_id: Some(folder_id),
                 title: "Page".into(),
-                content: String::new(),
                 status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -716,13 +691,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
                 folder_id: Some(None),
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -744,11 +714,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Spec".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["design".into(), "draft".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -772,11 +741,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Spec".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["design".into(), "phantom".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -797,11 +765,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["old".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -811,13 +778,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
                 labels: Some(vec!["new".into()]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -835,11 +797,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["x".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -849,13 +810,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
                 labels: Some(vec![]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -875,11 +831,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["keep".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -889,12 +844,7 @@ mod tests {
             page.id,
             &UpdatePage {
                 title: Some("Renamed".into()),
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -913,14 +863,12 @@ mod tests {
         let page = create_page(
             &conn,
             &CreatePage {
-                project_id: None,
-                folder_id: None,
                 title: "Workspace doc".into(),
-                content: String::new(),
                 status: "draft".into(),
                 // These labels can't exist in any project scope here, so
                 // even if we tried to attach them the lookup would miss.
                 labels: vec!["anything".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -939,11 +887,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "One".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["a".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -951,11 +898,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Two".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["a".into(), "b".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -981,11 +927,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Designy".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["design".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1009,11 +954,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["doomed".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1037,11 +981,10 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "draft".into(),
                 labels: vec!["x".into()],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1079,11 +1022,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Active doc".into(),
-                content: String::new(),
                 status: "active".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1103,13 +1044,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
                 status: Some("complete".into()),
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1126,11 +1062,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "P".into(),
-                content: String::new(),
                 status: "active".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1140,12 +1074,7 @@ mod tests {
             page.id,
             &UpdatePage {
                 title: Some("Renamed".into()),
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1163,11 +1092,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Archived doc".into(),
-                content: String::new(),
                 status: "archived".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1268,13 +1195,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
                 pinned: Some(true),
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1284,13 +1206,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
                 pinned: Some(false),
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1307,13 +1224,8 @@ mod tests {
             &conn,
             page.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
                 pinned: Some(true),
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1324,12 +1236,7 @@ mod tests {
             page.id,
             &UpdatePage {
                 title: Some("Renamed".into()),
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
-                pinned: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1346,13 +1253,8 @@ mod tests {
             &conn,
             p.id,
             &UpdatePage {
-                title: None,
-                content: None,
-                folder_id: None,
-                sort_order: None,
-                status: None,
                 pinned: Some(true),
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1372,11 +1274,9 @@ mod tests {
             &conn,
             &CreatePage {
                 project_id: Some(pid),
-                folder_id: None,
                 title: "Bad".into(),
-                content: String::new(),
                 status: "bogus".into(),
-                labels: vec![],
+                ..Default::default()
             },
         );
         assert!(result.is_err());

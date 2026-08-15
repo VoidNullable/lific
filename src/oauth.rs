@@ -494,12 +494,13 @@ async fn authorize_page(
 struct ApproveForm {
     client_id: String,
     redirect_uri: String,
+    /// Round-tripped from the authorize form so the POST body stays a valid
+    /// OAuth request, but the value is fixed at `code` and never branched on.
     #[allow(dead_code)]
     response_type: String,
     state: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
-    #[allow(dead_code)]
     scope: Option<String>,
     csrf_token: Option<String>,
     /// LIFIC-13: which tool is connecting — a Connected Tools registry id, or
@@ -910,6 +911,8 @@ fn cleanup_expired_device_codes(db: &DbPool) {
 struct DeviceAuthRequest {
     #[serde(default)]
     client_name: Option<String>,
+    /// Accepted per RFC 8628 so conforming clients are not rejected, but
+    /// device grants always issue the fixed `mcp` scope.
     #[serde(default)]
     #[allow(dead_code)]
     scope: Option<String>,
@@ -1232,6 +1235,8 @@ struct TokenRequest {
     redirect_uri: Option<String>,
     client_id: Option<String>,
     code_verifier: Option<String>,
+    /// Parsed so a `refresh_token` grant deserializes rather than 422s, and
+    /// is then refused by the `grant_type` match: we issue no refresh tokens.
     #[allow(dead_code)]
     refresh_token: Option<String>,
     /// RFC 8628 device grant: the opaque device_code returned by
@@ -1628,6 +1633,9 @@ fn device_error(status: StatusCode, error: &str, description: Option<&str>) -> R
 #[derive(Deserialize)]
 struct RevokeRequest {
     token: String,
+    /// RFC 7009 explicitly makes this a hint the server MAY ignore. We do:
+    /// there is only one revocable token store (`oauth_tokens`), so there is
+    /// nothing for the hint to disambiguate.
     #[allow(dead_code)]
     token_type_hint: Option<String>,
 }
