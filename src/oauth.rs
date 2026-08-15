@@ -1743,26 +1743,31 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Check if a bearer token is a valid OAuth access token.
+/// Check if a bearer token is a valid OAuth access token: known, not revoked,
+/// not expired. Tokens are stored as SHA-256 hashes; the incoming raw token is
+/// hashed before lookup.
+///
+/// LIF-384: this used to delegate to a `validate_oauth_token_with_scope` that
+/// returned the granted scope, which the only production caller (this
+/// function) discarded with `.is_some()`. Nothing ever compared a scope
+/// against a required one, and the column is always 'mcp'. Tokens still carry
+/// a scope in the database and in the token response, since clients read it;
+/// only the Rust path pretending to check it is gone.
 pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
-    validate_oauth_token_with_scope(db, token).is_some()
-}
-
-/// Validate an OAuth token and return its granted scope.
-/// Tokens are stored as SHA-256 hashes; the incoming raw token is hashed before lookup.
-pub fn validate_oauth_token_with_scope(db: &DbPool, token: &str) -> Option<String> {
     if !token.starts_with("lific_at_") {
-        return None;
+        return false;
     }
     let token_hash = sha256_hex(token.as_bytes());
-    let conn = db.read().ok()?;
+    let Ok(conn) = db.read() else {
+        return false;
+    };
     conn.query_row(
-        "SELECT scope FROM oauth_tokens
+        "SELECT 1 FROM oauth_tokens
          WHERE access_token = ?1 AND revoked = 0 AND expires_at > datetime('now')",
         params![token_hash],
-        |row| row.get(0),
+        |_| Ok(()),
     )
-    .ok()
+    .is_ok()
 }
 
 /// Resolve the user bound to a (valid, non-revoked, unexpired) OAuth access
@@ -2486,53 +2491,14 @@ mod tests {
         );
     }
 
-    // ── LIF-51: scope is stored on tokens ────────────────────
-
-    #[tokio::test]
-    async fn validate_oauth_token_returns_scope() {
-        let (_, db) = test_oauth_app();
-
-        let token = "lific_at_scope-test-token";
-        let token_hash = sha256_hex(token.as_bytes());
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        {
-            let conn = db.write().unwrap();
-            conn.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('scope-client', 'Test', '[\"http://localhost\"]')",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, 'scope-client', ?2, 'mcp')",
-                params![token_hash, expires],
-            ).unwrap();
-        }
-
-        let scope = validate_oauth_token_with_scope(&db, token);
-        assert_eq!(scope, Some("mcp".to_string()));
-    }
-
-    #[tokio::test]
-    async fn revoked_token_has_no_scope() {
-        let (_, db) = test_oauth_app();
-
-        let token = "lific_at_revoked-scope-test";
-        let token_hash = sha256_hex(token.as_bytes());
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        {
-            let conn = db.write().unwrap();
-            conn.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('rev-client', 'Test', '[\"http://localhost\"]')",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, revoked) VALUES (?1, 'rev-client', ?2, 'mcp', 1)",
-                params![token_hash, expires],
-            ).unwrap();
-        }
-
-        assert_eq!(validate_oauth_token_with_scope(&db, token), None);
-        assert!(!validate_oauth_token(&db, token));
-    }
+    // ── LIF-51 / LIF-384: scope is stored and advertised, never enforced ──
+    //
+    // The two tests that lived here exercised `validate_oauth_token_with_scope`,
+    // which is gone: nothing compared its return value against a required
+    // scope. Revoked tokens failing validation is covered by
+    // `revoke_token_invalidates_access`, and the `scope` field clients read off
+    // the token response is pinned in
+    // `device_consumed_code_cannot_mint_a_second_token`.
 
     // ── LIF-64: redirect_uri validation + register rate limit ─────────────
 
@@ -3564,6 +3530,8 @@ mod tests {
         approve_device_code(&db, &hash);
         let (status, body) = poll_device_token(&app, &device_code).await;
         assert_eq!(status, StatusCode::OK, "expected token, got {body}");
+        // Clients read `scope` off the token response; it stays on the wire.
+        assert_eq!(body["scope"], "mcp");
         assert_eq!(token_count(&db), 1);
         assert_eq!(device_status(&db, &hash), "consumed");
 
