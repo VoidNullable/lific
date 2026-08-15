@@ -29,7 +29,7 @@
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
@@ -926,6 +926,7 @@
                   {@render recentItems("issues", project)}
                 {/if}
                 {@render subItem(`/${project.identifier}/board`, "Board", LayoutGrid)}
+                {@render subItem(`/${project.identifier}/graph`, "Graph", Waypoints)}
                 {@render subItem(`/${project.identifier}/modules`, "Modules", Layers)}
                 {#if isProjectActive && activeRecentSection === "modules"}
                   {@render recentItems("modules", project)}

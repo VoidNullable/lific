@@ -122,6 +122,21 @@ pub(super) async fn delete_issue_handler(
     Ok(Json(serde_json::json!({"deleted": true})))
 }
 
+/// LIF-363: every relation edge inside one project, in one round trip. Feeds
+/// the dependency-graph view; the client filters to `blocks` edges itself so
+/// a future view mode (e.g. relates_to clusters) needs no new endpoint.
+pub(super) async fn project_relations(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<ProjectRelation>>, LificError> {
+    authz::require_role(&db, &identity, id, Role::Viewer)?;
+    with_read(&db, |conn| {
+        crate::db::queries::list_project_relations(conn, id)
+    })
+    .map(Json)
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct LinkRequest {
     source: String,
@@ -321,6 +336,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// LIF-363: the graph endpoint returns every edge whose endpoints both
+    /// live in the project — all relation types, both chain links — and
+    /// excludes cross-project edges entirely (a node for the far endpoint
+    /// wouldn't exist in a project-scoped graph).
+    #[tokio::test]
+    async fn project_relations_returns_in_project_edges_only() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+
+        for title in ["A", "B", "C"] {
+            let resp = json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": title}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        // A blocks B, B blocks C (the acceptance-criteria chain), plus one
+        // relates_to edge to prove type passthrough.
+        for (source, target, rel) in [
+            ("TST-1", "TST-2", "blocks"),
+            ("TST-2", "TST-3", "blocks"),
+            ("TST-1", "TST-3", "relates_to"),
+        ] {
+            let resp = json_post(
+                &app,
+                "/api/issues/link",
+                serde_json::json!({"source": source, "target": target, "relation_type": rel}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // A second project with a cross-project link back into TST: the edge
+        // must not appear in either project's graph.
+        let resp = json_post(
+            &app,
+            "/api/projects",
+            serde_json::json!({"name": "Other", "identifier": "OTH"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let other: serde_json::Value = parse_json(resp).await;
+        let other_id = other["id"].as_i64().unwrap();
+        let resp = json_post(
+            &app,
+            "/api/issues",
+            serde_json::json!({"project_id": other_id, "title": "Outsider"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = json_post(
+            &app,
+            "/api/issues/link",
+            serde_json::json!({"source": "OTH-1", "target": "TST-1", "relation_type": "blocks"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = json_get(&app, &format!("/api/projects/{project_id}/relations")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let edges: serde_json::Value = parse_json(resp).await;
+        let edges = edges.as_array().unwrap();
+        assert_eq!(edges.len(), 3);
+        let as_tuples: Vec<(String, String, String)> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e["source_identifier"].as_str().unwrap().to_string(),
+                    e["target_identifier"].as_str().unwrap().to_string(),
+                    e["relation_type"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        for expected in [
+            ("TST-1", "TST-2", "blocks"),
+            ("TST-2", "TST-3", "blocks"),
+            ("TST-1", "TST-3", "relates_to"),
+        ] {
+            assert!(
+                as_tuples.contains(&(
+                    expected.0.to_string(),
+                    expected.1.to_string(),
+                    expected.2.to_string()
+                )),
+                "missing edge {expected:?} in {as_tuples:?}"
+            );
+        }
+        // Numeric ids come along for O(1) node lookup client-side.
+        assert!(edges.iter().all(|e| e["source_id"].is_i64() && e["target_id"].is_i64()));
+
+        let resp = json_get(&app, &format!("/api/projects/{other_id}/relations")).await;
+        let edges: serde_json::Value = parse_json(resp).await;
+        assert_eq!(edges.as_array().unwrap().len(), 0);
+    }
+
+    /// An empty project graphs to an empty edge list, not an error.
+    #[tokio::test]
+    async fn project_relations_empty_project() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        let resp = json_get(&app, &format!("/api/projects/{project_id}/relations")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let edges: serde_json::Value = parse_json(resp).await;
+        assert_eq!(edges.as_array().unwrap().len(), 0);
     }
 
     /// LIF-385: `status` and `priority` are enums, so a value outside the set

@@ -263,6 +263,8 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("PUT", "/api/project-groups/assign"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/board"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/issue-counts"), Gated(Viewer)),
+        // Dependency graph edges (LIF-363).
+        (("GET", "/api/projects/{id}/relations"), Gated(Viewer)),
         (("POST", "/api/projects/{id}/import/github"), Gated(Lead)),
         // ── Membership management (LIF-199, REST/web-only) ──
         (("GET", "/api/projects/{id}/members"), Gated(Viewer)),

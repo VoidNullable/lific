@@ -290,6 +290,22 @@ pub struct Issue {
     pub duplicated_by: Vec<String>,
 }
 
+/// One edge in a project's issue-relation graph (LIF-363). Produced in bulk
+/// by `queries::list_project_relations` for the dependency-graph view, which
+/// needs every edge in one round trip instead of a `get_issue` per node. Both
+/// endpoints are guaranteed to live in the same project by that query.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectRelation {
+    pub source_id: i64,
+    /// Computed "{project.identifier}-{sequence}" for the source issue.
+    pub source_identifier: String,
+    pub target_id: i64,
+    /// Computed "{project.identifier}-{sequence}" for the target issue.
+    pub target_identifier: String,
+    /// blocks | relates_to | duplicate (directional: source→target).
+    pub relation_type: String,
+}
+
 /// `Default` is derived: `status` and `priority` fall back to
 /// [`Status::Backlog`] / [`Priority::None`], which is exactly what a JSON body
 /// omitting those fields produces (they carry `#[serde(default)]`). Before

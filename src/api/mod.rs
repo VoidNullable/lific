@@ -164,6 +164,11 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))
         .route("/api/issues/unlink", post(issues::unlink_issues))
+        // Project-wide relation edges (dependency graph — LIF-363)
+        .route(
+            "/api/projects/{id}/relations",
+            get(issues::project_relations),
+        )
         // Modules
         .route(
             "/api/modules",

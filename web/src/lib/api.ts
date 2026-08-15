@@ -647,6 +647,25 @@ export async function downloadIssueExport(identifier: string) {
   return download(`/export/issues/${identifier}`);
 }
 
+// ── Relations (dependency graph — LIF-363) ──────────────────
+//
+// One round trip for every relation edge inside a project. The graph view
+// filters to `blocks` client-side; other types ride along so a future view
+// mode needs no new endpoint.
+
+export interface ProjectRelation {
+  source_id: number;
+  source_identifier: string;
+  target_id: number;
+  target_identifier: string;
+  /** blocks | relates_to | duplicate (directional: source→target). */
+  relation_type: string;
+}
+
+export async function listProjectRelations(projectId: number) {
+  return request<ProjectRelation[]>(`/projects/${projectId}/relations`);
+}
+
 // ── Modules ─────────────────────────────────────────────────
 
 export interface Module {

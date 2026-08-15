@@ -46,6 +46,7 @@
     ListChecks,
     History,
     TrendingUp,
+    Waypoints,
   } from "lucide-svelte";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
@@ -336,6 +337,7 @@
     { slug: "overview", label: "Overview", icon: LayoutDashboard },
     { slug: "issues", label: "Issues", icon: List },
     { slug: "board", label: "Board", icon: LayoutGrid },
+    { slug: "graph", label: "Graph", icon: Waypoints },
     { slug: "modules", label: "Modules", icon: Layers },
     { slug: "pages", label: "Pages", icon: FileText },
     { slug: "plans", label: "Plans", icon: ListChecks },

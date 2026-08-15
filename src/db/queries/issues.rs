@@ -153,6 +153,41 @@ pub fn issue_status(conn: &Connection, id: i64) -> Result<String, LificError> {
         })
 }
 
+/// Every issue-to-issue relation whose endpoints BOTH live in `project_id`,
+/// with identifiers precomputed. One round trip for the dependency-graph view
+/// (LIF-363) — the list endpoint deliberately leaves per-issue relation
+/// arrays empty, and fetching `get_issue` per node would be N+1. Cross-project
+/// edges are excluded on purpose: the graph is scoped to one project and a
+/// node for the far endpoint wouldn't exist to draw the edge against.
+pub fn list_project_relations(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<Vec<ProjectRelation>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT ir.source_id, sp.identifier || '-' || s.sequence,
+                ir.target_id, tp.identifier || '-' || t.sequence,
+                ir.relation_type
+         FROM issue_relations ir
+         JOIN issues s ON s.id = ir.source_id
+         JOIN projects sp ON sp.id = s.project_id
+         JOIN issues t ON t.id = ir.target_id
+         JOIN projects tp ON tp.id = t.project_id
+         WHERE s.project_id = ?1 AND t.project_id = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id], |row| {
+            Ok(ProjectRelation {
+                source_id: row.get(0)?,
+                source_identifier: row.get(1)?,
+                target_id: row.get(2)?,
+                target_identifier: row.get(3)?,
+                relation_type: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Resolve "PRO-42" to an issue ID.
 pub fn resolve_identifier(conn: &Connection, identifier: &str) -> Result<i64, LificError> {
     let parts: Vec<&str> = identifier.splitn(2, '-').collect();

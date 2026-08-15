@@ -17,6 +17,7 @@
   import PlanDetail from "./routes/PlanDetail.svelte";
   import ProjectActivity from "./routes/ProjectActivity.svelte";
   import Insights from "./routes/Insights.svelte";
+  import DependencyGraph from "./routes/DependencyGraph.svelte";
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
@@ -353,6 +354,7 @@
     | { type: "app"; page: "project-settings"; project: string }
     | { type: "app"; page: "issues"; project: string }
     | { type: "app"; page: "board"; project: string }
+    | { type: "app"; page: "graph"; project: string }
     | {
         type: "app";
         page: "issue-new";
@@ -414,6 +416,12 @@
     const boardMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/board$/i);
     if (boardMatch) {
       return { type: "app", page: "board", project: boardMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/graph (dependency graph — LIF-363)
+    const graphMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/graph$/i);
+    if (graphMatch) {
+      return { type: "app", page: "graph", project: graphMatch[1] };
     }
 
     // Project-scoped: /{IDENTIFIER}/issues/new
@@ -604,6 +612,8 @@
         projectIdentifier={parsed.project}
         layout={parsed.page === "board" ? "board" : "list"}
       />
+    {:else if parsed.page === "graph"}
+      <DependencyGraph {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "issue-new"}
       <IssueNew
         {navigate}
