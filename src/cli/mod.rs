@@ -6,6 +6,7 @@ pub mod exec;
 pub mod http;
 pub mod import;
 pub mod instance;
+pub mod key;
 pub mod login;
 pub mod service;
 pub mod term;
