@@ -24,7 +24,9 @@ const MAX_OAUTH_BODY_BYTES: usize = 64 * 1024;
 const MAX_CLIENT_NAME_BYTES: usize = 128;
 const MAX_REDIRECT_URIS: usize = 8;
 const MAX_REDIRECT_URI_BYTES: usize = 2048;
-const MAX_REDIRECT_METADATA_BYTES: usize = 16 * 1024;
+// Leave room for JSON quotes, separators, and escaping around the maximum
+// number and size of redirect URIs.
+const MAX_REDIRECT_METADATA_BYTES: usize = 32 * 1024;
 const DYNAMIC_CLIENT_RETENTION_DAYS: i64 = 7;
 
 /// Per-process CSRF secret, generated randomly on startup.
@@ -428,13 +430,15 @@ async fn register_client(
     };
     // Anonymous registrations are disposable. Reclaim old clients that have
     // never participated in a code/token flow before inserting a new row.
-    let _ = conn.execute(
+    if let Err(error) = conn.execute(
         "DELETE FROM oauth_clients
          WHERE created_at < datetime('now', ?1)
            AND NOT EXISTS (SELECT 1 FROM oauth_codes c WHERE c.client_id = oauth_clients.client_id)
            AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id)",
         [format!("-{DYNAMIC_CLIENT_RETENTION_DAYS} days")],
-    );
+    ) {
+        warn!(%error, "failed to clean up stale OAuth clients");
+    }
     let client_id = uuid_v4();
     if let Err(e) = conn.execute(
         "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, ?2, ?3)",
@@ -1851,7 +1855,7 @@ pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
         return false;
     };
     conn.query_row(
-        "SELECT scope FROM oauth_tokens
+        "SELECT 1 FROM oauth_tokens
          WHERE access_token = ?1 AND revoked = 0 AND julianday(expires_at) > julianday('now')",
         params![token_hash],
         |_| Ok(()),
