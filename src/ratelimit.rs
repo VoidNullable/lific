@@ -184,19 +184,19 @@ impl RateLimiter {
 
     /// Keep the bounded table available to new identities. Expired entries are
     /// removed first; if an attacker has filled the table with live keys, evict
-    /// the key whose oldest attempt will expire first instead of permanently
-    /// denying every new identity.
+    /// the least-recently-active key based on its newest attempt. This preserves
+    /// identities that are still actively making attempts.
     fn make_room(map: &mut HashMap<String, Vec<Instant>>, now: Instant, window: Duration) {
         Self::sweep(map, now, window);
         if map.len() < MAX_KEYS {
             return;
         }
-        if let Some(oldest_key) = map
+        if let Some(least_recently_active_key) = map
             .iter()
-            .min_by_key(|(_, entries)| entries.first().copied().unwrap_or(now))
+            .min_by_key(|(_, entries)| entries.last().copied().unwrap_or(now))
             .map(|(key, _)| key.clone())
         {
-            map.remove(&oldest_key);
+            map.remove(&least_recently_active_key);
         }
     }
 
@@ -333,6 +333,39 @@ mod tests {
             assert!(rl.check(&format!("identity-{index}")));
         }
         assert!(rl.check("new-identity"));
+    }
+
+    #[test]
+    fn full_table_evicts_least_recently_active_key() {
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        let mut map = HashMap::new();
+
+        // This identity has the oldest attempt, but its newest attempt is
+        // recent and should keep it in the bounded table.
+        map.insert(
+            "high-rate".to_string(),
+            vec![
+                now.checked_sub(Duration::from_secs(30)).unwrap(),
+                now.checked_sub(Duration::from_secs(1)).unwrap(),
+            ],
+        );
+        map.insert(
+            "least-active".to_string(),
+            vec![now.checked_sub(Duration::from_secs(5)).unwrap()],
+        );
+        for index in 0..(MAX_KEYS - 2) {
+            map.insert(
+                format!("active-{index}"),
+                vec![now.checked_sub(Duration::from_secs(2)).unwrap()],
+            );
+        }
+
+        RateLimiter::make_room(&mut map, now, window);
+
+        assert!(map.contains_key("high-rate"));
+        assert!(!map.contains_key("least-active"));
+        assert_eq!(map.len(), MAX_KEYS - 1);
     }
 
     // ── LIF-75: peek() is non-recording ──────────────────────
