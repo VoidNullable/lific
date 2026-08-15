@@ -401,21 +401,6 @@ fn linked_attachment_events(
     Ok(events)
 }
 
-/// Re-scan an entity's markdown body for `/api/attachments/{id}` references
-/// and reconcile the link table to match (LIF-262 "re-scan on save"). Called
-/// from the issue/page/comment create+update handlers inside their write txn.
-/// The entity's own text is the source of truth for which attachments it uses;
-/// this makes the join table agree.
-pub(crate) fn sync_links(
-    conn: &rusqlite::Connection,
-    entity: AttachmentEntity,
-    entity_id: i64,
-    markdown: &str,
-) -> Result<(), LificError> {
-    let ids = q::parse_referenced_ids(markdown);
-    q::sync_entity_links(conn, entity, entity_id, &ids)
-}
-
 // ── Authorization helpers ────────────────────────────────────
 
 /// Resolve every distinct project id an attachment is linked into (via its

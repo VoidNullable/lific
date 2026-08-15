@@ -11,8 +11,9 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_user, with_read, with_write};
 
-/// LIF-263: build the visible mention-candidate set for a comment's project,
-/// then create the comment and record its resolved mentions in one write.
+/// Pool-level adaptor over [`comments::create_comment_with_mentions`]: the
+/// mention set (LIF-263) and the attachment links (LIF-262) are reconciled in
+/// the same write as the insert.
 ///
 /// The `authz_enforced` flag is read *before* the write lock is taken (it
 /// opens its own read connection) to avoid nesting the pool's guards.
@@ -25,17 +26,14 @@ fn create_comment_with_mentions(
 ) -> Result<Comment, LificError> {
     let member_scoped = authz::authz_enforced(db)?;
     with_write(db, |conn| {
-        let candidates = comments::mention_candidates(conn, project_id, member_scoped)?;
-        let comment = comments::create_comment(conn, parent, user_id, content)?;
-        comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-        // LIF-262: link attachments referenced in the comment body.
-        super::attachments::sync_links(
+        comments::create_comment_with_mentions(
             conn,
-            AttachmentEntity::Comment,
-            comment.id,
-            &comment.content,
-        )?;
-        Ok(comment)
+            parent,
+            project_id,
+            user_id,
+            content,
+            member_scoped,
+        )
     })
 }
 
@@ -224,17 +222,13 @@ pub(super) async fn update_comment_handler(
     let member_scoped = authz::authz_enforced(&db)?;
 
     let comment = with_write(&db, |conn| {
-        let candidates = comments::mention_candidates(conn, project_id, member_scoped)?;
-        let comment = comments::update_comment(conn, id, &input.content)?;
-        comments::sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-        // LIF-262: re-scan the edited comment and reconcile links.
-        super::attachments::sync_links(
+        comments::update_comment_with_mentions(
             conn,
-            AttachmentEntity::Comment,
-            comment.id,
-            &comment.content,
-        )?;
-        Ok(comment)
+            id,
+            project_id,
+            &input.content,
+            member_scoped,
+        )
     })?;
     match (comment.issue_id, project_id) {
         (Some(issue_id), Some(project_id)) => {

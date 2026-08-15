@@ -256,6 +256,22 @@ pub fn parse_referenced_ids(markdown: &str) -> Vec<i64> {
     ids
 }
 
+/// Re-scan an entity's markdown body for `/api/attachments/{id}` references
+/// and reconcile the link table to match (LIF-262 "re-scan on save"). Called
+/// from every issue/page/comment create+update path — REST handlers and MCP
+/// tools alike (LIF-369) — inside their write txn. The entity's own text is
+/// the source of truth for which attachments it uses; this makes the join
+/// table agree.
+pub fn sync_links(
+    conn: &Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+    markdown: &str,
+) -> Result<(), LificError> {
+    let ids = parse_referenced_ids(markdown);
+    sync_entity_links(conn, entity, entity_id, &ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -60,7 +60,7 @@ pub(super) async fn create_issue(
     let issue = with_write(&db, |conn| {
         let issue = crate::db::queries::create_issue(conn, &input)?;
         // LIF-262: link any attachments the description references.
-        super::attachments::sync_links(
+        crate::db::queries::attachments::sync_links(
             conn,
             AttachmentEntity::Issue,
             issue.id,
@@ -87,7 +87,7 @@ pub(super) async fn update_issue(
     let issue = with_write(&db, |conn| {
         let issue = crate::db::queries::update_issue(conn, id, &input)?;
         // LIF-262: re-scan the (possibly edited) description and reconcile links.
-        super::attachments::sync_links(
+        crate::db::queries::attachments::sync_links(
             conn,
             AttachmentEntity::Issue,
             issue.id,
