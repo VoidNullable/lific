@@ -4,14 +4,22 @@
 //! command parsing and output selection stay transport-independent while each
 //! backend owns only identifier resolution and I/O.
 
-use std::{borrow::Cow, fs, io::Write, net::IpAddr, path::Path, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fs,
+    io::Write,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
     header::{CONTENT_DISPOSITION, HeaderMap},
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::db::models;
@@ -19,7 +27,7 @@ use crate::links::{IssueLinkContext, MarkdownReference, ResourceUrl};
 
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
-    PageAction, ProjectAction, owned_labels,
+    PageAction, ProjectAction, owned_labels, render,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,6 +38,12 @@ type QueryParam<'a> = (&'a str, Cow<'a, str>);
 struct ResolvedResource {
     id: i64,
     identifier: String,
+}
+
+/// Deserialize a response into the model a command renders, or `None` when
+/// the server sent something this binary does not recognize.
+fn decode<T: DeserializeOwned>(value: &Value) -> Option<T> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 pub async fn run(
@@ -48,7 +62,7 @@ pub async fn run(
     if json_output {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_human(&output);
+        print!("{}", backend.human(command, &output).await);
     }
     Ok(())
 }
@@ -138,6 +152,176 @@ impl HttpBackend {
             Command::Folder { action } => self.folder(action).await,
             _ => bail!("the HTTP backend does not support this command yet"),
         }
+    }
+
+    /// Render a response the way the SQL backend renders it (LIF-373).
+    ///
+    /// Falls back to pretty JSON when the payload does not deserialize into
+    /// the model the command expects, so a CLI pointed at a server of another
+    /// version still prints something rather than failing at the last step.
+    async fn human(&self, command: &Command, value: &Value) -> String {
+        match self.render(command, value).await {
+            Some(text) => text,
+            None => format!("{}\n", pretty(value)),
+        }
+    }
+
+    async fn render(&self, command: &Command, value: &Value) -> Option<String> {
+        Some(match command {
+            Command::Issue { action } => match action {
+                IssueAction::List { .. } => {
+                    let issues: Vec<models::Issue> = decode(value)?;
+                    let names = self.module_names(&issues).await;
+                    render::issue_list(&issues, &|id| names.get(&id).cloned())
+                }
+                IssueAction::Get { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    let names = self.module_names(std::slice::from_ref(&issue)).await;
+                    render::issue_detail(&issue, &|id| names.get(&id).cloned())
+                }
+                IssueAction::Create { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    render::issue_created(&issue)
+                }
+                IssueAction::Update { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    render::issue_updated(&issue)
+                }
+            },
+            Command::Project { action } => match action {
+                ProjectAction::List => {
+                    let projects: Vec<models::Project> = decode(value)?;
+                    render::project_list(&projects)
+                }
+                ProjectAction::Get { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_detail(&project)
+                }
+                ProjectAction::Create { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_created(&project)
+                }
+                ProjectAction::Update { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_updated(&project)
+                }
+            },
+            Command::Page { action } => match action {
+                PageAction::List { .. } => {
+                    let pages: Vec<models::Page> = decode(value)?;
+                    render::page_list(&pages)
+                }
+                PageAction::Get { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_detail(&page)
+                }
+                PageAction::Create { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_created(&page)
+                }
+                PageAction::Update { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_updated(&page)
+                }
+            },
+            Command::Search { .. } => {
+                let results: Vec<models::SearchResult> = decode(value)?;
+                render::search_results(&results)
+            }
+            Command::Comment { action } => match action {
+                CommentAction::List { identifier } => {
+                    let comments: Vec<models::Comment> = decode(value)?;
+                    render::comment_list(&comments, identifier)
+                }
+                CommentAction::Add { identifier, .. } => {
+                    let comment: models::Comment = decode(value)?;
+                    render::comment_added(&comment, identifier)
+                }
+            },
+            Command::Module { action } => match action {
+                ModuleAction::List { project } => {
+                    let modules: Vec<models::Module> = decode(value)?;
+                    render::module_list(&modules, project)
+                }
+                ModuleAction::Create { project, .. } => {
+                    let module: models::Module = decode(value)?;
+                    render::module_created(&module, project)
+                }
+                ModuleAction::Update { .. } => {
+                    let module: models::Module = decode(value)?;
+                    render::module_updated(&module)
+                }
+                ModuleAction::Delete { name, .. } => render::module_deleted(name),
+            },
+            Command::Label { action } => match action {
+                LabelAction::List { project } => {
+                    let labels: Vec<models::Label> = decode(value)?;
+                    render::label_list(&labels, project)
+                }
+                LabelAction::Create { .. } => {
+                    let label: models::Label = decode(value)?;
+                    render::label_created(&label)
+                }
+                LabelAction::Update { .. } => {
+                    let label: models::Label = decode(value)?;
+                    render::label_updated(&label)
+                }
+                LabelAction::Delete { name, .. } => render::label_deleted(name),
+            },
+            Command::Folder { action } => match action {
+                FolderAction::List { project } => {
+                    let folders: Vec<models::Folder> = decode(value)?;
+                    render::folder_list(&folders, project)
+                }
+                FolderAction::Create { .. } => {
+                    let folder: models::Folder = decode(value)?;
+                    render::folder_created(&folder)
+                }
+                FolderAction::Update { name, .. } => {
+                    let folder: models::Folder = decode(value)?;
+                    render::folder_updated(name, &folder)
+                }
+                FolderAction::Delete { name, .. } => render::folder_deleted(name),
+            },
+            Command::Export { action } => {
+                let output = match action {
+                    ExportAction::Issue { output, .. }
+                    | ExportAction::Page { output, .. }
+                    | ExportAction::Project { output, .. } => output,
+                };
+                let written: Vec<PathBuf> = decode::<Vec<String>>(value)?
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect();
+                render::export_written(&written, output)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Module names for a rendered issue list, keyed by id. The SQL backend
+    /// reads these from the database; over HTTP one `/api/modules` call per
+    /// project covers the whole list. Failures are swallowed, so an
+    /// unresolvable module renders as no module, matching the SQL backend.
+    async fn module_names(&self, issues: &[models::Issue]) -> HashMap<i64, String> {
+        let mut projects = issues
+            .iter()
+            .filter(|issue| issue.module_id.is_some())
+            .map(|issue| issue.project_id)
+            .collect::<Vec<_>>();
+        projects.sort_unstable();
+        projects.dedup();
+
+        let mut names = HashMap::new();
+        for project_id in projects {
+            let params = [("project_id", Cow::Owned(project_id.to_string()))];
+            if let Ok(value) = self.get_json("/api/modules", &params).await
+                && let Some(modules) = decode::<Vec<models::Module>>(&value)
+            {
+                names.extend(modules.into_iter().map(|module| (module.id, module.name)));
+            }
+        }
+        names
     }
 
     async fn issue(&self, action: &IssueAction) -> Result<Value> {
@@ -1049,13 +1233,6 @@ fn with_string_field(
     object
 }
 
-fn print_human(value: &Value) {
-    match value {
-        Value::Array(items) => println!("{} item(s):\n{}", items.len(), pretty(value)),
-        _ => println!("{}", pretty(value)),
-    }
-}
-
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -1093,7 +1270,7 @@ mod tests {
     use super::{
         ERROR_BODY_LIMIT, HttpBackend, IssueLinkOutput, ResourceKind, error_detail,
         export_filename, find_resource, is_loopback_host, linked_comments, linked_modules,
-        linked_resources, models, resource_from_object, resource_url, safe_filename,
+        linked_resources, models, render, resource_from_object, resource_url, safe_filename,
         sanitize_error_detail, segment,
     };
     use crate::links::IssueLinkContext;
@@ -2115,6 +2292,160 @@ mod tests {
             value[0]["comment"],
             "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
         );
+    }
+
+    /// LIF-373: `lific issue list` must print the same thing whether it read
+    /// the database directly or went over HTTP. Same data, one renderer,
+    /// byte-identical output.
+    #[tokio::test]
+    async fn renders_issue_lists_identically_to_the_sql_backend() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let command = Command::Issue {
+            action: IssueAction::List {
+                project: "TST".into(),
+                status: None,
+                priority: None,
+                module: None,
+                label: None,
+                workable: false,
+                limit: None,
+            },
+        };
+
+        // A module-assigned issue as well: the SQL backend reads the module
+        // name from the database, the HTTP backend has to go fetch it.
+        let project_id = backend.project_id("TST").await.unwrap();
+        let module = backend
+            .send_json(
+                Method::POST,
+                "/api/modules",
+                &models::CreateModule {
+                    project_id,
+                    name: "Core".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    emoji: None,
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .send_json(
+                Method::POST,
+                "/api/issues",
+                &models::CreateIssue {
+                    project_id,
+                    title: "Modular issue".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    priority: "high".into(),
+                    module_id: module["id"].as_i64(),
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let value = backend.execute(&command, IssueLinkOutput::Url).await.unwrap();
+        let remote = backend.human(&command, &value).await;
+
+        let pool = crate::db::open_memory().expect("test db");
+        {
+            let conn = pool.write().unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Test Project".into(),
+                    identifier: "TST".into(),
+                    description: "integration test project".into(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: project.id,
+                    title: "Test issue".into(),
+                    description: String::new(),
+                    status: "backlog".into(),
+                    priority: "none".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .unwrap();
+            let module = crate::db::queries::create_module(
+                &conn,
+                &models::CreateModule {
+                    project_id: project.id,
+                    name: "Core".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    emoji: None,
+                },
+            )
+            .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: project.id,
+                    title: "Modular issue".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    priority: "high".into(),
+                    module_id: Some(module.id),
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .unwrap();
+        }
+        let conn = pool.read().unwrap();
+        let issues = crate::db::queries::list_issues(
+            &conn,
+            &models::ListIssuesQuery {
+                project_id: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let module_name = |id: i64| crate::db::queries::get_module_name(&conn, id).ok();
+        let local = render::issue_list(&issues, &module_name);
+
+        assert_eq!(remote, local);
+        assert!(remote.contains("TST-2"), "{remote}");
+        assert!(remote.contains("(Core)"), "{remote}");
+        fixture.server.abort();
+    }
+
+    /// A server that answers with a shape this binary does not know (an older
+    /// or newer release) still prints its payload instead of failing at the
+    /// last step.
+    #[tokio::test]
+    async fn falls_back_to_json_for_unrecognized_responses() {
+        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+
+        let rendered = backend
+            .human(
+                &Command::Project {
+                    action: ProjectAction::List,
+                },
+                &json!({"unexpected": true}),
+            )
+            .await;
+
+        assert_eq!(rendered, "{\n  \"unexpected\": true\n}\n");
     }
 
     #[test]

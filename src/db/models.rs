@@ -651,7 +651,7 @@ pub struct SearchQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub result_type: String,
     pub id: i64,

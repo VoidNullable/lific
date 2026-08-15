@@ -3,6 +3,7 @@ use crate::db::models::*;
 use crate::db::queries;
 use crate::error::LificError;
 
+use super::render;
 use super::*;
 
 /// Run a CLI CRUD command against the database.
@@ -48,10 +49,7 @@ fn export(
     if json {
         print_json(&written);
     } else {
-        println!("Exported {} file(s) to {}", written.len(), output.display());
-        for path in written {
-            println!("  {}", path.display());
-        }
+        print!("{}", render::export_written(&written, output));
     }
     Ok(())
 }
@@ -60,10 +58,6 @@ fn export(
 
 fn print_json<T: serde::Serialize>(val: &T) {
     println!("{}", serde_json::to_string_pretty(val).unwrap());
-}
-
-fn owned_labels(value: Option<&str>) -> Option<Vec<String>> {
-    value.map(|value| super::split_csv(value).map(str::to_owned).collect())
 }
 
 fn page_folder_id(
@@ -76,29 +70,6 @@ fn page_folder_id(
         .map(|project_id| queries::resolve_folder_name(conn, project_id, name))
         .transpose()?
         .ok_or_else(|| "cannot set folder on workspace page".into())
-}
-
-/// Format a priority with visual indicator for human output.
-fn fmt_priority(p: &str) -> &str {
-    match p {
-        "urgent" => "!!!  urgent",
-        "high" => "!!   high",
-        "medium" => "!    medium",
-        "low" => "     low",
-        _ => "     none",
-    }
-}
-
-/// Format a status with visual indicator for human output.
-fn fmt_status(s: &str) -> &str {
-    match s {
-        "backlog" => "[ ] backlog",
-        "todo" => "[.] todo",
-        "active" => "[~] active",
-        "done" => "[x] done",
-        "cancelled" => "[-] cancelled",
-        _ => s,
-    }
 }
 
 // ── Issue ────────────────────────────────────────────────────
@@ -142,34 +113,9 @@ fn issue(
 
             if json {
                 print_json(&issues);
-            } else if issues.is_empty() {
-                println!("No issues found.");
             } else {
-                println!("{} issue(s):\n", issues.len());
-                for i in &issues {
-                    let labels = if i.labels.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", i.labels.join(", "))
-                    };
-                    let module = if let Some(mid) = i.module_id {
-                        match queries::get_module_name(&conn, mid) {
-                            Ok(name) => format!(" ({name})"),
-                            Err(_) => String::new(),
-                        }
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "  {:<8} {} | {} | {}{}{}",
-                        i.identifier,
-                        fmt_status(&i.status),
-                        fmt_priority(&i.priority),
-                        i.title,
-                        labels,
-                        module
-                    );
-                }
+                let module_name = |id: i64| queries::get_module_name(&conn, id).ok();
+                print!("{}", render::issue_list(&issues, &module_name));
             }
         }
 
@@ -181,36 +127,8 @@ fn issue(
             if json {
                 print_json(&issue);
             } else {
-                println!("{} - {}", issue.identifier, issue.title);
-                println!("  Status:   {}", issue.status);
-                println!("  Priority: {}", issue.priority);
-                if !issue.labels.is_empty() {
-                    println!("  Labels:   {}", issue.labels.join(", "));
-                }
-                if let Some(mid) = issue.module_id
-                    && let Ok(name) = queries::get_module_name(&conn, mid)
-                {
-                    println!("  Module:   {name}");
-                }
-                if !issue.blocks.is_empty() {
-                    println!("  Blocks:   {}", issue.blocks.join(", "));
-                }
-                if !issue.blocked_by.is_empty() {
-                    println!("  Blocked:  {}", issue.blocked_by.join(", "));
-                }
-                if !issue.relates_to.is_empty() {
-                    println!("  Relates:  {}", issue.relates_to.join(", "));
-                }
-                if !issue.duplicates.is_empty() {
-                    println!("  Dupes:    {}", issue.duplicates.join(", "));
-                }
-                if !issue.duplicated_by.is_empty() {
-                    println!("  DupedBy:  {}", issue.duplicated_by.join(", "));
-                }
-                if !issue.description.is_empty() {
-                    println!();
-                    println!("{}", issue.description);
-                }
+                let module_name = |id: i64| queries::get_module_name(&conn, id).ok();
+                print!("{}", render::issue_detail(&issue, &module_name));
             }
         }
 
@@ -252,7 +170,7 @@ fn issue(
             if json {
                 print_json(&issue);
             } else {
-                println!("Created {}: {}", issue.identifier, issue.title);
+                print!("{}", render::issue_created(&issue));
             }
         }
 
@@ -299,9 +217,7 @@ fn issue(
             if json {
                 print_json(&issue);
             } else {
-                println!("Updated {}: {}", issue.identifier, issue.title);
-                println!("  Status:   {}", issue.status);
-                println!("  Priority: {}", issue.priority);
+                print!("{}", render::issue_updated(&issue));
             }
         }
     }
@@ -322,18 +238,8 @@ fn project(
 
             if json {
                 print_json(&projects);
-            } else if projects.is_empty() {
-                println!("No projects.");
             } else {
-                println!("{} project(s):\n", projects.len());
-                for p in &projects {
-                    let desc = if p.description.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" - {}", p.description.lines().next().unwrap_or(""))
-                    };
-                    println!("  {:<5} {}{}", p.identifier, p.name, desc);
-                }
+                print!("{}", render::project_list(&projects));
             }
         }
 
@@ -345,11 +251,7 @@ fn project(
             if json {
                 print_json(&project);
             } else {
-                println!("{} - {}", project.identifier, project.name);
-                if !project.description.is_empty() {
-                    println!();
-                    println!("{}", project.description);
-                }
+                print!("{}", render::project_detail(&project));
             }
         }
 
@@ -373,7 +275,7 @@ fn project(
             if json {
                 print_json(&project);
             } else {
-                println!("Created project {} ({})", project.name, project.identifier);
+                print!("{}", render::project_created(&project));
             }
         }
 
@@ -399,7 +301,7 @@ fn project(
             if json {
                 print_json(&project);
             } else {
-                println!("Updated project {} ({})", project.name, project.identifier);
+                print!("{}", render::project_updated(&project));
             }
         }
     }
@@ -440,28 +342,8 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
 
             if json {
                 print_json(&pages);
-            } else if pages.is_empty() {
-                println!("No pages found.");
             } else {
-                println!("{} page(s):\n", pages.len());
-                for p in &pages {
-                    let preview = if p.content.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        let first_line = p.content.lines().next().unwrap_or("");
-                        if first_line.len() > 60 {
-                            format!("{}...", &first_line[..60])
-                        } else {
-                            first_line.to_string()
-                        }
-                    };
-                    let labels = if p.labels.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", p.labels.join(", "))
-                    };
-                    println!("  {:<12} {} - {}{}", p.identifier, p.title, preview, labels);
-                }
+                print!("{}", render::page_list(&pages));
             }
         }
 
@@ -473,14 +355,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             if json {
                 print_json(&page);
             } else {
-                println!("{} - {}", page.identifier, page.title);
-                if !page.labels.is_empty() {
-                    println!("  Labels: {}", page.labels.join(", "));
-                }
-                if !page.content.is_empty() {
-                    println!();
-                    println!("{}", page.content);
-                }
+                print!("{}", render::page_detail(&page));
             }
         }
 
@@ -521,7 +396,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             if json {
                 print_json(&page);
             } else {
-                println!("Created page {}: {}", page.identifier, page.title);
+                print!("{}", render::page_created(&page));
             }
         }
 
@@ -560,7 +435,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             if json {
                 print_json(&page);
             } else {
-                println!("Updated page {}: {}", page.identifier, page.title);
+                print!("{}", render::page_updated(&page));
             }
         }
     }
@@ -593,24 +468,8 @@ fn search(
 
     if json {
         print_json(&results);
-    } else if results.is_empty() {
-        println!("No results found.");
     } else {
-        println!("{} result(s):\n", results.len());
-        for r in &results {
-            let ident = r.identifier.as_deref().unwrap_or("?");
-            println!("  {:<12} [{}] {}", ident, r.result_type, r.title);
-            if !r.snippet.is_empty() {
-                // Clean up snippet for terminal display
-                let snippet = r.snippet.replace("**", "").replace('\n', " ");
-                let snippet = if snippet.len() > 80 {
-                    format!("{}...", &snippet[..80])
-                } else {
-                    snippet
-                };
-                println!("              {}", snippet);
-            }
-        }
+        print!("{}", render::search_results(&results));
     }
     Ok(())
 }
@@ -635,20 +494,8 @@ fn comment(
 
             if json {
                 print_json(&comments);
-            } else if comments.is_empty() {
-                println!("No comments on {}.", identifier);
             } else {
-                println!("{} comment(s) on {}:\n", comments.len(), identifier);
-                for c in &comments {
-                    println!(
-                        "  {} ({}) - {}:",
-                        c.author_display_name, c.author, c.created_at
-                    );
-                    for line in c.content.lines() {
-                        println!("    {line}");
-                    }
-                    println!();
-                }
+                print!("{}", render::comment_list(&comments, identifier));
             }
         }
 
@@ -687,8 +534,7 @@ fn comment(
             if json {
                 print_json(&comment);
             } else {
-                println!("Added comment to {} by {}:", identifier, comment.author);
-                println!("  {}", comment.content);
+                print!("{}", render::comment_added(&comment, identifier));
             }
         }
     }
@@ -710,18 +556,8 @@ fn module(
 
             if json {
                 print_json(&modules);
-            } else if modules.is_empty() {
-                println!("No modules in {}.", project);
             } else {
-                println!("{} module(s) in {}:\n", modules.len(), project);
-                for m in &modules {
-                    let desc = if m.description.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" - {}", m.description.lines().next().unwrap_or(""))
-                    };
-                    println!("  {:<20} [{}]{}", m.name, m.status, desc);
-                }
+                print!("{}", render::module_list(&modules, project));
             }
         }
 
@@ -747,10 +583,7 @@ fn module(
             if json {
                 print_json(&module);
             } else {
-                println!(
-                    "Created module '{}' [{}] in {}",
-                    module.name, module.status, project
-                );
+                print!("{}", render::module_created(&module, project));
             }
         }
 
@@ -778,7 +611,7 @@ fn module(
             if json {
                 print_json(&module);
             } else {
-                println!("Updated module '{}' [{}]", module.name, module.status);
+                print!("{}", render::module_updated(&module));
             }
         }
 
@@ -791,7 +624,7 @@ fn module(
             if json {
                 println!("{{\"deleted\": true, \"name\": {:?}}}", name);
             } else {
-                println!("Deleted module '{}'", name);
+                print!("{}", render::module_deleted(name));
             }
         }
     }
@@ -813,13 +646,8 @@ fn label(
 
             if json {
                 print_json(&labels);
-            } else if labels.is_empty() {
-                println!("No labels in {}.", project);
             } else {
-                println!("{} label(s) in {}:\n", labels.len(), project);
-                for l in &labels {
-                    println!("  {} ({})", l.name, l.color);
-                }
+                print!("{}", render::label_list(&labels, project));
             }
         }
 
@@ -842,7 +670,7 @@ fn label(
             if json {
                 print_json(&label);
             } else {
-                println!("Created label '{}' ({})", label.name, label.color);
+                print!("{}", render::label_created(&label));
             }
         }
 
@@ -867,7 +695,7 @@ fn label(
             if json {
                 print_json(&label);
             } else {
-                println!("Updated label '{}' ({})", label.name, label.color);
+                print!("{}", render::label_updated(&label));
             }
         }
 
@@ -880,7 +708,7 @@ fn label(
             if json {
                 println!("{{\"deleted\": true, \"name\": {:?}}}", name);
             } else {
-                println!("Deleted label '{}'", name);
+                print!("{}", render::label_deleted(name));
             }
         }
     }
@@ -902,13 +730,8 @@ fn folder(
 
             if json {
                 print_json(&folders);
-            } else if folders.is_empty() {
-                println!("No folders in {}.", project);
             } else {
-                println!("{} folder(s) in {}:\n", folders.len(), project);
-                for f in &folders {
-                    println!("  {}", f.name);
-                }
+                print!("{}", render::folder_list(&folders, project));
             }
         }
 
@@ -927,7 +750,7 @@ fn folder(
             if json {
                 print_json(&folder);
             } else {
-                println!("Created folder '{}'", folder.name);
+                print!("{}", render::folder_created(&folder));
             }
         }
 
@@ -950,7 +773,7 @@ fn folder(
             if json {
                 print_json(&folder);
             } else {
-                println!("Renamed folder '{}' -> '{}'", name, folder.name);
+                print!("{}", render::folder_updated(name, &folder));
             }
         }
 
@@ -963,7 +786,7 @@ fn folder(
             if json {
                 println!("{{\"deleted\": true, \"name\": {:?}}}", name);
             } else {
-                println!("Deleted folder '{}'", name);
+                print!("{}", render::folder_deleted(name));
             }
         }
     }
@@ -1050,15 +873,6 @@ mod tests {
         let projects = queries::list_projects(&conn).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].identifier, "TST");
-    }
-
-    #[test]
-    fn shared_label_parser_trims_and_discards_empty_values() {
-        assert_eq!(
-            owned_labels(Some(" bug, ,urgent ,")),
-            Some(vec!["bug".to_owned(), "urgent".to_owned()])
-        );
-        assert_eq!(owned_labels(None), None);
     }
 
     #[test]

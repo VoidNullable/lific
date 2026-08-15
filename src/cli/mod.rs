@@ -6,6 +6,7 @@ pub mod exec;
 pub mod http;
 pub mod import;
 pub mod login;
+pub mod render;
 pub mod service;
 pub mod term;
 pub mod ui;
