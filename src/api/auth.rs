@@ -728,9 +728,9 @@ pub(super) struct UserListItem {
 
 pub(super) async fn list_users(
     State(db): State<DbPool>,
-    Extension(auth_user): Extension<Option<AuthUser>>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<UserListItem>>, LificError> {
-    require_admin(&auth_user)?;
+    require_admin(&identity)?;
     with_read(&db, |conn| {
         let users = crate::db::queries::users::list_users(conn)?;
         Ok(users
