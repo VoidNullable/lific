@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use crate::auth::{hex_encode, sha256_hex};
 use crate::db::DbPool;
 use crate::error::LificError;
 use crate::ratelimit::RateLimiter;
@@ -965,7 +966,7 @@ async fn device_authorization(
 
     // High-entropy device code — return raw once, store only its hash.
     let device_code = format!("{}{}", uuid_v4(), uuid_v4()).replace('-', "");
-    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+    let device_code_hash = sha256_hex(device_code.as_bytes());
 
     // Generate a unique user code (retry a few times on the rare collision).
     let mut user_code = generate_user_code();
@@ -1412,7 +1413,7 @@ async fn token_exchange(
 
     // Generate access token — store SHA-256 hash, return raw token only once
     let access_token = format!("lific_at_{}", uuid_v4());
-    let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
+    let token_hash = sha256_hex(access_token.as_bytes());
     let expires_in: u64 = 3600 * 24 * 30; // 30 days
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
@@ -1443,7 +1444,7 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     let Some(device_code) = req.device_code.as_deref().filter(|c| !c.is_empty()) else {
         return device_error(StatusCode::BAD_REQUEST, "invalid_request", Some("missing device_code"));
     };
-    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+    let device_code_hash = sha256_hex(device_code.as_bytes());
 
     let mut conn = match state.db.write() {
         Ok(c) => c,
@@ -1540,7 +1541,7 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             let client_id = "device";
 
             let access_token = format!("lific_at_{}", uuid_v4());
-            let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
+            let token_hash = sha256_hex(access_token.as_bytes());
             let expires_in: u64 = 3600 * 24 * 30; // 30 days
             let expires_at = now + chrono::Duration::seconds(expires_in as i64);
 
@@ -1668,7 +1669,7 @@ async fn revoke_token(
     // RFC 7009 says the server MUST respond with 200 even if the token
     // is invalid, already revoked, or unrecognized -- to prevent token scanning.
     // Hash the token before lookup since we store SHA-256 hashes.
-    let token_hash = hex_encode(&Sha256::digest(req.token.as_bytes()));
+    let token_hash = sha256_hex(req.token.as_bytes());
     // RFC 7009: always return 200, but log DB errors instead of silently discarding
     match state.db.write() {
         Ok(conn) => {
@@ -1700,11 +1701,6 @@ fn validate_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
         }
         _ => false, // Only S256 is accepted per OAuth 2.1
     }
-}
-
-/// Encode bytes as lowercase hex string.
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Decode a lowercase/uppercase hex string into bytes. Returns `Err(())` on
@@ -1758,7 +1754,7 @@ pub fn validate_oauth_token_with_scope(db: &DbPool, token: &str) -> Option<Strin
     if !token.starts_with("lific_at_") {
         return None;
     }
-    let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+    let token_hash = sha256_hex(token.as_bytes());
     let conn = db.read().ok()?;
     conn.query_row(
         "SELECT scope FROM oauth_tokens
@@ -1777,7 +1773,7 @@ pub fn oauth_token_user_id(db: &DbPool, token: &str) -> Option<i64> {
     if !token.starts_with("lific_at_") {
         return None;
     }
-    let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+    let token_hash = sha256_hex(token.as_bytes());
     let conn = db.read().ok()?;
     conn.query_row(
         "SELECT user_id FROM oauth_tokens
@@ -2365,7 +2361,7 @@ mod tests {
 
         // Manually insert a token to revoke (stored as SHA-256 hash)
         let token = "lific_at_test-revoke-token";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -2431,7 +2427,7 @@ mod tests {
 
         // Create a valid token so we can authenticate the revoke request
         let auth_token = "lific_at_auth-for-revoke";
-        let auth_hash = hex_encode(&Sha256::digest(auth_token.as_bytes()));
+        let auth_hash = sha256_hex(auth_token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -2497,7 +2493,7 @@ mod tests {
         let (_, db) = test_oauth_app();
 
         let token = "lific_at_scope-test-token";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -2520,7 +2516,7 @@ mod tests {
         let (_, db) = test_oauth_app();
 
         let token = "lific_at_revoked-scope-test";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -3106,7 +3102,7 @@ mod tests {
         // resolving to no user (anonymous) rather than erroring.
         let (_, db) = test_oauth_app();
         let token = "lific_at_legacy-no-user-binding";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -3211,7 +3207,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
         let conn = db.read().unwrap();
         // The raw code must NOT be in the table; only its hash.
         let by_hash: i64 = conn
@@ -3280,7 +3276,7 @@ mod tests {
         let device_code = v["device_code"].as_str().unwrap().to_string();
         let user_code = v["user_code"].as_str().unwrap().to_string();
 
-        let device_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let device_hash = sha256_hex(device_code.as_bytes());
 
         // First poll: pending.
         let (status, body) = poll_device_token(&app, &device_code).await;
@@ -3381,7 +3377,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap().to_string();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
 
         // Force expiry by rewriting expires_at into the past.
         {
@@ -3563,7 +3559,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap().to_string();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
 
         approve_device_code(&db, &hash);
         let (status, body) = poll_device_token(&app, &device_code).await;
@@ -3594,7 +3590,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap().to_string();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
 
         approve_device_code(&db, &hash);
         {

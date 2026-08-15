@@ -10535,7 +10535,6 @@ mod authz_gating_tests {
         use axum::routing::{get, post};
         use axum::{Extension, Router};
         use rusqlite::params;
-        use sha2::{Digest, Sha256};
         use tower::ServiceExt;
 
         let (m, _admin, lead, maintainer, _viewer, non_member, _project_id, _guard) =
@@ -10556,10 +10555,7 @@ mod authz_gating_tests {
 
         fn insert_oauth_token(db: &crate::db::DbPool, suffix: &str, user_id: i64) -> String {
             let token = format!("lific_at_test-{suffix}");
-            let hash: String = Sha256::digest(token.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            let hash = crate::auth::sha256_hex(token.as_bytes());
             let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
             let client_id = format!("client-{suffix}");
             let conn = db.write().unwrap();
