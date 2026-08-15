@@ -2,6 +2,12 @@
   import { marked } from "marked";
   import { mount, unmount } from "svelte";
   import DOMPurify from "dompurify";
+  import {
+    createMermaidBudget,
+    mermaidIsTooComplex,
+    type MermaidBudget,
+  } from "./mermaidLimits";
+  import { renderMermaidBlock } from "./mermaidRender";
   import IssueHoverCard from "./IssueHoverCard.svelte";
   import { IDENTIFIER_RE, PROJECT_CODE_RE, refKind, routeFor, projectCodeOf } from "./references";
   import { openPeek } from "./issues/peek.svelte"; // LIF-248
@@ -18,7 +24,13 @@
     // that resolve against this set render as chips showing the display
     // name; unknown tokens stay literal text.
     mentions = [],
-  }: { content: string; class?: string; mentions?: MentionUser[] } = $props();
+    mermaidBudget = createMermaidBudget(),
+  }: {
+    content: string;
+    class?: string;
+    mentions?: MentionUser[];
+    mermaidBudget?: MermaidBudget;
+  } = $props();
 
   // Lowercased username → display name, for chip rendering.
   let mentionMap = $derived(
@@ -137,6 +149,9 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   renderer.code = function (token: any): string {
     if (token?.lang === "mermaid") {
+      if (typeof token.text !== "string" || mermaidIsTooComplex(token.text)) {
+        return `<div class="mermaid-block mermaid-skipped" data-rendered="skipped">Mermaid diagram skipped: source is too complex.</div>`;
+      }
       return `<div class="mermaid-block" data-mermaid="${encodeURIComponent(token.text)}"></div>`;
     }
     // LIF-110: wrap real code blocks so a copy button can latch on.
@@ -369,26 +384,12 @@
       });
       for (const block of Array.from(blocks)) {
         if (cancelled) return;
-        const src = decodeURIComponent(block.dataset.mermaid ?? "");
-        try {
-          const id = `mmd-${Math.random().toString(36).slice(2)}`;
-          const { svg } = await mermaid.render(id, src);
-          block.innerHTML = svg;
-          block.dataset.rendered = "true";
-        } catch (err) {
-          // LIF-402: the error message echoes the offending diagram source,
-          // which is attacker-controlled content that already passed through
-          // DOMPurify as inert text. Interpolating it into an HTML string
-          // here would hand it back a parser and re-open stored XSS, so the
-          // node is built directly and the message set as text.
-          const pre = document.createElement("pre");
-          pre.style.color = "var(--error)";
-          pre.style.whiteSpace = "pre-wrap";
-          pre.style.margin = "0";
-          pre.textContent = `Mermaid error: ${String(err)}`;
-          block.replaceChildren(pre);
-          block.dataset.rendered = "error";
-        }
+        await renderMermaidBlock(
+          block,
+          (id, source) => mermaid.render(id, source),
+          mermaidBudget,
+          () => cancelled,
+        );
       }
     })();
 
