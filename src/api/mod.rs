@@ -163,22 +163,25 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // Modules
         .route(
             "/api/modules",
-            get(resources::list_modules).post(resources::create_module),
+            get(resources::list_structure::<resources::Modules>)
+                .post(resources::create_structure::<resources::Modules>),
         )
         .route(
             "/api/modules/{id}",
             get(resources::get_module)
-                .put(resources::update_module)
-                .delete(resources::delete_module_handler),
+                .put(resources::update_structure::<resources::Modules>)
+                .delete(resources::delete_structure::<resources::Modules>),
         )
         // Labels
         .route(
             "/api/labels",
-            get(resources::list_labels).post(resources::create_label),
+            get(resources::list_structure::<resources::Labels>)
+                .post(resources::create_structure::<resources::Labels>),
         )
         .route(
             "/api/labels/{id}",
-            put(resources::update_label_handler).delete(resources::delete_label_handler),
+            put(resources::update_structure::<resources::Labels>)
+                .delete(resources::delete_structure::<resources::Labels>),
         )
         .route(
             "/api/labels/{id}/merge",
@@ -217,12 +220,13 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // Folders
         .route(
             "/api/folders",
-            get(resources::list_folders_handler).post(resources::create_folder),
+            get(resources::list_structure::<resources::Folders>)
+                .post(resources::create_structure::<resources::Folders>),
         )
         .route(
             "/api/folders/{id}",
-            put(resources::update_folder)
-                .delete(resources::delete_folder_handler),
+            put(resources::update_structure::<resources::Folders>)
+                .delete(resources::delete_structure::<resources::Folders>),
         )
         // Users (for dropdowns)
         .route("/api/users", get(auth::list_users))

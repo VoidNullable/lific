@@ -2,6 +2,7 @@ use axum::{
     Extension,
     extract::{Json, Path, Query, State},
 };
+use rusqlite::Connection;
 
 use crate::authz;
 use crate::db::{DbPool, models::*};
@@ -10,24 +11,202 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_structure_role, with_read, with_write};
 
-// ── Module endpoints ─────────────────────────────────────────
+// ── Shared structure CRUD ────────────────────────────────────
+//
+// LIF-382: modules, labels and folders are one resource shape wearing three
+// names. Each is a project-scoped row whose list/create/update/delete
+// endpoints do the same four things: authorize against the owning project,
+// read or write through the pool, and broadcast `ProjectUpdated`. That shape
+// lives once, in the generic handlers below; a resource only supplies its
+// query functions through `Structure`.
+//
+// Generic functions rather than a macro, deliberately: every line here stays
+// ordinary Rust, so go-to-definition lands on a real `impl` block, types show
+// up in hover and inlay hints, and a mistake in one resource is a normal
+// trait mismatch pointing at the offending line instead of an error inside a
+// macro expansion nobody can step through.
 
+/// One project-scoped structure resource (a module, label, or folder).
+pub(super) trait Structure: 'static {
+    /// Row type handed back to the client.
+    type Model: serde::Serialize + Send + 'static;
+    /// Create payload, deserialized from the request body.
+    type Create: serde::de::DeserializeOwned + Send + 'static;
+    /// Update payload, deserialized from the request body.
+    type Update: serde::de::DeserializeOwned + Send + 'static;
+
+    /// Table an existing row lives in, used to resolve its project.
+    const TABLE: &'static str;
+
+    /// Project a create payload targets.
+    fn create_project_id(input: &Self::Create) -> i64;
+
+    fn list(conn: &Connection, project_id: i64) -> Result<Vec<Self::Model>, LificError>;
+    fn create(conn: &Connection, input: &Self::Create) -> Result<Self::Model, LificError>;
+    fn update(conn: &Connection, id: i64, input: &Self::Update)
+    -> Result<Self::Model, LificError>;
+    fn delete(conn: &Connection, id: i64) -> Result<(), LificError>;
+}
+
+pub(super) struct Modules;
+
+impl Structure for Modules {
+    type Model = Module;
+    type Create = CreateModule;
+    type Update = UpdateModule;
+
+    const TABLE: &'static str = "modules";
+
+    fn create_project_id(input: &CreateModule) -> i64 {
+        input.project_id
+    }
+
+    fn list(conn: &Connection, project_id: i64) -> Result<Vec<Module>, LificError> {
+        crate::db::queries::list_modules(conn, project_id)
+    }
+
+    fn create(conn: &Connection, input: &CreateModule) -> Result<Module, LificError> {
+        crate::db::queries::create_module(conn, input)
+    }
+
+    fn update(conn: &Connection, id: i64, input: &UpdateModule) -> Result<Module, LificError> {
+        crate::db::queries::update_module(conn, id, input)
+    }
+
+    fn delete(conn: &Connection, id: i64) -> Result<(), LificError> {
+        crate::db::queries::delete_module(conn, id)
+    }
+}
+
+pub(super) struct Labels;
+
+impl Structure for Labels {
+    type Model = Label;
+    type Create = CreateLabel;
+    type Update = UpdateLabel;
+
+    const TABLE: &'static str = "labels";
+
+    fn create_project_id(input: &CreateLabel) -> i64 {
+        input.project_id
+    }
+
+    fn list(conn: &Connection, project_id: i64) -> Result<Vec<Label>, LificError> {
+        crate::db::queries::list_labels(conn, project_id)
+    }
+
+    fn create(conn: &Connection, input: &CreateLabel) -> Result<Label, LificError> {
+        crate::db::queries::create_label(conn, input)
+    }
+
+    fn update(conn: &Connection, id: i64, input: &UpdateLabel) -> Result<Label, LificError> {
+        crate::db::queries::update_label(conn, id, input)
+    }
+
+    fn delete(conn: &Connection, id: i64) -> Result<(), LificError> {
+        crate::db::queries::delete_label(conn, id)
+    }
+}
+
+pub(super) struct Folders;
+
+impl Structure for Folders {
+    type Model = Folder;
+    type Create = CreateFolder;
+    type Update = UpdateFolder;
+
+    const TABLE: &'static str = "folders";
+
+    fn create_project_id(input: &CreateFolder) -> i64 {
+        input.project_id
+    }
+
+    fn list(conn: &Connection, project_id: i64) -> Result<Vec<Folder>, LificError> {
+        crate::db::queries::list_folders(conn, project_id)
+    }
+
+    fn create(conn: &Connection, input: &CreateFolder) -> Result<Folder, LificError> {
+        crate::db::queries::create_folder(conn, input)
+    }
+
+    fn update(conn: &Connection, id: i64, input: &UpdateFolder) -> Result<Folder, LificError> {
+        crate::db::queries::update_folder(conn, id, input)
+    }
+
+    fn delete(conn: &Connection, id: i64) -> Result<(), LificError> {
+        crate::db::queries::delete_folder(conn, id)
+    }
+}
+
+/// Every structure listing is scoped to a single project.
 #[derive(serde::Deserialize)]
-pub(super) struct ModuleQuery {
+pub(super) struct ProjectQuery {
     project_id: i64,
 }
 
-pub(super) async fn list_modules(
+/// Resolve the project owning an existing structure row, and require the
+/// caller may edit that project's structure. Returns the project id so the
+/// caller can broadcast against it.
+fn authorize_existing<R: Structure>(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    id: i64,
+) -> Result<i64, LificError> {
+    let project_id = with_read(db, |conn| {
+        crate::db::queries::get_resource_project_id(conn, R::TABLE, id)
+    })?;
+    require_structure_role(db, identity, project_id)?;
+    Ok(project_id)
+}
+
+pub(super) async fn list_structure<R: Structure>(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Query(q): Query<ModuleQuery>,
-) -> Result<Json<Vec<Module>>, LificError> {
+    Query(q): Query<ProjectQuery>,
+) -> Result<Json<Vec<R::Model>>, LificError> {
     authz::require_role(&db, &identity, q.project_id, Role::Viewer)?;
-    with_read(&db, |conn| {
-        crate::db::queries::list_modules(conn, q.project_id)
-    })
-    .map(Json)
+    with_read(&db, |conn| R::list(conn, q.project_id)).map(Json)
 }
+
+pub(super) async fn create_structure<R: Structure>(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Json(input): Json<R::Create>,
+) -> Result<Json<R::Model>, LificError> {
+    let project_id = R::create_project_id(&input);
+    require_structure_role(&db, &identity, project_id)?;
+    let created = with_write(&db, |conn| R::create(conn, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(created))
+}
+
+pub(super) async fn update_structure<R: Structure>(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Json(input): Json<R::Update>,
+) -> Result<Json<R::Model>, LificError> {
+    let project_id = authorize_existing::<R>(&db, &identity, id)?;
+    let updated = with_write(&db, |conn| R::update(conn, id, &input))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(updated))
+}
+
+pub(super) async fn delete_structure<R: Structure>(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let project_id = authorize_existing::<R>(&db, &identity, id)?;
+    with_write(&db, |conn| R::delete(conn, id))?;
+    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+// ── Module endpoints ─────────────────────────────────────────
 
 pub(super) async fn get_module(
     State(db): State<DbPool>,
@@ -39,114 +218,7 @@ pub(super) async fn get_module(
     Ok(Json(module))
 }
 
-pub(super) async fn create_module(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<CreateModule>,
-) -> Result<Json<Module>, LificError> {
-    require_structure_role(&db, &identity, input.project_id)?;
-    let module = with_write(&db, |conn| crate::db::queries::create_module(conn, &input))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id: module.project_id });
-    Ok(Json(module))
-}
-
-pub(super) async fn update_module(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<UpdateModule>,
-) -> Result<Json<Module>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "modules", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    let module = with_write(&db, |conn| {
-        crate::db::queries::update_module(conn, id, &input)
-    })?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(module))
-}
-
-pub(super) async fn delete_module_handler(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-) -> Result<Json<serde_json::Value>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "modules", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    with_write(&db, |conn| crate::db::queries::delete_module(conn, id))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(serde_json::json!({"deleted": true})))
-}
-
 // ── Label endpoints ──────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-pub(super) struct LabelQuery {
-    project_id: i64,
-}
-
-pub(super) async fn list_labels(
-    State(db): State<DbPool>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Query(q): Query<LabelQuery>,
-) -> Result<Json<Vec<Label>>, LificError> {
-    authz::require_role(&db, &identity, q.project_id, Role::Viewer)?;
-    with_read(&db, |conn| {
-        crate::db::queries::list_labels(conn, q.project_id)
-    })
-    .map(Json)
-}
-
-pub(super) async fn create_label(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<CreateLabel>,
-) -> Result<Json<Label>, LificError> {
-    require_structure_role(&db, &identity, input.project_id)?;
-    let label = with_write(&db, |conn| crate::db::queries::create_label(conn, &input))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id: input.project_id });
-    Ok(Json(label))
-}
-
-pub(super) async fn update_label_handler(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<UpdateLabel>,
-) -> Result<Json<Label>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "labels", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    let label = with_write(&db, |conn| {
-        crate::db::queries::update_label(conn, id, &input)
-    })?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(label))
-}
-
-pub(super) async fn delete_label_handler(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-) -> Result<Json<serde_json::Value>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "labels", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    with_write(&db, |conn| crate::db::queries::delete_label(conn, id))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(serde_json::json!({"deleted": true})))
-}
 
 #[derive(serde::Deserialize)]
 pub(super) struct MergeLabel {
@@ -163,10 +235,10 @@ pub(super) async fn merge_label_handler(
 ) -> Result<Json<Label>, LificError> {
     // Both labels must live in the same project, and the caller must lead it.
     let source_project = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "labels", id)
+        crate::db::queries::get_resource_project_id(conn, Labels::TABLE, id)
     })?;
     let target_project = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "labels", input.into)
+        crate::db::queries::get_resource_project_id(conn, Labels::TABLE, input.into)
     })?;
     if source_project != target_project {
         return Err(LificError::BadRequest(
@@ -179,70 +251,6 @@ pub(super) async fn merge_label_handler(
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id: source_project });
     Ok(Json(label))
-}
-
-// ── Folder endpoints ─────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-pub(super) struct FolderQuery {
-    project_id: i64,
-}
-
-pub(super) async fn list_folders_handler(
-    State(db): State<DbPool>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Query(q): Query<FolderQuery>,
-) -> Result<Json<Vec<Folder>>, LificError> {
-    authz::require_role(&db, &identity, q.project_id, Role::Viewer)?;
-    with_read(&db, |conn| {
-        crate::db::queries::list_folders(conn, q.project_id)
-    })
-    .map(Json)
-}
-
-pub(super) async fn create_folder(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<CreateFolder>,
-) -> Result<Json<Folder>, LificError> {
-    require_structure_role(&db, &identity, input.project_id)?;
-    let folder = with_write(&db, |conn| crate::db::queries::create_folder(conn, &input))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id: input.project_id });
-    Ok(Json(folder))
-}
-
-pub(super) async fn delete_folder_handler(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-) -> Result<Json<serde_json::Value>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "folders", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    with_write(&db, |conn| crate::db::queries::delete_folder(conn, id))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(serde_json::json!({"deleted": true})))
-}
-
-pub(super) async fn update_folder(
-    State(db): State<DbPool>,
-    Extension(realtime): Extension<RealtimeHub>,
-    Path(id): Path<i64>,
-    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<UpdateFolder>,
-) -> Result<Json<Folder>, LificError> {
-    let project_id = with_read(&db, |conn| {
-        crate::db::queries::get_resource_project_id(conn, "folders", id)
-    })?;
-    require_structure_role(&db, &identity, project_id)?;
-    let folder = with_write(&db, |conn| {
-        crate::db::queries::update_folder(conn, id, &input)
-    })?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-    Ok(Json(folder))
 }
 
 #[cfg(test)]
