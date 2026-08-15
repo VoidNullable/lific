@@ -520,22 +520,29 @@ fn filter_visible<T>(
     }
 }
 
-/// Require any authenticated user (LIF-233). Used for low-stakes, instance-wide
-/// actions like sidebar project ordering, which shouldn't be gated behind
-/// per-project lead/admin rights the way structural project edits are.
-/// Default-deny: returns Forbidden when identity is None.
+/// Require any authenticated user, and hand back who they are (LIF-233,
+/// LIF-372). The single "is there a caller at all?" gate for the whole API:
+/// used both by low-stakes instance-wide actions like sidebar project
+/// ordering (which shouldn't need per-project lead/admin rights the way
+/// structural project edits do) and by every per-user resource that needs an
+/// owner to attribute to: saved views, project groups, comments, API keys,
+/// bots, attachments.
+///
+/// Default-deny: returns Forbidden when identity is None. `LificError` has no
+/// Unauthorized variant, so Forbidden (403) is what "no authenticated caller"
+/// means here. Callers that only need the gate can discard the returned user.
 ///
 /// LIFIC-10: in passwordless mode (`[auth] required = false`) the middleware
 /// resolves a `ResolvedIdentity` (first-admin fallback) even for a
 /// credential-less request, so this passes — fixing the auth-off bug where
 /// `/api/projects/reorder` previously 403'd.
-fn require_authenticated(
+pub(super) fn require_user(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
-) -> Result<(), LificError> {
-    match identity {
-        Some(_) => Ok(()),
-        None => Err(LificError::Forbidden("authentication required".into())),
-    }
+) -> Result<AuthUser, LificError> {
+    identity
+        .as_ref()
+        .map(|i| i.user.clone())
+        .ok_or_else(|| LificError::Forbidden("authentication required".into()))
 }
 
 /// Check if the authenticated user is an admin.
@@ -987,6 +994,23 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    /// LIF-372: the single "is there a caller at all?" gate answers 403, not
+    /// 400. Fourteen handlers (profile, keys, bots, comments) used to answer
+    /// 400 for the same condition simply because each had written the check
+    /// out by hand.
+    #[tokio::test]
+    async fn require_user_without_identity_is_403_authentication_required() {
+        use axum::response::IntoResponse;
+
+        let err = super::require_user(&None).expect_err("no identity must be rejected");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "authentication required");
+    }
 
     #[tokio::test]
     async fn health_returns_ok() {

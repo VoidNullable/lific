@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### API
+
+- **"Authentication required" is now always a 403.** Nineteen places in the REST API each wrote their own version of the "is anyone signed in?" check, and roughly half of them reported the failure as `400 Bad Request` while the rest reported `403 Forbidden`. The endpoints for your profile, password, sessions, API keys, connected tools, and comments were in the 400 group; they now answer 403 like everything else, with the message `authentication required`. If you have a client that treats a 400 from those endpoints as "you are signed out", it needs to look for 403 instead.
+
 ## v2.6.0 (2026-08-12)
 
 Two security fixes, both worth upgrading for. An uploaded SVG could run script on your instance's origin, and a malformed config file could quietly hand you a more permissive server than the one you configured. Alongside them, comments are linkable, identifiers are copyable, and the desktop sidebar gets out of the way.

@@ -9,7 +9,7 @@ use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{
-    filter_visible, require_authenticated, require_project_delete, require_project_lead, with_read,
+    filter_visible, require_project_delete, require_project_lead, require_user, with_read,
     with_write,
 };
 
@@ -82,7 +82,7 @@ pub(super) async fn reorder_projects(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<ReorderProjects>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    require_authenticated(&identity)?;
+    require_user(&identity)?;
     let projects = with_write(&db, |conn| {
         crate::db::queries::reorder_projects(conn, &input.ids)
     })?;

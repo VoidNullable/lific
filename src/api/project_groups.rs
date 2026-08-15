@@ -22,26 +22,14 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{with_read, with_write};
-
-/// `LificError` has no Unauthorized variant — Forbidden is what the codebase
-/// uses for "no authenticated caller", same as `views::require_user`.
-fn require_user(
-    identity: Option<crate::resolve_caller::ResolvedIdentity>,
-) -> Result<AuthUser, LificError> {
-    identity
-        .map(|i| i.user)
-        .ok_or_else(|| {
-            LificError::Forbidden("authentication required to manage project groups".into())
-        })
-}
+use super::{require_user, with_read, with_write};
 
 pub(super) async fn list_groups(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<ProjectGroup>>, LificError> {
     let visible = authz::visible_project_ids(&db, &identity)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let mut groups = with_read(&db, |conn| project_groups::list_groups(conn, user.id))?;
     // A membership outlives the caller's access to that project when a
     // project_members row is revoked. Drop those ids rather than render a
@@ -60,7 +48,7 @@ pub(super) async fn create_group(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<CreateProjectGroup>,
 ) -> Result<Json<ProjectGroup>, LificError> {
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let group = with_write(&db, |conn| {
         project_groups::create_group(conn, user.id, &input)
     })?;
@@ -75,7 +63,7 @@ pub(super) async fn update_group(
     Path(id): Path<i64>,
     Json(input): Json<UpdateProjectGroup>,
 ) -> Result<Json<ProjectGroup>, LificError> {
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let group = with_write(&db, |conn| {
         project_groups::update_group(conn, id, user.id, &input)
     })?;
@@ -89,7 +77,7 @@ pub(super) async fn delete_group(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let deleted = with_write(&db, |conn| project_groups::delete_group(conn, id, user.id))?;
     realtime.send_to_users(RealtimeEvent::ProjectGroupsChanged, vec![user.id]);
     Ok(Json(serde_json::json!({ "deleted": deleted })))
@@ -102,7 +90,7 @@ pub(super) async fn assign_project(
     Json(input): Json<AssignProjectGroup>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Viewer)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     with_write(&db, |conn| {
         project_groups::assign_project(conn, user.id, input.project_id, input.group_id)
     })?;

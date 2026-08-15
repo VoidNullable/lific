@@ -34,23 +34,14 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{with_read, with_write};
+use super::{require_user, with_read, with_write};
 
-/// An OAuth/legacy-key request with no resolved `AuthUser` can pass the
-/// project-role gate in legacy mode (`require_role`'s `Viewer` branch is an
-/// unconditional allow when `authz_enforced` is off — see `authz.rs`), but
-/// saved views are inherently per-user, so there is no sensible "anonymous
-/// owner" to attribute a view to. Every handler below requires a resolved
-/// user on top of the role gate.
-fn require_user(
-    identity: Option<crate::resolve_caller::ResolvedIdentity>,
-) -> Result<AuthUser, LificError> {
-    identity
-        .map(|i| i.user)
-        .ok_or_else(|| {
-            LificError::Forbidden("authentication required to manage saved views".into())
-        })
-}
+// Every handler below applies `require_user` (api/mod.rs) on top of the role
+// gate. An OAuth/legacy-key request with no resolved `AuthUser` can pass the
+// project-role gate in legacy mode (`require_role`'s `Viewer` branch is an
+// unconditional allow when `authz_enforced` is off; see `authz.rs`), but saved
+// views are inherently per-user, so there is no sensible "anonymous owner" to
+// attribute a view to.
 
 /// GET /api/projects/{id}/views — the caller's own views only.
 pub(super) async fn list_views(
@@ -59,7 +50,7 @@ pub(super) async fn list_views(
     Path(project_id): Path<i64>,
 ) -> Result<Json<Vec<SavedView>>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     with_read(&db, |conn| views::list_views(conn, project_id, user.id)).map(Json)
 }
 
@@ -76,7 +67,7 @@ pub(super) async fn create_view(
     Json(input): Json<CreateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let view = with_write(&db, |conn| {
         views::create_view(conn, project_id, user.id, &input)
     })?;
@@ -96,7 +87,7 @@ pub(super) async fn update_view(
     Json(input): Json<UpdateSavedView>,
 ) -> Result<Json<SavedView>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     let view = with_write(&db, |conn| {
         views::update_view(conn, view_id, project_id, user.id, &input)
     })?;
@@ -112,7 +103,7 @@ pub(super) async fn delete_view(
     Path((project_id, view_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let user = require_user(identity)?;
+    let user = require_user(&identity)?;
     with_write(&db, |conn| {
         views::delete_view(conn, view_id, project_id, user.id)
     })?;

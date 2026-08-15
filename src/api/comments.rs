@@ -9,7 +9,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{with_read, with_write};
+use super::{require_user, with_read, with_write};
 
 /// LIF-263: build the visible mention-candidate set for a comment's project,
 /// then create the comment and record its resolved mentions in one write.
@@ -100,10 +100,7 @@ pub(super) async fn create_comment(
         with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     require_comment_viewer(&db, &identity, Some(project_id))?;
 
-    let user = identity
-        .as_ref()
-        .map(|i| i.user.clone())
-        .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
+    let user = require_user(&identity)?;
 
     let comment = create_comment_with_mentions(
         &db,
@@ -148,10 +145,7 @@ pub(super) async fn create_page_comment(
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
     require_comment_viewer(&db, &identity, project_id)?;
 
-    let user = identity
-        .as_ref()
-        .map(|i| i.user.clone())
-        .ok_or_else(|| LificError::BadRequest("authentication required to comment".into()))?;
+    let user = require_user(&identity)?;
 
     let comment = create_comment_with_mentions(
         &db,
@@ -191,7 +185,7 @@ pub(super) async fn update_comment_handler(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
-    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = require_user(&identity)?;
 
     // Check ownership: only the author or an admin can edit
     let existing = with_read(&db, |conn| {
@@ -257,7 +251,7 @@ pub(super) async fn delete_comment_handler(
     Path(id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = identity.as_ref().map(|i| i.user.clone()).ok_or_else(|| LificError::BadRequest("authentication required".into()))?;
+    let user = require_user(&identity)?;
 
     // Check ownership: only the author or an admin can delete
     let existing = with_read(&db, |conn| {
