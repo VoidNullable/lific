@@ -411,9 +411,7 @@ fn insert_first_admin(
 
 /// Hash a session token with SHA-256 for storage.
 fn hash_session_token(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(token.as_bytes());
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+    crate::auth::sha256_hex(token.as_bytes())
 }
 
 /// Create a new session for a user. Returns the session with the plaintext token

@@ -328,14 +328,9 @@ mod tests {
     // wiring (minus the rmcp transport itself) to prove an OAuth-token-backed
     // MCP session resolves to the correct, real user rather than None.
 
-    fn test_hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     fn insert_oauth_token(pool: &DbPool, suffix: &str, user_id: Option<i64>) -> String {
-        use sha2::{Digest, Sha256};
         let token = format!("lific_at_test-{suffix}");
-        let hash = test_hex_encode(&Sha256::digest(token.as_bytes()));
+        let hash = crate::auth::sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         let client_id = format!("client-{suffix}");
         let conn = pool.write().unwrap();

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use crate::auth::{hex_encode, sha256_hex};
 use crate::db::DbPool;
 use crate::error::LificError;
 use crate::ratelimit::RateLimiter;
@@ -965,7 +966,7 @@ async fn device_authorization(
 
     // High-entropy device code — return raw once, store only its hash.
     let device_code = format!("{}{}", uuid_v4(), uuid_v4()).replace('-', "");
-    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+    let device_code_hash = sha256_hex(device_code.as_bytes());
 
     // Generate a unique user code (retry a few times on the rare collision).
     let mut user_code = generate_user_code();
@@ -1412,7 +1413,7 @@ async fn token_exchange(
 
     // Generate access token — store SHA-256 hash, return raw token only once
     let access_token = format!("lific_at_{}", uuid_v4());
-    let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
+    let token_hash = sha256_hex(access_token.as_bytes());
     let expires_in: u64 = 3600 * 24 * 30; // 30 days
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
@@ -1443,9 +1444,9 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     let Some(device_code) = req.device_code.as_deref().filter(|c| !c.is_empty()) else {
         return device_error(StatusCode::BAD_REQUEST, "invalid_request", Some("missing device_code"));
     };
-    let device_code_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+    let device_code_hash = sha256_hex(device_code.as_bytes());
 
-    let conn = match state.db.write() {
+    let mut conn = match state.db.write() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
@@ -1538,19 +1539,33 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             }
             let scope = "mcp";
             let client_id = "device";
+
+            let access_token = format!("lific_at_{}", uuid_v4());
+            let token_hash = sha256_hex(access_token.as_bytes());
+            let expires_in: u64 = 3600 * 24 * 30; // 30 days
+            let expires_at = now + chrono::Duration::seconds(expires_in as i64);
+
+            // LIF-370: minting the token and burning the device code are one
+            // atomic step. Previously the consumed-UPDATE was `let _ =`, so a
+            // failed write handed out a token while leaving the code
+            // `approved` and replayable for as many tokens as the client cared
+            // to poll for. Either both writes land or neither does.
+            let tx = match conn.transaction() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to open device token transaction");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+            };
+
             // Ensure a client row exists so the FK on oauth_tokens is satisfied.
-            let _ = conn.execute(
+            let _ = tx.execute(
                 "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
                  VALUES ('device', 'Device Authorization', '[]')",
                 [],
             );
 
-            let access_token = format!("lific_at_{}", uuid_v4());
-            let token_hash = hex_encode(&Sha256::digest(access_token.as_bytes()));
-            let expires_in: u64 = 3600 * 24 * 30; // 30 days
-            let expires_at = now + chrono::Duration::seconds(expires_in as i64);
-
-            if let Err(e) = conn.execute(
+            if let Err(e) = tx.execute(
                 "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![token_hash, client_id, expires_at.to_rfc3339(), scope, row.user_id],
@@ -1559,11 +1574,32 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
                 return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
             }
 
-            // Single-use: mark consumed so a replay returns invalid_grant.
-            let _ = conn.execute(
-                "UPDATE oauth_device_codes SET status = 'consumed' WHERE device_code_hash = ?1",
+            // Single-use: mark consumed so a replay returns invalid_grant. The
+            // `status = 'approved'` guard means exactly one exchange can win;
+            // anything other than one row changed rolls the token back.
+            match tx.execute(
+                "UPDATE oauth_device_codes SET status = 'consumed'
+                 WHERE device_code_hash = ?1 AND status = 'approved'",
                 params![device_code_hash],
-            );
+            ) {
+                Ok(1) => {}
+                Ok(n) => {
+                    tracing::error!(
+                        rows = n,
+                        "device code not consumed exactly once; refusing to issue token"
+                    );
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to consume device code");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+                }
+            }
+
+            if let Err(e) = tx.commit() {
+                tracing::error!(error = %e, "failed to commit device token exchange");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+            }
 
             info!(scope = %scope, "OAuth device token issued");
             Json(TokenResponse {
@@ -1633,7 +1669,7 @@ async fn revoke_token(
     // RFC 7009 says the server MUST respond with 200 even if the token
     // is invalid, already revoked, or unrecognized -- to prevent token scanning.
     // Hash the token before lookup since we store SHA-256 hashes.
-    let token_hash = hex_encode(&Sha256::digest(req.token.as_bytes()));
+    let token_hash = sha256_hex(req.token.as_bytes());
     // RFC 7009: always return 200, but log DB errors instead of silently discarding
     match state.db.write() {
         Ok(conn) => {
@@ -1665,11 +1701,6 @@ fn validate_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
         }
         _ => false, // Only S256 is accepted per OAuth 2.1
     }
-}
-
-/// Encode bytes as lowercase hex string.
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Decode a lowercase/uppercase hex string into bytes. Returns `Err(())` on
@@ -1712,26 +1743,31 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Check if a bearer token is a valid OAuth access token.
+/// Check if a bearer token is a valid OAuth access token: known, not revoked,
+/// not expired. Tokens are stored as SHA-256 hashes; the incoming raw token is
+/// hashed before lookup.
+///
+/// LIF-384: this used to delegate to a `validate_oauth_token_with_scope` that
+/// returned the granted scope, which the only production caller (this
+/// function) discarded with `.is_some()`. Nothing ever compared a scope
+/// against a required one, and the column is always 'mcp'. Tokens still carry
+/// a scope in the database and in the token response, since clients read it;
+/// only the Rust path pretending to check it is gone.
 pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
-    validate_oauth_token_with_scope(db, token).is_some()
-}
-
-/// Validate an OAuth token and return its granted scope.
-/// Tokens are stored as SHA-256 hashes; the incoming raw token is hashed before lookup.
-pub fn validate_oauth_token_with_scope(db: &DbPool, token: &str) -> Option<String> {
     if !token.starts_with("lific_at_") {
-        return None;
+        return false;
     }
-    let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
-    let conn = db.read().ok()?;
+    let token_hash = sha256_hex(token.as_bytes());
+    let Ok(conn) = db.read() else {
+        return false;
+    };
     conn.query_row(
-        "SELECT scope FROM oauth_tokens
+        "SELECT 1 FROM oauth_tokens
          WHERE access_token = ?1 AND revoked = 0 AND expires_at > datetime('now')",
         params![token_hash],
-        |row| row.get(0),
+        |_| Ok(()),
     )
-    .ok()
+    .is_ok()
 }
 
 /// Resolve the user bound to a (valid, non-revoked, unexpired) OAuth access
@@ -1742,7 +1778,7 @@ pub fn oauth_token_user_id(db: &DbPool, token: &str) -> Option<i64> {
     if !token.starts_with("lific_at_") {
         return None;
     }
-    let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+    let token_hash = sha256_hex(token.as_bytes());
     let conn = db.read().ok()?;
     conn.query_row(
         "SELECT user_id FROM oauth_tokens
@@ -2330,7 +2366,7 @@ mod tests {
 
         // Manually insert a token to revoke (stored as SHA-256 hash)
         let token = "lific_at_test-revoke-token";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -2396,7 +2432,7 @@ mod tests {
 
         // Create a valid token so we can authenticate the revoke request
         let auth_token = "lific_at_auth-for-revoke";
-        let auth_hash = hex_encode(&Sha256::digest(auth_token.as_bytes()));
+        let auth_hash = sha256_hex(auth_token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -2455,53 +2491,14 @@ mod tests {
         );
     }
 
-    // ── LIF-51: scope is stored on tokens ────────────────────
-
-    #[tokio::test]
-    async fn validate_oauth_token_returns_scope() {
-        let (_, db) = test_oauth_app();
-
-        let token = "lific_at_scope-test-token";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        {
-            let conn = db.write().unwrap();
-            conn.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('scope-client', 'Test', '[\"http://localhost\"]')",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope) VALUES (?1, 'scope-client', ?2, 'mcp')",
-                params![token_hash, expires],
-            ).unwrap();
-        }
-
-        let scope = validate_oauth_token_with_scope(&db, token);
-        assert_eq!(scope, Some("mcp".to_string()));
-    }
-
-    #[tokio::test]
-    async fn revoked_token_has_no_scope() {
-        let (_, db) = test_oauth_app();
-
-        let token = "lific_at_revoked-scope-test";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        {
-            let conn = db.write().unwrap();
-            conn.execute(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ('rev-client', 'Test', '[\"http://localhost\"]')",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, revoked) VALUES (?1, 'rev-client', ?2, 'mcp', 1)",
-                params![token_hash, expires],
-            ).unwrap();
-        }
-
-        assert_eq!(validate_oauth_token_with_scope(&db, token), None);
-        assert!(!validate_oauth_token(&db, token));
-    }
+    // ── LIF-51 / LIF-384: scope is stored and advertised, never enforced ──
+    //
+    // The two tests that lived here exercised `validate_oauth_token_with_scope`,
+    // which is gone: nothing compared its return value against a required
+    // scope. Revoked tokens failing validation is covered by
+    // `revoke_token_invalidates_access`, and the `scope` field clients read off
+    // the token response is pinned in
+    // `device_consumed_code_cannot_mint_a_second_token`.
 
     // ── LIF-64: redirect_uri validation + register rate limit ─────────────
 
@@ -3071,7 +3068,7 @@ mod tests {
         // resolving to no user (anonymous) rather than erroring.
         let (_, db) = test_oauth_app();
         let token = "lific_at_legacy-no-user-binding";
-        let token_hash = hex_encode(&Sha256::digest(token.as_bytes()));
+        let token_hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         {
             let conn = db.write().unwrap();
@@ -3176,7 +3173,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
         let conn = db.read().unwrap();
         // The raw code must NOT be in the table; only its hash.
         let by_hash: i64 = conn
@@ -3245,7 +3242,7 @@ mod tests {
         let device_code = v["device_code"].as_str().unwrap().to_string();
         let user_code = v["user_code"].as_str().unwrap().to_string();
 
-        let device_hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let device_hash = sha256_hex(device_code.as_bytes());
 
         // First poll: pending.
         let (status, body) = poll_device_token(&app, &device_code).await;
@@ -3346,7 +3343,7 @@ mod tests {
         let (app, db) = test_oauth_app();
         let v = request_device_code(&app, None).await;
         let device_code = v["device_code"].as_str().unwrap().to_string();
-        let hash = hex_encode(&Sha256::digest(device_code.as_bytes()));
+        let hash = sha256_hex(device_code.as_bytes());
 
         // Force expiry by rewriting expires_at into the past.
         {
@@ -3489,6 +3486,96 @@ mod tests {
         let (status, body) = poll_device_token(&app, "totally-unknown-device-code").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_grant");
+    }
+
+    // ── LIF-370: token mint + code consumption are one transaction ───────
+
+    /// Approve a device code directly in the DB (the verification-page dance
+    /// is covered end-to-end above) and clear `last_polled_at` so the next
+    /// poll isn't answered with `slow_down`.
+    fn approve_device_code(db: &DbPool, device_hash: &str) {
+        let conn = db.write().unwrap();
+        conn.execute(
+            "UPDATE oauth_device_codes
+             SET status = 'approved', last_polled_at = NULL
+             WHERE device_code_hash = ?1",
+            params![device_hash],
+        )
+        .unwrap();
+    }
+
+    fn device_status(db: &DbPool, device_hash: &str) -> String {
+        let conn = db.read().unwrap();
+        conn.query_row(
+            "SELECT status FROM oauth_device_codes WHERE device_code_hash = ?1",
+            params![device_hash],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn token_count(db: &DbPool) -> i64 {
+        let conn = db.read().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn device_consumed_code_cannot_mint_a_second_token() {
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let hash = sha256_hex(device_code.as_bytes());
+
+        approve_device_code(&db, &hash);
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::OK, "expected token, got {body}");
+        // Clients read `scope` off the token response; it stays on the wire.
+        assert_eq!(body["scope"], "mcp");
+        assert_eq!(token_count(&db), 1);
+        assert_eq!(device_status(&db, &hash), "consumed");
+
+        // Replay the same code (interval waited): no second token, ever.
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE oauth_device_codes SET last_polled_at = NULL WHERE device_code_hash = ?1",
+                params![hash],
+            )
+            .unwrap();
+        }
+        let (status, body) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+        assert_eq!(token_count(&db), 1, "replay must not mint a second token");
+    }
+
+    #[tokio::test]
+    async fn device_token_is_rolled_back_when_the_code_cannot_be_consumed() {
+        // A failing consume-UPDATE used to be swallowed (`let _ = ...`),
+        // handing out a token while leaving the code approved and replayable.
+        // Now the whole exchange fails and nothing is written.
+        let (app, db) = test_oauth_app();
+        let v = request_device_code(&app, None).await;
+        let device_code = v["device_code"].as_str().unwrap().to_string();
+        let hash = sha256_hex(device_code.as_bytes());
+
+        approve_device_code(&db, &hash);
+        {
+            let conn = db.write().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER block_consume
+                 BEFORE UPDATE OF status ON oauth_device_codes
+                 WHEN NEW.status = 'consumed'
+                 BEGIN SELECT RAISE(ABORT, 'consume blocked'); END;",
+            )
+            .unwrap();
+        }
+
+        let (status, _) = poll_device_token(&app, &device_code).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(token_count(&db), 0, "no token may survive a failed consume");
+        assert_eq!(device_status(&db, &hash), "approved");
     }
 
     #[tokio::test]

@@ -23,6 +23,22 @@ pub struct AuthState {
     pub required: bool,
 }
 
+/// Encode bytes as a lowercase hex string.
+///
+/// LIF-383: the one hex encoder in the tree. Four copies of this loop used to
+/// live in oauth.rs, mcp/mod.rs, auth.rs and db/queries/users.rs.
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 a byte slice and return the lowercase hex digest. This is how every
+/// bearer credential (session tokens, OAuth access tokens, device codes) is
+/// stored and looked up.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex_encode(&Sha256::digest(bytes))
+}
+
 /// Create the API key manager with our prefix.
 pub fn create_key_manager() -> Result<ApiKeyManagerV0, String> {
     ApiKeyManagerV0::init_default_config("lific_sk")
@@ -1032,10 +1048,6 @@ mod tests {
     // helper, already covered in oauth.rs) to prove the request path shared by
     // every REST handler and the /mcp route.
 
-    fn test_hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     fn test_auth_state(pool: &db::DbPool) -> AuthState {
         AuthState {
             db: pool.clone(),
@@ -1066,9 +1078,8 @@ mod tests {
     /// unbound if `None`), bypassing the full authorize/token-exchange dance
     /// (already covered end-to-end in oauth.rs). Returns the raw bearer token.
     fn insert_oauth_token(pool: &db::DbPool, suffix: &str, user_id: Option<i64>) -> String {
-        use sha2::{Digest, Sha256};
         let token = format!("lific_at_test-{suffix}");
-        let hash = test_hex_encode(&Sha256::digest(token.as_bytes()));
+        let hash = sha256_hex(token.as_bytes());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         let client_id = format!("client-{suffix}");
         let conn = pool.write().unwrap();

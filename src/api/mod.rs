@@ -1837,7 +1837,6 @@ mod authz_gating_tests {
     async fn oauth_token_backed_member_succeeds_non_member_denied_when_enforced() {
         use axum::http::{Request, StatusCode as SC};
         use rusqlite::params;
-        use sha2::{Digest, Sha256};
         use tower::ServiceExt;
 
         let (db, _admin, _lead, maintainer, _viewer, non_member, project_id) =
@@ -1866,10 +1865,7 @@ mod authz_gating_tests {
 
         fn insert_oauth_token(db: &crate::db::DbPool, suffix: &str, user_id: i64) -> String {
             let token = format!("lific_at_test-{suffix}");
-            let hash: String = Sha256::digest(token.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            let hash = crate::auth::sha256_hex(token.as_bytes());
             let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
             let client_id = format!("client-{suffix}");
             let conn = db.write().unwrap();
