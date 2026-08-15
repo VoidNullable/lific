@@ -25,8 +25,10 @@ pub enum ActivityScope {
     Plan(i64),
 }
 
+/// Activity caps lower than the shared 500: the feed is a rolling audit tail,
+/// and each row carries old/new value blobs.
 const MAX_LIMIT: i64 = 200;
-const DEFAULT_LIMIT: i64 = 50;
+const DEFAULT_LIMIT: i64 = super::DEFAULT_PAGE_LIMIT;
 
 /// List activity newest-first. `limit` is clamped to 1..=200 (default 50).
 /// Fetches limit+1 rows internally to compute `has_more` without a COUNT.
@@ -36,8 +38,7 @@ pub fn list_activity(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<ActivityFeed, LificError> {
-    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let offset = offset.unwrap_or(0).max(0);
+    let (limit, offset) = super::page_with(limit, offset, DEFAULT_LIMIT, MAX_LIMIT);
 
     // Scope params come first (?1, optionally ?2 for plans); limit/offset are
     // appended after, so their placeholder indices depend on the scope arity.

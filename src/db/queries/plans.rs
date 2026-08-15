@@ -201,13 +201,11 @@ pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, Li
     }
     inner.push_str(&format!(" ORDER BY {order_by}"));
 
-    // LIF-141 class: clamp limit to a sane bound, never unbounded/negative.
-    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let (limit, offset) = super::page(q.limit, q.offset);
     if q.before_id.is_some() {
         inner.push_str(&format!(" LIMIT ?{}", pv.len() + 1));
         pv.push(Box::new(limit));
     } else {
-        let offset = q.offset.unwrap_or(0).max(0);
         inner.push_str(&format!(" LIMIT ?{} OFFSET ?{}", pv.len() + 1, pv.len() + 2));
         pv.push(Box::new(limit));
         pv.push(Box::new(offset));

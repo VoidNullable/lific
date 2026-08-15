@@ -138,9 +138,13 @@ pub fn count_comments(
 }
 
 /// List a page of comments for an issue or page. `limit` is clamped to
-/// 1..=501 (the extra row lets transports detect `has_more`) and `offset` to
-/// zero or greater. Passing neither preserves the unbounded behaviour used by
-/// exports and other internal callers.
+/// 1..=[`MAX_PAGE_LIMIT`](super::MAX_PAGE_LIMIT) and `offset` to zero or
+/// greater, the same bounds every other paginated query uses. Passing neither
+/// preserves the unbounded behaviour used by exports and other internal
+/// callers.
+///
+/// Transports that over-fetch by one to detect `has_more` must clamp their own
+/// input to `MAX_PAGE_LIMIT - 1`, since `limit + 1` is clamped back down here.
 pub fn list_comments_paginated(
     conn: &Connection,
     parent: CommentParent,
@@ -181,8 +185,7 @@ pub fn list_comments_paginated(
     sql.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
 
     if limit.is_some() || offset.is_some() {
-        let limit = limit.map(|n| n.clamp(1, 501)).unwrap_or(-1);
-        let offset = offset.unwrap_or(0).max(0);
+        let (limit, offset) = super::page_unbounded(limit, offset);
         sql.push_str(&format!(
             " LIMIT ?{} OFFSET ?{}",
             param_values.len() + 1,
@@ -578,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn list_comments_paginated_clamps_limit_to_501() {
+    fn list_comments_paginated_clamps_limit_to_max_page_limit() {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
         for index in 0..502 {
@@ -600,7 +603,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(comments.len(), 501);
+        assert_eq!(comments.len(), super::super::MAX_PAGE_LIMIT as usize);
     }
 
     #[test]

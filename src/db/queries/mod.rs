@@ -28,6 +28,52 @@ pub(crate) fn unescape_text(s: &str) -> String {
     s.replace("\\n", "\n").replace("\\t", "\t")
 }
 
+/// Default page size when a caller does not ask for one.
+pub const DEFAULT_PAGE_LIMIT: i64 = 50;
+
+/// Hard cap on a single page. Every paginated query clamps to this unless it
+/// documents a deliberately lower cap of its own (see `activity::list_activity`).
+pub const MAX_PAGE_LIMIT: i64 = 500;
+
+/// SQLite's "no limit" sentinel: `LIMIT -1` returns every row. Only reachable
+/// through `page_unbounded`, where an absent limit means "no limit" by design.
+pub const NO_LIMIT: i64 = -1;
+
+/// Clamp caller-supplied pagination into `(limit, offset)` ready for SQL.
+///
+/// LIF-141 class: SQLite treats `LIMIT -1` as "no limit", so an unclamped
+/// `?limit=-1` would dump the whole table. Floor at 1 so a 0/negative value
+/// still paginates, cap at [`MAX_PAGE_LIMIT`], and floor the offset at 0.
+pub fn page(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
+    page_with(limit, offset, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT)
+}
+
+/// [`page`] with a query-specific default and cap, for the few queries whose
+/// published defaults differ (search defaults to 20, activity caps at 200).
+pub fn page_with(
+    limit: Option<i64>,
+    offset: Option<i64>,
+    default_limit: i64,
+    max_limit: i64,
+) -> (i64, i64) {
+    (
+        limit.unwrap_or(default_limit).clamp(1, max_limit),
+        offset.unwrap_or(0).max(0),
+    )
+}
+
+/// [`page`] for queries where an absent limit means "return everything".
+///
+/// Used by the page and comment listings, whose export/REST/CLI callers rely on
+/// unbounded reads; only explicit paging callers pass a limit. A limit that is
+/// present is clamped exactly like [`page`].
+pub fn page_unbounded(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
+    (
+        limit.map_or(NO_LIMIT, |n| n.clamp(1, MAX_PAGE_LIMIT)),
+        offset.unwrap_or(0).max(0),
+    )
+}
+
 /// Run a closure inside a SQLite SAVEPOINT so that multi-statement writes are atomic.
 /// On success the savepoint is released; on error it is rolled back.
 pub(crate) fn savepoint<F, T>(
@@ -67,7 +113,71 @@ pub use search::*;
 
 #[cfg(test)]
 mod tests {
-    use super::unescape_text;
+    use super::{
+        DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, NO_LIMIT, page, page_unbounded, page_with,
+        unescape_text,
+    };
+
+    // ── page ──────────────────────────────────────────────────
+
+    #[test]
+    fn page_defaults_when_nothing_is_supplied() {
+        assert_eq!(page(None, None), (DEFAULT_PAGE_LIMIT, 0));
+    }
+
+    #[test]
+    fn page_passes_through_values_inside_the_bounds() {
+        assert_eq!(page(Some(10), Some(25)), (10, 25));
+        assert_eq!(page(Some(1), Some(0)), (1, 0));
+        assert_eq!(page(Some(MAX_PAGE_LIMIT), Some(0)), (MAX_PAGE_LIMIT, 0));
+    }
+
+    // SQLite reads LIMIT -1 as "no limit", so a negative or zero limit must
+    // floor at 1 rather than dumping the whole table (LIF-141 class).
+    #[test]
+    fn page_floors_zero_and_negative_limits_at_one() {
+        assert_eq!(page(Some(0), None).0, 1);
+        assert_eq!(page(Some(-1), None).0, 1);
+        assert_eq!(page(Some(i64::MIN), None).0, 1);
+    }
+
+    #[test]
+    fn page_caps_oversized_limits() {
+        assert_eq!(page(Some(MAX_PAGE_LIMIT + 1), None).0, MAX_PAGE_LIMIT);
+        assert_eq!(page(Some(i64::MAX), None).0, MAX_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn page_floors_negative_offsets_at_zero() {
+        assert_eq!(page(None, Some(-10)).1, 0);
+        assert_eq!(page(None, Some(i64::MIN)).1, 0);
+    }
+
+    // ── page_with ─────────────────────────────────────────────
+
+    #[test]
+    fn page_with_honours_a_query_specific_default_and_cap() {
+        assert_eq!(page_with(None, None, 20, 200), (20, 0));
+        assert_eq!(page_with(Some(999), None, 20, 200).0, 200);
+        assert_eq!(page_with(Some(0), Some(-3), 20, 200), (1, 0));
+    }
+
+    // ── page_unbounded ────────────────────────────────────────
+
+    #[test]
+    fn page_unbounded_treats_an_absent_limit_as_no_limit() {
+        assert_eq!(page_unbounded(None, None), (NO_LIMIT, 0));
+        assert_eq!(page_unbounded(None, Some(7)), (NO_LIMIT, 7));
+    }
+
+    #[test]
+    fn page_unbounded_clamps_a_supplied_limit_like_page() {
+        assert_eq!(page_unbounded(Some(10), None).0, 10);
+        assert_eq!(page_unbounded(Some(0), None).0, 1);
+        assert_eq!(page_unbounded(Some(-5), None).0, 1);
+        assert_eq!(page_unbounded(Some(i64::MAX), None).0, MAX_PAGE_LIMIT);
+        assert_eq!(page_unbounded(Some(5), Some(-5)).1, 0);
+    }
 
     #[test]
     fn unescape_text_preserves_literal_newline_escape_in_multiline_content() {

@@ -176,12 +176,9 @@ pub fn list_pages(
     // Optional pagination. `None` limit means "no limit" so existing
     // callers (export, REST, CLI) keep their unbounded behavior; only the
     // MCP list_resources(page) branch passes explicit values (LIF-137).
-    // When a limit is given, clamp to a sane range like list_issues
-    // (LIF-141): floor at 1 so a 0/negative value still paginates, cap at
-    // 500 to match MCP conventions. Offset applies whenever provided.
+    // Offset applies whenever provided.
     if limit.is_some() || offset.is_some() {
-        let limit = limit.map(|l| l.clamp(1, 500)).unwrap_or(-1);
-        let offset = offset.unwrap_or(0).max(0);
+        let (limit, offset) = super::page_unbounded(limit, offset);
         sql.push_str(&format!(
             " LIMIT ?{} OFFSET ?{}",
             param_values.len() + 1,

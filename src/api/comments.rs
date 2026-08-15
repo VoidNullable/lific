@@ -60,7 +60,7 @@ pub(super) struct ListCommentsQuery {
     author: Option<String>,
     /// Creation-time sort direction: asc (default) or desc.
     order: Option<String>,
-    /// Maximum comments to return (clamped to 1..=500).
+    /// Maximum comments to return (clamped by `list_comments_paginated`).
     limit: Option<i64>,
     /// Number of matching comments to skip.
     offset: Option<i64>,
@@ -75,14 +75,13 @@ pub(super) async fn list_comments(
     let project_id =
         with_read(&db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     require_comment_viewer(&db, &identity, Some(project_id))?;
-    let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
         crate::db::queries::comments::list_comments_paginated(
             conn,
             CommentParent::Issue(issue_id),
             q.author.as_deref(),
             q.order.as_deref(),
-            limit,
+            q.limit,
             q.offset,
         )
     })
@@ -124,14 +123,13 @@ pub(super) async fn list_page_comments(
 ) -> Result<Json<Vec<Comment>>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id;
     require_comment_viewer(&db, &identity, project_id)?;
-    let limit = q.limit.map(|n| n.clamp(1, 500));
     with_read(&db, |conn| {
         crate::db::queries::comments::list_comments_paginated(
             conn,
             CommentParent::Page(page_id),
             q.author.as_deref(),
             q.order.as_deref(),
-            limit,
+            q.limit,
             q.offset,
         )
     })
