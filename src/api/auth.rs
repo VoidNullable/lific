@@ -859,10 +859,50 @@ mod tests {
 
     #[tokio::test]
     async fn user_roster_requires_admin_authentication() {
-        assert!(super::require_admin(&None).is_err());
+        let unauthenticated = {
+            let db = crate::db::open_memory().expect("test db");
+            with_client_ip_test_layers(crate::api::router(db, &[]), test_peer())
+                .layer(axum::Extension(crate::config::AuthConfig {
+                    allow_signup: true,
+                    required: true,
+                    secure_cookies: false,
+                }))
+                .layer(axum::Extension(
+                    None::<crate::resolve_caller::ResolvedIdentity>,
+                ))
+        };
+        assert_eq!(
+            json_get(&unauthenticated, "/api/users").await.status(),
+            StatusCode::FORBIDDEN
+        );
 
-        let app = test_app_with_auth(true);
-        assert_eq!(json_get(&app, "/api/users").await.status(), StatusCode::OK);
+        let non_admin = {
+            let db = crate::db::open_memory().expect("test db");
+            with_client_ip_test_layers(crate::api::router(db, &[]), test_peer())
+                .layer(axum::Extension(crate::config::AuthConfig {
+                    allow_signup: true,
+                    required: true,
+                    secure_cookies: false,
+                }))
+                .layer(axum::Extension(Some(
+                    crate::resolve_caller::ResolvedIdentity {
+                        user: crate::db::models::AuthUser {
+                            id: 99,
+                            username: "member".into(),
+                            display_name: "Member".into(),
+                            is_admin: false,
+                        },
+                        transport: crate::actor::Transport::Web,
+                    },
+                )))
+        };
+        assert_eq!(
+            json_get(&non_admin, "/api/users").await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let admin = test_app_with_auth(true);
+        assert_eq!(json_get(&admin, "/api/users").await.status(), StatusCode::OK);
     }
 
     #[tokio::test]
