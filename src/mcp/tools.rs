@@ -1874,7 +1874,7 @@ impl LificMcp {
             None => None,
         };
         match self.write(|conn| {
-            queries::create_issue(
+            let issue = queries::create_issue(
                 conn,
                 &models::CreateIssue {
                     project_id: pid,
@@ -1888,7 +1888,16 @@ impl LificMcp {
                     labels: input.labels.clone().unwrap_or_default(),
                     source: None,
                 },
-            )
+            )?;
+            // LIF-369: link attachments the description references, same as
+            // the REST create path.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Issue,
+                issue.id,
+                &issue.description,
+            )?;
+            Ok(issue)
         }) {
             Ok(issue) => {
                 self.emit(crate::realtime::RealtimeEvent::IssueCreated {
@@ -1964,6 +1973,14 @@ impl LificMcp {
                     target_date: input.target_date.clone(),
                     labels: input.labels.clone(),
                 },
+            )?;
+            // LIF-369: re-scan the (possibly edited) description and
+            // reconcile links, same as the REST update path.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Issue,
+                issue.id,
+                &issue.description,
             )?;
             let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
                 (previous, "done") if previous != "done" => {
@@ -2158,7 +2175,15 @@ impl LificMcp {
                 _ => unreachable!(),
             }
 
-            queries::update_issue(conn, id, &patch)
+            let issue = queries::update_issue(conn, id, &patch)?;
+            // LIF-369: an edit can add or drop an attachment reference.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Issue,
+                issue.id,
+                &issue.description,
+            )?;
+            Ok(issue)
         }) {
             Ok(issue) => {
                 self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
@@ -2504,7 +2529,7 @@ impl LificMcp {
             _ => None,
         };
         match self.write(|conn| {
-            queries::create_page(
+            let page = queries::create_page(
                 conn,
                 &models::CreatePage {
                     project_id,
@@ -2514,7 +2539,16 @@ impl LificMcp {
                     status: input.status.clone().unwrap_or_else(|| "draft".into()),
                     labels: input.labels.clone().unwrap_or_default(),
                 },
-            )
+            )?;
+            // LIF-369: link attachments the content references, same as the
+            // REST create path.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Page,
+                page.id,
+                &page.content,
+            )?;
+            Ok(page)
         }) {
             Ok(page) => {
                 if let Some(project_id) = page.project_id {
@@ -2563,7 +2597,7 @@ impl LificMcp {
                 }
                 None => None,
             };
-            queries::update_page(
+            let page = queries::update_page(
                 conn,
                 id,
                 &models::UpdatePage {
@@ -2575,7 +2609,16 @@ impl LificMcp {
                     pinned: input.pinned,
                     labels: input.labels.clone(),
                 },
-            )
+            )?;
+            // LIF-369: re-scan the (possibly edited) content and reconcile
+            // links, same as the REST update path.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Page,
+                page.id,
+                &page.content,
+            )?;
+            Ok(page)
         }) {
             Ok(page) => {
                 if let Some(project_id) = page.project_id {
@@ -2656,7 +2699,15 @@ impl LificMcp {
                 _ => unreachable!(),
             }
 
-            queries::update_page(conn, id, &patch)
+            let page = queries::update_page(conn, id, &patch)?;
+            // LIF-369: an edit can add or drop an attachment reference.
+            queries::attachments::sync_links(
+                conn,
+                models::AttachmentEntity::Page,
+                page.id,
+                &page.content,
+            )?;
+            Ok(page)
         }) {
             Ok(page) => {
                 if let Some(project_id) = page.project_id {
@@ -3557,10 +3608,16 @@ impl LificMcp {
         };
 
         match self.write(|conn| {
-            let candidates =
-                queries::comments::mention_candidates(conn, project_id, member_scoped)?;
-            let c = queries::comments::create_comment(conn, parent, user_id, &input.content)?;
-            queries::comments::sync_mentions(conn, c.id, &c.content, &candidates)?;
+            // LIF-375: one shared implementation with the REST path — it also
+            // reconciles the attachment links the body references (LIF-369).
+            let c = queries::comments::create_comment_with_mentions(
+                conn,
+                parent,
+                project_id,
+                user_id,
+                &input.content,
+                member_scoped,
+            )?;
             let event = match (c.issue_id, project_id) {
                 (Some(issue_id), Some(project_id)) => {
                     Some(crate::realtime::RealtimeEvent::IssueUpdated {
@@ -3763,11 +3820,15 @@ impl LificMcp {
         };
 
         match self.write(|conn| {
-            let candidates =
-                queries::comments::mention_candidates(conn, project_id, member_scoped)?;
-            let c = queries::comments::update_comment(conn, input.comment_id, &input.content)?;
-            queries::comments::sync_mentions(conn, c.id, &c.content, &candidates)?;
-            Ok(c)
+            // LIF-375: shared with the REST edit path; re-derives mentions and
+            // attachment links from the new body (LIF-369).
+            queries::comments::update_comment_with_mentions(
+                conn,
+                input.comment_id,
+                project_id,
+                &input.content,
+                member_scoped,
+            )
         }) {
             // Don't echo the new content back — the agent already supplied it
             // (LIF-115). The id is the stable handle.
@@ -6357,6 +6418,234 @@ mod tests {
         let mentions =
             crate::db::queries::comments::list_mention_user_ids(&conn, comment_id).unwrap();
         assert_eq!(mentions, vec![ada_id], "only the real user @ada resolves");
+    }
+
+    // ── attachment link sync on MCP writes (LIF-369) ──
+    //
+    // The REST handlers have always re-scanned a saved body for
+    // `/api/attachments/{id}` references and reconciled `attachment_links`.
+    // The MCP tools did not, so an agent edit left the link table (which
+    // attachment authorization and orphan GC both read) stale. These tests
+    // pin the behavior on every MCP write path.
+
+    /// Insert an attachment row directly. Uploading bytes is a REST-only
+    /// concern; all the link table needs is a real attachment id to point at.
+    fn seed_attachment(m: &LificMcp, name: &str) -> i64 {
+        let conn = m.db.write().unwrap();
+        let attachment = crate::db::queries::attachments::create_attachment(
+            &conn,
+            &format!("sha-{name}"),
+            name,
+            "image/png",
+            3,
+            None,
+        )
+        .expect("seed attachment");
+        attachment.id
+    }
+
+    /// Every (entity_type, entity_id) an attachment is currently linked to.
+    fn links_for(m: &LificMcp, attachment_id: i64) -> Vec<(String, i64)> {
+        let conn = m.db.read().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT entity_type, entity_id FROM attachment_links
+                 WHERE attachment_id = ?1 ORDER BY entity_type, entity_id",
+            )
+            .unwrap();
+        stmt.query_map([attachment_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, i64)>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn create_issue_links_attachments_referenced_in_description() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATI");
+        let att = seed_attachment(&m, "shot.png");
+
+        let result = m.create_issue(Parameters(CreateIssueInput {
+            project: "ATI".into(),
+            title: "With attachment".into(),
+            description: Some(format!("see ![shot](/api/attachments/{att})")),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Created ATI-1"), "got: {result}");
+
+        let issue_id = issue_id_for(&m, "ATI-1");
+        assert_eq!(links_for(&m, att), vec![("issue".to_string(), issue_id)]);
+    }
+
+    #[test]
+    fn update_issue_reconciles_attachment_links() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATU");
+        let old = seed_attachment(&m, "old.png");
+        let new = seed_attachment(&m, "new.png");
+
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "ATU".into(),
+            title: "Swap".into(),
+            description: Some(format!("/api/attachments/{old}")),
+            ..Default::default()
+        }));
+        let issue_id = issue_id_for(&m, "ATU-1");
+        assert_eq!(links_for(&m, old), vec![("issue".to_string(), issue_id)]);
+
+        let result = m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "ATU-1".into(),
+            description: Some(format!("/api/attachments/{new}")),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Updated ATU-1"), "got: {result}");
+
+        assert!(links_for(&m, old).is_empty(), "dropped reference unlinks");
+        assert_eq!(links_for(&m, new), vec![("issue".to_string(), issue_id)]);
+    }
+
+    #[test]
+    fn edit_issue_links_attachments_added_by_the_edit() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATE");
+        let att = seed_attachment(&m, "edit.png");
+
+        m.create_issue(Parameters(CreateIssueInput {
+            project: "ATE".into(),
+            title: "Edited".into(),
+            description: Some("placeholder".into()),
+            ..Default::default()
+        }));
+
+        let result = m.edit_issue(Parameters(EditIssueInput {
+            identifier: "ATE-1".into(),
+            old_string: "placeholder".into(),
+            new_string: format!("/api/attachments/{att}"),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Edited ATE-1"), "got: {result}");
+
+        let issue_id = issue_id_for(&m, "ATE-1");
+        assert_eq!(links_for(&m, att), vec![("issue".to_string(), issue_id)]);
+    }
+
+    fn page_id_for(m: &LificMcp, identifier: &str) -> i64 {
+        m.read(|conn| queries::resolve_page_identifier(conn, identifier))
+            .expect("page id")
+    }
+
+    #[test]
+    fn create_page_links_attachments_referenced_in_content() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATP");
+        let att = seed_attachment(&m, "page.png");
+
+        let result = m.create_page(Parameters(CreatePageInput {
+            project: Some("ATP".into()),
+            title: "Doc".into(),
+            content: Some(format!("![p](/api/attachments/{att})")),
+            ..Default::default()
+        }));
+        assert!(result.contains("ATP-DOC-1"), "got: {result}");
+
+        let page_id = page_id_for(&m, "ATP-DOC-1");
+        assert_eq!(links_for(&m, att), vec![("page".to_string(), page_id)]);
+    }
+
+    #[test]
+    fn update_page_reconciles_attachment_links() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATQ");
+        let old = seed_attachment(&m, "old-page.png");
+        let new = seed_attachment(&m, "new-page.png");
+
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("ATQ".into()),
+            title: "Doc".into(),
+            content: Some(format!("/api/attachments/{old}")),
+            ..Default::default()
+        }));
+        let page_id = page_id_for(&m, "ATQ-DOC-1");
+        assert_eq!(links_for(&m, old), vec![("page".to_string(), page_id)]);
+
+        let result = m.update_page(Parameters(UpdatePageInput {
+            identifier: "ATQ-DOC-1".into(),
+            content: Some(format!("/api/attachments/{new}")),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Updated ATQ-DOC-1"), "got: {result}");
+
+        assert!(links_for(&m, old).is_empty(), "dropped reference unlinks");
+        assert_eq!(links_for(&m, new), vec![("page".to_string(), page_id)]);
+    }
+
+    #[test]
+    fn edit_page_links_attachments_added_by_the_edit() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATR");
+        let att = seed_attachment(&m, "page-edit.png");
+
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("ATR".into()),
+            title: "Doc".into(),
+            content: Some("placeholder".into()),
+            ..Default::default()
+        }));
+
+        let result = m.edit_page(Parameters(EditPageInput {
+            identifier: "ATR-DOC-1".into(),
+            old_string: "placeholder".into(),
+            new_string: format!("/api/attachments/{att}"),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Edited ATR-DOC-1"), "got: {result}");
+
+        let page_id = page_id_for(&m, "ATR-DOC-1");
+        assert_eq!(links_for(&m, att), vec![("page".to_string(), page_id)]);
+    }
+
+    #[test]
+    fn add_comment_links_attachments_referenced_in_body() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATC");
+        seed_issue(&m, "ATC", "Commented");
+        let att = seed_attachment(&m, "comment.png");
+        let _user_guard = seed_user(&m);
+
+        let result = m.add_comment(Parameters(AddCommentInput {
+            identifier: "ATC-1".into(),
+            content: format!("here: /api/attachments/{att}"),
+        }));
+        assert!(result.starts_with("Comment #"), "got: {result}");
+
+        let comment_id = comment_id_from(&result);
+        assert_eq!(links_for(&m, att), vec![("comment".to_string(), comment_id)]);
+    }
+
+    #[test]
+    fn edit_comment_reconciles_attachment_links() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Attach", "ATD");
+        seed_issue(&m, "ATD", "Commented");
+        let old = seed_attachment(&m, "old-comment.png");
+        let new = seed_attachment(&m, "new-comment.png");
+        let _user_guard = seed_user(&m);
+
+        let created = m.add_comment(Parameters(AddCommentInput {
+            identifier: "ATD-1".into(),
+            content: format!("/api/attachments/{old}"),
+        }));
+        let comment_id = comment_id_from(&created);
+        assert_eq!(links_for(&m, old), vec![("comment".to_string(), comment_id)]);
+
+        let result = m.edit_comment(Parameters(EditCommentInput {
+            comment_id,
+            content: format!("/api/attachments/{new}"),
+        }));
+        assert!(result.starts_with("Comment #"), "got: {result}");
+
+        assert!(links_for(&m, old).is_empty(), "dropped reference unlinks");
+        assert_eq!(links_for(&m, new), vec![("comment".to_string(), comment_id)]);
     }
 
     #[test]
