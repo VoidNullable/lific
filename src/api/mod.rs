@@ -268,7 +268,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // preview step.
         .route(
             "/api/projects/{id}/import/github",
-            post(projects::import_github),
+            post(projects::import_github).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         // Saved views (LIF-242) — Viewer-gated + strict per-user ownership
         // enforced in the query layer (see src/api/views.rs doc comment).
