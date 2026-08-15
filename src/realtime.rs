@@ -212,17 +212,23 @@ pub async fn serve_socket(
         },
         event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
         revoked = revocations.recv() => {
-            if matches!(revoked, Ok(id) if id == auth_user.id) {
+            let flow = revocation_flow(revoked, auth_user.id);
+            if flow == SocketFlow::Close {
                 let _ = socket.send(Message::Close(None)).await;
-                SocketFlow::Close
-            } else {
-                SocketFlow::Open
             }
+            flow
         },
         message = socket.recv() => {
             handle_client_message(&mut socket, &db, &auth_user, message).await
         },
     } {}
+}
+
+fn revocation_flow(revoked: Result<i64, RecvError>, user_id: i64) -> SocketFlow {
+    match revoked {
+        Ok(id) if id != user_id => SocketFlow::Open,
+        Ok(_) | Err(RecvError::Lagged(_)) | Err(RecvError::Closed) => SocketFlow::Close,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,6 +603,20 @@ mod tests {
         let mut rx = hub.revocations.subscribe();
         hub.revoke_user(42);
         assert_eq!(rx.try_recv().unwrap(), 42);
+    }
+
+    #[test]
+    fn revocation_receiver_errors_fail_closed() {
+        assert_eq!(
+            revocation_flow(Err(RecvError::Lagged(1)), 42),
+            SocketFlow::Close
+        );
+        assert_eq!(
+            revocation_flow(Err(RecvError::Closed), 42),
+            SocketFlow::Close
+        );
+        assert_eq!(revocation_flow(Ok(7), 42), SocketFlow::Open);
+        assert_eq!(revocation_flow(Ok(42), 42), SocketFlow::Close);
     }
 
     #[test]

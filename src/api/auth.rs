@@ -608,22 +608,24 @@ pub(super) async fn change_password(
 ) -> Result<impl IntoResponse, LificError> {
     let user = require_user(&identity)?;
     let session = with_write(&db, |conn| {
-        let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
-        let ok = crate::db::queries::users::verify_password(
-            &input.current_password,
-            &full.password_hash,
-        )?;
-        if !ok {
-            return Err(LificError::BadRequest(
-                "current password is incorrect".into(),
-            ));
-        }
-        crate::db::queries::users::update_password(conn, user.id, &input.new_password)?;
-        // Kill every existing session (including any an attacker holds), then
-        // issue a fresh one for this browser.
-        crate::db::queries::users::delete_all_sessions(conn, user.id)?;
-        crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)?;
-        crate::db::queries::users::create_session(conn, user.id, None)
+        crate::db::queries::savepoint(conn, "change_password", || {
+            let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
+            let ok = crate::db::queries::users::verify_password(
+                &input.current_password,
+                &full.password_hash,
+            )?;
+            if !ok {
+                return Err(LificError::BadRequest(
+                    "current password is incorrect".into(),
+                ));
+            }
+            crate::db::queries::users::update_password(conn, user.id, &input.new_password)?;
+            // Kill every existing session (including any an attacker holds), then
+            // issue a fresh one for this browser.
+            crate::db::queries::users::delete_all_sessions(conn, user.id)?;
+            crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)?;
+            crate::db::queries::users::create_session(conn, user.id, None)
+        })
     })?;
     realtime.revoke_user(user.id);
 
@@ -655,8 +657,10 @@ pub(super) async fn revoke_all_sessions(
 ) -> Result<impl IntoResponse, LificError> {
     let user = require_user(&identity)?;
     with_write(&db, |conn| {
-        crate::db::queries::users::delete_all_sessions(conn, user.id)?;
-        crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)
+        crate::db::queries::savepoint(conn, "revoke_all_sessions", || {
+            crate::db::queries::users::delete_all_sessions(conn, user.id)?;
+            crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)
+        })
     })?;
     realtime.revoke_user(user.id);
     let mut resp_headers = HeaderMap::new();
