@@ -25,8 +25,8 @@ const JSONLD = JSON.stringify([
     description:
       "A free, self-hosted issue tracker built for coding agents. Single binary, native MCP.",
     applicationCategory: "DeveloperApplication",
-    // Native Windows is supported via `cargo install` (docs/windows);
-    // prebuilt release binaries are Linux + macOS only.
+    // Prebuilt release binaries cover Linux and macOS (x86_64 + arm64) and
+    // Windows x86_64; `cargo install` works everywhere Rust does.
     operatingSystem: "Linux, macOS, Windows",
     license: "https://www.apache.org/licenses/LICENSE-2.0",
     offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
@@ -209,7 +209,7 @@ export default function Home() {
               >
                 the releases page
               </a>{" "}
-              (Linux and macOS, x86_64 and arm64)
+              (Linux and macOS, x86_64 and arm64, and Windows x86_64)
             </p>
           </div>
         </section>
@@ -294,7 +294,7 @@ export default function Home() {
             <Body className="mt-9">
               After the restart, the agent has the whole tracker as MCP tools:
               issues, plans, pages, comments, and search. The full tool
-              surface costs <Em>about 5.6k tokens of context</Em>, roughly one
+              surface costs <Em>about 5.8k tokens of context</Em>, roughly one
               long file read, so it leaves room for the actual work.
             </Body>
             <Body>
@@ -418,9 +418,12 @@ export default function Home() {
             <SectionTitle>everyone</SectionTitle>
             <Body className="mt-8">
               Setup takes about a minute. <Cmd>lific init</Cmd> writes the
-              config, creates the database,
-              and prints your API key once. It also registers a background
-              service, so <Em>the server is still running tomorrow</Em>.{" "}
+              config, creates the database, and asks how you want to sign in:
+              login-free, or with a password. It creates the first admin
+              account from that answer, then installs a background service
+              where the system offers one (a systemd user session on Linux,
+              launchd on macOS), so{" "}
+              <Em>the server is still running tomorrow</Em>.{" "}
               <Cmd>lific connect</Cmd> finds the AI tools on your machine and
               writes their MCP config for them. Restart your client and the
               tools show up.
@@ -440,7 +443,7 @@ export default function Home() {
                   <span className="text-success">$</span> lific init
                   {"      "}
                   <span className="text-text-faint">
-                    # config + db + api key; service on :3456
+                    # config + db + admin; service on :3456
                   </span>
                   {"\n"}
                   <span className="text-success">$</span> lific connect

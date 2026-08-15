@@ -71,6 +71,14 @@ Handlers return JSON errors with an `error` string.
 
 The common error statuses are `400` for invalid requests, `403` for forbidden requests, `404` for missing resources, `409` for conflicts, and `500` for internal failures. Authentication middleware can return `401` as plain text with a `WWW-Authenticate` header.
 
+An endpoint that requires an authenticated user, such as saved views or project groups, answers a request that carries no user identity with `403` and this body:
+
+```json
+{
+  "error": "authentication required"
+}
+```
+
 ## Pagination and lists
 
 Most collection endpoints return JSON arrays. Activity endpoints return an object with `items` and `has_more`; board, insights, and count endpoints return objects with their documented fields. Array responses do not include total counts or cursor metadata.

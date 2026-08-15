@@ -26,6 +26,8 @@ lific init
 lific service status
 ```
 
+On a fresh install, `lific init` also asks how you want to sign in and creates the first administrator with that choice. For a self-hosted instance that other people reach, take the `passwords` mode: it keeps `[auth] required = true` and leaves your bind host alone. The `login-free` alternative writes `[auth] required = false` and pins `[server] host` to `127.0.0.1`, which is the right shape for a single-operator machine and the wrong shape for a server. Pass `--auth-mode passwords` with `--name` and `--password` to make the choice non-interactively.
+
 On Linux, `lific service install` writes a systemd user unit. On macOS, it writes a LaunchAgent. The Linux service installation attempts to enable user lingering so the service can continue after logout.
 
 On Windows, `lific service` commands report that no supported service manager was found. [Windows](/docs/windows) documents the Task Scheduler and WSL 2 alternatives.
@@ -78,7 +80,9 @@ The plaintext key is shown once. Use it in an `Authorization: Bearer <key>` requ
 
 Lific also exposes OAuth authorization, token, registration, revocation, and device authorization routes when it runs with `lific start`. Set `server.public_url` to the public base URL so OAuth metadata advertises the URL clients use.
 
-`[auth] required` defaults to `true`. Do not set it to `false` for a public deployment. Lific refuses to start when authentication is disabled and `server.public_url` does not point to localhost.
+`[auth] required` defaults to `true`. Do not set it to `false` for a public deployment. Lific refuses to start when authentication is disabled and `[server] host` is not a loopback address. The guard reads the bind host, not `server.public_url`. The database-backed `web_auto_login` setting is guarded the same way, and additionally logs a warning when it is enabled behind an HTTPS `public_url`.
+
+A loopback bind satisfies the guard, so an instance bound to `127.0.0.1` and published by a reverse proxy still starts with authentication off. The guard cannot see your proxy. Keep `required = true` whenever anything in front of Lific accepts requests from outside the machine.
 
 ## Automatic backups
 

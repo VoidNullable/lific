@@ -66,6 +66,61 @@ Reorders the supplied projects by list position. This endpoint has no path or qu
 
 Request body field: `ids` (integer array). Response: a `Project` array in the resulting order.
 
+## Project groups
+
+Project groups are the caller's own sidebar grouping. Every endpoint here requires an authenticated user and operates only on that user's groups; another user's group reads as missing rather than forbidden.
+
+### GET `/api/project-groups`
+
+Lists the caller's project groups. This endpoint has no path or query parameters. It has no request body.
+
+Response: an array of objects with `id` (integer), `user_id` (integer), `name` (string), `sort_order` (integer), `project_ids` (integer array), `created_at` (string), and `updated_at` (string). `project_ids` lists only projects the caller can still see, so a project whose membership was revoked disappears from the group without being unfiled.
+
+### POST `/api/project-groups`
+
+Creates a group owned by the caller. This endpoint has no path or query parameters.
+
+Request body field: `name` (string). Response: a project group object with an empty `project_ids`. A name the caller already uses returns a conflict.
+
+```bash
+curl -X POST https://your-server.example/api/project-groups \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Day job"}'
+```
+
+```json
+{
+  "id": 1,
+  "user_id": 1,
+  "name": "Day job",
+  "sort_order": 0,
+  "project_ids": [],
+  "created_at": "2026-07-14 12:00:00",
+  "updated_at": "2026-07-14 12:00:00"
+}
+```
+
+### PATCH `/api/project-groups/{id}`
+
+Renames a caller-owned group. Path parameter: `id` (integer group ID). It has no query parameters.
+
+Request body field: `name` (string, optional). Response: a project group object. A group owned by another user returns `404`.
+
+### DELETE `/api/project-groups/{id}`
+
+Deletes a caller-owned group. Path parameter: `id` (integer group ID). It has no query parameters or request body. The projects themselves are untouched.
+
+Response: the standard delete response. A group owned by another user returns `404` and is left intact.
+
+### PUT `/api/project-groups/assign`
+
+Files a project into one of the caller's groups, or takes it out of all of them. This endpoint has no path or query parameters.
+
+Request body fields are `project_id` (integer) and `group_id` (integer or null). A null `group_id` removes the project from every group the caller owns. Unlike the rest of this family, this endpoint checks project access: assigning a project the caller cannot view returns `403`.
+
+Response: `{ "ok": true }`.
+
 ## Project data
 
 ### GET `/api/projects/{id}/board`

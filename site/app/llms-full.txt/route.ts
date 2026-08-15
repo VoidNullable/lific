@@ -1,7 +1,10 @@
 import { source } from "@/lib/source";
 
-// Static export: rendered once at build time, served as /llms-full.txt.
-// The entire documentation as one plain-text file for LLM consumption.
+// Served as /llms-full.txt: the entire documentation as one plain-text file
+// for LLM consumption. The body is assembled by walking source.getPages() and
+// reading each page's raw MDX, so it is derived from the content tree rather
+// than maintained by hand. Under `output: "export"` this handler runs during
+// the build and the result ships as a static asset.
 export const revalidate = false;
 
 function stripFrontmatter(text: string): string {

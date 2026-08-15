@@ -58,7 +58,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How many context tokens does an issue tracker's MCP server cost?",
-    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Lific 5,641 (27 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
+    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on August 15, 2026 at v2.6.0: 5,753 tokens (27 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
   },
 ];
 
@@ -600,7 +600,9 @@ export default function Compare() {
           <Body>
             So we measured, on {STAMP}: each server launched over stdio,
             asked for its tool list, schemas tokenized. Numbers below are what
-            an agent pays before it reads a single line of your code.
+            an agent pays before it reads a single line of your code. Lific&apos;s
+            own row was measured again the same way on August 15, 2026, against
+            v2.6.0; the other rows are the {STAMP} figures.
           </Body>
           <ComparisonTable
             caption="Measured tool counts and tool-schema token costs of each tracker's MCP server"
@@ -616,11 +618,11 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    Built in: <Cmd>lific mcp</Cmd> (v2.2.1)
+                    Built in: <Cmd>lific mcp</Cmd> (v2.6.0)
                   </>,
                   <>27</>,
-                  <>5,641 tokens</>,
-                  <>2.8%</>,
+                  <>5,753 tokens</>,
+                  <>2.9%</>,
                 ],
               },
               {
@@ -717,12 +719,13 @@ export default function Compare() {
             Linear also revises its tool set regularly.
           </Body>
           <Body>
-            Lific&apos;s own 5.6k fits the budget, but not gracefully: per
+            Lific&apos;s own 5.75k fits the budget, but not gracefully: per
             tool, its schemas are the second wordiest on this page, after
             Plane.
           </Body>
           <p className="mt-4 max-w-[75ch] text-caption leading-relaxed text-text-faint">
-            Methodology: each server was launched over stdio on {STAMP},
+            Methodology: each server was launched over stdio (the others on{" "}
+            {STAMP}, Lific again on August 15, 2026),
             sent <Cmd>initialize</Cmd> and <Cmd>tools/list</Cmd> via the
             official MCP Python SDK, and the returned tool definitions (name,
             description, input schema) were serialized as compact JSON and
@@ -747,9 +750,8 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    One Rust binary: <Cmd>cargo install lific</Cmd>, or static
-                    binaries for Linux and macOS. Windows is cargo-only, with
-                    no prebuilt binary.
+                    One Rust binary: <Cmd>cargo install lific</Cmd>, or
+                    prebuilt binaries for Linux, macOS, and Windows.
                   </>,
                   <>SQLite</>,
                   <>None; self-host only</>,
@@ -908,20 +910,22 @@ export default function Compare() {
           <FactList
             items={[
               {
-                head: "No prebuilt Windows binary.",
+                head: "No Windows service integration.",
                 body: (
                   <>
-                    Releases cover Linux and macOS (x86_64 and arm64). Windows{" "}
+                    Windows{" "}
                     <a
                       href="/docs/windows"
                       className="text-text underline decoration-border underline-offset-4 hover:text-accent hover:decoration-accent"
                     >
                       works natively
-                    </a>
-                    , but you compile it yourself with{" "}
-                    <Cmd>cargo install lific</Cmd>. There is also no Windows
-                    service integration, so keeping the server running is on
-                    you (Task Scheduler or a terminal).
+                    </a>{" "}
+                    and every release ships{" "}
+                    <Cmd>lific-windows-x86_64.exe</Cmd> alongside the Linux and
+                    macOS binaries, but <Cmd>lific init</Cmd> only installs a
+                    background service on Linux (systemd user session) and
+                    macOS (launchd). On Windows, keeping the server running is
+                    on you (Task Scheduler or a terminal).
                   </>
                 ),
               },

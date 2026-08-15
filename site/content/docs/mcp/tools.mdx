@@ -111,6 +111,8 @@ Replaces an exact string in an issue title or description.
 | `field` | `string` | No | Field to edit: `description` (default) or `title` |
 | `replace_all` | `boolean` | No | Replace all occurrences (default false) |
 
+When a description edit comes from a client that double-escapes JSON, literal `\n` and `\t` sequences in `old_string` and `new_string` become a real newline or tab before the exact string is matched.
+
 ### `get_board`
 
 Gets a board view of issues in a project.
@@ -379,3 +381,5 @@ Reads audit history for an issue, page, or project.
 | `identifier` | `string` | Yes | What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed |
 | `limit` | `integer` | No | Max entries (default 30, cap 200) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
+
+Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).

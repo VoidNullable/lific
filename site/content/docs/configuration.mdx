@@ -7,7 +7,7 @@ Lific reads TOML configuration from `lific.toml`. Every section and key is optio
 
 ## File discovery
 
-Lific uses the first readable and valid configuration file in this order.
+Lific uses the first configuration file that exists in this order.
 
 1. The path passed with `--config <PATH>`. This path is used alone. Lific does not search other locations.
 2. `./lific.toml` in the current directory.
@@ -22,7 +22,7 @@ User and system paths vary by platform.
 | macOS | `~/Library/Application Support/lific/lific.toml` | `/Library/Application Support/Lific/lific.toml` |
 | Windows | `%APPDATA%\lific\lific.toml` | `%ProgramData%\lific\lific.toml` |
 
-If a discovered file cannot be read or parsed, Lific writes a warning and continues to the next location. If no valid file is found, Lific uses its built-in defaults.
+A file that exists but cannot be read or parsed is a fatal error. Lific stops and names the file and the error; it does not warn and fall through to the next location, because quietly running on different settings than the ones you wrote is the more surprising outcome. Unknown keys are rejected for the same reason, so a typo such as `allow_signupp` fails loudly instead of being ignored. If no file exists at any of these paths, Lific uses its built-in defaults.
 
 Relative `database.path` values resolve relative to the directory containing the selected configuration file. A relative backup directory then resolves relative to the database directory.
 
@@ -117,11 +117,22 @@ Automatic backups use the same archive format as `lific dump`.
 | `allow_signup` | boolean | `true` | Initial self-service signup setting. Lific seeds the database-backed instance setting from this value when it first creates the setting. Later changes through instance settings are stored in the database. |
 | `required` | boolean | `true` | Requires a bearer credential on REST and MCP requests. |
 
-When `required = false`, a request with no credential is treated as an operator request. In the web UI, the browser automatically signs in as the first administrator; a new instance with no accounts shows signup once so an attribution identity can be created. A request with an invalid credential still fails authentication. Lific refuses to start with `required = false` when `server.public_url` is not a localhost URL.
+When `required = false`, a request with no credential is treated as an operator request. In the web UI, the browser automatically signs in as the first administrator; an instance with no accounts shows signup instead, so an attribution identity can be created. A request with an invalid credential still fails authentication.
 
-The `public_url` guard does not restrict the listener. Because the default `host` is `0.0.0.0`, an auth-disabled instance may still be reachable from the LAN. Bind it to `127.0.0.1` or protect it with a firewall.
+Lific refuses to start with `required = false` when `[server] host` is not loopback. The guard reads the bind host rather than `server.public_url`, so the check and the listening socket describe the same thing. The same rule applies to the database-backed `web_auto_login` setting: with auto-login enabled and a non-loopback bind, the server refuses to start. Behind a loopback bind with an HTTPS `public_url`, Lific starts and logs a warning instead.
 
-The runtime `secure_cookies` value is not a TOML key. Lific derives it at startup. It is false only when `server.public_url` explicitly begins with `http://`. It is true for HTTPS and for an unset public URL.
+`secure_cookies` is not a TOML key. Setting it under `[auth]` is now an unknown-key error; remove it if an older configuration file carries it. Lific derives the runtime value at startup: false only when `server.public_url` explicitly begins with `http://`, true for HTTPS and for an unset public URL.
+
+### What `lific init` writes
+
+On a fresh install, `lific init` resolves an auth mode and edits the configuration file in place, leaving every other section and setting alone.
+
+| Mode | `[auth] required` | `[server] host` | `web_auto_login` | First administrator |
+| --- | --- | --- | --- | --- |
+| `login-free` | `false` | `127.0.0.1` | enabled | passwordless |
+| `passwords` | `true` | unchanged | disabled | password you choose |
+
+`web_auto_login` lives in the database rather than in `lific.toml`; change it later with `lific instance set --auto-login <BOOLEAN>`. Login-free mode writes the loopback bind precisely so the startup guard above is satisfied by the instance it just created. Editing `host` afterwards to a non-loopback address makes that instance refuse to start.
 
 ## Example public configuration
 

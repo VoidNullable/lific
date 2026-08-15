@@ -70,12 +70,16 @@ lific mcp
 
 ### init
 
-Creates a configuration file when one is missing. It creates and migrates the database. It creates an initial API key when no API key exists. It installs and starts a supported background service unless `--no-service` is passed.
+Creates a configuration file when one is missing. It creates and migrates the database. It installs and starts a supported background service unless `--no-service` is passed.
+
+On a fresh install, that is, an instance with no human operator, `init` resolves an auth mode and creates the first administrator with it. `login-free` writes `[auth] required = false` and `[server] host = "127.0.0.1"`, enables browser auto-login, and creates a passwordless administrator after printing the login-free caution. `passwords` writes `[auth] required = true`, leaves the bind host unchanged, and creates the administrator with the given or prompted password. At an interactive terminal, an omitted `--auth-mode` shows a menu. An instance that already has a human operator skips all of this.
+
+`init` does not create an API key once a human operator exists. Use `lific key create`.
 
 Without `--config` or `--here`, the command uses the platform configuration and data directories. If `./lific.toml` already exists, it uses that file. `--here` uses `./lific.toml` and the default `./lific.db` layout.
 
 ```shell
-lific init [--no-service] [--here]
+lific init [--no-service] [--here] [--name <NAME>] [--auth-mode <MODE>] [--password <PASSWORD>]
 ```
 
 **Arguments**
@@ -86,6 +90,9 @@ lific init [--no-service] [--here]
 
 - `--no-service` creates the configuration and database without installing or starting a background service.
 - `--here` creates or uses the instance in the current directory. It conflicts with `--config`.
+- `--name <NAME>` names the first administrator instead of prompting for it. The name cannot be prompted for without a terminal.
+- `--auth-mode <MODE>` selects `login-free` or `passwords` instead of showing the menu.
+- `--password <PASSWORD>` sets the first administrator's password for `--auth-mode passwords`. It is prompted for when omitted, and ignored in login-free mode.
 
 ### service install
 
@@ -225,7 +232,7 @@ lific logout [--url <URL>]
 
 ### connect
 
-Writes MCP connection settings into selected AI client configuration files. The command requires an existing Lific database. With no `--client` at an interactive terminal, it offers a client picker. A non-interactive invocation must name one or more clients and pass `--yes`.
+Writes MCP connection settings into selected AI client configuration files. The command requires an existing Lific database. At an interactive terminal with neither `--stdio` nor `--oauth`, it first offers a transport menu with local stdio preselected, then the client picker. A non-interactive invocation defaults to the remote transport, and must name one or more clients and pass `--yes`.
 
 Known client identifiers are `opencode`, `claude-code`, `claude-desktop`, `cursor`, `vscode`, `codex`, `zed`, `gemini`, `windsurf`, `goose`, and `crush`.
 
@@ -241,7 +248,7 @@ lific connect [--client <CLIENT>]... [--scope <SCOPE>] [--stdio] [--oauth] [--ur
 
 - `--client <CLIENT>` selects a client. Repeat the flag to select multiple clients.
 - `--scope <SCOPE>` selects `global` or `project`. The default is `global`.
-- `--stdio` writes a local MCP configuration that runs `lific --db <PATH> mcp`.
+- `--stdio` writes a local MCP configuration that runs `lific --db <PATH> mcp`. It mints a per-tool bot and key and writes the key into the entry's environment as `LIFIC_TOKEN`.
 - `--oauth` writes a remote configuration without an authorization header. The client performs its own OAuth flow. It conflicts with `--stdio` and `--key`.
 - `--url <URL>` overrides the remote MCP URL. The default uses `server.public_url` with `/mcp`, or `http://127.0.0.1:<port>/mcp`.
 - `--key <API_KEY>` writes this API key instead of creating connection keys.

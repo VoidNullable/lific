@@ -225,6 +225,12 @@ Creates a folder. This endpoint has no path or query parameters.
 
 Request body fields are `project_id` (integer), `parent_id` (integer or null, optional), and `name` (string). Response: a `Folder` object.
 
+### PUT `/api/folders/{id}`
+
+Renames a folder. Path parameter: `id` (integer folder ID). It has no query parameters.
+
+Request body field: `name` (string, optional). No other folder field is updatable here; a folder's project and parent are fixed after creation. Response: a `Folder` object.
+
 ### DELETE `/api/folders/{id}`
 
 Deletes a folder. Path parameter: `id` (integer folder ID). It has no query parameters or request body.
@@ -246,6 +252,17 @@ It has no request body. Response: a `Page` array.
 Creates a page. This endpoint has no path or query parameters.
 
 Request body fields are `project_id` (integer or null, optional), `folder_id` (integer or null, optional), `title` (string), `content` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `draft`), and `labels` (string array, optional). Response: a `Page` object.
+
+### GET `/api/pages/resolve/{identifier}`
+
+Resolves a page identifier such as `LIF-DOC-1` or the workspace form `DOC-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
+
+Response: a `Page` object.
+
+```bash
+curl https://your-server.example/api/pages/resolve/LIF-DOC-1 \
+  -H "Authorization: Bearer <API_KEY>"
+```
 
 ### GET `/api/pages/{id}`
 
@@ -422,7 +439,7 @@ Searches indexed issues, pages, and comments. Query parameters are `query` (stri
 
 `result_type` accepts `issue`, `page`, or `comment`. `sort` accepts `relevance` or `recent`. `mode` accepts `fts` or `literal`. It has no request body.
 
-Response: an array of objects with `result_type` (string), `id` (integer), `identifier` (string or null), `title` (string), `snippet` (string), and `project_id` (integer or null).
+Response: an array of objects with `result_type` (string), `id` (integer), `identifier` (string or null), `title` (string), `snippet` (string), `project_id` (integer or null), and `parent_page_id` (integer). `parent_page_id` is present only when the result is a comment on a page, and it holds the id of that page.
 
 ### GET `/api/health`
 

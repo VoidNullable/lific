@@ -3,13 +3,15 @@ title: Connect agents
 description: lific connect detects installed AI tools and writes MCP configuration for them.
 ---
 
-`lific connect` configures AI coding tools to use your Lific server over MCP. It detects the clients installed on your machine and writes a `lific` server entry into each client's MCP configuration. The default remote mode mints an API key per client; `--key`, `--oauth`, and `--stdio` use different credential paths.
+`lific connect` configures AI coding tools to use your Lific server over MCP. It detects the clients installed on your machine and writes a `lific` server entry into each client's MCP configuration. Both the local stdio transport and the remote transport mint a per-tool credential; `--key` reuses one you supply, and `--oauth` writes none at all.
 
 ```bash
 lific connect
 ```
 
-In a terminal, the command shows an arrow-key multiselect of supported clients. Detected clients are preselected. Detection checks for the client's configuration file or its marker directory.
+In a terminal, the command asks two questions. First it shows a transport menu, with local stdio preselected and remote and OAuth also on offer. Then it shows an arrow-key multiselect of supported clients. Detected clients are preselected. Detection checks for the client's configuration file or its marker directory.
+
+`--stdio` and `--oauth` skip the transport menu. Without a terminal and without either flag, the transport is remote, which is the historical default.
 
 `lific connect` requires an initialized instance. It refuses to run without a database and recommends `lific init`. It does not require the HTTP server to be running while it writes configuration.
 
@@ -35,14 +37,16 @@ VS Code global paths: `~/Library/Application Support/Code/User/mcp.json` on macO
 
 ## What gets written
 
-Every entry is named `lific`. The shape follows each client's own configuration format. In the default remote mode, most clients receive the MCP URL plus an `Authorization: Bearer` header. Two clients differ:
+Every entry is named `lific`. The shape follows each client's own configuration format. In remote mode, most clients receive the MCP URL plus an `Authorization: Bearer` header. Two clients differ:
 
 - Codex uses TOML and references the key through `bearer_token_env_var = "LIFIC_API_KEY"`. See [Codex environment variable](#codex-environment-variable) below for the required export step. The key is never written into the file or into your shell startup files.
 - Claude Desktop does not support remote MCP servers natively. Its entry launches `npx -y mcp-remote <url>` with the bearer header as an argument.
 
+In stdio mode, the entry runs `lific --db <absolute-db-path> mcp` and carries the minted token in the client's environment field as `LIFIC_TOKEN`. The field name follows the client: `environment` for OpenCode, `env` for Claude Code and Codex. Clients with no environment field in their MCP schema get the launch command alone, and that session runs as the operator.
+
 Writes are merge-preserving. Unrelated keys and sibling MCP server entries remain in place. Only the `lific` entry is inserted or replaced. If an existing configuration file fails to parse, `lific connect` leaves the file unchanged and reports the failure with the entry contents for manual editing.
 
-Re-running `lific connect` is safe. It replaces the `lific` entry with current values and rotates the API key for that client.
+Re-running `lific connect` is safe and idempotent. It replaces the `lific` entry with current values, rotates that client's credential, and heals an entry that is stale or missing its token. Reconnecting also remembers which tool a client was connected as.
 
 ## Non-interactive use
 
@@ -56,11 +60,18 @@ Without a terminal, `--client` is required. `--json` switches the output to JSON
 
 `--dry-run` prints the full merged contents of every file that would change, without writing anything.
 
-## API keys
+## Credentials
 
-In the default remote-key mode, when `--key` is not supplied, `lific connect` mints one API key per selected client. The plaintext key is embedded in the written configuration and is not otherwise persisted by connect. On a server with human accounts, minted keys belong to bot users named `{tool}-{owner}`. Use `--user <username>` to select the owner when more than one account exists. Re-running rotates existing active keys with the same tool name. `--oauth` and `--stdio` do not mint API keys.
+When `--key` is not supplied, `lific connect` mints one credential per selected client in both remote and stdio mode. The plaintext value is embedded in the written configuration and is not otherwise persisted by connect. On a server with human accounts, the minted key belongs to a bot user named `{tool}-{owner}`, so the connected tool acts as itself and inherits that owner's project access. Use `--user <username>` to select the owner when more than one account exists. Re-running rotates the existing active key for the same tool. Disconnecting or deleting a bot revokes its OAuth tokens as well.
 
-Use `--key <key>` to reuse an existing key verbatim instead of minting new ones.
+`--oauth` mints nothing; the client obtains its own token. Use `--key <key>` to reuse an existing key verbatim instead of minting new ones.
+
+### `LIFIC_API_KEY` and `LIFIC_TOKEN`
+
+These are two different variables and they are not interchangeable.
+
+- `LIFIC_API_KEY` is the bearer credential for remote HTTP access. Codex reads it, and `lific doctor` falls back to it when `--key` is omitted.
+- `LIFIC_TOKEN` is the identity of a local stdio MCP session. `lific connect --stdio` writes it into the client's environment field; nothing reads it over HTTP.
 
 ### Codex environment variable
 
@@ -71,7 +82,7 @@ export LIFIC_API_KEY="<KEY_SHOWN_BY_LIFIC_CONNECT>"
 codex
 ```
 
-Do not commit the key or paste it into a shared project configuration. With `--oauth`, Codex performs its own login flow and does not use `LIFIC_API_KEY`; with `--stdio`, no API key is needed.
+Do not commit the key or paste it into a shared project configuration. With `--oauth`, Codex performs its own login flow and does not use `LIFIC_API_KEY`. With `--stdio`, Codex does not use `LIFIC_API_KEY` either: the session credential is written into the entry's `env` table as `LIFIC_TOKEN`, and no export step is required.
 
 ## Server URL
 
@@ -83,12 +94,12 @@ Use `--url` to point clients at a remote server:
 lific connect --url https://your-server.example/mcp --client opencode --yes
 ```
 
-## Modes
+## Transports
 
-`lific connect` writes one of three entry forms:
+`lific connect` writes one of three entry forms. The interactive menu offers all three and preselects stdio.
 
-- Remote HTTP with a bearer key. This is the default.
-- `--stdio` writes a local command form, `lific --db <absolute-db-path> mcp`. The client launches Lific as a subprocess. No API key is needed. This suits a single-user machine where the client and the database live together.
+- `--stdio` writes a local command form, `lific --db <absolute-db-path> mcp`, and mints the tool a bot and key that it writes into the entry's environment as `LIFIC_TOKEN`. The client launches Lific as a subprocess and there is no network authentication. This suits a machine where the client and the database live together.
+- Remote HTTP with a bearer key. This is the transport a non-interactive run uses when neither transport flag is passed.
 - `--oauth` writes the URL with no credentials. An OAuth-capable client completes the [OAuth 2.1 flow](/docs/mcp) on first connection. `--oauth` conflicts with `--stdio` and `--key`.
 
 ## Scopes
@@ -101,7 +112,7 @@ In project scope, or when the current directory contains `.git`, `lific connect`
 
 ## Verifying the result
 
-`lific doctor` checks the configuration, database, and server state. It accepts `--key` or the `LIFIC_API_KEY` environment variable and exits nonzero when something is broken.
+`lific doctor` checks the configuration, database, and server state. It accepts `--key`, falls back to the `LIFIC_API_KEY` environment variable, and then to the credential stored by `lific login`. It exits nonzero when something is broken. `LIFIC_TOKEN` is not part of this path; it belongs to a stdio session, not to an HTTP check.
 
 ```bash
 lific doctor

@@ -10,7 +10,7 @@ export function GET() {
   const body = [
     "# Lific",
     "",
-    "> A free, self-hosted issue tracker built for coding agents. Single Rust binary, SQLite storage, native MCP server, REST API, CLI, and web UI.",
+    "> A free, self-hosted issue tracker built for coding agents. Single Rust binary, SQLite storage, a built-in MCP server with 27 tools, REST API, CLI, and web UI.",
     "",
     "Full documentation content: https://lific.dev/llms-full.txt",
     "Comparison with other MCP issue trackers (beads, Vikunja, Gitea, Plane, Linear): https://lific.dev/compare",

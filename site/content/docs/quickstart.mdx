@@ -13,6 +13,20 @@ Create the configuration file and SQLite database.
 lific init --no-service
 ```
 
+On a fresh install, `lific init` asks how you want to sign in and offers two modes.
+
+- **Login-free** sets `[auth] required = false`, sets `[server] host = "127.0.0.1"` so the server only accepts connections from this machine, turns on browser auto-login, and creates a passwordless first administrator. Before it does any of that, it states the tradeoff: anyone who can reach the server can administer it.
+- **Passwords** keeps `[auth] required = true`, leaves the bind host unchanged, and creates the first administrator with the password you choose.
+
+In both modes, `lific init` asks for your name and creates the first administrator directly. It does not create an API key; use `lific key create` when you need one.
+
+To pick the mode without the menu, pass the flags instead. This is the form for scripts.
+
+```bash
+lific init --no-service --auth-mode login-free --name "Your Name"
+lific init --no-service --auth-mode passwords --name "Your Name" --password "<PASSWORD>"
+```
+
 Without `--here` or `--config`, `lific init` uses operating system configuration and data directories. On Linux, it writes the configuration file to `~/.config/lific/lific.toml` and the database to `~/.local/share/lific/lific.db`. On Windows, it writes the configuration file to `%APPDATA%\lific\lific.toml` and the database to `%LOCALAPPDATA%\lific\lific.db`. [Windows](/docs/windows) has a full walkthrough for that platform.
 
 Use `--here` to create a directory-local instance with `./lific.toml` and `./lific.db`.
@@ -29,13 +43,15 @@ Start the HTTP server.
 lific start
 ```
 
-The default port is `3456`. The default bind host is `0.0.0.0`. Open `http://127.0.0.1:3456` in a browser to use the web UI.
+The default port is `3456`. The built-in default bind host is `0.0.0.0`; login-free mode writes `127.0.0.1` during initialization. Open `http://127.0.0.1:3456` in a browser to use the web UI.
 
-## Create an account
+## Sign in
 
-Use the signup screen in the web UI to create an account with a username, email address, and password. Signup creates a regular user account and a session. It cannot create an administrator account.
+In login-free mode, the web UI signs you in as the administrator that `lific init` created. There is no password to enter.
 
-Promote the account from another terminal. Replace `<username>` with the username you created.
+In password mode, sign in as that administrator with the password you chose during initialization.
+
+Later accounts come from the signup screen or from `lific user create`. Signup creates a regular user account and a session; it cannot create an administrator account. Promote an account from a terminal, replacing `<username>` with the username you want to promote.
 
 ```bash
 lific user promote --username <username>

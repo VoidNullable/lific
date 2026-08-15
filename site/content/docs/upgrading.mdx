@@ -1,9 +1,9 @@
 ---
-title: Upgrade from 2.0 to 2.2
-description: Back up, upgrade, verify, and adopt the v2.1 and v2.2 changes from an existing Lific 2.0 installation.
+title: Upgrade from 2.0 to 2.6
+description: Back up, upgrade, verify, and adopt the changes from 2.1 through 2.6 on an existing Lific 2.0 installation.
 ---
 
-This guide covers upgrades from Lific 2.0 through 2.2. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
+This guide covers upgrades from Lific 2.0 through 2.6. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
 
 ## Before upgrading
 
@@ -11,12 +11,13 @@ This guide covers upgrades from Lific 2.0 through 2.2. It assumes an existing 2.
 2. Make a complete backup while the service is stopped or quiesced:
 
    ```shell
-   lific dump --out ./lific-before-2.2.tar.gz
+   lific dump --out ./lific-before-2.6.tar.gz
    ```
 
    The archive includes a consistent database snapshot, attachments, and `manifest.json`.
 3. Record how clients connect: browser URL, API-key users, OAuth clients, and MCP configuration files. Keep one known-good operator key available for recovery.
 4. If the instance is behind a reverse proxy, review `server.trusted_proxies` before starting 2.2. Add only proxy networks you operate; the default trusts loopback proxies.
+5. Confirm that `lific.toml` parses before rolling out 2.6. From 2.6 a config file that exists but cannot be read or parsed stops startup instead of falling back to defaults, and unknown keys are rejected. Run `lific doctor`, which reports the configuration as one check and continues through the rest.
 
 Stop the background service before replacing the binary or restoring a backup. Keep the same `lific.toml`, database path, attachments directory, and public URL unless you are intentionally relocating the instance.
 
@@ -43,9 +44,32 @@ Stop the background service before replacing the binary or restoring a backup. K
 - The three export MCP tools are now one `export` tool. It dispatches by identifier: `PRO-42` for an issue, `PRO-DOC-3` for a page, and bare `PRO` for a project.
 - The MCP surface is 27 tools. Clients that assumed the older 29-tool count or the removed export tool names must refresh their discovery data.
 
+### v2.3
+
+- The CLI can run data commands against a running server with `--backend http`, using `--url` or `LIFIC_URL` and `--api-key` or `LIFIC_API_KEY`. The direct SQLite backend remains the default.
+- OAuth discovery works on an instance with no `server.public_url`. An explicit `public_url` is still authoritative.
+
+### v2.4
+
+- One migration runs automatically on first launch. Project groups start empty for every user, so the sidebar renders as before until you create one.
+
+### v2.5
+
+- No migrations. Identifiers render as Markdown links in MCP, CLI, and REST output; `server.public_url` pins the link base, and Lific otherwise derives it from an allowlisted request host.
+
+### v2.6
+
+- Two migrations run automatically on first start. They add the per-tool identity plumbing behind connected agents, and there are no manual steps.
+- A configuration file that exists but cannot be read or parsed is now a fatal startup error, and unknown keys are rejected. A missing file still starts on the built-in defaults. Check that `lific.toml` parses before the rollout; `lific doctor` is the tool for it.
+- A server with `web_auto_login` enabled refuses to start when `[server] host` is not loopback. Bind `127.0.0.1` or turn auto-login off.
+- REST authentication failures are uniformly `403` with the message `authentication required`. Endpoints for profile, password, sessions, API keys, connected tools, and comments previously answered `400` for this case. A client that reads `400` from those endpoints as "signed out" must key on `403` instead.
+- Remove `secure_cookies` from `[auth]` if your config sets it. It has never been read from the file, and unknown keys are now an error rather than being ignored.
+- `lific init` presents an auth-mode choice on a fresh install and creates the first administrator directly. An existing instance with users skips this entirely.
+- Connected AI tools have identities of their own. Audit entries for their writes are attributed to the tool rather than to the operator who connected it.
+
 ## Upgrade and verify
 
-1. Install the v2.2 binary and restart the existing service.
+1. Install the v2.6 binary and restart the existing service.
 2. Run `lific doctor` with the operator credential. Resolve configuration, database, backup, server, OAuth, and MCP failures before opening the instance to users.
 3. Check `lific instance info` and confirm the expected database, public URL, signup policy, and `authz_enforced` state.
 4. Review membership and operator keys:
@@ -73,7 +97,7 @@ lific instance set --authz-enforced true
 
 Before enabling it, ensure every human and bot that needs access has a project membership, and keep an operator-trusted key available for recovery. To roll back the setting on a private instance, use `--authz-enforced false` and then investigate the missing membership or role rather than distributing a broader key.
 
-For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe on a public URL; Lific refuses that combination at startup. Treat both settings as operator changes that require shell access and a verification step.
+For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe anywhere others can reach it; Lific refuses to start when it is set and `[server] host` is not loopback. Treat both settings as operator changes that require shell access and a verification step.
 
 ## If the upgrade fails
 

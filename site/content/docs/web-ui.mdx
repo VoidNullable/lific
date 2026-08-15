@@ -9,11 +9,13 @@ The web UI is the browser workspace for Lific. Use it for visual triage, Markdow
 
 The home dashboard groups active issues by project and provides recently viewed items, pinned pages, an activity digest, and quick actions. Use it as the jump-off point for work that spans several projects.
 
+The activity digest carries a rate indicator. It seeds from the last 24 hours of activity you can see, then counts realtime events as they arrive, and it reports the shortest window that has enough events: updates per second, minute, hour, or day.
+
 ## Navigate project work
 
 Each project keeps its own navigation state. Issue tabs are All, Recent, Open, and Closed; page tabs are Browse, Recent, Drafts, and Archived; plan tabs are Active, Done, Archived, and All; and module tabs are Active, Backlog, Archive, and All. Count badges show the current totals, and the selected tab persists per project and resource area.
 
-The sidebar shows recent items for the active section and deliberately excludes transient search results and items from unrelated sections. Its width is resizable and persists in the browser.
+The sidebar shows recent items for the active section and deliberately excludes transient search results and items from unrelated sections. Its width is resizable and persists in the browser. On desktop it can also be collapsed out of the way from the control beside the Lific wordmark, and the topbar then carries the control that brings it back.
 
 ## Triage issues
 
@@ -31,7 +33,15 @@ Board views support status or priority swimlanes, collapsible columns, and hidde
 
 The issue editor supports Markdown preview, a formatting toolbar, issue-reference autocomplete, Mermaid diagrams, code-block copy, labels, modules, dates, relations, comments, and attachments. Use the keyboard shortcut help or command palette when you do not remember a shortcut.
 
+The status chip in the issue topbar is a picker, not a badge: select it to change status without opening the sidebar field.
+
 Changes can be undone from the UI. Deletes use a deferred undo window, so confirm the item and use Undo immediately if the deletion was accidental.
+
+## Discuss in comments
+
+Comments on issues and pages are threaded in one list. Your own comments carry an actions menu with Edit and Delete; the menu appears only on comments you wrote. Editing opens the comment in place with the same composer, and an edited comment is marked `edited`, with the exact time in the label's tooltip.
+
+Each comment has a stable anchor link next to its author, so you can point someone at one comment rather than the whole thread. In Markdown, `#42` becomes a link to comment 42 on the current issue or page, and `LIF-25#comment-42` links to a comment on another issue. Both are skipped inside code spans and code blocks.
 
 ## Work with pages and plans
 
@@ -44,6 +54,8 @@ Labels and modules are managed from the project structure controls. Labels are p
 ## Navigate and personalize
 
 The command palette searches actions and content and highlights matching result text. Deep links let you share or bookmark an issue, page, or plan directly.
+
+Identifiers can be copied wherever you meet them: a copy control sits in the breadcrumb trail, on board cards, and in the issue peek panel, and list rows offer the same action in their context menu. The controls are ordinary buttons, so they are reachable by keyboard, and they flip to a check mark once the identifier is on the clipboard.
 
 Appearance settings include accent color, density, font scale, and reduced motion. The interface also provides a dark/light theme choice where supported by the current release. Keyboard shortcuts are listed in the shortcut help panel.
 

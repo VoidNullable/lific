@@ -49,6 +49,8 @@ lific init --no-service
 
 Use `--no-service` on Windows. Plain `lific init` tries to install a background service, finds no supported service manager, and reports an error for that step. The rest of the initialization still completes.
 
+On a fresh install, `lific init` asks how you want to sign in. Login-free mode sets `[auth] required = false`, sets `[server] host = "127.0.0.1"`, turns on browser auto-login, and creates a passwordless first administrator, after stating that anyone who can reach the server can administer it. Password mode keeps `[auth] required = true`, leaves the bind host unchanged, and creates the first administrator with the password you choose. Either way, init asks for your name and creates that administrator directly. Pass `--auth-mode login-free` or `--auth-mode passwords`, with `--name` and `--password`, to skip the menu in a script.
+
 `lific init` creates these files on Windows:
 
 | File | Path |
@@ -66,7 +68,7 @@ lific start
 
 The default port is `3456`. Open `http://127.0.0.1:3456` in a browser. Press Ctrl+C to stop the server.
 
-The default bind host is `0.0.0.0`, which accepts connections from the local network. Windows Defender Firewall asks for permission the first time the server listens. To restrict the server to the local machine, set the host in `lific.toml`:
+The built-in default bind host is `0.0.0.0`, which accepts connections from the local network. Windows Defender Firewall asks for permission the first time the server listens. Login-free initialization already writes `127.0.0.1`; otherwise, set the host in `lific.toml` to restrict the server to the local machine:
 
 ```toml
 [server]
@@ -74,7 +76,7 @@ host = "127.0.0.1"
 port = 3456
 ```
 
-From here the [Quickstart](/docs/quickstart) applies unchanged: create an account in the web UI, then promote it from a second terminal with `lific user promote --username <username>`.
+From here the [Quickstart](/docs/quickstart) applies unchanged: sign in as the administrator that `lific init` created, then create a project and an issue.
 
 ### Start automatically (optional)
 

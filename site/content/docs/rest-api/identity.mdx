@@ -172,7 +172,7 @@ Response: `{ "revoked": true }`.
 
 Lists connected tool bots owned by the authenticated user. This endpoint has no path or query parameters. It has no request body.
 
-Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `owner_id` (integer or null), `created_at` (string), and `has_active_key` (boolean).
+Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `owner_id` (integer or null), `created_at` (string), and `connected` (boolean). `connected` is true when the bot has a live credential, either an active API key or an active OAuth token.
 
 ### POST `/api/auth/bots`
 

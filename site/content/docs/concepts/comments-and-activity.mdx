@@ -7,6 +7,10 @@ Comments belong to exactly one issue or one page. A comment stores its author, M
 
 Comments on issues and pages have separate threads. Deleting an issue or page also deletes its comments.
 
+An author can edit and delete their own comments. Over REST, an administrator can also edit or delete any comment. An edited comment keeps its identity and records a new update time, which is what marks it as edited.
+
+Each comment has a stable anchor derived from its numeric id, so a single comment in a thread can be linked to directly.
+
 ## Mentions
 
 Comment text can include `@username` mentions. A mention token begins with `@` and can contain ASCII letters, digits, underscores, and hyphens.
@@ -22,6 +26,8 @@ When project-scoped authorization is enforced, resolved mentions are limited to 
 The activity log is an append-only record of mutations. It covers changes made through the web UI, MCP server, REST API, CLI, and system operations.
 
 An activity entry records a timestamp, actor information when available, transport, resource type, action, and changed values. Update operations record one entry for each changed field.
+
+The actor is the identity that made the change, and the transport is the door it came through: `web`, `mcp`, `api`, `cli`, or `system`. A connected agent has its own identity, so its writes are attributed to that agent rather than to the person who connected it, and entries mark it as a bot.
 
 Issue activity includes issue changes, comments, label attachments and removals, and issue relationship changes. Page activity includes page changes, comments, and label attachments and removals. Plan activity includes plan and plan-step changes.
 

@@ -44,6 +44,22 @@ OAuth-capable MCP clients can connect to the endpoint URL and complete the autho
 
 Lific implements dynamic client registration at `/oauth/register`. Clients can register a redirect URI before starting authorization. Registered redirect URIs must be absolute HTTP or HTTPS URLs.
 
+## Identity and authorization
+
+MCP resolves the caller exactly as REST does, in every auth mode. An agent cannot do more through MCP than the same account can do through the web UI, and the gates read the same resolved identity on both surfaces.
+
+Writes made by a connected agent are attributed to that agent in the audit log, not to the operator who connected it. `lific connect` mints a per-tool bot for this, so a tool acts as itself and inherits its owner's project access.
+
+## stdio sessions and `LIFIC_TOKEN`
+
+A stdio MCP session has no transport authentication, so it carries its identity in the `LIFIC_TOKEN` environment variable instead. `lific connect --stdio` writes that variable into the client's configuration entry. Lific resolves it once at startup and uses it for the whole session.
+
+- **Absent, or valid but not bound to a user:** the session runs as the operator and Lific prints a warning to standard error.
+- **Present and valid:** the session runs as that agent.
+- **Present but invalid**, for example revoked or mistyped: Lific refuses to start. A bad agent credential must not silently fall back to operator access.
+
+`LIFIC_TOKEN` is not the same thing as `LIFIC_API_KEY`. `LIFIC_API_KEY` is the bearer credential for remote HTTP access.
+
 ## MCP Registry manifest and stdio
 
 The repository includes an MCP Registry manifest in `server.json`. The manifest declares the Cargo package `lific` and a stdio launch command of `lific mcp`. This manifest describes the stdio package transport. It does not configure the HTTP endpoint.
