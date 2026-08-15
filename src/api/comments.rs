@@ -324,9 +324,7 @@ mod tests {
             &CreateProject {
                 name: "Test".into(),
                 identifier: "TST".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -336,14 +334,9 @@ mod tests {
             &CreateIssue {
                 project_id: project.id,
                 title: "Comment test issue".into(),
-                description: String::new(),
                 status: "todo".into(),
                 priority: "medium".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -529,9 +522,7 @@ mod tests {
                 &CreateProject {
                     name: "Test".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -540,14 +531,9 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Test".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -653,9 +639,7 @@ mod tests {
                 &CreateProject {
                     name: "Test".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -664,14 +648,9 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Test".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -752,9 +731,7 @@ mod tests {
                 &CreateProject {
                     name: "Test".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -763,11 +740,9 @@ mod tests {
                 &conn,
                 &CreatePage {
                     project_id: Some(project.id),
-                    folder_id: None,
                     title: "Doc 1".into(),
                     content: "Body".into(),
-                    status: "draft".into(),
-                    labels: vec![],
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -942,9 +917,7 @@ mod tests {
                 &CreateProject {
                     name: "Test".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -952,11 +925,8 @@ mod tests {
                 &conn,
                 &CreatePage {
                     project_id: Some(project.id),
-                    folder_id: None,
                     title: "Page".into(),
-                    content: String::new(),
-                    status: "draft".into(),
-                    labels: vec![],
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1045,9 +1015,7 @@ mod tests {
                 &CreateProject {
                     name: "Test".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1055,11 +1023,8 @@ mod tests {
                 &conn,
                 &CreatePage {
                     project_id: Some(project.id),
-                    folder_id: None,
                     title: "Page".into(),
-                    content: String::new(),
-                    status: "draft".into(),
-                    labels: vec![],
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1152,9 +1117,7 @@ mod tests {
                 &CreateProject {
                     name: "Mentions".into(),
                     identifier: "MEN".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1163,14 +1126,9 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Mention target".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1260,9 +1218,7 @@ mod tests {
                 &CreateProject {
                     name: "Edit".into(),
                     identifier: "EDT".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1271,14 +1227,9 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "Edit target".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1343,14 +1294,9 @@ mod tests {
                 &CreateIssue {
                     project_id,
                     title: "Enforced".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -1427,9 +1373,7 @@ mod tests {
                 &CreateProject {
                     name: "T".into(),
                     identifier: "TST".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1438,14 +1382,9 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: "i".into(),
-                    description: String::new(),
                     status: "todo".into(),
                     priority: "medium".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1453,11 +1392,8 @@ mod tests {
                 &conn,
                 &CreatePage {
                     project_id: Some(project.id),
-                    folder_id: None,
                     title: "p".into(),
-                    content: String::new(),
-                    status: "draft".into(),
-                    labels: vec![],
+                    ..Default::default()
                 },
             )
             .unwrap();

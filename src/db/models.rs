@@ -24,7 +24,7 @@ pub struct ReorderProjects {
     pub ids: Vec<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct CreateProject {
     pub name: String,
     pub identifier: String,
@@ -34,7 +34,7 @@ pub struct CreateProject {
     pub lead_user_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateProject {
     pub name: Option<String>,
     pub identifier: Option<String>,
@@ -67,7 +67,7 @@ pub struct CreateProjectGroup {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateProjectGroup {
     pub name: Option<String>,
 }
@@ -141,7 +141,28 @@ pub struct CreateIssue {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Hand-written rather than derived so `..Default::default()` produces the
+/// same issue a JSON body with those fields omitted would: `status` and
+/// `priority` come from [`default_status`] / [`default_priority`], not from
+/// `String::default()` (which would be `""`, a value the API rejects).
+impl Default for CreateIssue {
+    fn default() -> Self {
+        Self {
+            project_id: 0,
+            title: String::new(),
+            description: String::new(),
+            status: default_status(),
+            priority: default_priority(),
+            module_id: None,
+            start_date: None,
+            target_date: None,
+            labels: Vec::new(),
+            source: None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateIssue {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -228,7 +249,7 @@ pub struct CreateModule {
     pub emoji: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateModule {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -259,7 +280,7 @@ pub struct CreateLabel {
     pub color: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateLabel {
     pub name: Option<String>,
     pub color: Option<String>,
@@ -269,7 +290,7 @@ fn default_label_color() -> String {
     "#6B7280".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdateFolder {
     pub name: Option<String>,
 }
@@ -314,7 +335,22 @@ pub struct CreatePage {
     pub labels: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Hand-written for the same reason as [`CreateIssue`]'s: `status` must come
+/// from [`default_page_status`] ("draft"), not `String::default()`.
+impl Default for CreatePage {
+    fn default() -> Self {
+        Self {
+            project_id: None,
+            folder_id: None,
+            title: String::new(),
+            content: String::new(),
+            status: default_page_status(),
+            labels: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct UpdatePage {
     pub title: Option<String>,
     pub content: Option<String>,

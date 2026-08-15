@@ -904,9 +904,8 @@ pub(crate) mod test_helpers {
             &CreateProject {
                 name: "Lead Test".into(),
                 identifier: "LDT".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -959,9 +958,8 @@ pub(crate) mod test_helpers {
             &CreateProject {
                 name: "Membership Test".into(),
                 identifier: "MEM".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1659,9 +1657,8 @@ mod authz_gating_tests {
                 &CreateProject {
                     name: "Other".into(),
                     identifier: "OTH".into(),
-                    description: String::new(),
-                    emoji: None,
                     lead_user_id: Some(lead.id),
+                    ..Default::default()
                 },
             )
             .unwrap()

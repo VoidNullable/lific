@@ -639,9 +639,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -688,14 +686,9 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                description: String::new(),
                 status: status.into(),
                 priority: priority.into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -739,14 +732,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Labeled".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["bug".into(), "feature".into()],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -769,14 +756,8 @@ mod tests {
             &CreateIssue {
                 project_id: issue_project_id,
                 title: "Wrong module".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
                 module_id: Some(module_id),
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -822,14 +803,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Doomed".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["bug".into()],
-                source: None,
+                ..Default::default()
             },
         );
         assert!(result.is_err(), "label attach failure must surface");
@@ -989,14 +964,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "In module".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
                 module_id: Some(mid),
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1032,14 +1001,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "Buggy".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["bug".into()],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1321,15 +1284,9 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                title: None,
-                description: None,
                 status: Some("active".into()),
                 priority: Some("urgent".into()),
-                module_id: None,
-                sort_order: None,
-                start_date: None,
-                target_date: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1352,15 +1309,8 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                title: None,
-                description: None,
-                status: None,
-                priority: None,
                 module_id: Some(Some(module_id)),
-                sort_order: None,
-                start_date: None,
-                target_date: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -1386,14 +1336,8 @@ mod tests {
             &CreateIssue {
                 project_id,
                 title: "Assigned issue".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
                 module_id: Some(module_id),
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1402,15 +1346,8 @@ mod tests {
             &conn,
             issue.id,
             &UpdateIssue {
-                title: None,
-                description: None,
-                status: None,
-                priority: None,
                 module_id: Some(None),
-                sort_order: None,
-                start_date: None,
-                target_date: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();

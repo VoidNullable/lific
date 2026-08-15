@@ -728,9 +728,7 @@ mod tests {
             &CreateProject {
                 name: "Unowned".into(),
                 identifier: "UNO".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -809,9 +807,9 @@ mod tests {
                 &CreateProject {
                     name: "With Emoji".into(),
                     identifier: "EMJ".into(),
-                    description: String::new(),
                     emoji: Some("🧪".into()),
                     lead_user_id: Some(admin.id),
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -1106,9 +1104,8 @@ mod tests {
                 &CreateProject {
                     name: "App".into(),
                     identifier: "APP".into(),
-                    description: String::new(),
-                    emoji: None,
                     lead_user_id: Some(owner),
+                    ..Default::default()
                 },
             )
             .unwrap()

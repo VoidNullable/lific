@@ -266,11 +266,9 @@ pub fn apply_issue(
                 description: issue.description.clone(),
                 status: issue.status.clone(),
                 priority: issue.priority.clone(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
                 source: Some(issue.source.clone()),
+                ..Default::default()
             },
         )?;
 

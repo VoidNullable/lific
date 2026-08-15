@@ -466,9 +466,7 @@ mod tests {
             &CreateProject {
                 name: "Test".into(),
                 identifier: "TST".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -500,9 +498,8 @@ mod tests {
             module.id,
             &UpdateModule {
                 name: Some("Core DB".into()),
-                description: None,
                 status: Some("done".into()),
-                emoji: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -648,7 +645,7 @@ mod tests {
             label.id,
             &UpdateLabel {
                 name: Some("defect".into()),
-                color: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -659,8 +656,8 @@ mod tests {
             &conn,
             label.id,
             &UpdateLabel {
-                name: None,
                 color: Some("#FF0000".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -690,14 +687,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "A".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["bug".into()],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -707,14 +698,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: "B".into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["bug".into(), "defect".into()],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -828,9 +813,7 @@ mod tests {
             &CreateProject {
                 name: "Other".into(),
                 identifier: "OTH".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -936,10 +919,8 @@ mod tests {
             &conn,
             module.id,
             &UpdateModule {
-                name: None,
-                description: None,
-                status: None,
                 emoji: Some(Some("🚀".into())),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -951,9 +932,7 @@ mod tests {
             module.id,
             &UpdateModule {
                 name: Some("Icons!".into()),
-                description: None,
-                status: None,
-                emoji: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -964,10 +943,8 @@ mod tests {
             &conn,
             module.id,
             &UpdateModule {
-                name: None,
-                description: None,
-                status: None,
                 emoji: Some(None),
+                ..Default::default()
             },
         )
         .unwrap();

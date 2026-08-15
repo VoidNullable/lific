@@ -370,7 +370,7 @@ mod tests {
                 identifier: "TST".into(),
                 description: "A test project".into(),
                 emoji: Some("🧪".into()),
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -393,9 +393,7 @@ mod tests {
             &CreateProject {
                 name: "Lific".into(),
                 identifier: "LIF".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -421,9 +419,7 @@ mod tests {
             &CreateProject {
                 name: "First".into(),
                 identifier: "DUP".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -433,9 +429,7 @@ mod tests {
             &CreateProject {
                 name: "Second".into(),
                 identifier: "DUP".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         );
         assert!(result.is_err());
@@ -449,9 +443,7 @@ mod tests {
             &CreateProject {
                 name: format!("P {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
     }
@@ -495,11 +487,8 @@ mod tests {
                 &conn,
                 project.id,
                 &UpdateProject {
-                    name: None,
                     identifier: Some(bad.into()),
-                    description: None,
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             );
             assert!(
@@ -520,9 +509,7 @@ mod tests {
             &CreateProject {
                 name: "Old Name".into(),
                 identifier: "OLD".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -532,10 +519,8 @@ mod tests {
             project.id,
             &UpdateProject {
                 name: Some("New Name".into()),
-                identifier: None,
                 description: Some("Now with description".into()),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -554,9 +539,7 @@ mod tests {
             &CreateProject {
                 name: "Doomed".into(),
                 identifier: "DEL".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -583,9 +566,7 @@ mod tests {
                 &CreateProject {
                     name: name.into(),
                     identifier: ident.into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -655,9 +636,7 @@ mod tests {
             &CreateProject {
                 name: name.into(),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -756,8 +735,7 @@ mod tests {
                 name: "Escaped".into(),
                 identifier: "ESC".into(),
                 description: "line1\\nline2\\ttab".into(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -787,9 +765,8 @@ mod tests {
             &CreateProject {
                 name: "Has Emoji".into(),
                 identifier: "EMJ".into(),
-                description: String::new(),
                 emoji: Some("🧪".into()),
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -799,11 +776,8 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
-                name: None,
-                identifier: None,
-                description: None,
                 emoji: Some(None), // explicit clear
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -820,9 +794,8 @@ mod tests {
             &CreateProject {
                 name: "Has Lead".into(),
                 identifier: "LDP".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(uid),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -832,11 +805,8 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
-                name: None,
-                identifier: None,
-                description: None,
-                emoji: None,
                 lead_user_id: Some(None), // explicit clear
+                ..Default::default()
             },
         )
         .unwrap();
@@ -853,9 +823,9 @@ mod tests {
             &CreateProject {
                 name: "Keep".into(),
                 identifier: "KEP".into(),
-                description: String::new(),
                 emoji: Some("🎯".into()),
                 lead_user_id: Some(uid),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -865,11 +835,10 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
+                // emoji and lead_user_id are left absent (None) by the
+                // default, which must preserve the existing values.
                 name: Some("Keep Renamed".into()),
-                identifier: None,
-                description: None,
-                emoji: None, // absent — preserve
-                lead_user_id: None, // absent — preserve
+                ..Default::default()
             },
         )
         .unwrap();
@@ -887,9 +856,7 @@ mod tests {
             &CreateProject {
                 name: "Orphan".into(),
                 identifier: "ORP".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -899,11 +866,8 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
-                name: None,
-                identifier: None,
-                description: None,
-                emoji: None,
                 lead_user_id: Some(Some(99999)),
+                ..Default::default()
             },
         );
         match result {

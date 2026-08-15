@@ -242,10 +242,8 @@ fn issue(
                     status: status.clone(),
                     priority: priority.clone(),
                     module_id,
-                    start_date: None,
-                    target_date: None,
                     labels: label_list,
-                    source: None,
+                    ..Default::default()
                 },
             )?;
 
@@ -289,10 +287,8 @@ fn issue(
                     // LIF-145: module_id is now tristate; the CLI only sets or
                     // skips (no clear), so map Some(id) -> Some(Some(id)).
                     module_id: module_id.map(Some),
-                    sort_order: None,
-                    start_date: None,
-                    target_date: None,
                     labels: label_list,
+                    ..Default::default()
                 },
             )?;
 
@@ -365,8 +361,7 @@ fn project(
                     name: name.clone(),
                     identifier: identifier.clone(),
                     description: description.clone(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )?;
 
@@ -389,10 +384,8 @@ fn project(
                 id,
                 &UpdateProject {
                     name: name.clone(),
-                    identifier: None,
                     description: description.clone(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )?;
 
@@ -513,8 +506,8 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     folder_id,
                     title: title.clone(),
                     content: content.clone(),
-                    status: "draft".into(),
                     labels: label_list,
+                    ..Default::default()
                 },
             )?;
 
@@ -550,10 +543,8 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     title: title.clone(),
                     content: content.clone(),
                     folder_id,
-                    sort_order: None,
-                    status: None,
-                    pinned: None,
                     labels: label_list,
+                    ..Default::default()
                 },
             )?;
 
@@ -771,7 +762,7 @@ fn module(
                     name: new_name.clone(),
                     description: description.clone(),
                     status: status.clone(),
-                    emoji: None,
+                    ..Default::default()
                 },
             )?;
 
@@ -988,9 +979,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1004,14 +993,7 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                description: String::new(),
-                status: "backlog".into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1137,14 +1119,9 @@ mod tests {
                 &CreateIssue {
                     project_id: pid,
                     title: "Active one".into(),
-                    description: String::new(),
                     status: "active".into(),
                     priority: "high".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1153,14 +1130,9 @@ mod tests {
                 &CreateIssue {
                     project_id: pid,
                     title: "Done one".into(),
-                    description: String::new(),
                     status: "done".into(),
                     priority: "low".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();

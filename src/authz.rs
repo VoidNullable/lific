@@ -483,9 +483,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -678,9 +676,8 @@ mod tests {
             &CreateProject {
                 name: "Legacy Lead".into(),
                 identifier: "LLD".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -908,9 +905,8 @@ mod tests {
             &CreateProject {
                 name: "Structure Legacy".into(),
                 identifier: "SL1".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -957,9 +953,8 @@ mod tests {
             &CreateProject {
                 name: "Delete Legacy".into(),
                 identifier: "DL1".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1044,9 +1039,8 @@ mod tests {
             &CreateProject {
                 name: "Backfill".into(),
                 identifier: "BAK".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(lead.id),
+                ..Default::default()
             },
         )
         .unwrap()

@@ -299,9 +299,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -504,9 +502,8 @@ mod tests {
             &CreateProject {
                 name: "Has Lead".into(),
                 identifier: "HLD".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -526,9 +523,7 @@ mod tests {
             &CreateProject {
                 name: "No Lead".into(),
                 identifier: "NLD".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -547,9 +542,8 @@ mod tests {
             &CreateProject {
                 name: "Handoff".into(),
                 identifier: "HND".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -562,11 +556,8 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
-                name: None,
-                identifier: None,
-                description: None,
-                emoji: None,
                 lead_user_id: Some(Some(bob)),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -593,9 +584,8 @@ mod tests {
             &CreateProject {
                 name: "Clearable".into(),
                 identifier: "CLR".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -604,11 +594,8 @@ mod tests {
             &conn,
             project.id,
             &UpdateProject {
-                name: None,
-                identifier: None,
-                description: None,
-                emoji: None,
                 lead_user_id: Some(None), // explicit clear
+                ..Default::default()
             },
         )
         .unwrap();
@@ -754,9 +741,8 @@ mod tests {
             &CreateProject {
                 name: "Reassign".into(),
                 identifier: "RAS".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -789,9 +775,8 @@ mod tests {
             &CreateProject {
                 name: "Dangling".into(),
                 identifier: "DNG".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -817,9 +802,8 @@ mod tests {
             &CreateProject {
                 name: "Untouched".into(),
                 identifier: "UNT".into(),
-                description: String::new(),
-                emoji: None,
                 lead_user_id: Some(alice),
+                ..Default::default()
             },
         )
         .unwrap();

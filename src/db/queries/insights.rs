@@ -262,9 +262,7 @@ mod tests {
                 &CreateProject {
                     name: "Insights Test".into(),
                     identifier: "INS".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -278,31 +276,11 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                description: String::new(),
-                status: "backlog".into(),
                 priority: priority.into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap()
-    }
-
-    fn no_update() -> UpdateIssue {
-        UpdateIssue {
-            title: None,
-            description: None,
-            status: None,
-            priority: None,
-            module_id: None,
-            sort_order: None,
-            start_date: None,
-            target_date: None,
-            labels: None,
-        }
     }
 
     // ── clamp_weeks ───────────────────────────────────────────
@@ -376,7 +354,7 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..no_update() },
+            &UpdateIssue { status: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -395,14 +373,14 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..no_update() },
+            &UpdateIssue { status: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         // Reopen: latest status transition is no longer terminal.
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("todo".into()), ..no_update() },
+            &UpdateIssue { status: Some("todo".into()), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -421,19 +399,19 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("done".into()), ..no_update() },
+            &UpdateIssue { status: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("todo".into()), ..no_update() },
+            &UpdateIssue { status: Some("todo".into()), ..Default::default() },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some("cancelled".into()), ..no_update() },
+            &UpdateIssue { status: Some("cancelled".into()), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -459,7 +437,7 @@ mod tests {
         queries::update_issue(
             &conn,
             c.id,
-            &UpdateIssue { status: Some("done".into()), ..no_update() },
+            &UpdateIssue { status: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         drop(conn);
@@ -494,7 +472,7 @@ mod tests {
         queries::update_issue(
             &conn,
             a.id,
-            &UpdateIssue { module_id: Some(Some(module.id)), ..no_update() },
+            &UpdateIssue { module_id: Some(Some(module.id)), ..Default::default() },
         )
         .unwrap();
         quick_issue(&conn, pid, "B", "none");
@@ -557,9 +535,7 @@ mod tests {
                 &CreateProject {
                     name: "Other".into(),
                     identifier: "OTH".into(),
-                    description: String::new(),
-                    emoji: None,
-                    lead_user_id: None,
+                    ..Default::default()
                 },
             )
             .unwrap()

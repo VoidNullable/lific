@@ -675,9 +675,7 @@ mod tests {
             &CreateProject {
                 name: format!("Project {ident}"),
                 identifier: ident.into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -690,14 +688,8 @@ mod tests {
             &CreateIssue {
                 project_id: pid,
                 title: title.into(),
-                description: String::new(),
                 status: status.into(),
-                priority: "none".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
-                labels: vec![],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -810,14 +802,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 status: Some("done".into()),
-                title: None,
-                description: None,
-                priority: None,
-                module_id: None,
-                sort_order: None,
-                start_date: None,
-                target_date: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -856,14 +841,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 status: Some("active".into()),
-                title: None,
-                description: None,
-                priority: None,
-                module_id: None,
-                sort_order: None,
-                start_date: None,
-                target_date: None,
-                labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -900,8 +878,7 @@ mod tests {
             issue.id,
             &UpdateIssue {
                 status: Some("done".into()),
-                title: None, description: None, priority: None, module_id: None,
-                sort_order: None, start_date: None, target_date: None, labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -933,8 +910,7 @@ mod tests {
             anchor.id,
             &UpdateIssue {
                 status: Some("done".into()),
-                title: None, description: None, priority: None, module_id: None,
-                sort_order: None, start_date: None, target_date: None, labels: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1189,8 +1165,8 @@ mod tests {
         create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("mirror", Some(issue.id))] }).unwrap();
 
         issues::update_issue(&conn, issue.id, &UpdateIssue {
-            status: Some("done".into()), title: None, description: None, priority: None,
-            module_id: None, sort_order: None, start_date: None, target_date: None, labels: None,
+            status: Some("done".into()),
+            ..Default::default()
         }).unwrap();
 
         let step_audit = audit_rows(&conn, "plan_step");

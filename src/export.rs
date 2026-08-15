@@ -326,9 +326,7 @@ mod tests {
             &CreateProject {
                 name: "Export Test".into(),
                 identifier: "EXP".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -340,11 +338,8 @@ mod tests {
                 description: "Need markdown output".into(),
                 status: "todo".into(),
                 priority: "high".into(),
-                module_id: None,
-                start_date: None,
-                target_date: None,
                 labels: vec!["feature".into()],
-                source: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -392,8 +387,7 @@ mod tests {
                 folder_id: Some(child.id),
                 title: "Getting Started".into(),
                 content: "Welcome".into(),
-                status: "draft".into(),
-                labels: vec![],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -428,9 +422,7 @@ mod tests {
             &CreateProject {
                 name: "Dup Test".into(),
                 identifier: "DUP".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -440,14 +432,8 @@ mod tests {
                 &CreateIssue {
                     project_id: project.id,
                     title: title.into(),
-                    description: String::new(),
                     status: "todo".into(),
-                    priority: "none".into(),
-                    module_id: None,
-                    start_date: None,
-                    target_date: None,
-                    labels: vec![],
-                    source: None,
+                    ..Default::default()
                 },
             )
             .unwrap()

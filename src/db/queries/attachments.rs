@@ -282,9 +282,7 @@ mod tests {
             &CreateProject {
                 name: "Att".into(),
                 identifier: "ATT".into(),
-                description: String::new(),
-                emoji: None,
-                lead_user_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
