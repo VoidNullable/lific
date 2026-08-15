@@ -4,21 +4,30 @@
 //! command parsing and output selection stay transport-independent while each
 //! backend owns only identifier resolution and I/O.
 
-use std::{borrow::Cow, fs, io::Write, net::IpAddr, path::Path, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fs,
+    io::Write,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
     header::{CONTENT_DISPOSITION, HeaderMap},
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use crate::db::models;
 use crate::links::{IssueLinkContext, MarkdownReference, ResourceUrl};
 
 use super::{
     Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
-    PageAction, ProjectAction, borrowed_labels,
+    PageAction, ProjectAction, owned_labels, render,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,124 +40,10 @@ struct ResolvedResource {
     identifier: String,
 }
 
-#[derive(Serialize)]
-struct IssueCreate<'a> {
-    project_id: i64,
-    title: &'a str,
-    description: &'a str,
-    status: &'a str,
-    priority: &'a str,
-    module_id: Option<i64>,
-    start_date: Option<&'a str>,
-    target_date: Option<&'a str>,
-    labels: &'a [&'a str],
-    source: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct IssueUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    priority: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    module_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<&'a [&'a str]>,
-}
-
-#[derive(Serialize)]
-struct ProjectCreate<'a> {
-    name: &'a str,
-    identifier: &'a str,
-    description: &'a str,
-    emoji: Option<&'a str>,
-    lead_user_id: Option<i64>,
-}
-
-#[derive(Serialize)]
-struct ProjectUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct PageCreate<'a> {
-    project_id: Option<i64>,
-    folder_id: Option<i64>,
-    title: &'a str,
-    content: &'a str,
-    status: &'static str,
-    labels: &'a [&'a str],
-}
-
-#[derive(Serialize)]
-struct PageUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    folder_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<&'a [&'a str]>,
-}
-
-#[derive(Serialize)]
-struct CommentCreate<'a> {
-    content: &'a str,
-}
-
-#[derive(Serialize)]
-struct ModuleCreate<'a> {
-    project_id: i64,
-    name: &'a str,
-    description: &'a str,
-    status: &'a str,
-    emoji: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct ModuleUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct LabelCreate<'a> {
-    project_id: i64,
-    name: &'a str,
-    color: &'a str,
-}
-
-#[derive(Serialize)]
-struct LabelUpdate<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    color: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct FolderCreate<'a> {
-    project_id: i64,
-    parent_id: Option<i64>,
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct FolderUpdate<'a> {
-    name: &'a str,
+/// Deserialize a response into the model a command renders, or `None` when
+/// the server sent something this binary does not recognize.
+fn decode<T: DeserializeOwned>(value: &Value) -> Option<T> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 pub async fn run(
@@ -167,7 +62,7 @@ pub async fn run(
     if json_output {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_human(&output);
+        print!("{}", backend.human(command, &output).await);
     }
     Ok(())
 }
@@ -259,6 +154,176 @@ impl HttpBackend {
         }
     }
 
+    /// Render a response the way the SQL backend renders it (LIF-373).
+    ///
+    /// Falls back to pretty JSON when the payload does not deserialize into
+    /// the model the command expects, so a CLI pointed at a server of another
+    /// version still prints something rather than failing at the last step.
+    async fn human(&self, command: &Command, value: &Value) -> String {
+        match self.render(command, value).await {
+            Some(text) => text,
+            None => format!("{}\n", pretty(value)),
+        }
+    }
+
+    async fn render(&self, command: &Command, value: &Value) -> Option<String> {
+        Some(match command {
+            Command::Issue { action } => match action {
+                IssueAction::List { .. } => {
+                    let issues: Vec<models::Issue> = decode(value)?;
+                    let names = self.module_names(&issues).await;
+                    render::issue_list(&issues, &|id| names.get(&id).cloned())
+                }
+                IssueAction::Get { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    let names = self.module_names(std::slice::from_ref(&issue)).await;
+                    render::issue_detail(&issue, &|id| names.get(&id).cloned())
+                }
+                IssueAction::Create { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    render::issue_created(&issue)
+                }
+                IssueAction::Update { .. } => {
+                    let issue: models::Issue = decode(value)?;
+                    render::issue_updated(&issue)
+                }
+            },
+            Command::Project { action } => match action {
+                ProjectAction::List => {
+                    let projects: Vec<models::Project> = decode(value)?;
+                    render::project_list(&projects)
+                }
+                ProjectAction::Get { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_detail(&project)
+                }
+                ProjectAction::Create { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_created(&project)
+                }
+                ProjectAction::Update { .. } => {
+                    let project: models::Project = decode(value)?;
+                    render::project_updated(&project)
+                }
+            },
+            Command::Page { action } => match action {
+                PageAction::List { .. } => {
+                    let pages: Vec<models::Page> = decode(value)?;
+                    render::page_list(&pages)
+                }
+                PageAction::Get { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_detail(&page)
+                }
+                PageAction::Create { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_created(&page)
+                }
+                PageAction::Update { .. } => {
+                    let page: models::Page = decode(value)?;
+                    render::page_updated(&page)
+                }
+            },
+            Command::Search { .. } => {
+                let results: Vec<models::SearchResult> = decode(value)?;
+                render::search_results(&results)
+            }
+            Command::Comment { action } => match action {
+                CommentAction::List { identifier } => {
+                    let comments: Vec<models::Comment> = decode(value)?;
+                    render::comment_list(&comments, identifier)
+                }
+                CommentAction::Add { identifier, .. } => {
+                    let comment: models::Comment = decode(value)?;
+                    render::comment_added(&comment, identifier)
+                }
+            },
+            Command::Module { action } => match action {
+                ModuleAction::List { project } => {
+                    let modules: Vec<models::Module> = decode(value)?;
+                    render::module_list(&modules, project)
+                }
+                ModuleAction::Create { project, .. } => {
+                    let module: models::Module = decode(value)?;
+                    render::module_created(&module, project)
+                }
+                ModuleAction::Update { .. } => {
+                    let module: models::Module = decode(value)?;
+                    render::module_updated(&module)
+                }
+                ModuleAction::Delete { name, .. } => render::module_deleted(name),
+            },
+            Command::Label { action } => match action {
+                LabelAction::List { project } => {
+                    let labels: Vec<models::Label> = decode(value)?;
+                    render::label_list(&labels, project)
+                }
+                LabelAction::Create { .. } => {
+                    let label: models::Label = decode(value)?;
+                    render::label_created(&label)
+                }
+                LabelAction::Update { .. } => {
+                    let label: models::Label = decode(value)?;
+                    render::label_updated(&label)
+                }
+                LabelAction::Delete { name, .. } => render::label_deleted(name),
+            },
+            Command::Folder { action } => match action {
+                FolderAction::List { project } => {
+                    let folders: Vec<models::Folder> = decode(value)?;
+                    render::folder_list(&folders, project)
+                }
+                FolderAction::Create { .. } => {
+                    let folder: models::Folder = decode(value)?;
+                    render::folder_created(&folder)
+                }
+                FolderAction::Update { name, .. } => {
+                    let folder: models::Folder = decode(value)?;
+                    render::folder_updated(name, &folder)
+                }
+                FolderAction::Delete { name, .. } => render::folder_deleted(name),
+            },
+            Command::Export { action } => {
+                let output = match action {
+                    ExportAction::Issue { output, .. }
+                    | ExportAction::Page { output, .. }
+                    | ExportAction::Project { output, .. } => output,
+                };
+                let written: Vec<PathBuf> = decode::<Vec<String>>(value)?
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect();
+                render::export_written(&written, output)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Module names for a rendered issue list, keyed by id. The SQL backend
+    /// reads these from the database; over HTTP one `/api/modules` call per
+    /// project covers the whole list. Failures are swallowed, so an
+    /// unresolvable module renders as no module, matching the SQL backend.
+    async fn module_names(&self, issues: &[models::Issue]) -> HashMap<i64, String> {
+        let mut projects = issues
+            .iter()
+            .filter(|issue| issue.module_id.is_some())
+            .map(|issue| issue.project_id)
+            .collect::<Vec<_>>();
+        projects.sort_unstable();
+        projects.dedup();
+
+        let mut names = HashMap::new();
+        for project_id in projects {
+            let params = [("project_id", Cow::Owned(project_id.to_string()))];
+            if let Ok(value) = self.get_json("/api/modules", &params).await
+                && let Some(modules) = decode::<Vec<models::Module>>(&value)
+            {
+                names.extend(modules.into_iter().map(|module| (module.id, module.name)));
+            }
+        }
+        names
+    }
+
     async fn issue(&self, action: &IssueAction) -> Result<Value> {
         match action {
             IssueAction::List {
@@ -313,17 +378,16 @@ impl HttpBackend {
                     Some(module) => Some(self.module_id(project_id, module).await?),
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref()).unwrap_or_default();
-                let body = IssueCreate {
+                let body = models::CreateIssue {
                     project_id,
-                    title,
-                    description,
-                    status,
-                    priority,
+                    title: title.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    priority: priority.clone(),
                     module_id,
                     start_date: None,
                     target_date: None,
-                    labels: &labels,
+                    labels: owned_labels(labels.as_deref()).unwrap_or_default(),
                     source: None,
                 };
                 self.send_json(Method::POST, "/api/issues", &body).await
@@ -345,14 +409,18 @@ impl HttpBackend {
                     }
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref());
-                let body = IssueUpdate {
-                    title: title.as_deref(),
-                    description: description.as_deref(),
-                    status: status.as_deref(),
-                    priority: priority.as_deref(),
-                    module_id,
-                    labels: labels.as_deref(),
+                let body = models::UpdateIssue {
+                    title: title.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    priority: priority.clone(),
+                    // LIF-145: module_id is tristate; the CLI only sets or
+                    // skips (no clear), so map Some(id) -> Some(Some(id)).
+                    module_id: module_id.map(Some),
+                    sort_order: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: owned_labels(labels.as_deref()),
                 };
                 self.send_json(Method::PUT, &format!("/api/issues/{id}"), &body)
                     .await
@@ -375,10 +443,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/projects",
-                    &ProjectCreate {
-                        name,
-                        identifier,
-                        description,
+                    &models::CreateProject {
+                        name: name.clone(),
+                        identifier: identifier.clone(),
+                        description: description.clone(),
                         emoji: None,
                         lead_user_id: None,
                     },
@@ -391,9 +459,12 @@ impl HttpBackend {
                 description,
             } => {
                 let id = self.project_id(identifier).await?;
-                let body = ProjectUpdate {
-                    name: name.as_deref(),
-                    description: description.as_deref(),
+                let body = models::UpdateProject {
+                    name: name.clone(),
+                    identifier: None,
+                    description: description.clone(),
+                    emoji: None,
+                    lead_user_id: None,
                 };
                 self.send_json(Method::PUT, &format!("/api/projects/{id}"), &body)
                     .await
@@ -437,17 +508,16 @@ impl HttpBackend {
                 let (project_id, folder_id) = self
                     .page_scope(project.as_deref(), folder.as_deref())
                     .await?;
-                let labels = borrowed_labels(labels.as_deref()).unwrap_or_default();
                 self.send_json(
                     Method::POST,
                     "/api/pages",
-                    &PageCreate {
+                    &models::CreatePage {
                         project_id,
                         folder_id,
-                        title,
-                        content,
-                        status: "draft",
-                        labels: &labels,
+                        title: title.clone(),
+                        content: content.clone(),
+                        status: "draft".into(),
+                        labels: owned_labels(labels.as_deref()).unwrap_or_default(),
                     },
                 )
                 .await
@@ -470,12 +540,14 @@ impl HttpBackend {
                     }
                     None => None,
                 };
-                let labels = borrowed_labels(labels.as_deref());
-                let body = PageUpdate {
-                    title: title.as_deref(),
-                    content: content.as_deref(),
-                    folder_id,
-                    labels: labels.as_deref(),
+                let body = models::UpdatePage {
+                    title: title.clone(),
+                    content: content.clone(),
+                    folder_id: folder_id.map(Some),
+                    sort_order: None,
+                    status: None,
+                    pinned: None,
+                    labels: owned_labels(labels.as_deref()),
                 };
                 self.send_json(Method::PUT, &format!("/api/pages/{id}"), &body)
                     .await
@@ -505,7 +577,9 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     &format!("/api/issues/{}/comments", issue.id),
-                    &CommentCreate { content },
+                    &models::CreateComment {
+                        content: content.clone(),
+                    },
                 )
                 .await
                 .map(|value| (value, issue.identifier))
@@ -534,11 +608,11 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/modules",
-                    &ModuleCreate {
+                    &models::CreateModule {
                         project_id: project.id,
-                        name,
-                        description,
-                        status,
+                        name: name.clone(),
+                        description: description.clone(),
+                        status: status.clone(),
                         emoji: None,
                     },
                 )
@@ -554,10 +628,11 @@ impl HttpBackend {
             } => {
                 let project = self.project_identity(project).await?;
                 let id = self.module_id(project.id, name).await?;
-                let body = ModuleUpdate {
-                    name: new_name.as_deref(),
-                    description: description.as_deref(),
-                    status: status.as_deref(),
+                let body = models::UpdateModule {
+                    name: new_name.clone(),
+                    description: description.clone(),
+                    status: status.clone(),
+                    emoji: None,
                 };
                 self.send_json(Method::PUT, &format!("/api/modules/{id}"), &body)
                     .await
@@ -589,10 +664,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/labels",
-                    &LabelCreate {
+                    &models::CreateLabel {
                         project_id,
-                        name,
-                        color,
+                        name: name.clone(),
+                        color: color.clone(),
                     },
                 )
                 .await
@@ -604,9 +679,9 @@ impl HttpBackend {
                 color,
             } => {
                 let id = self.label_id(self.project_id(project).await?, name).await?;
-                let body = LabelUpdate {
-                    name: new_name.as_deref(),
-                    color: color.as_deref(),
+                let body = models::UpdateLabel {
+                    name: new_name.clone(),
+                    color: color.clone(),
                 };
                 self.send_json(Method::PUT, &format!("/api/labels/{id}"), &body)
                     .await
@@ -634,10 +709,10 @@ impl HttpBackend {
                 self.send_json(
                     Method::POST,
                     "/api/folders",
-                    &FolderCreate {
+                    &models::CreateFolder {
                         project_id,
                         parent_id: None,
-                        name,
+                        name: name.clone(),
                     },
                 )
                 .await
@@ -653,7 +728,9 @@ impl HttpBackend {
                 self.send_json(
                     Method::PUT,
                     &format!("/api/folders/{id}"),
-                    &FolderUpdate { name: new_name },
+                    &models::UpdateFolder {
+                        name: Some(new_name.clone()),
+                    },
                 )
                 .await
             }
@@ -952,13 +1029,6 @@ fn sanitize_error_detail(detail: &str) -> String {
         .collect()
 }
 
-fn print_human(value: &Value) {
-    match value {
-        Value::Array(items) => println!("{} item(s):\n{}", items.len(), pretty(value)),
-        _ => println!("{}", pretty(value)),
-    }
-}
-
 #[derive(Clone, Copy)]
 enum IssueLinkOutput {
     Url,
@@ -1198,10 +1268,10 @@ mod tests {
     };
 
     use super::{
-        ERROR_BODY_LIMIT, HttpBackend, IssueCreate, IssueLinkOutput, IssueUpdate, PageCreate,
-        ProjectCreate, ResourceKind, error_detail, export_filename, find_resource,
-        is_loopback_host, linked_comments, linked_modules, linked_resources, resource_from_object,
-        resource_url, safe_filename, sanitize_error_detail, segment,
+        ERROR_BODY_LIMIT, HttpBackend, IssueLinkOutput, ResourceKind, error_detail,
+        export_filename, find_resource, is_loopback_host, linked_comments, linked_modules,
+        linked_resources, models, render, resource_from_object, resource_url, safe_filename,
+        sanitize_error_detail, segment,
     };
     use crate::links::IssueLinkContext;
 
@@ -1869,15 +1939,25 @@ mod tests {
         assert_eq!(error.to_string(), "folder 'Docs' not found");
     }
 
-    #[test]
-    fn preserves_optional_json_fields_only_when_set() {
-        let body = serde_json::to_value(IssueUpdate {
-            title: Some("Updated"),
+    fn issue_update() -> models::UpdateIssue {
+        models::UpdateIssue {
+            title: None,
             description: None,
             status: None,
             priority: None,
             module_id: None,
+            sort_order: None,
+            start_date: None,
+            target_date: None,
             labels: None,
+        }
+    }
+
+    #[test]
+    fn preserves_optional_json_fields_only_when_set() {
+        let body = serde_json::to_value(models::UpdateIssue {
+            title: Some("Updated".into()),
+            ..issue_update()
         })
         .unwrap();
         assert_eq!(body["title"], "Updated");
@@ -1886,16 +1966,58 @@ mod tests {
 
     #[test]
     fn preserves_empty_optional_json_values() {
-        let body = serde_json::to_value(IssueUpdate {
-            title: None,
-            description: Some(""),
-            status: None,
-            priority: None,
-            module_id: None,
-            labels: None,
+        let body = serde_json::to_value(models::UpdateIssue {
+            description: Some(String::new()),
+            ..issue_update()
         })
         .unwrap();
         assert_eq!(body["description"], "");
+    }
+
+    /// LIF-374: the HTTP backend used to declare its own `IssueUpdate` with a
+    /// flat `Option<i64>` module id, which cannot express "clear the module"
+    /// — `null` and "absent" collapsed into the same payload. Sending
+    /// `models::UpdateIssue` keeps all three states distinguishable the way
+    /// the server's `deserialize_nullable` reads them.
+    #[test]
+    fn distinguishes_absent_cleared_and_assigned_module_ids() {
+        let absent = serde_json::to_value(issue_update()).unwrap();
+        let cleared = serde_json::to_value(models::UpdateIssue {
+            module_id: Some(None),
+            ..issue_update()
+        })
+        .unwrap();
+        let assigned = serde_json::to_value(models::UpdateIssue {
+            module_id: Some(Some(7)),
+            ..issue_update()
+        })
+        .unwrap();
+
+        assert!(absent.get("module_id").is_none());
+        assert_eq!(cleared["module_id"], serde_json::Value::Null);
+        assert_eq!(assigned["module_id"], 7);
+    }
+
+    /// The flags `lific project update` exposes must reach the server
+    /// unchanged, and the fields it does not expose must stay absent rather
+    /// than being sent as nulls that would clear them (LIF-374: the old
+    /// shadow struct carried only 2 of the 5 fields).
+    #[test]
+    fn sends_only_the_project_fields_the_cli_sets() {
+        let body = serde_json::to_value(models::UpdateProject {
+            name: Some("Docs".into()),
+            identifier: None,
+            description: Some("Reference material".into()),
+            emoji: None,
+            lead_user_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(body["name"], "Docs");
+        assert_eq!(body["description"], "Reference material");
+        assert!(body.get("identifier").is_none());
+        assert!(body.get("emoji").is_none());
+        assert!(body.get("lead_user_id").is_none());
     }
 
     #[test]
@@ -1921,17 +2043,16 @@ mod tests {
 
     #[test]
     fn builds_issue_create_payload_with_nullable_fields() {
-        let labels = vec!["bug"];
-        let payload = serde_json::to_value(IssueCreate {
+        let payload = serde_json::to_value(models::CreateIssue {
             project_id: 7,
-            title: "Broken link",
-            description: "Details",
-            status: "backlog",
-            priority: "high",
+            title: "Broken link".into(),
+            description: "Details".into(),
+            status: "backlog".into(),
+            priority: "high".into(),
             module_id: None,
             start_date: None,
             target_date: None,
-            labels: &labels,
+            labels: vec!["bug".into()],
             source: None,
         })
         .unwrap();
@@ -1944,10 +2065,10 @@ mod tests {
 
     #[test]
     fn builds_project_create_payload_with_server_defaults() {
-        let payload = serde_json::to_value(ProjectCreate {
-            name: "Docs",
-            identifier: "DOC",
-            description: "Reference material",
+        let payload = serde_json::to_value(models::CreateProject {
+            name: "Docs".into(),
+            identifier: "DOC".into(),
+            description: "Reference material".into(),
             emoji: None,
             lead_user_id: None,
         })
@@ -1961,14 +2082,13 @@ mod tests {
 
     #[test]
     fn builds_page_create_payload_for_workspace_pages() {
-        let labels = Vec::new();
-        let payload = serde_json::to_value(PageCreate {
+        let payload = serde_json::to_value(models::CreatePage {
             project_id: None,
             folder_id: None,
-            title: "Runbook",
-            content: "# Steps",
-            status: "draft",
-            labels: &labels,
+            title: "Runbook".into(),
+            content: "# Steps".into(),
+            status: "draft".into(),
+            labels: Vec::new(),
         })
         .unwrap();
         assert!(payload["project_id"].is_null());
@@ -1979,14 +2099,13 @@ mod tests {
 
     #[test]
     fn builds_page_create_payload_with_project_folder_and_labels() {
-        let labels = vec!["ops", "ship"];
-        let payload = serde_json::to_value(PageCreate {
+        let payload = serde_json::to_value(models::CreatePage {
             project_id: Some(3),
             folder_id: Some(8),
-            title: "Release",
-            content: "Notes",
-            status: "draft",
-            labels: &labels,
+            title: "Release".into(),
+            content: "Notes".into(),
+            status: "draft".into(),
+            labels: vec!["ops".into(), "ship".into()],
         })
         .unwrap();
         assert_eq!(payload["project_id"], 3);
@@ -2173,6 +2292,160 @@ mod tests {
             value[0]["comment"],
             "[comment #8](https://tracker.example/lific/LIF/pages/17#comment-8)"
         );
+    }
+
+    /// LIF-373: `lific issue list` must print the same thing whether it read
+    /// the database directly or went over HTTP. Same data, one renderer,
+    /// byte-identical output.
+    #[tokio::test]
+    async fn renders_issue_lists_identically_to_the_sql_backend() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let command = Command::Issue {
+            action: IssueAction::List {
+                project: "TST".into(),
+                status: None,
+                priority: None,
+                module: None,
+                label: None,
+                workable: false,
+                limit: None,
+            },
+        };
+
+        // A module-assigned issue as well: the SQL backend reads the module
+        // name from the database, the HTTP backend has to go fetch it.
+        let project_id = backend.project_id("TST").await.unwrap();
+        let module = backend
+            .send_json(
+                Method::POST,
+                "/api/modules",
+                &models::CreateModule {
+                    project_id,
+                    name: "Core".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    emoji: None,
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .send_json(
+                Method::POST,
+                "/api/issues",
+                &models::CreateIssue {
+                    project_id,
+                    title: "Modular issue".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    priority: "high".into(),
+                    module_id: module["id"].as_i64(),
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let value = backend.execute(&command, IssueLinkOutput::Url).await.unwrap();
+        let remote = backend.human(&command, &value).await;
+
+        let pool = crate::db::open_memory().expect("test db");
+        {
+            let conn = pool.write().unwrap();
+            let project = crate::db::queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Test Project".into(),
+                    identifier: "TST".into(),
+                    description: "integration test project".into(),
+                    emoji: None,
+                    lead_user_id: None,
+                },
+            )
+            .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: project.id,
+                    title: "Test issue".into(),
+                    description: String::new(),
+                    status: "backlog".into(),
+                    priority: "none".into(),
+                    module_id: None,
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .unwrap();
+            let module = crate::db::queries::create_module(
+                &conn,
+                &models::CreateModule {
+                    project_id: project.id,
+                    name: "Core".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    emoji: None,
+                },
+            )
+            .unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: project.id,
+                    title: "Modular issue".into(),
+                    description: String::new(),
+                    status: "active".into(),
+                    priority: "high".into(),
+                    module_id: Some(module.id),
+                    start_date: None,
+                    target_date: None,
+                    labels: Vec::new(),
+                    source: None,
+                },
+            )
+            .unwrap();
+        }
+        let conn = pool.read().unwrap();
+        let issues = crate::db::queries::list_issues(
+            &conn,
+            &models::ListIssuesQuery {
+                project_id: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let module_name = |id: i64| crate::db::queries::get_module_name(&conn, id).ok();
+        let local = render::issue_list(&issues, &module_name);
+
+        assert_eq!(remote, local);
+        assert!(remote.contains("TST-2"), "{remote}");
+        assert!(remote.contains("(Core)"), "{remote}");
+        fixture.server.abort();
+    }
+
+    /// A server that answers with a shape this binary does not know (an older
+    /// or newer release) still prints its payload instead of failing at the
+    /// last step.
+    #[tokio::test]
+    async fn falls_back_to_json_for_unrecognized_responses() {
+        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+
+        let rendered = backend
+            .human(
+                &Command::Project {
+                    action: ProjectAction::List,
+                },
+                &json!({"unexpected": true}),
+            )
+            .await;
+
+        assert_eq!(rendered, "{\n  \"unexpected\": true\n}\n");
     }
 
     #[test]

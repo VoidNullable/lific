@@ -24,7 +24,7 @@ pub struct ReorderProjects {
     pub ids: Vec<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateProject {
     pub name: String,
     pub identifier: String,
@@ -34,18 +34,34 @@ pub struct CreateProject {
     pub lead_user_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+/// LIF-374: `Serialize` is what the HTTP CLI backend sends as the request
+/// body, so the remote path cannot drift from the local one. `Option::is_none`
+/// skips absent fields, which keeps "field omitted" (don't change) distinct
+/// from an explicit `null` — the distinction `deserialize_nullable` reads on
+/// the tristate fields below.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateProject {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// LIF-103: tristate so clients can explicitly clear the emoji back to NULL.
     /// None = field absent (don't change), Some(None) = set NULL, Some(Some(s)) = set string.
-    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub emoji: Option<Option<String>>,
     /// LIF-103: tristate so clients can explicitly clear the lead back to NULL.
     /// None = field absent (don't change), Some(None) = set NULL, Some(Some(id)) = set id.
-    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lead_user_id: Option<Option<i64>>,
 }
 
@@ -121,7 +137,7 @@ pub struct Issue {
     pub duplicated_by: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateIssue {
     pub project_id: i64,
     pub title: String,
@@ -141,19 +157,32 @@ pub struct CreateIssue {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateIssue {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
     /// LIF-145: tristate so clients can clear an issue's module back to NULL.
     /// None = absent (don't change), Some(None) = unassign (NULL), Some(Some(id)) = set.
-    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub module_id: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
 }
 
@@ -217,7 +246,7 @@ pub struct Module {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateModule {
     pub project_id: i64,
     pub name: String,
@@ -228,14 +257,22 @@ pub struct CreateModule {
     pub emoji: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateModule {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// LIF-124: tristate so clients can clear the icon back to NULL.
     /// None = absent (don't change), Some(None) = NULL, Some(Some(s)) = set.
-    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub emoji: Option<Option<String>>,
 }
 
@@ -251,7 +288,7 @@ pub struct Label {
     pub color: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateLabel {
     pub project_id: i64,
     pub name: String,
@@ -259,9 +296,12 @@ pub struct CreateLabel {
     pub color: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateLabel {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
 
@@ -269,8 +309,10 @@ fn default_label_color() -> String {
     "#6B7280".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+/// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateFolder {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
@@ -298,7 +340,7 @@ pub struct Page {
     pub labels: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePage {
     pub project_id: Option<i64>,
     pub folder_id: Option<i64>,
@@ -314,21 +356,32 @@ pub struct CreatePage {
     pub labels: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdatePage {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// None = don't change, Some(None) = set to NULL, Some(Some(id)) = set to id
-    #[serde(default, deserialize_with = "crate::db::models::deserialize_nullable")]
+    #[serde(
+        default,
+        deserialize_with = "crate::db::models::deserialize_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub folder_id: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<f64>,
     /// LIF-112: lifecycle status. None = don't change.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// LIF-183: pin/unpin. None = don't change.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
     /// Replace the full label set. None = don't touch, Some(vec) = replace
     /// (delete-all + insert-by-name, mirroring `UpdateIssue`). Silently
     /// no-ops for workspace pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
 }
 
@@ -345,7 +398,7 @@ pub struct Folder {
     pub sort_order: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateFolder {
     pub project_id: i64,
     pub parent_id: Option<i64>,
@@ -558,7 +611,7 @@ pub struct Comment {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateComment {
     pub content: String,
 }
@@ -598,7 +651,7 @@ pub struct SearchQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub result_type: String,
     pub id: i64,
