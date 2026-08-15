@@ -5,6 +5,7 @@ use axum::{
 use rusqlite::Connection;
 
 use crate::authz;
+use crate::db::queries::ResourceTable;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
@@ -36,7 +37,7 @@ pub(super) trait Structure: 'static {
     type Update: serde::de::DeserializeOwned + Send + 'static;
 
     /// Table an existing row lives in, used to resolve its project.
-    const TABLE: &'static str;
+    const TABLE: ResourceTable;
 
     /// Project a create payload targets.
     fn create_project_id(input: &Self::Create) -> i64;
@@ -55,7 +56,7 @@ impl Structure for Modules {
     type Create = CreateModule;
     type Update = UpdateModule;
 
-    const TABLE: &'static str = "modules";
+    const TABLE: ResourceTable = ResourceTable::Modules;
 
     fn create_project_id(input: &CreateModule) -> i64 {
         input.project_id
@@ -85,7 +86,7 @@ impl Structure for Labels {
     type Create = CreateLabel;
     type Update = UpdateLabel;
 
-    const TABLE: &'static str = "labels";
+    const TABLE: ResourceTable = ResourceTable::Labels;
 
     fn create_project_id(input: &CreateLabel) -> i64 {
         input.project_id
@@ -115,7 +116,7 @@ impl Structure for Folders {
     type Create = CreateFolder;
     type Update = UpdateFolder;
 
-    const TABLE: &'static str = "folders";
+    const TABLE: ResourceTable = ResourceTable::Folders;
 
     fn create_project_id(input: &CreateFolder) -> i64 {
         input.project_id

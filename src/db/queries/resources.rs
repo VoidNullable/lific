@@ -5,21 +5,38 @@ use crate::error::LificError;
 
 use super::unescape_text;
 
-/// Look up the project_id for a module, label, or folder by its id.
+/// A table [`get_resource_project_id`] can resolve a row in.
 ///
-/// The `table` parameter is validated against a whitelist to prevent SQL injection —
-/// only "modules", "labels", and "folders" are accepted.
-pub fn get_resource_project_id(conn: &Connection, table: &str, id: i64) -> Result<i64, LificError> {
-    let table = match table {
-        "modules" => "modules",
-        "labels" => "labels",
-        "folders" => "folders",
-        _ => {
-            return Err(LificError::BadRequest(format!(
-                "invalid resource table: {table}"
-            )))
+/// LIF-386: the table name is interpolated into the SQL, because SQLite has
+/// no bind parameter for an identifier. The set of legal names is therefore
+/// an enum rather than a string: a caller cannot express an injection in the
+/// first place, so there is nothing to validate at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceTable {
+    Modules,
+    Labels,
+    Folders,
+}
+
+impl ResourceTable {
+    /// The SQL identifier for this table. Every value is a literal written
+    /// right here, which is what makes the interpolation below safe.
+    pub fn as_table(&self) -> &'static str {
+        match self {
+            ResourceTable::Modules => "modules",
+            ResourceTable::Labels => "labels",
+            ResourceTable::Folders => "folders",
         }
-    };
+    }
+}
+
+/// Look up the project_id for a module, label, or folder by its id.
+pub fn get_resource_project_id(
+    conn: &Connection,
+    table: ResourceTable,
+    id: i64,
+) -> Result<i64, LificError> {
+    let table = table.as_table();
     let sql = format!("SELECT project_id FROM {table} WHERE id = ?1");
     conn.query_row(&sql, params![id], |row| row.get(0))
         .map_err(|e| match e {
@@ -976,8 +993,11 @@ mod tests {
 
     // ── Coverage backfill: previously-untested lookups & guards ──
 
-    // get_resource_project_id whitelists the table name (it's interpolated
-    // into SQL) — an unknown table must be rejected as BadRequest, never run.
+    // get_resource_project_id interpolates the table name into SQL, so the
+    // name may only ever come from `ResourceTable` (LIF-386). An unknown
+    // table is not rejected at runtime any more, it is unrepresentable: the
+    // enum's every value is one of the three literals asserted below, and a
+    // caller has no other way to name a table.
     #[test]
     fn get_resource_project_id_resolves_and_rejects_bad_table() {
         let pool = test_db();
@@ -994,16 +1014,26 @@ mod tests {
             project_id: pid, parent_id: None, name: "Docs".into(),
         }).unwrap();
 
-        assert_eq!(get_resource_project_id(&conn, "modules", module.id).unwrap(), pid);
-        assert_eq!(get_resource_project_id(&conn, "labels", label.id).unwrap(), pid);
-        assert_eq!(get_resource_project_id(&conn, "folders", folder.id).unwrap(), pid);
+        assert_eq!(get_resource_project_id(&conn, ResourceTable::Modules, module.id).unwrap(), pid);
+        assert_eq!(get_resource_project_id(&conn, ResourceTable::Labels, label.id).unwrap(), pid);
+        assert_eq!(get_resource_project_id(&conn, ResourceTable::Folders, folder.id).unwrap(), pid);
 
-        // Unknown table is rejected before any SQL runs (anti-injection guard).
-        let err = get_resource_project_id(&conn, "issues; DROP TABLE projects", 1).unwrap_err();
-        assert!(matches!(err, LificError::BadRequest(_)), "bad table must be BadRequest, got {err:?}");
+        // The only table names reachable from the enum are these three bare
+        // identifiers, so no call site can smuggle SQL in through the name.
+        for table in [ResourceTable::Modules, ResourceTable::Labels, ResourceTable::Folders] {
+            let name = table.as_table();
+            assert!(
+                ["modules", "labels", "folders"].contains(&name),
+                "unexpected table identifier: {name}"
+            );
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase()),
+                "table identifier must be a bare identifier, got {name}"
+            );
+        }
 
         // Known table, missing row → NotFound.
-        let err = get_resource_project_id(&conn, "modules", 999_999).unwrap_err();
+        let err = get_resource_project_id(&conn, ResourceTable::Modules, 999_999).unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)));
     }
 
