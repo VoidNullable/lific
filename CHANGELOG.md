@@ -1,14 +1,17 @@
 # Changelog
 
-## Unreleased
+## v2.6.0 (2026-08-15)
 
-### API
+Who is acting is now resolved one way everywhere: connected AI agents get identities of their own and act as themselves, login-free mode genuinely works, and `lific init` asks how you want to sign in instead of leaving that decision to a hand-edited config file. Alongside the identity work: two security fixes worth upgrading for on their own, comments you can edit and link to, and identifiers you can copy from wherever you see them.
 
-- **"Authentication required" is now always a 403.** Nineteen places in the REST API each wrote their own version of the "is anyone signed in?" check, and roughly half of them reported the failure as `400 Bad Request` while the rest reported `403 Forbidden`. The endpoints for your profile, password, sessions, API keys, connected tools, and comments were in the 400 group; they now answer 403 like everything else, with the message `authentication required`. If you have a client that treats a 400 from those endpoints as "you are signed out", it needs to look for 403 instead.
+### Sign-in, identity, and agents (PR #23 by [@zorro432](https://github.com/zorro432))
 
-## v2.6.0 (2026-08-12)
-
-Two security fixes, both worth upgrading for. An uploaded SVG could run script on your instance's origin, and a malformed config file could quietly hand you a more permissive server than the one you configured. Alongside them, comments are linkable, identifiers are copyable, and the desktop sidebar gets out of the way.
+- **Login-free mode now works end to end.** Running with `required = false` used to be half-broken: project reads passed while admin endpoints answered 403, because the "no auth here" signal never reached the handler-level gates. Identity is now resolved in one place for REST, MCP, and CLI alike, every request carries a real user, and a login-free instance can administer itself.
+- **`lific init` asks how you want to sign in.** On a fresh install it offers Login-free or Passwords, states plainly what login-free means (anyone who can reach the server can administer it), binds login-free instances to loopback so that promise actually holds, and persists the choice to the config file. `--auth-mode` and `--password` cover scripted setups.
+- **Connected AI agents act as themselves.** Approving a tool over OAuth mints a per-tool bot identity, stdio agents connected via `lific connect --stdio` carry their own token, and the audit log attributes their writes to the tool rather than to you. Disconnecting or deleting a bot revokes its OAuth tokens too, and reconnecting remembers which tool a client picked last time.
+- **`lific connect` grew a transport menu**, with stdio preselected and remote and OAuth on offer. The flags (`--stdio`, `--oauth`, `--url`) behave exactly as before for scripted runs.
+- **MCP enforces the same authorization as REST.** An agent can no longer do more through MCP than the same account could through the web UI.
+- **Hardening around the edges.** Failed credentials now fail instead of quietly falling back to the first admin's identity; a server with `web_auto_login` enabled refuses to start on a non-loopback bind; connector configs that embed credentials are written with `0600` permissions; a new API key is bound to its user in the same insert that creates it; OAuth device-code redemption is atomic with the token mint.
 
 ### Security
 
@@ -16,9 +19,15 @@ Two security fixes, both worth upgrading for. An uploaded SVG could run script o
 
 - **A malformed config file now stops the server instead of silently reverting to defaults.** A config that failed to parse, including one broken by a single typo, produced a warning on stderr and then booted from the built-in defaults. Those defaults bind `0.0.0.0`, allow self-service signup, and treat an empty `cors_origins` as "any origin", so an operator who had set `host = "127.0.0.1"` and `allow_signup = false` could be left running a materially more exposed instance with nothing but a log line to say so. A config file that exists but cannot be read or parsed is now a hard startup failure naming the file and the error. Unknown keys are rejected for the same reason: `allow_signupp = false` used to be ignored silently and now fails loudly. A missing config file is still perfectly fine and still starts on defaults. Reported by [@mjc](https://github.com/mjc).
 
+### API
+
+- **"Authentication required" is now always a 403.** Nineteen places in the REST API each wrote their own version of the "is anyone signed in?" check, and roughly half of them reported the failure as `400 Bad Request` while the rest reported `403 Forbidden`. The endpoints for your profile, password, sessions, API keys, connected tools, and comments were in the 400 group; they now answer 403 like everything else, with the message `authentication required`. If you have a client that treats a 400 from those endpoints as "you are signed out", it needs to look for 403 instead.
+
 ### Web UI
 
 - **Comments have their own links, and `#N` becomes one.** A comment can be linked directly and the browser scrolls to it, and a bare `#12` in issue text resolves to that issue. (PR #24 by [@unger1984](https://github.com/unger1984))
+- **Edit and delete your own comments.** Editing is inline with the full composer (markdown, mentions, quoting, attachments), deleting asks for confirmation in place, and an edited comment carries an `edited` label with the exact time in its tooltip. (PR #25 by [@unger1984](https://github.com/unger1984))
+- **Home shows a live activity rate.** It seeds from the last 24 hours of activity you are allowed to see, then ticks along over the websocket instead of starting from a misleading zero. (PR #26 by [@mjc](https://github.com/mjc))
 - **Copy an identifier from wherever you are looking at it**: the detail-page breadcrumbs, a board card, or a list row. (PR #22 by [@lardissone](https://github.com/lardissone)) The copy and peek buttons are reachable by keyboard, not hover alone, and pills name the identifier they copy so a screen reader announces something useful.
 - **Copy selected text from the selection toolbar**, instead of reaching for the mouse to select and copy by hand.
 - **The desktop sidebar collapses**, giving the board and the issue list the full width.
@@ -29,13 +38,19 @@ Two security fixes, both worth upgrading for. An uploaded SVG could run script o
 - Starter label presets no longer vanish after you add the first one.
 - Editing a label no longer reloads the entire settings page.
 - `#N` inside a numeric HTML entity is left alone rather than linkified into nonsense.
+- Deeply nested plan steps stay readable instead of squeezing themselves into an ever-narrower column.
+- Attachment links stay in sync on every MCP write path, not just some of them.
+- A restore whose rollback fails now names the path the old database survives at, instead of leaving you to hunt for it.
+- `lific doctor` checks the router production actually serves.
 - Test databases are named from a counter rather than the clock, so a fast machine no longer collides two of them in the same millisecond.
 
 ### Upgrading
 
-- No migrations. Upgrading from any 2.x needs no manual steps.
+- Two migrations run automatically on first start; they add the per-tool identity plumbing behind connected agents. No manual steps.
 - **Check that your `lific.toml` parses before rolling this out**, because a config Lific previously ignored will now stop it from starting. `lific doctor` reports the config as a normal check and keeps running the rest, which makes it the right tool for this. The strictness is the fix, not a side effect: a config that fails to load is exactly the case that used to degrade quietly.
+- If `web_auto_login` is enabled and `[server] host` is not loopback, the server now refuses to start rather than exposing a no-password login to the network. Bind `127.0.0.1` or turn auto-login off.
 - If your config sets `secure_cookies` under `[auth]`, remove it. It has never been read from the file (it is derived from whether `server.public_url` is `https://`), and unknown keys are now an error rather than being ignored.
+- Audit entries written by connected tools are now attributed to the tool's own identity rather than to the operator who connected it.
 
 ## v2.5.0 (2026-07-28)
 
