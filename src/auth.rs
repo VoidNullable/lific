@@ -498,8 +498,15 @@ pub async fn require_api_key(
             let auth_user = match crate::oauth::oauth_token_user_id(&auth.db, &token) {
                 None => None,
                 Some(uid) => {
+                    // LIF-214 follow-up: `get_live_user_by_id` also rejects a
+                    // deactivated account and a bot whose owner is
+                    // deactivated. A bot's authority is its owner's authority,
+                    // so an owner switched off must not keep acting through
+                    // the tool token they approved earlier. Same 401 as a
+                    // dangling binding, and for the same reason: falling
+                    // through as None would promote it to the operator.
                     let user = auth.db.read().ok().and_then(|conn| {
-                        crate::db::queries::users::get_user_by_id(&conn, uid).ok()
+                        crate::db::queries::users::get_live_user_by_id(&conn, uid).ok()
                     });
                     match user {
                         Some(u) => Some(crate::db::models::AuthUser {
@@ -510,12 +517,14 @@ pub async fn require_api_key(
                         }),
                         None => {
                             if is_mcp_request {
-                                warn!("/mcp rejected: OAuth token bound to a missing user");
+                                warn!(
+                                    "/mcp rejected: OAuth token bound to a missing or deactivated user"
+                                );
                             }
                             return (
                                 StatusCode::UNAUTHORIZED,
                                 [("WWW-Authenticate", www_auth.as_str())],
-                                "OAuth token bound to a missing or deleted user",
+                                "OAuth token bound to a missing or deactivated user",
                             )
                                 .into_response();
                         }
@@ -577,6 +586,15 @@ pub async fn require_api_key(
             return (StatusCode::UNAUTHORIZED,
                     [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
         }
+        Err(ApiKeyReject::Inactive) => {
+            warn!("rejected API key: deactivated account, or a bot with a deactivated owner");
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "This account is deactivated",
+            )
+                .into_response();
+        }
     };
 
     // LIF-155: API keys are programmatic — 'mcp' on the /mcp path, 'api' for
@@ -624,6 +642,10 @@ enum ApiKeyReject {
     NotFound,
     /// A matching key exists but the stored hash didn't verify.
     HashMismatch,
+    /// The key verified, but the identity it names may not authenticate: the
+    /// account is deactivated, or it is a bot whose owner is deactivated
+    /// (LIF-214 follow-up, see `queries::users::credential_is_live`).
+    Inactive,
 }
 
 /// Shared API-key authentication for both the HTTP middleware and the stdio
@@ -715,17 +737,33 @@ fn validate_api_key(
             // Resolve the user if the key has a user_id. A valid-but-unbound
             // key (legacy, or a fresh-install unassigned key) is Ok(None) — the
             // caller falls back to the operator.
-            let auth_user = key.user_id.and_then(|uid| {
-                let conn = db.read().ok()?;
-                crate::db::queries::users::get_user_by_id(&conn, uid)
-                    .ok()
-                    .map(|u| crate::db::models::AuthUser {
-                        id: u.id,
-                        username: u.username,
-                        display_name: u.display_name,
-                        is_admin: u.is_admin,
-                    })
-            });
+            let auth_user = match key.user_id {
+                None => None,
+                Some(uid) => {
+                    let conn = db.read().map_err(|_| ApiKeyReject::Db)?;
+                    match crate::db::queries::users::get_user_by_id(&conn, uid) {
+                        // LIF-214 follow-up: a key bound to a deactivated
+                        // account, or to a bot whose *owner* is deactivated,
+                        // is a dead credential. It must be rejected outright
+                        // rather than degraded to `None`, which would hand it
+                        // the unbound-key operator fallback (first admin) and
+                        // turn deactivation into a promotion.
+                        Ok(u) => match crate::db::queries::users::credential_is_live(&conn, &u) {
+                            Ok(true) => Some(crate::db::models::AuthUser {
+                                id: u.id,
+                                username: u.username,
+                                display_name: u.display_name,
+                                is_admin: u.is_admin,
+                            }),
+                            Ok(false) => return Err(ApiKeyReject::Inactive),
+                            Err(_) => return Err(ApiKeyReject::Db),
+                        },
+                        // Unchanged: a binding to a user row that no longer
+                        // exists stays unresolved.
+                        Err(_) => None,
+                    }
+                }
+            };
             Ok(auth_user)
         }
         _ => Err(ApiKeyReject::HashMismatch),
@@ -752,6 +790,7 @@ pub fn resolve_api_key_user(
         ApiKeyReject::BadChecksum => "invalid API key checksum".to_string(),
         ApiKeyReject::NotFound => "invalid API key".to_string(),
         ApiKeyReject::HashMismatch => "API key hash verification failed".to_string(),
+        ApiKeyReject::Inactive => "this account is deactivated".to_string(),
     })
 }
 
@@ -1297,6 +1336,181 @@ mod tests {
             b"none",
             "a legacy key with no bound user must stay unresolved (default-deny)"
         );
+    }
+
+    // ── Owner deactivation reaches the bots (LIF-214 follow-up) ──
+    //
+    // A bot is a separate `users` row holding its own API key and OAuth
+    // token, and `authz::effective_user` resolves it to its owner before any
+    // permission check. Deactivating the owner therefore has to stop the
+    // bot's credentials too, or the switched-off account keeps acting through
+    // its agents. Enforcement lives on the read path, so these also assert
+    // that reactivating the owner brings the bots straight back with the same
+    // credentials.
+
+    /// Owner (human, non-admin so the last-admin guard stays out of the way)
+    /// plus one bot they own. Returns `(pool, owner_id, bot_id)`.
+    fn owner_and_bot(pool: &db::DbPool) -> (i64, i64) {
+        let conn = pool.write().unwrap();
+        // An admin has to exist so the owner is never the last one.
+        crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: "instance-admin".into(),
+                email: "instance-admin@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        let owner = crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: "botowner".into(),
+                email: "botowner@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: Some("Bot Owner".into()),
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        let bot =
+            crate::db::queries::users::ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+        (owner.id, bot.id)
+    }
+
+    fn set_owner_active(pool: &db::DbPool, owner_id: i64, active: bool) {
+        let conn = pool.write().unwrap();
+        crate::db::queries::users::set_active(&conn, owner_id, active).unwrap();
+    }
+
+    async fn echo_with_bearer(pool: &db::DbPool, token: &str) -> (StatusCode, String) {
+        let resp = echo_app(test_auth_state(pool))
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn bot_api_key_stops_working_while_its_owner_is_deactivated() {
+        let pool = test_db();
+        let (owner_id, bot_id) = owner_and_bot(&pool);
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "opencode-key", Some(bot_id)).unwrap();
+
+        let (status, body) = echo_with_bearer(&pool, &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, format!("user:{bot_id}:opencode-botowner:false"));
+
+        set_owner_active(&pool, owner_id, false);
+        let (status, body) = echo_with_bearer(&pool, &key).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a bot must not outlive its owner's access: {body}"
+        );
+        assert_ne!(
+            body, "none",
+            "and must never degrade to the unbound-key operator fallback"
+        );
+
+        set_owner_active(&pool, owner_id, true);
+        let (status, body) = echo_with_bearer(&pool, &key).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "reactivating the owner restores the bot without re-minting: {body}"
+        );
+        assert_eq!(body, format!("user:{bot_id}:opencode-botowner:false"));
+    }
+
+    #[tokio::test]
+    async fn bot_oauth_token_stops_working_while_its_owner_is_deactivated() {
+        let pool = test_db();
+        let (owner_id, bot_id) = owner_and_bot(&pool);
+        let token = insert_oauth_token(&pool, "ownerdeact", Some(bot_id));
+
+        let (status, body) = echo_with_bearer(&pool, &token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, format!("user:{bot_id}:opencode-botowner:false"));
+
+        set_owner_active(&pool, owner_id, false);
+        let (status, body) = echo_with_bearer(&pool, &token).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the bot's OAuth token dies with its owner's access: {body}"
+        );
+
+        set_owner_active(&pool, owner_id, true);
+        let (status, body) = echo_with_bearer(&pool, &token).await;
+        assert_eq!(status, StatusCode::OK, "restored on reactivation: {body}");
+        assert_eq!(body, format!("user:{bot_id}:opencode-botowner:false"));
+    }
+
+    /// The read-path check is not bot-specific: a key bound to a deactivated
+    /// human is refused even if the revocation `set_active` performs never
+    /// happened (simulated here by flipping the flag directly).
+    #[tokio::test]
+    async fn api_key_bound_to_a_deactivated_human_is_refused_even_unrevoked() {
+        let pool = test_db();
+        let (owner_id, _bot_id) = owner_and_bot(&pool);
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "human-key", Some(owner_id)).unwrap();
+
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "UPDATE users SET is_active = 0 WHERE id = ?1",
+                params![owner_id],
+            )
+            .unwrap();
+        }
+
+        let (status, body) = echo_with_bearer(&pool, &key).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(body, "none", "never falls back to the operator");
+    }
+
+    /// An ownerless bot (`owner_id IS NULL`) inherits nothing, so nothing
+    /// gates it. `effective_user` evaluates it as itself; so does this.
+    #[tokio::test]
+    async fn ownerless_bot_key_is_unaffected_by_the_owner_check() {
+        let pool = test_db();
+        let bot_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "orphan-bot".into(),
+                    email: "orphan-bot@bot.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: Some("Orphan".into()),
+                    is_admin: false,
+                    is_bot: true,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "orphan-key", Some(bot_id)).unwrap();
+
+        let (status, body) = echo_with_bearer(&pool, &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, format!("user:{bot_id}:orphan-bot:false"));
     }
 
     // ── LIF-294: [auth] required = false ─────────────────────────

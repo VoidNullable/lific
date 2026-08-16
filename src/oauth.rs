@@ -565,11 +565,7 @@ async fn authorize_approve(
             .map(|u| Some(u.id))
     } else if token.starts_with("lific_at_") {
         // OAuth tokens can also approve (valid authenticated identity).
-        if validate_oauth_token(&oauth.db, &token) {
-            Some(oauth_token_user_id(&oauth.db, &token))
-        } else {
-            None
-        }
+        authenticate_oauth_token(&oauth.db, &token)
     } else {
         None
     };
@@ -1147,11 +1143,7 @@ async fn device_approve(
             .ok()
             .map(|u| Some(u.id))
     } else if token.starts_with("lific_at_") {
-        if validate_oauth_token(&oauth.db, &token) {
-            Some(oauth_token_user_id(&oauth.db, &token))
-        } else {
-            None
-        }
+        authenticate_oauth_token(&oauth.db, &token)
     } else {
         None
     };
@@ -1659,7 +1651,7 @@ async fn revoke_token(
                 Err(_) => false,
             }
         }
-        Some(t) if t.starts_with("lific_at_") => validate_oauth_token(&state.db, t),
+        Some(t) if t.starts_with("lific_at_") => authenticate_oauth_token(&state.db, t).is_some(),
         // LIF-208: default-deny unknown bearer shapes. The previous
         // `Some(_) => true` treated *any* other string (including arbitrary
         // garbage) as authenticated, which is sloppier than the rest of the
@@ -1776,6 +1768,33 @@ pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
         |_| Ok(()),
     )
     .is_ok()
+}
+
+/// Authenticate an OAuth access token as an *approving identity*.
+///
+/// Returns:
+/// - `None` when the token does not authenticate at all: invalid, revoked,
+///   expired, or bound to a user who may no longer authenticate (deactivated,
+///   or a bot whose owner is deactivated — LIF-214 follow-up, see
+///   `queries::users::credential_is_live`).
+/// - `Some(None)` for a valid legacy token carrying no user binding.
+/// - `Some(Some(id))` for a valid token bound to a live user.
+///
+/// This is the OAuth-token twin of [`crate::db::queries::users::validate_session`],
+/// which applies the same liveness rule to session tokens.
+fn authenticate_oauth_token(db: &DbPool, token: &str) -> Option<Option<i64>> {
+    if !validate_oauth_token(db, token) {
+        return None;
+    }
+    match oauth_token_user_id(db, token) {
+        None => Some(None),
+        Some(uid) => {
+            let conn = db.read().ok()?;
+            crate::db::queries::users::get_live_user_by_id(&conn, uid)
+                .ok()
+                .map(|u| Some(u.id))
+        }
+    }
 }
 
 /// Resolve the user bound to a (valid, non-revoked, unexpired) OAuth access

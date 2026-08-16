@@ -2,7 +2,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -481,6 +481,58 @@ pub fn create_session(
     })
 }
 
+/// Whether a credential naming `user` may authenticate right now.
+///
+/// Two ways it may not:
+///
+/// - The account itself was deactivated (LIF-214). `set_active` tears down the
+///   credentials it can see, and this catches anything that outlives that
+///   write (a race, or a token minted while the flag was flipping).
+/// - It is a *bot* whose owner was deactivated. A bot is a separate `users`
+///   row with its own API keys and OAuth tokens, but no permissions of its
+///   own: [`crate::authz::effective_user`] resolves every owned bot to its
+///   owner before any role check runs. So an owner who has lost access would
+///   otherwise keep exercising it through a tool connection minted earlier.
+///   Enforcing on the read path rather than revoking the bots' credentials is
+///   deliberate. It cannot race a connect that is in flight, and reactivating
+///   the owner restores every bot without re-minting anything.
+///
+/// An ownerless bot (`owner_id IS NULL`, or a dangling owner row) inherits
+/// nothing, so it is evaluated as itself — the same fallback `effective_user`
+/// makes.
+pub fn credential_is_live(conn: &Connection, user: &User) -> Result<bool, LificError> {
+    if !user.is_active {
+        return Ok(false);
+    }
+    if !user.is_bot {
+        return Ok(true);
+    }
+    let owner_is_active: Option<bool> = conn
+        .query_row(
+            "SELECT owner.is_active FROM users bot
+             JOIN users owner ON owner.id = bot.owner_id
+             WHERE bot.id = ?1 AND bot.is_bot = 1",
+            params![user.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(owner_is_active.unwrap_or(true))
+}
+
+/// Load a user by id and refuse to hand it back when the credential naming it
+/// may not authenticate ([`credential_is_live`]).
+///
+/// Callers that resolve a bearer credential to an identity use this instead of
+/// [`get_user_by_id`], so a deactivated account and a bot with a deactivated
+/// owner are rejected at exactly the same door.
+pub fn get_live_user_by_id(conn: &Connection, user_id: i64) -> Result<User, LificError> {
+    let user = get_user_by_id(conn, user_id)?;
+    if !credential_is_live(conn, &user)? {
+        return Err(LificError::BadRequest("this account is deactivated".into()));
+    }
+    Ok(user)
+}
+
 /// Validate a session token. Returns the associated user if the session
 /// exists and has not expired. The incoming plaintext token is hashed with
 /// SHA-256 before lookup.
@@ -509,8 +561,10 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
     let user = get_user_by_id(conn, user_id)?;
     // LIF-214: deactivation revokes access, so a session row that outlives it
     // (a race with the sweep, or a token minted before the flag flipped) must
-    // not authenticate. Same error the middleware already maps to 401.
-    if !user.is_active {
+    // not authenticate. Same error the middleware already maps to 401. A bot
+    // whose owner is deactivated is rejected on the same terms — see
+    // [`credential_is_live`].
+    if !credential_is_live(conn, &user)? {
         return Err(LificError::BadRequest(INVALID_SESSION_MESSAGE.into()));
     }
     Ok(user)
@@ -733,33 +787,56 @@ pub fn set_admin_guarded(
 /// the account holds is torn down in the same write: sessions deleted, API
 /// keys and OAuth tokens revoked. Restoring the account does not bring the
 /// credentials back; the user signs in again and mints fresh ones.
+///
+/// The account's **owned bots** are handled differently on purpose. Their
+/// sessions are deleted too, so an already-established realtime connection
+/// drops promptly instead of lingering until its next reconnect. Their API
+/// keys and OAuth tokens are left alone: [`credential_is_live`] rejects them
+/// on the read path for as long as the owner is deactivated, which is
+/// race-free, and reactivating the owner then restores every connected tool
+/// without the user having to re-mint anything.
+///
+/// The guard, the flag write and every teardown run in one transaction. A
+/// failure part-way through used to be able to leave a deactivated account
+/// holding live credentials; now it leaves nothing at all.
 pub fn set_active(conn: &Connection, user_id: i64, is_active: bool) -> Result<User, LificError> {
-    let target = manageable_target(conn, user_id)?;
+    let tx = conn.unchecked_transaction()?;
 
-    if !is_active && target.is_admin && target.is_active && count_active_admins(conn)? <= 1 {
+    let target = manageable_target(&tx, user_id)?;
+
+    if !is_active && target.is_admin && target.is_active && count_active_admins(&tx)? <= 1 {
         return Err(LificError::Conflict(
             "cannot deactivate the last instance admin. Promote someone else first.".into(),
         ));
     }
 
-    conn.execute(
+    tx.execute(
         "UPDATE users SET is_active = ?1, updated_at = datetime('now') WHERE id = ?2",
         params![is_active, target.id],
     )?;
 
     if !is_active {
-        delete_all_sessions(conn, target.id)?;
-        conn.execute(
+        delete_all_sessions(&tx, target.id)?;
+        tx.execute(
             "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
             params![target.id],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+            params![target.id],
+        )?;
+        // Owned bots: sessions only. Their keys and tokens stay intact and
+        // simply stop authenticating (see the doc comment above).
+        tx.execute(
+            "DELETE FROM sessions WHERE user_id IN
+             (SELECT id FROM users WHERE owner_id = ?1 AND is_bot = 1)",
             params![target.id],
         )?;
     }
 
-    get_user_by_id(conn, target.id)
+    let refreshed = get_user_by_id(&tx, target.id)?;
+    tx.commit()?;
+    Ok(refreshed)
 }
 
 /// Find a bot by its stable (owner, tool) pairing (LIFIC-17).
@@ -2623,5 +2700,220 @@ mod tests {
             matches!(err, LificError::BadRequest(_)),
             "an empty password must be rejected, got {err:?}"
         );
+    }
+
+    // ── Deactivation: credential teardown and owned bots ─────
+    //
+    // LIF-214 gave `set_active` a teardown. These pin the two things review
+    // found missing from it: the write has to be all-or-nothing, and the
+    // account's owned bots have to stop working too.
+
+    /// An admin (so the last-admin guard is never the thing under test), a
+    /// human owner, and one bot the owner owns.
+    fn deactivation_fixture(conn: &Connection) -> (User, User) {
+        let mk = |username: &str, is_admin: bool| {
+            create_user(
+                conn,
+                &CreateUser {
+                    username: username.into(),
+                    email: format!("{username}@example.com"),
+                    password: "securepassword123".into(),
+                    display_name: None,
+                    is_admin,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+        };
+        mk("keeper-admin", true);
+        let owner = mk("owner", false);
+        let bot = ensure_bot(conn, owner.id, "opencode", "OpenCode").unwrap();
+        (owner, bot)
+    }
+
+    fn seed_key(conn: &Connection, name: &str, user_id: i64) {
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, user_id) VALUES (?1, ?2, ?3)",
+            params![name, format!("hash-{name}"), user_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_oauth_token(conn: &Connection, suffix: &str, user_id: i64) {
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+             VALUES (?1, 'Test', '[\"http://localhost\"]')",
+            params![format!("client-{suffix}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+             VALUES (?1, ?2, '2999-01-01T00:00:00Z', 'mcp', ?3)",
+            params![
+                format!("hash-{suffix}"),
+                format!("client-{suffix}"),
+                user_id
+            ],
+        )
+        .unwrap();
+    }
+
+    fn count(conn: &Connection, sql: &str, id: i64) -> i64 {
+        conn.query_row(sql, params![id], |row| row.get(0)).unwrap()
+    }
+
+    fn live_sessions(conn: &Connection, user_id: i64) -> i64 {
+        count(
+            conn,
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?1",
+            user_id,
+        )
+    }
+
+    fn live_keys(conn: &Connection, user_id: i64) -> i64 {
+        count(
+            conn,
+            "SELECT COUNT(*) FROM api_keys WHERE user_id = ?1 AND revoked = 0",
+            user_id,
+        )
+    }
+
+    fn live_tokens(conn: &Connection, user_id: i64) -> i64 {
+        count(
+            conn,
+            "SELECT COUNT(*) FROM oauth_tokens WHERE user_id = ?1 AND revoked = 0",
+            user_id,
+        )
+    }
+
+    /// The exact end state of a successful deactivation, in one assertion
+    /// block: the target loses everything, the bot loses only its sessions.
+    #[test]
+    fn deactivation_tears_down_the_full_credential_set_in_one_write() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (owner, bot) = deactivation_fixture(&conn);
+
+        create_session(&conn, owner.id, None).unwrap();
+        create_session(&conn, bot.id, None).unwrap();
+        seed_key(&conn, "owner-key", owner.id);
+        seed_key(&conn, "bot-key", bot.id);
+        seed_oauth_token(&conn, "owner", owner.id);
+        seed_oauth_token(&conn, "bot", bot.id);
+
+        let refreshed = set_active(&conn, owner.id, false).unwrap();
+        assert!(!refreshed.is_active);
+
+        assert_eq!(live_sessions(&conn, owner.id), 0, "own sessions deleted");
+        assert_eq!(live_keys(&conn, owner.id), 0, "own API keys revoked");
+        assert_eq!(live_tokens(&conn, owner.id), 0, "own OAuth tokens revoked");
+
+        assert_eq!(
+            live_sessions(&conn, bot.id),
+            0,
+            "the bot's sessions go too, so live realtime connections drop"
+        );
+        assert_eq!(
+            live_keys(&conn, bot.id),
+            1,
+            "the bot's API key is left intact; the read path refuses it"
+        );
+        assert_eq!(
+            live_tokens(&conn, bot.id),
+            1,
+            "same for its OAuth token, so reactivation needs no re-minting"
+        );
+    }
+
+    /// A refused deactivation writes nothing at all. The guard runs inside the
+    /// same transaction as the teardown, so a rejection cannot leave a
+    /// half-revoked account behind.
+    #[test]
+    fn a_refused_deactivation_leaves_every_credential_alone() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let admin = create_user(
+            &conn,
+            &CreateUser {
+                username: "solo-admin".into(),
+                email: "solo-admin@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        create_session(&conn, admin.id, None).unwrap();
+        seed_key(&conn, "admin-key", admin.id);
+        seed_oauth_token(&conn, "admin", admin.id);
+
+        let err = set_active(&conn, admin.id, false).unwrap_err();
+        assert!(
+            matches!(err, LificError::Conflict(_)),
+            "the last admin cannot be deactivated, got {err:?}"
+        );
+
+        assert!(get_user_by_id(&conn, admin.id).unwrap().is_active);
+        assert_eq!(live_sessions(&conn, admin.id), 1);
+        assert_eq!(live_keys(&conn, admin.id), 1);
+        assert_eq!(live_tokens(&conn, admin.id), 1);
+    }
+
+    #[test]
+    fn a_bots_session_dies_with_its_owner_and_returns_on_reactivation() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (owner, bot) = deactivation_fixture(&conn);
+
+        // A session minted *after* deactivation still must not authenticate:
+        // the check is on the read path, not on the teardown.
+        set_active(&conn, owner.id, false).unwrap();
+        let token = create_session(&conn, bot.id, None).unwrap().token;
+        assert!(
+            validate_session(&conn, &token).is_err(),
+            "a bot session cannot authenticate while its owner is deactivated"
+        );
+
+        set_active(&conn, owner.id, true).unwrap();
+        assert_eq!(
+            validate_session(&conn, &token).unwrap().id,
+            bot.id,
+            "reactivating the owner brings the bot straight back"
+        );
+    }
+
+    #[test]
+    fn credential_is_live_tracks_the_owner_and_ignores_ownerless_bots() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (owner, bot) = deactivation_fixture(&conn);
+
+        assert!(credential_is_live(&conn, &owner).unwrap());
+        assert!(credential_is_live(&conn, &bot).unwrap());
+
+        set_active(&conn, owner.id, false).unwrap();
+        let owner = get_user_by_id(&conn, owner.id).unwrap();
+        assert!(!credential_is_live(&conn, &owner).unwrap());
+        assert!(
+            !credential_is_live(&conn, &bot).unwrap(),
+            "the bot inherits its owner's loss of access"
+        );
+
+        // An ownerless bot has nothing to inherit and is evaluated as itself,
+        // matching `authz::effective_user`'s dangling-owner fallback.
+        let orphan = create_user(
+            &conn,
+            &CreateUser {
+                username: "orphan".into(),
+                email: "orphan@bot.local".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: true,
+            },
+        )
+        .unwrap();
+        assert!(credential_is_live(&conn, &orphan).unwrap());
     }
 }
