@@ -295,6 +295,7 @@
       view.newMenuOpen ||
       view.filterOpen ||
       view.lanesOpen ||
+      view.overflowOpen ||
       peekState.open ||
       // LIF-245: a poll landing under the command palette or the shortcut
       // help overlay wouldn't corrupt anything visible (both are opaque
@@ -1198,6 +1199,10 @@
           view.sortOpen = false;
         } else if (view.filterOpen) {
           view.filterOpen = false;
+        } else if (view.overflowOpen) {
+          // LIF-350: last of the topbar popovers, since the sub-`sm`
+          // overflow menu is the container the three above it open from.
+          view.overflowOpen = false;
         } else if (bulkMenu !== null) {
           bulkMenu = null;
         } else if (view.moduleDropdownId !== null) {
@@ -1383,6 +1388,7 @@
     view.newMenuOpen = false;
     view.filterOpen = false;
     view.lanesOpen = false;
+    view.overflowOpen = false;
     bulkMenu = null;
   }}
 />

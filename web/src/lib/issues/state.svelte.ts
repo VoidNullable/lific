@@ -271,6 +271,12 @@ export class IssueListState {
   filterOpen = $state(false);
   /** Swimlane-picker popover (LIF-241). Board mode only. */
   lanesOpen = $state(false);
+  /** Sub-`sm` overflow menu (LIF-350). Below the `sm` breakpoint the
+   *  saved-views, sort and display/swimlane triggers fold behind a single
+   *  button so the topbar fits one row on a 360px phone; this tracks that
+   *  button's popover. At `sm` and up the three controls sit in the row
+   *  and nothing ever sets this. */
+  overflowOpen = $state(false);
 
   // ── Row interaction: keyboard focus, multi-select, inline dropdowns ──
   // Shared between the keyboard handler, the bulk handlers, and IssueRow.
@@ -418,6 +424,7 @@ export class IssueListState {
     this.newMenuOpen = false;
     this.filterOpen = false;
     this.lanesOpen = false;
+    this.overflowOpen = false;
   }
 
   /** Count of active filters, for the topbar Filter button badge. */

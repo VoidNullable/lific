@@ -278,7 +278,14 @@
       }}
     >
       <Bookmark size={12} class="shrink-0" />
-      <span class="hidden sm:inline max-w-[120px] truncate">
+      <!-- LIF-350: the label and caret used to be `hidden sm:inline` /
+           `hidden sm:block`, because below sm this trigger sat in the
+           topbar row and had no room for them. It no longer sits there:
+           below sm the whole control lives inside the topbar's overflow
+           popover, where a bare bookmark glyph would be unreadable. Both
+           are flex children of the button, so dropping the classes leaves
+           the `sm` and up rendering exactly as it was. -->
+      <span class="max-w-[120px] truncate">
         {activeView?.name ?? "Default view"}
       </span>
       {#if drifted}
@@ -287,13 +294,14 @@
           title="Unsaved changes"
         ></span>
       {/if}
-      <ChevronDown size={12} class="shrink-0 hidden sm:block" />
+      <ChevronDown size={12} class="shrink-0" />
     </button>
 
     {#if open}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
       <div
         class="absolute right-0 top-full mt-1.5 z-30 w-[260px]
+               max-sm:right-auto max-sm:left-0
                bg-[var(--surface)] border border-[var(--border)]
                rounded-lg shadow-lg py-1.5 text-body-sm"
         onclick={(e) => e.stopPropagation()}

@@ -13,7 +13,7 @@
     Plus, Search, ChevronDown, Signal,
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDown, ArrowUp, Hash, Clock, History, Check, Zap, PenLine,
-    SlidersVertical, Rows3, Layers,
+    SlidersVertical, Rows3, Layers, MoreHorizontal,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
   import SubTabs, { type SubTab } from "../SubTabs.svelte";
@@ -100,19 +100,37 @@
 
   <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
   <div class="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
-    <!-- Breadcrumb (LIF-286: shared component). The project segment + its
-         separator collapse below sm (the mobile header already shows the
-         app name); the page label stays. -->
-    <Breadcrumbs
-      segments={[
-        { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
-        { label: layout === "board" ? "Board" : "Issues" },
-      ]}
-    />
+    <!-- Breadcrumb (LIF-286: shared component). The project segment and its
+         separator still carry `hideBelowSm`, which is what every other
+         detail topbar does; below sm the wrapper hides the trail before
+         that ever matters.
+
+         LIF-350: below sm the trail goes entirely. Since LIF-349 the mobile
+         app header reads "[icon] Project Issues", so the surviving "Issues"
+         / "Board" crumb was pure duplication, and the ~50px it cost (plus
+         its gap) was a big share of what pushed this row onto a second
+         line at 360px. Hidden from the outside rather than by flagging
+         both segments, which would leave an empty <nav> still claiming a
+         gap in the row. `min-w-0` moves onto the wrapper so the trail can
+         still shrink at sm and up exactly as it did. -->
+    <div class="hidden sm:block min-w-0">
+      <Breadcrumbs
+        segments={[
+          { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
+          { label: layout === "board" ? "Board" : "Issues" },
+        ]}
+      />
+    </div>
 
     <!-- View switcher pill. Anchored directly after the breadcrumb so the
          toggle never shifts when the per-status tallies (which arrive a
-         frame later, after the counts fetch) render in beside it. -->
+         frame later, after the counts fetch) render in beside it.
+
+         LIF-350: icon-only below sm. `sr-only` (not `hidden`) keeps both
+         labels in the accessibility tree, so the buttons still announce as
+         "List" / "Board" on a phone, and it takes them out of flow rather
+         than out of the box tree, so they claim neither width nor a flex
+         gap there. `sm:not-sr-only` restores them verbatim at sm and up. -->
     <div
       class="flex items-center gap-0.5 p-0.5 rounded-md bg-[var(--bg)]
              shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
@@ -127,7 +145,7 @@
         onclick={() => navigate(`/${projectIdentifier}/issues`)}
       >
         <ListIcon size={11} class="shrink-0" />
-        List
+        <span class="sr-only sm:not-sr-only">List</span>
       </button>
       <button
         class="flex items-center gap-1 px-2 py-0.5 rounded
@@ -139,7 +157,7 @@
         onclick={() => navigate(`/${projectIdentifier}/board`)}
       >
         <LayoutGrid size={11} class="shrink-0" />
-        Board
+        <span class="sr-only sm:not-sr-only">Board</span>
       </button>
     </div>
 
@@ -211,6 +229,7 @@
           view.displayOpen = false;
           view.lanesOpen = false;
           view.newMenuOpen = false;
+          view.overflowOpen = false;
         }}
       >
         <SlidersVertical size={12} class="shrink-0" />
@@ -246,12 +265,62 @@
     </span>
     <div class="hidden sm:block w-px h-4 bg-[var(--border)] mr-1"></div>
 
+    <!-- ── LIF-350: sub-`sm` overflow group ─────────────────────
+         Saved views, sort and display/swimlanes cost ~88px of a 360px
+         phone row that has none to spare, and they are the three least
+         load-bearing controls here. Below sm they fold behind one 28px
+         button and stack vertically inside its popover.
+
+         Both wrappers go `display: contents` at sm and up, which deletes
+         them from layout outright: the three controls become direct flex
+         children of the right zone again, in the same order, with the same
+         `gap-0.5`, so the desktop row is untouched. The popover is
+         `absolute` under the button (the topbar row clips nothing), and
+         each control keeps its own popover — re-anchored `left-0` below
+         sm so a 220-260px panel opens rightward into the viewport instead
+         of leftward off the edge of it.
+
+         The children keep their original indentation: this file already
+         wraps controls in `{#if layout === ...}` without indenting them
+         (see the swimlane and display blocks below), and re-indenting
+         ~160 untouched lines would bury the actual change. -->
+    <div class="max-sm:relative sm:contents">
+      <button
+        class="sm:hidden touch-target size-7 flex items-center justify-center rounded-md
+               text-[var(--text-muted)] hover:text-[var(--text)]
+               hover:bg-[var(--bg-subtle)] transition-colors
+               {view.overflowOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
+        aria-label="View options"
+        aria-haspopup="menu"
+        aria-expanded={view.overflowOpen}
+        onclick={(e) => {
+          e.stopPropagation();
+          view.overflowOpen = !view.overflowOpen;
+          view.sortOpen = false;
+          view.displayOpen = false;
+          view.lanesOpen = false;
+          view.filterOpen = false;
+          view.newMenuOpen = false;
+        }}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      <div
+        class="sm:contents max-sm:absolute max-sm:right-0 max-sm:top-full max-sm:mt-1.5
+               max-sm:z-30 max-sm:w-[212px] max-sm:flex-col max-sm:gap-0.5 max-sm:p-1
+               max-sm:rounded-lg max-sm:border max-sm:border-[var(--border)]
+               max-sm:bg-[var(--surface)] max-sm:shadow-lg
+               {view.overflowOpen ? 'max-sm:flex' : 'max-sm:hidden'}"
+      >
+
     <!-- LIF-242: saved views. Self-contained — hides itself when /api/me
          fails (logged out / OAuth-token-only / legacy key). -->
     <SavedViews {view} {projectIdentifier} {layout} {navigate} />
 
-    <!-- Sort button + popover. -->
-    <div class="relative">
+    <!-- Sort button + popover. The `[&>span]` rule below sm stretches the
+         Tooltip's `inline-flex` wrapper so the trigger fills the overflow
+         panel's width instead of hugging its label; no-op at sm and up. -->
+    <div class="relative max-sm:[&>span]:w-full">
       <Tooltip
         content={view.sortOpen
           ? null
@@ -276,7 +345,14 @@
           {:else}
             <ArrowDown size={12} class="shrink-0" />
           {/if}
-          <span class="hidden sm:inline">
+          <!-- LIF-350: label no longer `hidden sm:inline` — below sm this
+               trigger renders inside the overflow panel, where an unlabeled
+               arrow says nothing. Flex child either way, so sm and up is
+               unchanged. The "Sort:" qualifier only appears in the panel,
+               where a row reading just "Priority" would be indistinguishable
+               from a grouping choice; in the row it would be noise. -->
+          <span class="sm:hidden">Sort:</span>
+          <span>
             {view.sortField === "age"
               ? "Age"
               : view.sortField === "updated"
@@ -291,6 +367,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[220px]
+                 max-sm:right-auto max-sm:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -341,7 +418,7 @@
     <!-- LIF-241: Swimlane picker. Board view only — splits the board into
          horizontal bands (module / priority) on top of the status columns. -->
     {#if layout === "board"}
-    <div class="relative">
+    <div class="relative max-sm:[&>span]:w-full">
       <Tooltip content={view.lanesOpen ? null : "Swimlanes"} placement="bottom">
         <button
           class="h-7 flex items-center gap-1 px-2 rounded-md
@@ -358,7 +435,9 @@
           }}
         >
           <Rows3 size={12} class="shrink-0" />
-          <span class="hidden sm:inline">
+          <!-- LIF-350: see the sort trigger — labels stay on below sm now
+               that these live in the overflow panel. -->
+          <span>
             {view.laneBy === "none" ? "Lanes" : view.laneBy === "module" ? "Module" : "Priority"}
           </span>
         </button>
@@ -367,6 +446,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[188px]
+                 max-sm:right-auto max-sm:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -405,22 +485,30 @@
 
     <!-- LIF-191: Display options — group-by + density. List view only. -->
     {#if layout !== "board"}
-    <div class="relative">
+    <div class="relative max-sm:[&>span]:w-full">
       <Tooltip content={view.displayOpen ? null : "Display options"} placement="bottom">
+        <!-- LIF-350: a bare 28px square in the row at sm and up; a labeled,
+             full-width row inside the overflow panel below it. The `max-sm:`
+             utilities all sit inside the breakpoint's media query, so the
+             `size-7` square is exactly what it was on desktop. -->
         <button
           class="touch-target size-7 flex items-center justify-center rounded-md
+                 max-sm:w-full max-sm:justify-start max-sm:gap-1.5 max-sm:px-2
+                 text-caption font-medium
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors
                  {view.displayOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
           onclick={(e) => { e.stopPropagation(); view.displayOpen = !view.displayOpen; view.sortOpen = false; view.newMenuOpen = false; }}
         >
-          <SlidersHorizontal size={14} />
+          <SlidersHorizontal size={14} class="shrink-0" />
+          <span class="sm:hidden">Display</span>
         </button>
       </Tooltip>
       {#if view.displayOpen}
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[224px]
+                 max-sm:right-auto max-sm:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -460,6 +548,9 @@
       {/if}
     </div>
     {/if}
+      </div>
+    </div>
+    <!-- ── end sub-`sm` overflow group ──────────────────────────── -->
 
     <!-- Search: collapsed to icon, expands inline on click or `/`.
          Below sm the expanded field can't join the row — the row is already
@@ -506,7 +597,7 @@
           class="touch-target size-7 flex items-center justify-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
-          onclick={(e) => { e.stopPropagation(); onOpenSearch(); }}
+          onclick={(e) => { e.stopPropagation(); view.overflowOpen = false; onOpenSearch(); }}
         >
           <Search size={14} />
         </button>
@@ -554,6 +645,7 @@
           onclick={(e) => {
             e.stopPropagation();
             view.newMenuOpen = false;
+            view.overflowOpen = false;
             onQuickCreate();
           }}
         >
@@ -586,6 +678,7 @@
             view.sortOpen = false;
             view.displayOpen = false;
             view.lanesOpen = false;
+            view.overflowOpen = false;
           }}
         >
           <ChevronDown
