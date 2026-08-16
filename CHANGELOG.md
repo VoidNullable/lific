@@ -10,6 +10,21 @@
 
 - **`GET /api/auth/me` now answers 403 `authentication required` when unauthenticated**, like every other endpoint. It was the one endpoint that escaped the v2.6.0 consolidation and still returned a 400.
 
+### Instance administration
+
+- **Manage members from the Instance settings roster.** Instance admins can now create users, promote and demote admins, and deactivate or restore accounts from the web UI, with server-side guard rails: the last remaining admin cannot be demoted or deactivated, and bot identities are not valid targets. Deactivation ends access immediately and atomically, tearing down the account's sessions, API keys, and OAuth tokens in one write, and any bots the account owns stop authenticating until their owner is restored. Five new admin-gated REST endpoints back the UI.
+- **The audit log can be pruned.** A new `audit_retention_days` key in the `[backup]` section deletes audit entries older than the window during the existing backup cycle. Unset or 0 keeps everything forever, which remains the default.
+
+### Web UI
+
+- **The activity feed shows real diffs.** Description and content changes render as a per-line diff, added and removed lines tinted, long unchanged stretches folded behind a divider, instead of the previous two full-value blocks.
+- **The issue list shows what moved while you were away.** Rows changed since your last visit get a small accent dot, and a toolbar chip counts them and cycles focus through them; viewing a row clears its dot. An agent closes three issues while you are at lunch, and the list points at exactly those three.
+- **The issue-list toolbar fits on phones.** Below the small breakpoint it now keeps to a single row instead of wrapping into a fourth band of chrome, with saved views, sort, and display folded into an accessible overflow panel. Chrome above the first issue drops from 173px to under 90px on a 360px screen.
+
+### CLI
+
+- **`--backend http` now renders exactly like the local backend.** Human and JSON output are shared between the two paths for every data command, and remote exports unpack into the same on-disk markdown tree local exports write instead of leaving a ZIP behind. The client validates every server-supplied path before writing, refuses archive entries that try to escape the output directory, and caps archive entry counts and expanded size.
+
 ### Fixes
 
 - Duplicate agent identities can no longer be minted by two simultaneous connects: bot uniqueness per (owner, tool) is now enforced by the database, and upgrading merges any existing duplicates into the oldest bot without losing memberships, groups, or saved views.
