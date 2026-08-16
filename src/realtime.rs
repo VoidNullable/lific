@@ -16,7 +16,7 @@ pub(crate) const MAX_CLIENT_MESSAGE_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_CLIENT_FRAME_BYTES: usize = 4 * 1024;
 const ACTIVITY_BASELINE_CACHE_TTL: Duration = Duration::from_secs(60);
 const CLIENT_MESSAGE_WINDOW: Duration = Duration::from_secs(10);
-const MAX_CLIENT_MESSAGES_PER_WINDOW: usize = 64;
+pub(crate) const MAX_CLIENT_MESSAGES_PER_WINDOW: usize = 64;
 const CLIENT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(120);
 // Kept short so a revoked session stops receiving events within a minute;
 // each tick is one indexed SQLite lookup per open socket, which is cheap at
@@ -25,7 +25,7 @@ const SESSION_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 /// Per-user cap on concurrent event sockets. Generous for real browser tabs,
 /// but stops one authenticated client from accumulating unbounded server
 /// tasks + broadcast receivers.
-const MAX_SOCKETS_PER_USER: usize = 16;
+pub(crate) const MAX_SOCKETS_PER_USER: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct RealtimeHub {
@@ -181,7 +181,7 @@ pub async fn serve_socket(
     mut auth_user: crate::db::models::AuthUser,
     _permit: SocketPermit,
 ) {
-    let mut visible_projects = visible_projects_for(&db, &auth_user);
+    let mut visible_projects = visible_projects_for(&db, &auth_user).await;
     let connected_at = Instant::now();
     let mut client = ClientState::new(connected_at);
     let mut rx = hub.subscribe();
@@ -193,24 +193,41 @@ pub async fn serve_socket(
 
     loop {
         let progress_deadline = client.progress_deadline();
-        let flow = tokio::select! {
-            _ = revalidate.tick() => {
-                let flow = revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
+        let input = tokio::select! {
+            _ = revalidate.tick() => SocketInput::Revalidate,
+            event = rx.recv() => SocketInput::Event(event),
+            message = socket.recv() => SocketInput::Message(message),
+            _ = time::sleep_until(progress_deadline) => SocketInput::ProgressDeadline,
+        };
+        let flow = match input {
+            SocketInput::Revalidate => {
+                let flow =
+                    revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
                 if flow == SocketFlow::Open {
-                    visible_projects = visible_projects_for(&db, &auth_user);
+                    visible_projects = visible_projects_for(&db, &auth_user).await;
+                    client.invalidate_activity_baseline();
                 }
                 flow
-            },
-            event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
-            message = socket.recv() => {
+            }
+            SocketInput::Event(event) => {
+                forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await
+            }
+            SocketInput::Message(message) => {
                 handle_client_message(&mut socket, &db, &auth_user, &mut client, message).await
-            },
-            _ = time::sleep_until(progress_deadline) => close_socket(&mut socket).await,
+            }
+            SocketInput::ProgressDeadline => close_socket(&mut socket).await,
         };
         if flow == SocketFlow::Close {
             break;
         }
     }
+}
+
+enum SocketInput {
+    Revalidate,
+    Event(Result<RealtimeMessage, RecvError>),
+    Message(Option<Result<Message, axum::Error>>),
+    ProgressDeadline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -299,6 +316,10 @@ impl ClientState {
             event,
         });
     }
+
+    fn invalidate_activity_baseline(&mut self) {
+        self.activity_baseline = None;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -338,7 +359,16 @@ async fn revalidate_session(
     session_token: &str,
     auth_user: &mut crate::db::models::AuthUser,
 ) -> SocketFlow {
-    match session_state(db, session_token) {
+    let db = db.clone();
+    let session_token = session_token.to_owned();
+    let state = tokio::task::spawn_blocking(move || session_state(&db, &session_token))
+        .await
+        .unwrap_or_else(|error| {
+            SessionState::Error(crate::error::LificError::Internal(format!(
+                "websocket session task failed: {error}"
+            )))
+        });
+    match state {
         SessionState::Valid(user) => {
             *auth_user = user;
             SocketFlow::Open
@@ -363,33 +393,46 @@ async fn forward_event(
     event: Result<RealtimeMessage, RecvError>,
 ) -> SocketFlow {
     match event {
-        Ok(message) => match visible_to(db, auth_user, &message) {
-            EventVisibility::Visible => {
-                if let Some(project_id) = message.event.project_id() {
-                    if matches!(message.event, RealtimeEvent::ProjectDeleted { .. }) {
-                        if let Some(projects) = visible_projects {
-                            projects.remove(&project_id);
+        Ok(message) => {
+            let visibility_db = db.clone();
+            let visibility_user = auth_user.clone();
+            let visibility_message = message.clone();
+            let visibility = tokio::task::spawn_blocking(move || {
+                visible_to(&visibility_db, &visibility_user, &visibility_message)
+            })
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "websocket visibility task failed");
+                EventVisibility::Hidden
+            });
+            match visibility {
+                EventVisibility::Visible => {
+                    if let Some(project_id) = message.event.project_id() {
+                        if matches!(message.event, RealtimeEvent::ProjectDeleted { .. }) {
+                            if let Some(projects) = visible_projects {
+                                projects.remove(&project_id);
+                            }
+                        } else if let Some(projects) = visible_projects {
+                            projects.insert(project_id);
                         }
-                    } else if let Some(projects) = visible_projects {
-                        projects.insert(project_id);
+                    }
+                    SocketFlow::from_send(socket.send(message.message).await)
+                }
+                EventVisibility::Hidden => {
+                    let revoked = matches!(message.event, RealtimeEvent::ProjectUpdated { .. })
+                        && message.event.project_id().is_some_and(|project_id| {
+                            visible_projects
+                                .as_mut()
+                                .is_some_and(|projects| projects.remove(&project_id))
+                        });
+                    if revoked {
+                        send_event(socket, &RealtimeEvent::ResyncRequired).await
+                    } else {
+                        SocketFlow::Open
                     }
                 }
-                SocketFlow::from_send(socket.send(message.message).await)
             }
-            EventVisibility::Hidden => {
-                let revoked = matches!(message.event, RealtimeEvent::ProjectUpdated { .. })
-                    && message.event.project_id().is_some_and(|project_id| {
-                        visible_projects
-                            .as_mut()
-                            .is_some_and(|projects| projects.remove(&project_id))
-                    });
-                if revoked {
-                    send_event(socket, &RealtimeEvent::ResyncRequired).await
-                } else {
-                    SocketFlow::Open
-                }
-            }
-        },
+        }
         Err(RecvError::Lagged(dropped)) => {
             warn!(
                 dropped,
@@ -442,15 +485,28 @@ async fn send_activity_baseline(
     let now = Instant::now();
     let baseline = match client.cached_activity_baseline(now) {
         Some(event) => Ok(event),
-        None => activity_baseline(db, auth_user).inspect(|event| {
-            client.cache_activity_baseline(now, event.clone());
-        }),
+        None => {
+            let baseline_db = db.clone();
+            let baseline_user = auth_user.clone();
+            tokio::task::spawn_blocking(move || activity_baseline(&baseline_db, &baseline_user))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(crate::error::LificError::Internal(format!(
+                        "websocket baseline task failed: {error}"
+                    )))
+                })
+                .inspect(|event| client.cache_activity_baseline(now, event.clone()))
+        }
     };
+    send_event(socket, &baseline_response(baseline)).await
+}
+
+fn baseline_response(baseline: Result<RealtimeEvent, crate::error::LificError>) -> RealtimeEvent {
     match baseline {
-        Ok(event) => send_event(socket, &event).await,
+        Ok(event) => event,
         Err(error) => {
             warn!(error = %error, "failed to load websocket activity baseline");
-            SocketFlow::Open
+            RealtimeEvent::ResyncRequired
         }
     }
 }
@@ -519,7 +575,21 @@ fn session_user(
     }
 }
 
-fn visible_projects_for(
+async fn visible_projects_for(
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
+) -> Option<HashSet<i64>> {
+    let db = db.clone();
+    let auth_user = auth_user.clone();
+    tokio::task::spawn_blocking(move || query_visible_projects(&db, &auth_user))
+        .await
+        .unwrap_or_else(|error| {
+            warn!(error = %error, "websocket project visibility task failed");
+            None
+        })
+}
+
+fn query_visible_projects(
     db: &crate::db::DbPool,
     auth_user: &crate::db::models::AuthUser,
 ) -> Option<HashSet<i64>> {
@@ -775,6 +845,25 @@ mod tests {
         assert_eq!(
             client.cached_activity_baseline(loaded_at + ACTIVITY_BASELINE_CACHE_TTL),
             None
+        );
+    }
+
+    #[test]
+    fn activity_baseline_cache_can_be_invalidated_after_revalidation() {
+        let loaded_at = Instant::now();
+        let mut client = ClientState::new(loaded_at);
+        client.cache_activity_baseline(loaded_at, RealtimeEvent::ActivityBaseline { day_count: 7 });
+
+        client.invalidate_activity_baseline();
+
+        assert_eq!(client.cached_activity_baseline(loaded_at), None);
+    }
+
+    #[test]
+    fn baseline_errors_request_a_client_resync() {
+        assert_eq!(
+            baseline_response(Err(crate::error::LificError::Internal("test".into()))),
+            RealtimeEvent::ResyncRequired
         );
     }
 
