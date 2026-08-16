@@ -25,6 +25,7 @@ pub fn start_backup_task(
 
     let interval = Duration::from_secs(config.interval_minutes * 60);
     let retain = config.retain;
+    let audit_retention_days = config.audit_retention_days;
 
     tokio::spawn(async move {
         if let Err(e) = std::fs::create_dir_all(&backup_dir) {
@@ -36,19 +37,20 @@ pub fn start_backup_task(
             dir = %backup_dir.display(),
             interval_min = config.interval_minutes,
             retain = retain,
+            audit_retention_days = audit_retention_days.unwrap_or(0),
             "backup task started"
         );
 
         // Run initial backup after a short delay (let the server finish starting)
         tokio::time::sleep(Duration::from_secs(5)).await;
-        run_backup(&pool, &db_path, &backup_dir, retain);
+        run_backup(&pool, &db_path, &backup_dir, retain, audit_retention_days);
 
         // Then run on interval
         let mut interval_timer = tokio::time::interval(interval);
         interval_timer.tick().await; // skip first immediate tick
         loop {
             interval_timer.tick().await;
-            run_backup(&pool, &db_path, &backup_dir, retain);
+            run_backup(&pool, &db_path, &backup_dir, retain, audit_retention_days);
         }
     })
 }
@@ -64,7 +66,13 @@ static LEGACY_MIRROR_HINTED: AtomicBool = AtomicBool::new(false);
 /// attachments-mirror scheme. The mirror grew forever (blobs were never GC'd);
 /// self-contained archives sidestep that (at the cost of duplicating blobs per
 /// archive — acceptable at current scale).
-fn run_backup(pool: &DbPool, db_path: &Path, backup_dir: &Path, retain: usize) {
+fn run_backup(
+    pool: &DbPool,
+    db_path: &Path,
+    backup_dir: &Path,
+    retain: usize,
+    audit_retention_days: Option<u32>,
+) {
     let db_stem = db_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -108,6 +116,48 @@ fn run_backup(pool: &DbPool, db_path: &Path, backup_dir: &Path, retain: usize) {
     }
 
     rotate_backups(backup_dir, db_stem, retain);
+
+    // Audit retention runs last, and only on a run that produced an archive:
+    // the dump failure path above returns early, so history is never dropped
+    // by a cycle that failed to preserve it first.
+    prune_audit_log(pool, audit_retention_days);
+}
+
+/// Delete `audit_log` rows older than the configured retention window
+/// (LIF-158).
+///
+/// `None` and `Some(0)` both mean "keep forever" and do nothing, so the
+/// default install keeps the append-only history it has always kept. Anything
+/// larger deletes rows whose `ts` predates the cutoff.
+///
+/// The cutoff is computed by SQLite itself (`datetime('now', '-N days')`)
+/// rather than in Rust: `audit_log.ts` is written by the migration-018
+/// triggers as `datetime('now')`, so comparing against a value from the same
+/// clock and the same format is the only way the comparison is honest. The
+/// negative-modifier-as-bind-parameter shape matches
+/// `queries::attachments::find_orphans`.
+fn prune_audit_log(pool: &DbPool, audit_retention_days: Option<u32>) {
+    let Some(days) = audit_retention_days.filter(|d| *d > 0) else {
+        return;
+    };
+
+    let conn = match pool.write() {
+        Ok(conn) => conn,
+        Err(e) => {
+            warn!(error = %e, "could not acquire write connection for audit log pruning");
+            return;
+        }
+    };
+
+    let cutoff = format!("-{days} days");
+    match conn.execute(
+        "DELETE FROM audit_log WHERE ts < datetime('now', ?1)",
+        rusqlite::params![cutoff],
+    ) {
+        Ok(0) => {}
+        Ok(deleted) => info!(deleted, retention_days = days, "pruned old audit log entries"),
+        Err(e) => warn!(error = %e, "audit log pruning failed"),
+    }
 }
 
 /// How old a dump staging file must be before the sweep considers it stale.
@@ -369,7 +419,7 @@ mod tests {
         fs::write(&stale, "partial").unwrap();
         backdate(&stale, STALE_TMP_AGE + Duration::from_secs(60));
 
-        run_backup(&pool, &db_path, &backup_dir, 5);
+        run_backup(&pool, &db_path, &backup_dir, 5, None);
 
         assert!(!stale.exists(), "run_backup must sweep stale staging files");
 
@@ -407,7 +457,7 @@ mod tests {
         fs::write(att_dir.join("deadbeefsha"), b"blob contents").unwrap();
         fs::write(att_dir.join("deadbeefsha.tmp"), b"partial").unwrap();
 
-        run_backup(&pool, &db_path, &backup_dir, 5);
+        run_backup(&pool, &db_path, &backup_dir, 5, None);
 
         // Exactly one `.tar.gz` archive, no bare `.db` snapshot.
         let archives: Vec<_> = fs::read_dir(&backup_dir)
@@ -435,6 +485,94 @@ mod tests {
             !names.iter().any(|n| n.ends_with(".tmp")),
             "in-progress .tmp writes must not be archived: {names:?}"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── LIF-158: audit log retention ──────────────────────────────────────
+
+    /// Insert one audit row aged `days_ago` days, and return its label so the
+    /// assertions can name what survived.
+    fn seed_audit_row(pool: &DbPool, label: &str, days_ago: i64) {
+        let conn = pool.write().unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (ts, transport, entity_type, entity_id, entity_label, action)
+             VALUES (datetime('now', ?1), 'system', 'issue', 1, ?2, 'create')",
+            rusqlite::params![format!("-{days_ago} days"), label],
+        )
+        .unwrap();
+    }
+
+    fn audit_labels(pool: &DbPool) -> Vec<String> {
+        let conn = pool.read().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT entity_label FROM audit_log ORDER BY entity_label")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn prune_audit_log_deletes_rows_past_the_window_and_keeps_recent_ones() {
+        let pool = crate::db::open_memory().unwrap();
+        seed_audit_row(&pool, "ancient", 400);
+        seed_audit_row(&pool, "old", 31);
+        seed_audit_row(&pool, "recent", 29);
+        seed_audit_row(&pool, "today", 0);
+
+        prune_audit_log(&pool, Some(30));
+
+        assert_eq!(audit_labels(&pool), vec!["recent", "today"]);
+    }
+
+    #[test]
+    fn prune_audit_log_keeps_everything_when_retention_is_unset_or_zero() {
+        let pool = crate::db::open_memory().unwrap();
+        seed_audit_row(&pool, "ancient", 4000);
+        seed_audit_row(&pool, "today", 0);
+        let before = audit_labels(&pool);
+
+        // Unset: the default, and the pre-LIF-158 behavior.
+        prune_audit_log(&pool, None);
+        assert_eq!(audit_labels(&pool), before);
+
+        // Explicit 0 means the same thing, not "delete everything".
+        prune_audit_log(&pool, Some(0));
+        assert_eq!(audit_labels(&pool), before);
+    }
+
+    /// A one-day window must not take today's rows with it: the cutoff is
+    /// `now - N days`, so a row written moments ago always survives.
+    #[test]
+    fn prune_audit_log_one_day_window_spares_todays_rows() {
+        let pool = crate::db::open_memory().unwrap();
+        seed_audit_row(&pool, "yesterday", 2);
+        seed_audit_row(&pool, "now", 0);
+
+        prune_audit_log(&pool, Some(1));
+
+        assert_eq!(audit_labels(&pool), vec!["now"]);
+    }
+
+    #[test]
+    fn run_backup_prunes_audit_log_only_when_retention_is_configured() {
+        let dir = make_temp_dir();
+        let db_path = dir.join("lific.db");
+        let backup_dir = dir.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let pool = crate::db::open(&db_path).expect("open test db");
+        seed_audit_row(&pool, "ancient", 400);
+        seed_audit_row(&pool, "today", 0);
+
+        // Retention off: the backup cycle leaves the audit log alone.
+        run_backup(&pool, &db_path, &backup_dir, 5, None);
+        assert_eq!(audit_labels(&pool), vec!["ancient", "today"]);
+
+        // Retention on: the same cycle prunes past the window.
+        run_backup(&pool, &db_path, &backup_dir, 5, Some(30));
+        assert_eq!(audit_labels(&pool), vec!["today"]);
 
         fs::remove_dir_all(&dir).ok();
     }

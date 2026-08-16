@@ -234,6 +234,14 @@ pub struct BackupConfig {
     pub interval_minutes: u64,
     /// Maximum number of backups to retain
     pub retain: usize,
+    /// How many days of `audit_log` history to keep. Pruning runs at the end
+    /// of each backup cycle, so retention rides the same schedule as backup
+    /// rotation and never deletes history the current archive doesn't hold.
+    ///
+    /// LIF-158: unset (or `0`) means keep forever, which is the pre-existing
+    /// behavior and stays the default. Nothing silently starts discarding an
+    /// operator's audit trail on upgrade; they have to ask for it.
+    pub audit_retention_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +288,7 @@ impl Default for BackupConfig {
             dir: PathBuf::from("backups"),
             interval_minutes: 60,
             retain: 24, // keep 24 hourly backups = 1 day of history
+            audit_retention_days: None, // keep audit history forever
         }
     }
 }
@@ -629,6 +638,27 @@ enabled = false
         assert_eq!(config.database.path, dir.join("lific.db"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // LIF-158: audit log retention is opt-in. Unset and 0 both mean "keep
+    // forever", so no upgrade quietly starts discarding history.
+    #[test]
+    fn audit_retention_days_defaults_to_off_and_parses_from_toml() {
+        assert_eq!(BackupConfig::default().audit_retention_days, None);
+
+        // Present.
+        let cfg: Config = toml::from_str("[backup]\naudit_retention_days = 90\n").unwrap();
+        assert_eq!(cfg.backup.audit_retention_days, Some(90));
+
+        // Absent, with the section present: still off, and the neighboring
+        // backup knobs keep their defaults.
+        let cfg: Config = toml::from_str("[backup]\nretain = 12\n").unwrap();
+        assert_eq!(cfg.backup.audit_retention_days, None);
+        assert_eq!(cfg.backup.retain, 12);
+
+        // Explicit 0: parses, and means keep forever rather than "prune all".
+        let cfg: Config = toml::from_str("[backup]\naudit_retention_days = 0\n").unwrap();
+        assert_eq!(cfg.backup.audit_retention_days, Some(0));
     }
 
     #[test]

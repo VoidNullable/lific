@@ -101,6 +101,7 @@ The attachment directory is named `attachments` and is stored beside the databas
 | `dir` | path string | `"backups"` | Backup directory. An absolute path is used directly. A relative path resolves beside the database file. |
 | `interval_minutes` | unsigned integer | `60` | Interval between automatic backups, in minutes. |
 | `retain` | unsigned integer | `24` | Maximum number of backup artifacts to retain. The oldest matching artifacts are removed first. |
+| `audit_retention_days` | optional unsigned integer | unset | Number of days of audit log history to keep. Rows older than the window are deleted at the end of each backup cycle. Unset or `0` keeps history forever. |
 
 Automatic backups use the same archive format as `lific dump`.
 
