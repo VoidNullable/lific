@@ -448,10 +448,7 @@ pub(super) async fn auth_me(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = identity
-        .as_ref()
-        .map(|i| i.user.clone())
-        .ok_or_else(|| LificError::BadRequest("no user associated with this token".into()))?;
+    let user = require_user(&identity)?;
 
     // Fetch full user from DB to get all fields (email, etc.)
     let full = with_read(&db, |conn| {
@@ -1354,6 +1351,44 @@ mod tests {
 
         assert_eq!(data["user"]["username"], "metest");
         assert!(token.starts_with("lific_sess_"));
+    }
+
+    /// LIF-396: GET /api/auth/me was the one endpoint that escaped LIF-372's
+    /// consolidation, still answering 400 "no user associated with this token"
+    /// where every other gate answers 403 "authentication required".
+    #[tokio::test]
+    async fn auth_me_without_identity_is_403_authentication_required() {
+        use tower::ServiceExt;
+
+        let db = crate::db::open_memory().expect("test db");
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), test_peer())
+            .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+            .layer(axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
+            .layer(axum::Extension(None::<crate::db::models::AuthUser>))
+            .layer(axum::Extension(
+                None::<crate::resolve_caller::ResolvedIdentity>,
+            ));
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/auth/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let data = parse_json(resp).await;
+        assert_eq!(
+            data["error"], "authentication required",
+            "auth_me must use the shared require_user gate's error: {data}"
+        );
     }
 
     // ── LIF-190: profile / password / session settings ──────
