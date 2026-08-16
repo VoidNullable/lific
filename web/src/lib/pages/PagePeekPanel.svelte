@@ -49,16 +49,10 @@
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 240 } : { x: 480, duration: 240 };
   }
-  // Swipe-down dismiss (mobile): sheetDrag animates the sheet off-screen
-  // itself before closing; the one-shot flag keeps the out: transition from
-  // replaying the slide. Mirrors PeekPanel exactly.
+  // Swipe-down dismiss (mobile): sheetDrag slides the sheet off and latches
+  // it invisible before closing — see sheetdrag.ts. Mirrors PeekPanel.
   let sheetEl = $state<HTMLElement | null>(null);
-  let dragDismissed = false;
   function panelOutParams() {
-    if (dragDismissed) {
-      dragDismissed = false;
-      return { duration: 0 };
-    }
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 180 } : { x: 480, duration: 180 };
   }
@@ -115,13 +109,7 @@
     <!-- Grab zone: pill + header — drag down here to dismiss on mobile. -->
     <div
       class="shrink-0"
-      use:sheetDrag={{
-        sheet: () => sheetEl,
-        onDismiss: () => {
-          dragDismissed = true;
-          closePagePeek();
-        },
-      }}
+      use:sheetDrag={{ sheet: () => sheetEl, onDismiss: closePagePeek }}
     >
     <!-- Drag-handle visual (mobile bottom sheet only). -->
     <div class="md:hidden flex justify-center pt-2 pb-1 shrink-0">

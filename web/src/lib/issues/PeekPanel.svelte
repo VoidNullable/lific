@@ -209,16 +209,12 @@
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 240 } : { x: 480, duration: 240 };
   }
-  // Swipe-down dismiss (mobile): sheetDrag animates the sheet off-screen
-  // itself before closing, so the out: transition must not replay the slide
-  // from the top. One-shot flag, consumed by panelOutParams.
+  // Swipe-down dismiss (mobile): sheetDrag slides the sheet off and latches
+  // it `visibility: hidden` before closing, so the out: transition below can
+  // play (or not) without ever making the sheet reappear. No special-casing
+  // needed here — see sheetdrag.ts's module doc.
   let sheetEl = $state<HTMLElement | null>(null);
-  let dragDismissed = false;
   function panelOutParams() {
-    if (dragDismissed) {
-      dragDismissed = false;
-      return { duration: 0 };
-    }
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 180 } : { x: 480, duration: 180 };
   }
@@ -271,13 +267,7 @@
          hint that this is possible. Scrim click and the X still work. -->
     <div
       class="shrink-0"
-      use:sheetDrag={{
-        sheet: () => sheetEl,
-        onDismiss: () => {
-          dragDismissed = true;
-          closePeek();
-        },
-      }}
+      use:sheetDrag={{ sheet: () => sheetEl, onDismiss: closePeek }}
     >
     <!-- Drag-handle visual (mobile bottom sheet only). -->
     <div class="md:hidden flex justify-center pt-2 pb-1 shrink-0">

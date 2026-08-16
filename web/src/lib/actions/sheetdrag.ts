@@ -16,11 +16,14 @@
 //   0.45 px/ms after at least 24px of travel, commits the dismiss; anything
 //   less springs back.
 // - On commit the action finishes the slide itself (one smooth continuation
-//   from the finger's last position), then calls `onDismiss`. The caller
-//   should suppress its own exit transition for that close — otherwise
-//   Svelte's out: would yank the already-offscreen sheet back up and replay
-//   the slide. Both peek panels do this with a `dragDismissed` flag read by
-//   their out-params function.
+//   from the finger's last position), sets `visibility: hidden`, and THEN
+//   calls `onDismiss`. The visibility latch is what keeps the dismissal
+//   clean: the sheet shares its {#if} block with the scrim, so Svelte keeps
+//   both elements in the DOM until the longest outro (the scrim's 180ms
+//   fade) finishes — and fly's outro animates transform and opacity, either
+//   of which would make the sheet visibly reappear for that window.
+//   Visibility is the one channel no transition touches. The element
+//   unmounts hidden and every reopen builds fresh DOM, so nothing leaks.
 
 export interface SheetDragOptions {
   /** The element to translate — the sheet root, not the header the action
@@ -80,10 +83,12 @@ export function sheetDrag(node: HTMLElement, options: SheetDragOptions) {
     if (commit) {
       el.style.transform = `translateY(${height + 40}px)`;
       window.setTimeout(() => {
+        // Latch invisible BEFORE closing — see the module doc. Never clear
+        // the inline styles on this path: the element unmounts hidden, and
+        // clearing them would flash the sheet back while the scrim's outro
+        // holds the {#if} block in the DOM.
+        el.style.visibility = "hidden";
         opts.onDismiss();
-        // The sheet unmounts on dismiss; clear inline styles anyway in case
-        // the caller keeps the element (or the dismiss is a no-op).
-        clearInline(el);
       }, SLIDE_MS);
     } else {
       el.style.transform = "translateY(0px)";
