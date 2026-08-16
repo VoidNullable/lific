@@ -33,6 +33,7 @@
     isFocused,
     isSelected,
     selectionActive,
+    isChanged = false,
     hitSnippet,
     statusOpen,
     priorityOpen,
@@ -74,6 +75,10 @@
     isSelected: boolean;
     /** Any selection exists (keeps checkboxes visible across all rows). */
     selectionActive: boolean;
+    /** LIF-153: this issue has been updated (or created) since the snapshot
+     *  taken the last time the user looked at this project's list. Renders
+     *  the accent dot in the identifier gutter. */
+    isChanged?: boolean;
     /** Search snippet to show under the title, if this row matched on body. */
     hitSnippet: string | null;
     /** This row's inline status dropdown is open. */
@@ -264,10 +269,32 @@
   </div>
 
   <!-- Identifier. Narrower on mobile (the project prefix is implied by
-       context) so the title gets more room. -->
-  <span class="text-body-sm text-[var(--text-faint)] font-mono shrink-0 w-[52px] sm:w-[72px] truncate">
-    {issue.identifier}
-  </span>
+       context) so the title gets more room.
+
+       LIF-153: the changed-since-last-visit dot sits in a gutter to its
+       left, inside this wrapper rather than as another row-level flex
+       child, because the row's `gap-2 sm:gap-3` would otherwise charge a
+       full 8/12px gap for a 6px dot. The gutter is ALWAYS rendered at
+       `w-1.5`, whether or not the dot is in it, so a row gaining or losing
+       its dot (on a poll tick, or the moment it's marked seen) never nudges
+       the identifier or the title beside it. It reuses the accent of the
+       row's focus rail: one "this one, right here" color across the list. -->
+  <div class="flex items-center gap-1 sm:gap-1.5 shrink-0">
+    <span class="w-1.5 shrink-0 flex items-center justify-center">
+      {#if isChanged}
+        <Tooltip content="Updated since you last looked">
+          <span class="block size-1.5 rounded-full bg-[var(--accent)]"></span>
+        </Tooltip>
+        <!-- The tooltip is hover/focus-only and this row isn't focusable,
+             so the dot needs its own text for a screen reader. `sr-only`
+             is absolutely positioned, so it costs no width. -->
+        <span class="sr-only">Updated since you last looked</span>
+      {/if}
+    </span>
+    <span class="text-body-sm text-[var(--text-faint)] font-mono w-[52px] sm:w-[72px] truncate">
+      {issue.identifier}
+    </span>
+  </div>
 
   <!-- Title (and, in search mode, an optional content snippet below it when
        the description was the reason this issue surfaced). The column flexes

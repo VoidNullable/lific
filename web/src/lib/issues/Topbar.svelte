@@ -35,6 +35,8 @@
     statusCounts,
     countsLoading = false,
     countLabel,
+    changedCount = 0,
+    onCycleChanged = () => {},
     labels,
     modules,
     priorityCssColor,
@@ -54,6 +56,12 @@
      *  gap that used to sit there for that one frame. */
     countsLoading?: boolean;
     countLabel: string;
+    /** LIF-153: how many currently-listed rows changed since the snapshot
+     *  taken on the user's last visit. Drives the "N updated" chip; 0 hides
+     *  it entirely. */
+    changedCount?: number;
+    /** Moves keyboard focus to the next changed row (and marks it seen). */
+    onCycleChanged?: () => void;
     /** Label + module lists feed the filter modal's Label / Module sections. */
     labels: Label[];
     modules: Module[];
@@ -71,6 +79,11 @@
   // Count of active filters — drives the badge on the Filter button. Derived
   // so the topbar re-renders when filters change without manual subscription.
   let filterCount = $derived(view.activeFilterCount());
+
+  // LIF-153: the chip's number is capped so its box has a known maximum
+  // width below sm, where the row's whole slack is ~58px. Three glyphs is
+  // the ceiling, and "99+" reads as "a lot" just as well as "137" does.
+  let changedLabel = $derived(changedCount > 99 ? "99+" : String(changedCount));
 
   // LIF-308: status counts are server truth (rather than the capped row
   // fetch), so All/Open/Closed stay accurate even for large projects. While
@@ -254,6 +267,49 @@
 
   <!-- ── RIGHT ZONE: display / search / help / primary action ── -->
   <div class="ml-auto flex items-center gap-0.5 shrink-0">
+
+    <!-- ── LIF-153: "changed since your last visit" chip ─────────
+         The list polls every 15s and swaps rows in silently, so this is
+         the only place that says anything happened. Clicking it walks
+         keyboard focus to the next changed row and marks that row seen,
+         so the count ticks down as the user works through it.
+
+         List-only: the chip's whole payload is moving row focus, and
+         focus is a list-mode concept (board cards have no focused state;
+         see the `listOnly` gate in IssueList's key handler).
+
+         Below sm it is a dot plus the number: no label, `px-1.5` instead
+         of `px-2`. The sub-sm topbar row had 58.33px of slack after
+         LIF-350 and this is the only thing added to it. At sm and up the
+         word "updated" comes back, which is also where the chip stops
+         being ambiguous next to the total-count number beside it. -->
+    {#if layout === "list" && changedCount > 0}
+      <Tooltip
+        content={`${changedCount} updated since you last looked  ·  click to step through`}
+        placement="bottom"
+      >
+        <button
+          class="h-7 flex items-center gap-1 px-1.5 sm:px-2 sm:mr-1 rounded-md
+                 text-caption font-medium tabular-nums
+                 text-[var(--accent)] bg-[var(--accent-subtle)]
+                 hover:bg-[var(--accent)] hover:text-[var(--accent-text)]
+                 transition-colors"
+          aria-label={`${changedCount} updated since you last looked. Focus the next one.`}
+          onclick={(e) => {
+            e.stopPropagation();
+            view.overflowOpen = false;
+            onCycleChanged();
+          }}
+        >
+          <span
+            class="block size-1.5 shrink-0 rounded-full bg-current"
+            aria-hidden="true"
+          ></span>
+          <span>{changedLabel}</span>
+          <span class="hidden sm:inline">updated</span>
+        </button>
+      </Tooltip>
+    {/if}
 
     <!-- Issue count. Reserved min-width so the brief load frame can't reflow.
          Hidden below sm to save horizontal room on phones. -->

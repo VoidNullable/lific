@@ -34,6 +34,15 @@
     buildLanes, laneKeyForIssue,
   } from "../lib/issues/grouping";
   import { saveListState, saveLayout } from "../lib/issues/persistence";
+  import {
+    loadSeen,
+    saveSeen,
+    snapshotOf,
+    isSeen,
+    withSeen,
+    pruneSeen,
+    type SeenMap,
+  } from "../lib/seenStore"; // LIF-153
   import IssueCard from "../lib/issues/IssueCard.svelte";
   import BulkActionBar, {
     type BulkMenu,
@@ -84,6 +93,10 @@
   // is exactly what the right sidebar's project-wide breakdowns (LIF-186)
   // need, no separate unfiltered fetch required.
   let issues = $state<Issue[]>([]);
+  /** LIF-161: the row fetch is bounded (see loadIssues). Named rather than
+   *  inline because the LIF-153 seen-snapshot prune has to know whether the
+   *  array it is holding is the whole project or just a window onto it. */
+  const ISSUE_FETCH_LIMIT = 1000;
   // LIF-161: true per-status tallies from the server. The fetched `issues`
   // array is limit-capped, so its length is NOT a reliable count — this is.
   let issueCounts = $state<IssueStatusCounts | null>(null);
@@ -91,6 +104,21 @@
   let labels = $state<Label[]>([]);
   let loading = $state(true);
   let error = $state("");
+
+  // ── LIF-153: "what changed since you last looked" ────
+  // `seenMap` is the baseline every row is diffed against: issue id →
+  // the `updated_at` it carried the last time the user looked at this
+  // project's list (see lib/seenStore.ts for the storage shape). It is
+  // deliberately a plain per-component field rather than part of
+  // IssueListState: it belongs to the data layer this component owns,
+  // exactly like `issues` itself, not to the view/interaction state the
+  // topbar and rows share.
+  //
+  // `seenProject` names the project the map was loaded for. Every read
+  // checks it, so the frame between a project switch and that project's
+  // snapshot landing shows no dots rather than the previous project's.
+  let seenMap = $state<SeenMap>({});
+  let seenProject = $state<string | null>(null);
 
   // LIF-99 Phase 3: shared view/interaction state lives in a $state class.
   // The component still owns the data layer (issues, project, fetches).
@@ -161,6 +189,30 @@
   // knows where to send the user. The view state itself lives on `view`;
   // these effects drive its hydrate/snapshot against localStorage.
 
+  // LIF-153: flush the seen snapshot on unmount / navigation. Marks are
+  // already written through as they happen (see markIssueSeen: opening an
+  // issue unmounts this component mid-navigation, so deferring the write to
+  // here would lose it), which leaves this doing the one thing a per-mark
+  // write can't: pruning entries for issues that have since been deleted,
+  // so a long-lived project's map can't grow forever.
+  //
+  // Declared BEFORE the project-load effect below so that on a project
+  // switch this teardown runs while `seenMap` still holds the OLD project's
+  // data. The `seenProject` guard makes the reverse order safe too: it
+  // skips the write rather than stamping an empty map over a real one.
+  $effect(() => {
+    const id = projectIdentifier;
+    return () => {
+      if (seenProject !== id) return;
+      // Only prune against a COMPLETE view of the project. At the fetch cap
+      // `issues` is a window, and pruning against it would forget rows the
+      // user has seen, which would light them up again on the next visit.
+      const next =
+        issues.length >= ISSUE_FETCH_LIMIT ? seenMap : pruneSeen(seenMap, issues);
+      saveSeen(id, next);
+    };
+  });
+
   // Re-run when the project prop changes (read it synchronously so Svelte tracks it)
   $effect(() => {
     const id = projectIdentifier;
@@ -204,6 +256,11 @@
     // in practice, but free to rule out entirely on a project switch.
     view.focusedIndex = -1;
     lastFocusedId = null;
+    // LIF-153: drop the previous project's baseline before its successor's
+    // rows can be diffed against it. Synchronous (before the first await),
+    // so no frame can render the wrong project's dots.
+    seenProject = null;
+    seenMap = {};
     const projRes = await listProjects();
     if (!projRes.ok) {
       error = projRes.error;
@@ -232,12 +289,51 @@
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
 
-    await loadIssues();
+    // LIF-153: only establish the seen baseline if the rows actually landed.
+    // A failed fetch leaves `issues` holding the PREVIOUS project's rows, and
+    // seeding a first visit from those would persist a wrong snapshot.
+    if (await loadIssues()) initSeen(identifier, issues);
     loading = false;
   }
 
-  async function loadIssues() {
-    if (!project) return;
+  /** LIF-153: establish this project's baseline once its issues have landed.
+   *
+   *  No stored snapshot means the project has never been opened on this
+   *  device. Seed it silently from the rows we just loaded, so a first visit
+   *  shows no dots at all instead of lighting up every row in the project.
+   *  "Everything is new" is the one thing this indicator must never say. */
+  function initSeen(identifier: string, loaded: Issue[]) {
+    // A slow response for a project the user has already navigated away from
+    // must not write that project's baseline over the current one.
+    if (identifier !== projectIdentifier) return;
+    const stored = loadSeen(identifier);
+    if (stored === null) {
+      const seeded = snapshotOf(loaded);
+      saveSeen(identifier, seeded);
+      seenMap = seeded;
+    } else {
+      seenMap = stored;
+    }
+    seenProject = identifier;
+  }
+
+  /** Record that the user has now looked at this row at its current
+   *  revision, which drops its dot and decrements the topbar chip on the
+   *  next frame. Written through to storage immediately rather than left
+   *  to the unmount flush: the main call site is opening an issue, which
+   *  unmounts this component as it navigates. */
+  function markIssueSeen(issue: Issue) {
+    if (seenProject !== projectIdentifier) return;
+    const next = withSeen(seenMap, issue);
+    if (next === seenMap) return; // already seen at this revision
+    seenMap = next;
+    saveSeen(projectIdentifier, next);
+  }
+
+  /** Returns whether the rows themselves loaded. The counts are advisory:
+   *  the topbar just omits the tallies for a tick when they fail. */
+  async function loadIssues(): Promise<boolean> {
+    if (!project) return false;
 
     // LIF-222 perf: always fetch the FULL, unfiltered issue set. Status /
     // priority / label / module filtering is applied client-side in the
@@ -250,7 +346,7 @@
     // endpoint, not from this fetch. Counts ride along so the topbar
     // converges with the rows.
     const [res, countsRes] = await Promise.all([
-      listIssues({ project_id: project.id, limit: 1000 }),
+      listIssues({ project_id: project.id, limit: ISSUE_FETCH_LIMIT }),
       getIssueCounts(project.id),
     ]);
     if (res.ok) {
@@ -259,6 +355,7 @@
     if (countsRes.ok) {
       issueCounts = countsRes.data;
     }
+    return res.ok;
   }
 
   // ── LIF-129: auto-refresh ────────────────────────────
@@ -905,6 +1002,47 @@
     });
   });
 
+  // ── LIF-153: which rows changed since the snapshot ───
+  // Diffed over the FULL loaded set (not the filtered one) so a row's dot
+  // is a property of the row itself, stable no matter which filter, search
+  // or sub-tab happens to be showing it.
+  let changedIds = $derived.by(() => {
+    const out = new Set<number>();
+    if (seenProject !== projectIdentifier) return out;
+    for (const issue of issues) {
+      if (!isSeen(seenMap, issue)) out.add(issue.id);
+    }
+    return out;
+  });
+
+  // The chip's number, by contrast, counts only rows that are actually on
+  // screen: `focusNextChanged` walks `flatIssues`, so counting anything
+  // beyond it would advertise rows the chip can never take you to (filtered
+  // out, sliced off by a sub-tab, or inside a collapsed group).
+  let changedCount = $derived(
+    flatIssues.reduce((n, issue) => n + (changedIds.has(issue.id) ? 1 : 0), 0),
+  );
+
+  /** Chip click: move keyboard focus to the next changed row after the
+   *  cursor (wrapping at the end) and mark it seen. Marking removes it from
+   *  `changedIds`, so successive clicks walk forward through what's left and
+   *  the count ticks down to zero as the user works through the list. */
+  function focusNextChanged() {
+    const n = flatIssues.length;
+    if (n === 0 || changedIds.size === 0) return;
+    const start = view.focusedIndex; // -1 before any focus, so step 1 lands on row 0
+    for (let step = 1; step <= n; step++) {
+      const idx = (((start + step) % n) + n) % n;
+      const candidate = flatIssues[idx];
+      if (!changedIds.has(candidate.id)) continue;
+      markKeyboardActive();
+      scrollOnFocus = true;
+      view.focusedIndex = idx;
+      markIssueSeen(candidate);
+      return;
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     // LIF-245: single shared guard — typing in a field, the peek panel,
     // the command palette, or the shortcut help overlay all own their own
@@ -1061,7 +1199,9 @@
       case "Enter":
         if (listOnly && view.focusedIndex >= 0 && view.focusedIndex < flatIssues.length) {
           e.preventDefault();
-          navigate(`/${projectIdentifier}/issues/${flatIssues[view.focusedIndex].identifier}`);
+          // Routed through openIssue (rather than navigate directly) so the
+          // keyboard path marks the row seen exactly like a click does.
+          openIssue(flatIssues[view.focusedIndex]);
         }
         break;
       case " ":
@@ -1255,6 +1395,7 @@
   // The row component is presentational; these own the shared-state writes
   // and the optimistic issue updates that used to live inline in the row.
   function openIssue(issue: Issue) {
+    markIssueSeen(issue); // LIF-153: reading it is the point, so it's seen now
     navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
   }
   // LIF-244: peek panel. openPeek() is the module-level singleton entry
@@ -1406,6 +1547,8 @@
     {statusCounts}
     countsLoading={issueCounts === null}
     {countLabel}
+    {changedCount}
+    onCycleChanged={focusNextChanged}
     {labels}
     {modules}
     {priorityCssColor}
@@ -2094,6 +2237,7 @@
     isFocused={idx === view.focusedIndex}
     isSelected={view.selectedIds.has(issue.id)}
     selectionActive={view.selectedIds.size > 0}
+    isChanged={changedIds.has(issue.id)}
     hitSnippet={issueSearchScores.get(issue.id)?.snippet ?? null}
     statusOpen={view.statusDropdownId === issue.id}
     priorityOpen={view.priorityDropdownId === issue.id}
