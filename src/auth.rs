@@ -355,7 +355,9 @@ pub async fn require_api_key(
             && let Some(cookie_token) = session_cookie_token(request.headers())
         {
             let user = {
-                let conn = match auth.db.write() {
+                // LIF-139: validation is a pure read — take a pooled read
+                // connection instead of the single writer mutex.
+                let conn = match auth.db.read() {
                     Ok(c) => c,
                     Err(_) => {
                         return (StatusCode::INTERNAL_SERVER_ERROR, "database error")
@@ -428,7 +430,10 @@ pub async fn require_api_key(
     // ── Session tokens (lific_sess_ prefix) ──────────────────────
     if token.starts_with("lific_sess_") {
         let user = {
-            let conn = match auth.db.write() {
+            // LIF-139: session validation no longer writes, so every
+            // session-authenticated request reads from the pool instead of
+            // serializing on the exclusive writer.
+            let conn = match auth.db.read() {
                 Ok(c) => c,
                 Err(_) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();

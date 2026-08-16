@@ -414,6 +414,24 @@ fn hash_session_token(token: &str) -> String {
     crate::auth::sha256_hex(token.as_bytes())
 }
 
+/// Sweep expired session rows.
+///
+/// LIF-139: this used to run inside `validate_session`, which put a write on
+/// the hot path of every session-authenticated request and forced the auth
+/// middleware to take the exclusive writer mutex just to read. The sweep now
+/// piggybacks on the session writes that already hold the writer — login
+/// (`create_session`) and logout (`delete_session`) — so validation is a pure
+/// read. Expiry itself is enforced by the `expires_at` predicate in
+/// `validate_session`, never by this cleanup; the sweep only reclaims rows.
+///
+/// Best-effort: a failure here must never fail the login/logout it rides on.
+fn purge_expired_sessions(conn: &Connection) {
+    let _ = conn.execute(
+        "DELETE FROM sessions WHERE expires_at < datetime('now')",
+        [],
+    );
+}
+
 /// Create a new session for a user. Returns the session with the plaintext token
 /// (shown once to the client). The SHA-256 hash is stored in the database.
 /// Sessions expire after `duration_hours` (default 24 * 7 = 1 week).
@@ -422,6 +440,10 @@ pub fn create_session(
     user_id: i64,
     duration_hours: Option<i64>,
 ) -> Result<Session, LificError> {
+    // LIF-139: login already holds the writer — sweep expired rows here
+    // instead of on every validation.
+    purge_expired_sessions(conn);
+
     let hours = duration_hours.unwrap_or(24 * 7); // 1 week default
     let token = generate_session_token();
     let token_hash = hash_session_token(&token);
@@ -450,15 +472,15 @@ pub fn create_session(
 }
 
 /// Validate a session token. Returns the associated user if the session
-/// exists and has not expired. Expired sessions are cleaned up lazily.
-/// The incoming plaintext token is hashed with SHA-256 before lookup.
+/// exists and has not expired. The incoming plaintext token is hashed with
+/// SHA-256 before lookup.
+///
+/// LIF-139: read-only. Expiry is enforced by the `expires_at > datetime('now')`
+/// predicate below, so an expired row is rejected whether or not it has been
+/// swept yet. The sweep moved to `create_session`/`delete_session`
+/// (see [`purge_expired_sessions`]), which lets the auth middleware validate on
+/// a pooled read connection rather than serializing on the single writer.
 pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificError> {
-    // Delete expired sessions while we're here (lazy cleanup)
-    let _ = conn.execute(
-        "DELETE FROM sessions WHERE expires_at < datetime('now')",
-        [],
-    );
-
     let token_hash = hash_session_token(token);
 
     let user_id: i64 = conn
@@ -481,6 +503,8 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
 pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> {
     let token_hash = hash_session_token(token);
     conn.execute("DELETE FROM sessions WHERE token = ?1", params![token_hash])?;
+    // LIF-139: logout holds the writer too — reclaim expired rows here.
+    purge_expired_sessions(conn);
     Ok(())
 }
 
@@ -1635,6 +1659,108 @@ mod tests {
 
         let result = validate_session(&conn, &token);
         assert!(result.is_err());
+    }
+
+    // ── LIF-139: validation is read-only, cleanup rides the writers ──
+
+    /// Insert an already-expired session row directly and return its token.
+    fn insert_expired_session(conn: &Connection, user_id: i64) -> String {
+        let token = generate_session_token();
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at)
+             VALUES (?1, ?2, datetime('now', '-1 hour'))",
+            params![hash_session_token(&token), user_id],
+        )
+        .unwrap();
+        token
+    }
+
+    fn session_row_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    // The expiry check lives in the SELECT, not in a cleanup DELETE. An
+    // expired token must be refused even while its row is still on disk.
+    #[test]
+    fn expired_session_rejected_without_being_swept_first() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let token = insert_expired_session(&conn, user.id);
+
+        assert!(
+            validate_session(&conn, &token).is_err(),
+            "an expired session must be rejected on the predicate alone"
+        );
+        assert_eq!(
+            session_row_count(&conn),
+            1,
+            "validation must not write — the expired row is still there"
+        );
+        // Still rejected on a second look, i.e. the first call didn't rely on
+        // having deleted the row.
+        assert!(validate_session(&conn, &token).is_err());
+    }
+
+    // Login already holds the writer, so it is where expired rows get reaped.
+    #[test]
+    fn creating_a_session_purges_expired_rows() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        insert_expired_session(&conn, user.id);
+        assert_eq!(session_row_count(&conn), 1);
+
+        let fresh = create_session(&conn, user.id, None).unwrap();
+
+        assert_eq!(
+            session_row_count(&conn),
+            1,
+            "login sweeps the expired row, leaving only the new session"
+        );
+        assert!(
+            validate_session(&conn, &fresh.token).is_ok(),
+            "the freshly minted session survives the sweep"
+        );
+    }
+
+    // Logout is the other writer-holding touchpoint.
+    #[test]
+    fn deleting_a_session_purges_expired_rows() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let live = create_session(&conn, user.id, None).unwrap();
+        insert_expired_session(&conn, user.id);
+        assert_eq!(session_row_count(&conn), 2);
+
+        delete_session(&conn, &live.token).unwrap();
+
+        assert_eq!(
+            session_row_count(&conn),
+            0,
+            "logout removes its own session and sweeps expired ones"
+        );
+    }
+
+    // The middleware now validates on a pooled read connection, which is
+    // read-only at the SQLite level: a stray write would surface as an error
+    // rather than a silent no-op.
+    #[test]
+    fn session_validates_over_a_read_connection() {
+        let pool = test_db();
+        let (user_id, token) = {
+            let conn = pool.write().unwrap();
+            let user = test_create_user(&conn);
+            let session = create_session(&conn, user.id, None).unwrap();
+            (user.id, session.token)
+        };
+
+        let conn = pool.read().unwrap();
+        let validated = validate_session(&conn, &token).expect("read-only validation works");
+        assert_eq!(validated.id, user_id);
+        assert!(validate_session(&conn, "lific_sess_nope").is_err());
     }
 
     #[test]

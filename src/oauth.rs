@@ -556,7 +556,7 @@ async fn authorize_approve(
     //                     bind no user, preserving the old behavior
     //   Some(Some(id)) -> authenticated as user `id` -> bind it to the code
     let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
-        let conn = match oauth.db.write() {
+        let conn = match oauth.db.read() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
         };
@@ -1139,7 +1139,7 @@ async fn device_approve(
     };
 
     let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
-        let conn = match oauth.db.write() {
+        let conn = match oauth.db.read() {
             Ok(c) => c,
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
         };
@@ -1654,7 +1654,7 @@ async fn revoke_token(
 
     let is_authenticated = match &caller_token {
         Some(t) if t.starts_with("lific_sess_") => {
-            match state.db.write() {
+            match state.db.read() {
                 Ok(conn) => crate::db::queries::users::validate_session(&conn, t).is_ok(),
                 Err(_) => false,
             }
