@@ -34,6 +34,7 @@
   } from "../lib/api";
   import { layoutGraph, layoutGrid } from "../lib/graph/layout";
   import GraphCanvas from "../lib/graph/GraphCanvas.svelte";
+  import IssueHoverCard from "../lib/IssueHoverCard.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
@@ -319,6 +320,59 @@
     revision++;
   }
 
+  // ── Node hover preview (LIF-363 follow-up) ────────────────
+  //
+  // Same choreography as Markdown.svelte's auto-link hover cards: a 350ms
+  // intent delay before showing, a short grace period on leave so the
+  // pointer can travel onto the card, and the shared IssueHoverCard (with
+  // the description preview turned on — the node already shows the
+  // metadata, so content is the card's whole job here). Mouse only: on
+  // touch there is no hover, and a tap keeps meaning "open the issue".
+  const HOVER_SHOW_MS = 350;
+  const HOVER_HIDE_MS = 200;
+  let hoverIdent = $state<string | null>(null);
+  let hoverAnchor = $state<HTMLElement | null>(null);
+  let hoverShowTimer: ReturnType<typeof setTimeout> | undefined;
+  let hoverHideTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function nodeHoverEnter({ node, event }: { node: Node; event: PointerEvent }) {
+    if (event.pointerType !== "mouse") return;
+    clearTimeout(hoverShowTimer);
+    clearTimeout(hoverHideTimer);
+    const issue = (node.data as { issue: Issue }).issue;
+    // The wrapper xyflow renders for the node carries data-id; anchoring to
+    // it keeps the card glued to the card's on-screen rect at any zoom.
+    const anchor = document.querySelector<HTMLElement>(
+      `.svelte-flow__node[data-id="${node.id}"]`,
+    );
+    if (!anchor) return;
+    hoverShowTimer = setTimeout(() => {
+      hoverIdent = issue.identifier;
+      hoverAnchor = anchor;
+    }, HOVER_SHOW_MS);
+  }
+
+  function nodeHoverLeave() {
+    clearTimeout(hoverShowTimer);
+    hoverHideTimer = setTimeout(() => {
+      hoverIdent = null;
+      hoverAnchor = null;
+    }, HOVER_HIDE_MS);
+  }
+
+  function hoverCardEnter() {
+    clearTimeout(hoverHideTimer);
+  }
+
+  /** Immediate hide: any press or wheel means the graph is about to move
+   *  under the card's fixed coordinates (pan, drag, zoom, menu open). */
+  function hideHoverNow() {
+    clearTimeout(hoverShowTimer);
+    clearTimeout(hoverHideTimer);
+    hoverIdent = null;
+    hoverAnchor = null;
+  }
+
   function relationVerb(t: string): string {
     return t === "blocks" ? "blocks" : t === "duplicate" ? "duplicates" : "relates to";
   }
@@ -377,7 +431,12 @@
       </div>
     </div>
   {:else}
-    <div class="relative flex-1 min-h-0 dep-graph">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="relative flex-1 min-h-0 dep-graph"
+      onpointerdowncapture={hideHoverNow}
+      onwheelcapture={hideHoverNow}
+    >
       {#key `${view}-${showClosed}-${revision}`}
         {#if flowNodes.length === 0}
           <!-- Empty state for the current canvas; the switcher stays usable. -->
@@ -422,6 +481,8 @@
               navigate(`/${projectIdentifier}/issues/${issue.identifier}`);
             }}
             onpaneclick={() => (menu = null)}
+            onnodepointerenter={nodeHoverEnter}
+            onnodepointerleave={nodeHoverLeave}
           />
         {/if}
       {/key}
@@ -437,7 +498,10 @@
                    {view === 'linked'
               ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
               : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-            onclick={() => (view = "linked")}
+            onclick={() => {
+              hideHoverNow();
+              view = "linked";
+            }}
           >
             Linked
             <span class="text-[var(--text-faint)] tabular-nums ml-0.5">{linkedIssues.length}</span>
@@ -447,7 +511,10 @@
                    {view === 'unlinked'
               ? 'bg-[var(--bg-subtle)] text-[var(--text)]'
               : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
-            onclick={() => (view = "unlinked")}
+            onclick={() => {
+              hideHoverNow();
+              view = "unlinked";
+            }}
           >
             Unlinked
             <span class="text-[var(--text-faint)] tabular-nums ml-0.5">{unlinkedIssues.length}</span>
@@ -461,7 +528,10 @@
             ? 'bg-[var(--accent-subtle)] border-[var(--accent)] text-[var(--text)]'
             : 'bg-[var(--surface)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]'}"
           aria-pressed={showClosed}
-          onclick={() => (showClosed = !showClosed)}
+          onclick={() => {
+            hideHoverNow();
+            showClosed = !showClosed;
+          }}
         >
           <StatusIcon status="done" size={12} />
           Closed issues
@@ -589,6 +659,17 @@
             </div>
           {/if}
         </div>
+      {/if}
+
+      <!-- ── Node hover preview ────────────────────────────── -->
+      {#if hoverIdent && hoverAnchor}
+        <IssueHoverCard
+          identifier={hoverIdent}
+          anchorEl={hoverAnchor}
+          onEnter={hoverCardEnter}
+          onLeave={nodeHoverLeave}
+          showDescription
+        />
       {/if}
     </div>
   {/if}

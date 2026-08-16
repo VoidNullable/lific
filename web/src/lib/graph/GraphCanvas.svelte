@@ -24,6 +24,8 @@
     onedgeclick,
     onnodeopen,
     onpaneclick,
+    onnodepointerenter,
+    onnodepointerleave,
   }: {
     initialNodes: Node[];
     initialEdges: Edge[];
@@ -33,6 +35,8 @@
     onedgeclick: (args: { edge: Edge; event: MouseEvent | TouchEvent }) => void;
     onnodeopen: (node: Node) => void;
     onpaneclick: () => void;
+    onnodepointerenter: (args: { node: Node; event: PointerEvent }) => void;
+    onnodepointerleave: (args: { node: Node; event: PointerEvent }) => void;
   } = $props();
 
   // Capturing only the initial prop value is the point (see doc comment):
@@ -60,6 +64,8 @@
   {onconnect}
   {onconnectend}
   {onedgeclick}
+  {onnodepointerenter}
+  {onnodepointerleave}
   onpaneclick={() => onpaneclick()}
 >
   <Background gap={24} patternColor="var(--border)" bgColor="var(--bg)" />

@@ -31,12 +31,35 @@
     anchorEl,
     onEnter,
     onLeave,
+    showDescription = false,
   }: {
     identifier: string;
     anchorEl: HTMLElement;
     onEnter: () => void;
     onLeave: () => void;
+    /** LIF-363: also preview the issue's description (markdown stripped to
+     *  plain text, clamped). On by the dependency graph, whose nodes already
+     *  show status/id/priority/title — the card's value there is the
+     *  content. Markdown auto-links keep the compact metadata-only card. */
+    showDescription?: boolean;
   } = $props();
+
+  /** Reduce markdown to tooltip-safe plain text: drop code fences, images
+   *  and reference syntax, unwrap links/emphasis, strip list/heading/quote
+   *  markers. Not a parser — just enough that a preview reads as prose. */
+  function stripMarkdown(md: string): string {
+    return md
+      .replace(/```[\s\S]*?```/g, " ") // fenced code blocks
+      .replace(/`([^`]*)`/g, "$1") // inline code
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, " ") // images
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links → text
+      .replace(/^#{1,6}\s+/gm, "") // headings
+      .replace(/^\s*(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s*)?/gm, "") // list markers
+      .replace(/^\s*>\s?/gm, "") // blockquotes
+      .replace(/(\*\*|__|\*|_|~~)/g, "") // emphasis
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
   let cardEl = $state<HTMLDivElement | null>(null);
   let cached = $state<CachedIssue | null>(null);
@@ -154,6 +177,21 @@
     <p class="text-body-sm text-[var(--text)] leading-snug line-clamp-2 mt-1 mb-0">
       {issue.title}
     </p>
+    {#if showDescription}
+      {@const preview = stripMarkdown(issue.description)}
+      {#if preview}
+        <p
+          class="text-caption text-[var(--text-muted)] leading-snug line-clamp-5
+                 mt-1.5 mb-0 pt-1.5 border-t border-[var(--border)]"
+        >
+          {preview}
+        </p>
+      {:else}
+        <p class="text-caption text-[var(--text-faint)] italic mt-1.5 mb-0 pt-1.5 border-t border-[var(--border)]">
+          No description
+        </p>
+      {/if}
+    {/if}
     {#if mod}
       <div class="mt-1.5 flex items-center gap-1 text-micro text-[var(--text-muted)]">
         {#if mod.emoji}
