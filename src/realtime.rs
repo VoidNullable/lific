@@ -8,10 +8,10 @@ use tokio::time::{self, Duration, Instant};
 use tracing::{trace, warn};
 
 const EVENT_BUFFER: usize = 256;
-/// The realtime protocol accepts only the bounded `activity.baseline.request`
-/// control message from clients; all other application data is ignored. These
-/// small limits leave room for control frames while bounding tungstenite's
-/// pre-handler buffers well below its large defaults.
+/// The realtime protocol accepts only heartbeats and bounded
+/// `activity.baseline.request` messages from clients. These small limits leave
+/// room for control frames while bounding tungstenite's pre-handler buffers
+/// well below its large defaults.
 pub(crate) const MAX_CLIENT_MESSAGE_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_CLIENT_FRAME_BYTES: usize = 4 * 1024;
 const ACTIVITY_BASELINE_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -47,16 +47,16 @@ impl RealtimeHub {
     }
 
     /// Claim a connection slot for `user_id`, or `None` when the user already
-    /// has `MAX_SOCKETS_PER_USER` live sockets. The returned guard releases
+    /// has `MAX_SOCKETS_PER_USER` live sockets. The returned permit releases
     /// the slot on drop, so a slot can never leak past its socket task.
-    pub(crate) fn try_register(&self, user_id: i64) -> Option<ConnectionSlot> {
+    pub(crate) fn try_acquire_socket(&self, user_id: i64) -> Option<SocketPermit> {
         let mut connections = self.connections.lock().expect("connections lock poisoned");
         let count = connections.entry(user_id).or_insert(0);
         if *count >= MAX_SOCKETS_PER_USER {
             return None;
         }
         *count += 1;
-        Some(ConnectionSlot {
+        Some(SocketPermit {
             connections: Arc::clone(&self.connections),
             user_id,
         })
@@ -75,32 +75,33 @@ impl RealtimeHub {
     }
 
     fn send_message(&self, event: RealtimeEvent, audience: RealtimeAudience) {
-        match self.tx.receiver_count() {
-            0 => trace!("dropped realtime event because no receivers are subscribed"),
-            _ => match serde_json::to_string(&event) {
-                Ok(json) => {
-                    let message = RealtimeMessage {
-                        event,
-                        message: Message::Text(json.into()),
-                        audience,
-                    };
-                    if self.tx.send(message).is_err() {
-                        trace!("dropped realtime event because no receivers are subscribed");
-                    }
-                }
-                Err(_) => warn!("failed to serialize realtime event"),
-            },
+        if self.tx.receiver_count() == 0 {
+            trace!("dropped realtime event because no receivers are subscribed");
+            return;
+        }
+        let Ok(json) = serde_json::to_string(&event) else {
+            warn!("failed to serialize realtime event");
+            return;
+        };
+        let message = RealtimeMessage {
+            event,
+            message: Message::Text(json.into()),
+            audience,
+        };
+        if self.tx.send(message).is_err() {
+            trace!("dropped realtime event because no receivers are subscribed");
         }
     }
 }
 
 /// RAII guard for one live socket's slot in the per-user connection count.
-pub(crate) struct ConnectionSlot {
+#[must_use = "dropping the permit releases the socket slot"]
+pub(crate) struct SocketPermit {
     connections: Arc<Mutex<HashMap<i64, usize>>>,
     user_id: i64,
 }
 
-impl Drop for ConnectionSlot {
+impl Drop for SocketPermit {
     fn drop(&mut self) {
         let mut connections = self.connections.lock().expect("connections lock poisoned");
         if let Some(count) = connections.get_mut(&self.user_id) {
@@ -178,43 +179,38 @@ pub async fn serve_socket(
     db: crate::db::DbPool,
     session_token: String,
     mut auth_user: crate::db::models::AuthUser,
-    _slot: ConnectionSlot,
+    _permit: SocketPermit,
 ) {
     let mut visible_projects = visible_projects_for(&db, &auth_user);
-    let mut activity_baseline_cache = None;
-    let mut client_message_budget = ClientMessageBudget::new();
-    let mut client_progress_deadline = Instant::now() + CLIENT_PROGRESS_TIMEOUT;
+    let connected_at = Instant::now();
+    let mut client = ClientState::new(connected_at);
     let mut rx = hub.subscribe();
-    let mut revalidate = time::interval(SESSION_REVALIDATE_INTERVAL);
+    let mut revalidate = time::interval_at(
+        connected_at + SESSION_REVALIDATE_INTERVAL,
+        SESSION_REVALIDATE_INTERVAL,
+    );
     revalidate.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
-    while let SocketFlow::Open = tokio::select! {
-        _ = revalidate.tick() => {
-            let flow = revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
-            if flow == SocketFlow::Open {
-                visible_projects = visible_projects_for(&db, &auth_user);
-            }
-            flow
-        },
-        event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
-        message = socket.recv() => {
-            if matches!(message, Some(Ok(_))) {
-                client_progress_deadline = Instant::now() + CLIENT_PROGRESS_TIMEOUT;
-            }
-            handle_client_message(
-                &mut socket,
-                &db,
-                &auth_user,
-                &mut activity_baseline_cache,
-                &mut client_message_budget,
-                message,
-            ).await
-        },
-        _ = time::sleep_until(client_progress_deadline) => {
-            let _ = socket.send(Message::Close(None)).await;
-            SocketFlow::Close
-        },
-    } {}
+    loop {
+        let progress_deadline = client.progress_deadline();
+        let flow = tokio::select! {
+            _ = revalidate.tick() => {
+                let flow = revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
+                if flow == SocketFlow::Open {
+                    visible_projects = visible_projects_for(&db, &auth_user);
+                }
+                flow
+            },
+            event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
+            message = socket.recv() => {
+                handle_client_message(&mut socket, &db, &auth_user, &mut client, message).await
+            },
+            _ = time::sleep_until(progress_deadline) => close_socket(&mut socket).await,
+        };
+        if flow == SocketFlow::Close {
+            break;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,26 +219,107 @@ enum SocketFlow {
     Close,
 }
 
-struct ClientMessageBudget {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientAdmission {
+    Accepted,
+    RateLimited,
+}
+
+struct FixedWindowRateLimit {
     window_started: Instant,
     messages: usize,
 }
 
-impl ClientMessageBudget {
-    fn new() -> Self {
+impl FixedWindowRateLimit {
+    fn new(now: Instant) -> Self {
         Self {
-            window_started: Instant::now(),
+            window_started: now,
             messages: 0,
         }
     }
 
-    fn allow(&mut self, now: Instant) -> bool {
+    #[must_use]
+    fn admit(&mut self, now: Instant) -> ClientAdmission {
         if now.duration_since(self.window_started) >= CLIENT_MESSAGE_WINDOW {
             self.window_started = now;
             self.messages = 0;
         }
         self.messages += 1;
-        self.messages <= MAX_CLIENT_MESSAGES_PER_WINDOW
+        if self.messages <= MAX_CLIENT_MESSAGES_PER_WINDOW {
+            ClientAdmission::Accepted
+        } else {
+            ClientAdmission::RateLimited
+        }
+    }
+}
+
+struct CachedActivityBaseline {
+    loaded_at: Instant,
+    event: RealtimeEvent,
+}
+
+struct ClientState {
+    rate_limit: FixedWindowRateLimit,
+    progress_deadline: Instant,
+    activity_baseline: Option<CachedActivityBaseline>,
+}
+
+impl ClientState {
+    fn new(now: Instant) -> Self {
+        Self {
+            rate_limit: FixedWindowRateLimit::new(now),
+            progress_deadline: now + CLIENT_PROGRESS_TIMEOUT,
+            activity_baseline: None,
+        }
+    }
+
+    fn progress_deadline(&self) -> Instant {
+        self.progress_deadline
+    }
+
+    #[must_use]
+    fn admit_message(&mut self, now: Instant) -> ClientAdmission {
+        self.rate_limit.admit(now)
+    }
+
+    fn record_progress(&mut self, now: Instant) {
+        self.progress_deadline = now + CLIENT_PROGRESS_TIMEOUT;
+    }
+
+    fn cached_activity_baseline(&self, now: Instant) -> Option<RealtimeEvent> {
+        self.activity_baseline
+            .as_ref()
+            .filter(|cached| now.duration_since(cached.loaded_at) < ACTIVITY_BASELINE_CACHE_TTL)
+            .map(|cached| cached.event.clone())
+    }
+
+    fn cache_activity_baseline(&mut self, now: Instant, event: RealtimeEvent) {
+        self.activity_baseline = Some(CachedActivityBaseline {
+            loaded_at: now,
+            event,
+        });
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClientAction {
+    Send(Message),
+    ActivityBaseline,
+    Heartbeat,
+    Ignore,
+    Close,
+}
+
+fn client_action(message: Message) -> ClientAction {
+    match message {
+        Message::Ping(payload) => ClientAction::Send(Message::Pong(payload)),
+        Message::Pong(_) => ClientAction::Ignore,
+        Message::Text(text) => match serde_json::from_str::<RealtimeRequest>(&text) {
+            Ok(RealtimeRequest::ActivityBaselineRequest) => ClientAction::ActivityBaseline,
+            Ok(RealtimeRequest::Heartbeat) => ClientAction::Heartbeat,
+            Err(_) => ClientAction::Close,
+        },
+        Message::Binary(_) | Message::Close(_) => ClientAction::Close,
     }
 }
 
@@ -286,8 +363,8 @@ async fn forward_event(
     event: Result<RealtimeMessage, RecvError>,
 ) -> SocketFlow {
     match event {
-        Ok(message) => match event_flow(db, auth_user, &message) {
-            EventFlow::Forward => {
+        Ok(message) => match visible_to(db, auth_user, &message) {
+            EventVisibility::Visible => {
                 if let Some(project_id) = message.event.project_id() {
                     if matches!(message.event, RealtimeEvent::ProjectDeleted { .. }) {
                         if let Some(projects) = visible_projects {
@@ -299,16 +376,13 @@ async fn forward_event(
                 }
                 SocketFlow::from_send(socket.send(message.message).await)
             }
-            EventFlow::Drop => {
+            EventVisibility::Hidden => {
                 let revoked = matches!(message.event, RealtimeEvent::ProjectUpdated { .. })
-                    && message
-                        .event
-                        .project_id()
-                        .is_some_and(|project_id| {
-                            visible_projects
-                                .as_mut()
-                                .is_some_and(|projects| projects.remove(&project_id))
-                        });
+                    && message.event.project_id().is_some_and(|project_id| {
+                        visible_projects
+                            .as_mut()
+                            .is_some_and(|projects| projects.remove(&project_id))
+                    });
                 if revoked {
                     send_event(socket, &RealtimeEvent::ResyncRequired).await
                 } else {
@@ -331,60 +405,59 @@ async fn handle_client_message(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
     auth_user: &crate::db::models::AuthUser,
-    activity_baseline_cache: &mut Option<(Instant, RealtimeEvent)>,
-    client_message_budget: &mut ClientMessageBudget,
+    client: &mut ClientState,
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
     match message {
         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => SocketFlow::Close,
         Some(Ok(message)) => {
-            if !client_message_budget.allow(Instant::now()) {
-                let _ = socket.send(Message::Close(None)).await;
-                return SocketFlow::Close;
+            let now = Instant::now();
+            if client.admit_message(now) == ClientAdmission::RateLimited {
+                return close_socket(socket).await;
             }
 
-            match message {
-                Message::Ping(payload) => {
-                    SocketFlow::from_send(socket.send(Message::Pong(payload)).await)
+            match client_action(message) {
+                ClientAction::Send(message) => SocketFlow::from_send(socket.send(message).await),
+                ClientAction::ActivityBaseline => {
+                    client.record_progress(now);
+                    send_activity_baseline(socket, db, auth_user, client).await
                 }
-                Message::Text(text) => match serde_json::from_str::<RealtimeRequest>(&text) {
-                    Ok(RealtimeRequest::ActivityBaselineRequest) => {
-                        let now = Instant::now();
-                        let baseline = activity_baseline_cache
-                            .as_ref()
-                            .filter(|(cached_at, _)| {
-                                now.duration_since(*cached_at) < ACTIVITY_BASELINE_CACHE_TTL
-                            })
-                            .map(|(_, event)| event.clone())
-                            .map(Ok)
-                            .unwrap_or_else(|| {
-                                activity_baseline(db, auth_user).inspect(|event| {
-                                    *activity_baseline_cache = Some((now, event.clone()));
-                                })
-                            });
-                        match baseline {
-                            Ok(event) => send_event(socket, &event).await,
-                            Err(error) => {
-                                warn!(error = %error, "failed to load websocket activity baseline");
-                                SocketFlow::Open
-                            }
-                        }
-                    }
-                    Ok(RealtimeRequest::Heartbeat) => SocketFlow::Open,
-                    Err(_) => {
-                        let _ = socket.send(Message::Close(None)).await;
-                        SocketFlow::Close
-                    }
-                },
-                Message::Pong(_) => SocketFlow::Open,
-                Message::Binary(_) => {
-                    let _ = socket.send(Message::Close(None)).await;
-                    SocketFlow::Close
+                ClientAction::Heartbeat => {
+                    client.record_progress(now);
+                    SocketFlow::Open
                 }
-                Message::Close(_) => unreachable!(),
+                ClientAction::Ignore => SocketFlow::Open,
+                ClientAction::Close => close_socket(socket).await,
             }
         }
     }
+}
+
+async fn send_activity_baseline(
+    socket: &mut WebSocket,
+    db: &crate::db::DbPool,
+    auth_user: &crate::db::models::AuthUser,
+    client: &mut ClientState,
+) -> SocketFlow {
+    let now = Instant::now();
+    let baseline = match client.cached_activity_baseline(now) {
+        Some(event) => Ok(event),
+        None => activity_baseline(db, auth_user).inspect(|event| {
+            client.cache_activity_baseline(now, event.clone());
+        }),
+    };
+    match baseline {
+        Ok(event) => send_event(socket, &event).await,
+        Err(error) => {
+            warn!(error = %error, "failed to load websocket activity baseline");
+            SocketFlow::Open
+        }
+    }
+}
+
+async fn close_socket(socket: &mut WebSocket) -> SocketFlow {
+    let _ = socket.send(Message::Close(None)).await;
+    SocketFlow::Close
 }
 
 fn activity_baseline(
@@ -463,23 +536,6 @@ fn visible_projects_for(
 enum EventVisibility {
     Visible,
     Hidden,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EventFlow {
-    Forward,
-    Drop,
-}
-
-fn event_flow(
-    db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
-    message: &RealtimeMessage,
-) -> EventFlow {
-    match visible_to(db, auth_user, message) {
-        EventVisibility::Visible => EventFlow::Forward,
-        EventVisibility::Hidden => EventFlow::Drop,
-    }
 }
 
 fn visible_to(
@@ -621,18 +677,105 @@ mod tests {
     #[test]
     fn socket_slots_are_capped_per_user_and_released_on_drop() {
         let hub = RealtimeHub::new();
-        let mut slots: Vec<ConnectionSlot> = (0..MAX_SOCKETS_PER_USER)
-            .map(|_| hub.try_register(7).expect("slot under the cap"))
+        let mut slots: Vec<SocketPermit> = (0..MAX_SOCKETS_PER_USER)
+            .map(|_| hub.try_acquire_socket(7).expect("slot under the cap"))
             .collect();
 
         // A different user is unaffected by user 7's saturation.
-        assert!(hub.try_register(8).is_some());
+        assert!(hub.try_acquire_socket(8).is_some());
         // User 7 is at the cap.
-        assert!(hub.try_register(7).is_none());
+        assert!(hub.try_acquire_socket(7).is_none());
 
         // Dropping one slot frees exactly one.
         slots.pop();
-        assert!(hub.try_register(7).is_some());
+        assert!(hub.try_acquire_socket(7).is_some());
+    }
+
+    #[test]
+    fn client_actions_cover_every_supported_message_kind() {
+        assert_eq!(
+            client_action(Message::Ping(vec![1, 2, 3].into())),
+            ClientAction::Send(Message::Pong(vec![1, 2, 3].into()))
+        );
+        assert_eq!(
+            client_action(Message::Text(r#"{"type":"heartbeat"}"#.into())),
+            ClientAction::Heartbeat
+        );
+        assert_eq!(
+            client_action(Message::Text(
+                r#"{"type":"activity.baseline.request"}"#.into()
+            )),
+            ClientAction::ActivityBaseline
+        );
+        assert_eq!(
+            client_action(Message::Text(r#"{"type":"unknown"}"#.into())),
+            ClientAction::Close
+        );
+        assert_eq!(
+            client_action(Message::Binary(Vec::new().into())),
+            ClientAction::Close
+        );
+        assert_eq!(client_action(Message::Close(None)), ClientAction::Close);
+    }
+
+    #[test]
+    fn fixed_window_rate_limit_resets_at_the_window_boundary() {
+        let started = Instant::now();
+        let mut limit = FixedWindowRateLimit::new(started);
+
+        for _ in 0..MAX_CLIENT_MESSAGES_PER_WINDOW {
+            assert_eq!(limit.admit(started), ClientAdmission::Accepted);
+        }
+        assert_eq!(limit.admit(started), ClientAdmission::RateLimited);
+        assert_eq!(
+            limit.admit(started + CLIENT_MESSAGE_WINDOW),
+            ClientAdmission::Accepted
+        );
+    }
+
+    #[test]
+    fn rate_admission_does_not_extend_the_progress_deadline() {
+        let started = Instant::now();
+        let mut client = ClientState::new(started);
+        let received_at = started + Duration::from_secs(30);
+
+        assert_eq!(client.admit_message(received_at), ClientAdmission::Accepted);
+        assert_eq!(
+            client.progress_deadline(),
+            started + CLIENT_PROGRESS_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn application_message_extends_the_progress_deadline() {
+        let started = Instant::now();
+        let mut client = ClientState::new(started);
+        let received_at = started + Duration::from_secs(30);
+
+        client.record_progress(received_at);
+        assert_eq!(
+            client.progress_deadline(),
+            received_at + CLIENT_PROGRESS_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn activity_baseline_cache_expires_at_its_ttl_boundary() {
+        let loaded_at = Instant::now();
+        let mut client = ClientState::new(loaded_at);
+        let event = RealtimeEvent::ActivityBaseline { day_count: 7 };
+        client.cache_activity_baseline(loaded_at, event.clone());
+
+        assert_eq!(
+            client.cached_activity_baseline(
+                loaded_at + ACTIVITY_BASELINE_CACHE_TTL - Duration::from_nanos(1)
+            ),
+            Some(event)
+        );
+        assert_eq!(
+            client.cached_activity_baseline(loaded_at + ACTIVITY_BASELINE_CACHE_TTL),
+            None
+        );
     }
 
     #[test]

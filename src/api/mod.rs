@@ -337,17 +337,17 @@ async fn events_ws(
     ws: WebSocketUpgrade,
 ) -> Result<Response, LificError> {
     let validated = validate_websocket_request(&db, &headers, &allowed_origins)?;
-    let Some(slot) = realtime.try_register(validated.user.id) else {
+    let Some(permit) = realtime.try_acquire_socket(validated.user.id) else {
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({ "error": "websocket connection limit reached" })),
         )
             .into_response());
     };
-    // Realtime is server-pushed, with only the bounded
-    // `activity.baseline.request` control message accepted from clients. Cap
-    // application data far below Axum/Tungstenite's 64 MiB default so an
-    // authenticated peer cannot force large discarded message allocations.
+    // Realtime is server-pushed; clients send only heartbeats and bounded
+    // activity-baseline requests. Cap application data far below
+    // Axum/Tungstenite's 64 MiB default so an authenticated peer cannot force
+    // large discarded message allocations.
     Ok(ws
         .read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
         .max_message_size(crate::realtime::MAX_CLIENT_MESSAGE_BYTES)
@@ -359,7 +359,7 @@ async fn events_ws(
                 db,
                 validated.session_token,
                 validated.user,
-                slot,
+                permit,
             )
         })
         .into_response())
@@ -2213,20 +2213,51 @@ mod authz_gating_tests {
     type TestWebSocket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
+    const ACTIVITY_BASELINE_REQUEST: &str = r#"{"type":"activity.baseline.request"}"#;
 
     async fn request_activity_baseline(socket: &mut TestWebSocket) -> i64 {
-        socket
-            .send(Message::Text(
-                r#"{"type":"activity.baseline.request"}"#.into(),
-            ))
-            .await
-            .unwrap();
+        request_activity_baseline_with(socket, ACTIVITY_BASELINE_REQUEST.to_owned()).await
+    }
+
+    async fn request_activity_baseline_with(socket: &mut TestWebSocket, request: String) -> i64 {
+        socket.send(Message::Text(request.into())).await.unwrap();
+        receive_activity_baseline(socket).await
+    }
+
+    async fn receive_activity_baseline(socket: &mut TestWebSocket) -> i64 {
         let Some(Ok(Message::Text(text))) = socket.next().await else {
             panic!("expected activity baseline response");
         };
         serde_json::from_str::<serde_json::Value>(&text).unwrap()["day_count"]
             .as_i64()
             .unwrap()
+    }
+
+    fn activity_baseline_request(bytes: usize) -> String {
+        let mut request = ACTIVITY_BASELINE_REQUEST.to_owned();
+        assert!(request.len() <= bytes);
+        request.extend(std::iter::repeat_n(' ', bytes - request.len()));
+        request
+    }
+
+    async fn send_fragmented_text(socket: &mut TestWebSocket, text: String) {
+        let frame_bytes = crate::realtime::MAX_CLIENT_FRAME_BYTES;
+        for (index, chunk) in text.as_bytes().chunks(frame_bytes).enumerate() {
+            let opcode = if index == 0 {
+                OpCode::Data(Data::Text)
+            } else {
+                OpCode::Data(Data::Continue)
+            };
+            let is_final = (index + 1) * frame_bytes >= text.len();
+            socket
+                .send(Message::Frame(Frame::message(
+                    chunk.to_vec(),
+                    opcode,
+                    is_final,
+                )))
+                .await
+                .unwrap();
+        }
     }
 
     async fn assert_websocket_closed(socket: &mut TestWebSocket) {
@@ -2259,6 +2290,15 @@ mod authz_gating_tests {
             Err(error) => panic!("expected HTTP rejection, got {error}"),
         }
 
+        let mut released = sockets.pop().unwrap();
+        released.close(None).await.unwrap();
+        assert_websocket_closed(&mut released).await;
+        let (mut replacement, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .expect("closing a socket must release its permit");
+        request_activity_baseline(&mut replacement).await;
+
         server.abort();
     }
 
@@ -2289,6 +2329,34 @@ mod authz_gating_tests {
         server.abort();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn websocket_refreshes_activity_baseline_after_cache_expiry() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db.clone(), realtime).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        let initial = request_activity_baseline(&mut socket).await;
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "After baseline expiry".into(),
+                    identifier: "EXP".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        assert_eq!(request_activity_baseline(&mut socket).await, initial + 1);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn websocket_closes_on_client_message_flood() {
         let (db, token) = websocket_session();
@@ -2310,51 +2378,61 @@ mod authz_gating_tests {
     }
 
     #[tokio::test]
-    async fn websocket_enforces_frame_and_message_size_limits() {
+    async fn websocket_enforces_frame_and_message_size_boundaries() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
         let (url, server) = websocket_test_server(db, realtime).await;
+
+        let (mut max_frame, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+        assert_eq!(
+            request_activity_baseline_with(
+                &mut max_frame,
+                activity_baseline_request(crate::realtime::MAX_CLIENT_FRAME_BYTES),
+            )
+            .await,
+            0
+        );
 
         let (mut oversized_frame, _) =
             tokio_tungstenite::connect_async(websocket_request(&url, &token))
                 .await
                 .unwrap();
-        let mut valid_json = r#"{"type":"activity.baseline.request"}"#.to_owned();
-        valid_json.push_str(&" ".repeat(4 * 1024));
         oversized_frame
-            .send(Message::Text(valid_json.into()))
+            .send(Message::Text(
+                activity_baseline_request(crate::realtime::MAX_CLIENT_FRAME_BYTES + 1).into(),
+            ))
             .await
             .unwrap();
         assert_websocket_closed(&mut oversized_frame).await;
+
+        let (mut max_message, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+        send_fragmented_text(
+            &mut max_message,
+            activity_baseline_request(crate::realtime::MAX_CLIENT_MESSAGE_BYTES),
+        )
+        .await;
+        assert_eq!(receive_activity_baseline(&mut max_message).await, 0);
 
         let (mut oversized_message, _) =
             tokio_tungstenite::connect_async(websocket_request(&url, &token))
                 .await
                 .unwrap();
-        oversized_message
-            .send(Message::Frame(Frame::message(
-                r#"{"type":"activity.baseline.request"}"#,
-                OpCode::Data(Data::Text),
-                false,
-            )))
-            .await
-            .unwrap();
-        for is_final in [false, false, false, true] {
-            oversized_message
-                .send(Message::Frame(Frame::message(
-                    vec![b' '; 4 * 1024],
-                    OpCode::Data(Data::Continue),
-                    is_final,
-                )))
-                .await
-                .unwrap();
-        }
+        send_fragmented_text(
+            &mut oversized_message,
+            activity_baseline_request(crate::realtime::MAX_CLIENT_MESSAGE_BYTES + 1),
+        )
+        .await;
         assert_websocket_closed(&mut oversized_message).await;
 
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn websocket_closes_incomplete_fragment_after_progress_deadline() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
@@ -2371,7 +2449,32 @@ mod authz_gating_tests {
             )))
             .await
             .unwrap();
-        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        socket
+            .send(Message::Ping(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            socket.next().await,
+            Some(Ok(Message::Pong(payload))) if payload.as_ref() == [1, 2, 3]
+        ));
+
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(110)).await;
+        tokio::time::resume();
+        socket
+            .send(Message::Ping(vec![4, 5, 6].into()))
+            .await
+            .unwrap();
+        let response = socket.next().await;
+        assert!(
+            matches!(
+                &response,
+                Some(Ok(Message::Pong(payload))) if payload.as_ref() == [4, 5, 6]
+            ),
+            "expected Pong while fragmented, got {response:?}"
+        );
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
         assert_websocket_closed(&mut socket).await;
 
         server.abort();
