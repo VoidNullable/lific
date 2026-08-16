@@ -563,23 +563,50 @@ fn unusable_password_hash() -> Result<String, LificError> {
     hash_password(&random_pw_hex)
 }
 
+/// Whether a failure is SQLite rejecting a write because it broke a constraint
+/// (UNIQUE, CHECK, foreign key). LIF-367 leans on this to tell "another
+/// connect got here first" apart from a genuine database failure.
+fn is_constraint_violation(err: &LificError) -> bool {
+    matches!(
+        err,
+        LificError::Database(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+/// Create a bot user owned by `owner_id`, with its `tool_id` set in the same
+/// statement.
+///
+/// LIF-367: `idx_users_owner_tool` makes `(owner_id, tool_id)` unique for
+/// bots, so the pair has to land atomically. Minting with `tool_id` NULL and
+/// patching it in a follow-up UPDATE leaves a window in which a concurrent
+/// connect sees no bot for the pair and mints a second one. Pass `None` only
+/// for identities that genuinely have no tool behind them.
+///
+/// Every constraint the row can break — the unique username, the unique
+/// (owner, tool) pair — comes back as [`LificError::BadRequest`], and that is
+/// the *only* thing that produces that variant here. [`ensure_bot`] relies on
+/// that to tell "somebody else already connected this tool" from a real
+/// failure.
 pub fn create_bot_user(
     conn: &Connection,
     owner_id: i64,
     bot_username: &str,
     display_name: &str,
+    tool_id: Option<&str>,
 ) -> Result<crate::db::models::User, LificError> {
     let password_hash = unusable_password_hash()?;
 
     conn.execute(
-        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id)
-         VALUES (?1, ?2, ?3, ?4, 0, 1, ?5)",
+        "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id, tool_id)
+         VALUES (?1, ?2, ?3, ?4, 0, 1, ?5, ?6)",
         params![
             bot_username,
             format!("{bot_username}@bot.local"),
             password_hash,
             display_name,
             owner_id,
+            tool_id,
         ],
     )
     .map_err(|e| match e {
@@ -691,6 +718,30 @@ pub fn bot_is_connected(conn: &Connection, bot_id: i64) -> Result<bool, LificErr
 /// by their owner and tool prefix and backfilled in place — safe even when the
 /// owner renamed in the meantime, since the prefix match skips the stale owner
 /// name embedded in their username.
+/// Re-resolve the bot for `(owner_id, tool_id)` after a write was rejected by
+/// a constraint.
+///
+/// LIF-367: with `idx_users_owner_tool` in place, the loser of a concurrent
+/// `ensure_bot` no longer silently mints a duplicate — its write fails. That
+/// is the right outcome for the data and the wrong one for the caller, who
+/// asked for "the bot for this tool" and should get the winner's row rather
+/// than a 500. So look the pair up again: if somebody won the race, their bot
+/// is the answer. If the lookup still misses, the constraint that fired was
+/// something else (most likely the derived username colliding with an
+/// unrelated account), and `rejection` — the error the write actually
+/// produced — stands.
+fn resolve_bot_conflict(
+    conn: &Connection,
+    owner_id: i64,
+    tool_id: &str,
+    rejection: LificError,
+) -> Result<User, LificError> {
+    match find_bot_by_owner_and_tool(conn, owner_id, tool_id)? {
+        Some(winner) => Ok(winner),
+        None => Err(rejection),
+    }
+}
+
 pub fn ensure_bot(
     conn: &Connection,
     owner_id: i64,
@@ -704,20 +755,33 @@ pub fn ensure_bot(
     // Legacy bot: pre-migration, tool_id NULL, keyed only by owner + tool.
     // Reuse and backfill it.
     if let Some(legacy) = find_bot_legacy_by_tool_prefix(conn, owner_id, tool_id)? {
-        conn.execute(
+        return match conn.execute(
             "UPDATE users SET tool_id = ?1 WHERE id = ?2",
             params![tool_id, legacy.id],
-        )?;
-        return Ok(legacy);
+        ) {
+            Ok(_) => Ok(legacy),
+            // A concurrent connect claimed the pair between our lookup and
+            // this backfill; the legacy row stays legacy and the winner wins.
+            Err(e) => {
+                let e: LificError = e.into();
+                if is_constraint_violation(&e) {
+                    resolve_bot_conflict(conn, owner_id, tool_id, e)
+                } else {
+                    Err(e)
+                }
+            }
+        };
     }
     let owner_username = get_user_by_id(conn, owner_id)?.username;
     let bot_username = format!("{tool_id}-{owner_username}");
-    let bot = create_bot_user(conn, owner_id, &bot_username, display_name)?;
-    conn.execute(
-        "UPDATE users SET tool_id = ?1 WHERE id = ?2",
-        params![tool_id, bot.id],
-    )?;
-    Ok(bot)
+    match create_bot_user(conn, owner_id, &bot_username, display_name, Some(tool_id)) {
+        Ok(bot) => Ok(bot),
+        // The one thing that makes create_bot_user return BadRequest is SQLite
+        // rejecting the row, which after LIF-367 usually means a concurrent
+        // connect already minted this exact agent.
+        Err(e @ LificError::BadRequest(_)) => resolve_bot_conflict(conn, owner_id, tool_id, e),
+        Err(e) => Err(e),
+    }
 }
 
 /// List all bots owned by a specific user.
@@ -1051,7 +1115,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn); // username "blake"
         // A pre-migration bot: username "opencode-blake", tool_id NULL.
-        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode")
+        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode", None)
             .unwrap();
 
         let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
@@ -1078,7 +1142,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn); // username "blake"
         // A pre-migration bot whose username still has the old owner name.
-        let legacy = create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode")
+        let legacy = create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode", None)
             .unwrap();
         // The owner renames before ever reconnecting.
         conn.execute(
@@ -1092,6 +1156,504 @@ mod tests {
             reused.id, legacy.id,
             "renaming before a legacy reconnect must still reuse, not duplicate"
         );
+    }
+
+    // ── (owner_id, tool_id) uniqueness in the schema (LIF-367) ───
+
+    /// Insert a bot row straight into the table, bypassing every
+    /// application-level dedupe, so the schema is the only thing that can
+    /// object. Returns the raw rusqlite result.
+    fn raw_insert_bot(
+        conn: &Connection,
+        username: &str,
+        owner_id: i64,
+        tool_id: Option<&str>,
+    ) -> Result<usize, rusqlite::Error> {
+        conn.execute(
+            "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id, tool_id)
+             VALUES (?1, ?2, 'x', 'Agent', 0, 1, ?3, ?4)",
+            params![username, format!("{username}@bot.local"), owner_id, tool_id],
+        )
+    }
+
+    fn is_constraint_err(err: &rusqlite::Error) -> bool {
+        matches!(
+            err,
+            rusqlite::Error::SqliteFailure(e, _)
+                if e.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+
+    // The pairing used to be enforced by `ensure_bot` reading before it wrote,
+    // which two concurrent connects can both win. The database now refuses the
+    // second row outright.
+    #[test]
+    fn second_bot_for_the_same_owner_and_tool_is_rejected_by_the_schema() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+
+        // A distinct username, so the users.username UNIQUE is not what fires:
+        // only idx_users_owner_tool can reject this.
+        let err = raw_insert_bot(&conn, "opencode-blake-2", owner.id, Some("opencode"))
+            .expect_err("duplicate (owner_id, tool_id) bot must be rejected");
+        assert!(
+            is_constraint_err(&err),
+            "expected a constraint violation, got {err:?}"
+        );
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE is_bot = 1 AND owner_id = ?1",
+                params![owner.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "the rejected insert left no row behind");
+    }
+
+    // The index is partial on purpose. Humans and legacy bots awaiting lazy
+    // backfill both carry tool_id NULL and must not collide with each other,
+    // and one owner may connect any number of *different* tools.
+    #[test]
+    fn bot_uniqueness_ignores_null_tool_ids_and_distinct_tools() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+
+        raw_insert_bot(&conn, "legacy-one", owner.id, None).unwrap();
+        raw_insert_bot(&conn, "legacy-two", owner.id, None)
+            .expect("two legacy bots with tool_id NULL are allowed");
+        raw_insert_bot(&conn, "opencode-blake", owner.id, Some("opencode")).unwrap();
+        raw_insert_bot(&conn, "claude-code-blake", owner.id, Some("claude-code"))
+            .expect("a different tool for the same owner is allowed");
+    }
+
+    // Whatever order the connects land in, the owner ends up with exactly one
+    // agent for the tool and every caller gets that same identity back.
+    #[test]
+    fn ensure_bot_is_idempotent_across_repeated_connects() {
+        let pool = test_db();
+        let owner_id = {
+            let conn = pool.write().unwrap();
+            test_create_user(&conn).id
+        };
+
+        let ids: Vec<i64> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let pool = pool.clone();
+                    scope.spawn(move || {
+                        let conn = pool.write().unwrap();
+                        ensure_bot(&conn, owner_id, "opencode", "OpenCode")
+                            .expect("ensure_bot must not fail on a repeat connect")
+                            .id
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(
+            ids.windows(2).all(|w| w[0] == w[1]),
+            "every connect must resolve to the same agent, got {ids:?}"
+        );
+        let conn = pool.write().unwrap();
+        let bots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE is_bot = 1 AND owner_id = ?1 AND tool_id = 'opencode'",
+                params![owner_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bots, 1, "no duplicate agent for the pair");
+    }
+
+    // The recovery path itself: a mint rejected by the index means somebody
+    // else already minted the pair, and the caller wants that winner, not an
+    // error.
+    #[test]
+    fn a_rejected_mint_resolves_to_the_bot_that_won_the_race() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn);
+        let winner = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
+
+        let resolved = resolve_bot_conflict(
+            &conn,
+            owner.id,
+            "opencode",
+            LificError::BadRequest("rejected".into()),
+        )
+        .unwrap();
+        assert_eq!(resolved.id, winner.id, "the winner's bot is the answer");
+    }
+
+    // ...but a constraint that fired for some other reason must not be
+    // reported as a successful connect. Here an unrelated account already
+    // holds the username the bot would take, so there is no winner to return.
+    #[test]
+    fn a_rejected_mint_with_no_winner_stays_an_error() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let owner = test_create_user(&conn); // "blake"
+        create_user(
+            &conn,
+            &CreateUser {
+                username: "opencode-blake".into(),
+                email: "squatter@example.com".into(),
+                password: "securepassword123".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
+        let err = ensure_bot(&conn, owner.id, "opencode", "OpenCode")
+            .expect_err("a username collision is still a failure");
+        assert!(
+            matches!(err, LificError::BadRequest(ref m) if m.contains("already connected")),
+            "expected the connect-conflict message, got {err:?}"
+        );
+    }
+
+    // ── migration 038: dedupe of rows minted before the index (LIF-367) ──
+
+    // Rewinds the pool to the schema-037 shape, seeds the duplicate an
+    // unguarded `ensure_bot` could produce along with rows referencing the
+    // loser, then applies 038 verbatim and checks the survivor absorbed
+    // everything.
+    //
+    // The runner (`migrate::run`) only ever applies migrations *newer* than
+    // the highest recorded version, so it cannot be asked to replay one in
+    // isolation; the migration SQL is applied directly instead, which is the
+    // same statements in the same order.
+    #[test]
+    fn migration_038_keeps_the_oldest_bot_and_repoints_every_reference() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        conn.execute_batch("DROP INDEX idx_users_owner_tool;").unwrap();
+
+        let owner = test_create_user(&conn);
+        raw_insert_bot(&conn, "opencode-blake", owner.id, Some("opencode")).unwrap();
+        let survivor = conn.last_insert_rowid();
+        raw_insert_bot(&conn, "opencode-oldname", owner.id, Some("opencode")).unwrap();
+        let loser = conn.last_insert_rowid();
+        assert!(loser > survivor, "the loser is the newer row");
+
+        // A bot for a different tool, and a legacy NULL-tool bot: both must be
+        // left exactly where they are.
+        raw_insert_bot(&conn, "claude-code-blake", owner.id, Some("claude-code")).unwrap();
+        let untouched = conn.last_insert_rowid();
+
+        conn.execute_batch(
+            "INSERT INTO projects (name, identifier) VALUES ('Lific', 'LIF');
+             INSERT INTO issues (project_id, sequence, title) VALUES (1, 1, 'An issue');",
+        )
+        .unwrap();
+
+        // Every user-referencing column in the schema, pointed at the loser.
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, user_id) VALUES ('k', 'h', ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) VALUES ('t', ?1, datetime('now', '+1 day'))",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO comments (issue_id, user_id, content) VALUES (1, ?1, 'hi')",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO comment_mentions (comment_id, user_id) VALUES (1, ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachments (sha256, filename, mime, size_bytes, uploader_id)
+             VALUES ('abc', 'f.png', 'image/png', 1, ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute("UPDATE projects SET lead_user_id = ?1", params![loser])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+             VALUES ('c', 'Test', '[\"http://localhost\"]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, user_id)
+             VALUES ('tok', 'c', datetime('now', '+1 hour'), ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, expires_at, user_id)
+             VALUES ('code', 'c', 'http://localhost', 'ch', datetime('now', '+1 hour'), ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_device_codes (device_code_hash, user_code, expires_at, user_id)
+             VALUES ('dh', 'ABCD-EFGH', datetime('now', '+1 hour'), ?1)",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (actor_user_id, transport, entity_type, entity_id, action, field)
+             VALUES (?1, 'mcp', 'issue', 1, 'create', 'seeded')",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO saved_views (project_id, user_id, name, config) VALUES (1, ?1, 'Mine', '{}')",
+            params![loser],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_groups (user_id, name) VALUES (?1, 'Work')",
+            params![loser],
+        )
+        .unwrap();
+        // Both rows are members of the same project, at different roles, and
+        // the *loser* holds the stronger one. Collapsing the pair must keep
+        // the privilege, not whichever row happened to survive.
+        conn.execute(
+            "INSERT INTO project_members (project_id, user_id, role) VALUES (1, ?1, 'viewer')",
+            params![survivor],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_members (project_id, user_id, role) VALUES (1, ?1, 'lead')",
+            params![loser],
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!("../../../migrations/038_bot_identity_unique.sql"))
+            .unwrap();
+
+        // The loser is gone, the survivor and the unrelated bot are not.
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM users WHERE is_bot = 1 ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec![survivor, untouched]);
+
+        let owns = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(owns("SELECT user_id FROM api_keys"), survivor);
+        assert_eq!(owns("SELECT user_id FROM sessions"), survivor);
+        assert_eq!(owns("SELECT user_id FROM comments"), survivor);
+        assert_eq!(owns("SELECT user_id FROM comment_mentions"), survivor);
+        assert_eq!(owns("SELECT uploader_id FROM attachments"), survivor);
+        assert_eq!(owns("SELECT lead_user_id FROM projects"), survivor);
+        assert_eq!(owns("SELECT user_id FROM oauth_tokens"), survivor);
+        assert_eq!(owns("SELECT user_id FROM oauth_codes"), survivor);
+        assert_eq!(owns("SELECT user_id FROM oauth_device_codes"), survivor);
+        assert_eq!(
+            owns("SELECT actor_user_id FROM audit_log WHERE field = 'seeded'"),
+            survivor
+        );
+        assert_eq!(owns("SELECT user_id FROM saved_views"), survivor);
+        assert_eq!(owns("SELECT user_id FROM project_groups"), survivor);
+        assert_eq!(
+            owns(&format!(
+                "SELECT COUNT(*) FROM audit_log WHERE actor_user_id = {loser}"
+            )),
+            0,
+            "nothing is still attributed to the deleted row"
+        );
+
+        // One membership left, carrying the stronger of the two roles.
+        let members: Vec<(i64, String)> = conn
+            .prepare("SELECT user_id, role FROM project_members")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(members, vec![(survivor, "lead".to_string())]);
+
+        // And the constraint is now in force.
+        let err = raw_insert_bot(&conn, "opencode-third", owner.id, Some("opencode"))
+            .expect_err("038 leaves the pair unique");
+        assert!(is_constraint_err(&err), "got {err:?}");
+    }
+
+    // Where a row cannot simply be repointed because the survivor already
+    // holds one for the same unique key, nothing may be silently thrown away:
+    // roles merge upward, group items are reparented, and views that only
+    // share a name are renamed rather than dropped. Three duplicate bots, so
+    // the loser-versus-loser collisions are covered too.
+    #[test]
+    fn migration_038_merges_colliding_rows_instead_of_dropping_them() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        conn.execute_batch("DROP INDEX idx_users_owner_tool;").unwrap();
+
+        let owner = test_create_user(&conn);
+        raw_insert_bot(&conn, "opencode-blake", owner.id, Some("opencode")).unwrap();
+        let survivor = conn.last_insert_rowid();
+        raw_insert_bot(&conn, "opencode-second", owner.id, Some("opencode")).unwrap();
+        let loser_a = conn.last_insert_rowid();
+        raw_insert_bot(&conn, "opencode-third", owner.id, Some("opencode")).unwrap();
+        let loser_b = conn.last_insert_rowid();
+
+        conn.execute_batch(
+            "INSERT INTO projects (name, identifier) VALUES ('One', 'ONE'), ('Two', 'TWO');",
+        )
+        .unwrap();
+
+        // Roles: the survivor is a viewer where a loser leads, and a loser
+        // holds the only membership of the second project.
+        for (project, user, role) in [
+            (1, survivor, "viewer"),
+            (1, loser_a, "lead"),
+            (2, loser_b, "maintainer"),
+        ] {
+            conn.execute(
+                "INSERT INTO project_members (project_id, user_id, role) VALUES (?1, ?2, ?3)",
+                params![project, user, role],
+            )
+            .unwrap();
+        }
+
+        // Groups: 'Work' exists three times over, each holding items; 'Solo'
+        // belongs to a loser alone.
+        for (id, user, name) in [
+            (100, survivor, "Work"),
+            (200, loser_a, "Work"),
+            (300, loser_a, "Solo"),
+            (400, loser_b, "Work"),
+        ] {
+            conn.execute(
+                "INSERT INTO project_groups (id, user_id, name) VALUES (?1, ?2, ?3)",
+                params![id, user, name],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO project_group_items (group_id, project_id)
+             VALUES (100, 1), (200, 1), (200, 2), (300, 2), (400, 2);",
+        )
+        .unwrap();
+
+        // Views: one name, three different configs, plus a loser-only view.
+        for (id, user, name, config) in [
+            (1, survivor, "Mine", "{\"a\":1}"),
+            (2, loser_a, "Mine", "{\"b\":2}"),
+            (3, loser_a, "Solo", "{}"),
+            (4, loser_b, "Mine", "{\"c\":3}"),
+        ] {
+            conn.execute(
+                "INSERT INTO saved_views (id, project_id, user_id, name, config)
+                 VALUES (?1, 1, ?2, ?3, ?4)",
+                params![id, user, name, config],
+            )
+            .unwrap();
+        }
+
+        conn.execute_batch(include_str!("../../../migrations/038_bot_identity_unique.sql"))
+            .unwrap();
+
+        // The strongest role wins per project; nothing is dropped.
+        let members: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT project_id, user_id, role FROM project_members ORDER BY project_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            members,
+            vec![
+                (1, survivor, "lead".to_string()),
+                (2, survivor, "maintainer".to_string()),
+            ]
+        );
+
+        // The three 'Work' groups collapse into the survivor's, and every
+        // project that was in any of them is still in the one that remains.
+        let groups: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT id, user_id, name FROM project_groups ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                (100, survivor, "Work".to_string()),
+                (300, survivor, "Solo".to_string()),
+            ]
+        );
+        let items: Vec<(i64, i64)> = conn
+            .prepare("SELECT group_id, project_id FROM project_group_items ORDER BY group_id, project_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            items,
+            vec![(100, 1), (100, 2), (300, 2)],
+            "the reparented item survived and the duplicate collapsed"
+        );
+
+        // Every view survives with its own config; the name clash is resolved
+        // by suffixing the newer rows, not by deleting them.
+        let views: Vec<(i64, i64, String, String)> = conn
+            .prepare("SELECT id, user_id, name, config FROM saved_views ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            views,
+            vec![
+                (1, survivor, "Mine".to_string(), "{\"a\":1}".to_string()),
+                (
+                    2,
+                    survivor,
+                    "Mine (merged 2)".to_string(),
+                    "{\"b\":2}".to_string()
+                ),
+                (3, survivor, "Solo".to_string(), "{}".to_string()),
+                (
+                    4,
+                    survivor,
+                    "Mine (merged 4)".to_string(),
+                    "{\"c\":3}".to_string()
+                ),
+            ]
+        );
+
+        // Both losers are gone and no reference dangles.
+        let bots: Vec<i64> = conn
+            .prepare("SELECT id FROM users WHERE is_bot = 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(bots, vec![survivor], "{loser_a} and {loser_b} merged away");
+        let dangling: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(dangling, 0, "no foreign key left pointing at a deleted row");
     }
 
     // ── disconnect/delete bot credential revocation (LIFIC-13 follow-up) ──

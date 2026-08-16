@@ -180,6 +180,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "users tool id",
         include_str!("../../migrations/037_users_tool_id.sql"),
     ),
+    (
+        38,
+        "bot identity unique",
+        include_str!("../../migrations/038_bot_identity_unique.sql"),
+    ),
 ];
 
 /// Highest migration version this binary knows how to apply. Used by

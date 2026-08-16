@@ -10369,9 +10369,14 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let bot = {
             let conn = m.db.write().unwrap();
-            let bot =
-                crate::db::queries::users::create_bot_user(&conn, maintainer.id, "bot1", "bot1")
-                    .unwrap();
+            let bot = crate::db::queries::users::create_bot_user(
+                &conn,
+                maintainer.id,
+                "bot1",
+                "bot1",
+                None,
+            )
+            .unwrap();
             models::AuthUser {
                 id: bot.id,
                 username: bot.username,

@@ -474,7 +474,8 @@ mod tests {
     fn seed_bot(conn: &Connection, username: &str, owner_id: Option<i64>) -> AuthUser {
         match owner_id {
             Some(owner) => {
-                let bot = queries::users::create_bot_user(conn, owner, username, username).unwrap();
+                let bot =
+                    queries::users::create_bot_user(conn, owner, username, username, None).unwrap();
                 AuthUser {
                     id: bot.id,
                     username: bot.username,
