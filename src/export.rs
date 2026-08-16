@@ -118,16 +118,22 @@ pub fn export_project(conn: &Connection, identifier: &str) -> Result<ExportBundl
     })
 }
 
+/// Write a bundle's files under `target_dir`, one file per
+/// [`ExportFile::path`].
+///
+/// The paths are not trusted. A local SQL export builds them itself, but the
+/// CLI's HTTP backend deserializes the very same bundle from a remote
+/// server's JSON (LIF-341), so every path is checked here rather than at the
+/// call sites: anything that could land outside `target_dir` (an absolute
+/// path, a `..` segment, a platform prefix, a symlinked directory already
+/// sitting in the output tree) is rejected instead of written.
 pub fn write_bundle_to_directory(
     bundle: &ExportBundle,
     target_dir: &Path,
 ) -> Result<Vec<PathBuf>, LificError> {
     let mut written = Vec::new();
     for file in &bundle.files {
-        let full_path = target_dir.join(&file.path);
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
-        }
+        let full_path = prepare_output_path(target_dir, &file.path)?;
         std::fs::write(&full_path, &file.content).map_err(io_error)?;
         written.push(full_path);
     }
@@ -144,31 +150,125 @@ pub fn write_bundle_to_directory(
 ///
 /// Entry names come off the network, so they are checked rather than
 /// trusted. Anything that could climb out of `target_dir` (an absolute path,
-/// a `..` segment, a Windows drive prefix) is rejected instead of written.
+/// a `..` segment, a Windows drive prefix, a symlink in the output tree) is
+/// rejected instead of written, and the archive itself is capped so a hostile
+/// server cannot fill the disk with a zip bomb.
 pub fn unpack_zip_to_directory(
     archive: &[u8],
     target_dir: &Path,
 ) -> Result<Vec<PathBuf>, LificError> {
+    unpack_zip_with_limits(archive, target_dir, &UnpackLimits::default())
+}
+
+/// How much of an archive we are willing to expand onto the caller's disk.
+struct UnpackLimits {
+    max_entries: usize,
+    max_bytes: u64,
+}
+
+impl Default for UnpackLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_ARCHIVE_ENTRIES,
+            max_bytes: MAX_ARCHIVE_BYTES,
+        }
+    }
+}
+
+/// A project export is a few thousand markdown files at the very outside.
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+
+/// Total expanded bytes, not compressed bytes: the compressed size is what a
+/// zip bomb makes small.
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn unpack_zip_with_limits(
+    archive: &[u8],
+    target_dir: &Path,
+    limits: &UnpackLimits,
+) -> Result<Vec<PathBuf>, LificError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(archive)).map_err(zip_error)?;
+    if zip.len() > limits.max_entries {
+        return Err(LificError::BadRequest(format!(
+            "export archive holds {} entries, more than the {} allowed",
+            zip.len(),
+            limits.max_entries
+        )));
+    }
+
     let mut written = Vec::new();
+    let mut expanded: u64 = 0;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(zip_error)?;
         if entry.is_dir() {
             continue;
         }
-        let full_path = target_dir.join(contained_path(entry.name())?);
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
+        let full_path = prepare_output_path(target_dir, entry.name())?;
+
+        // Read through a limited reader: `entry.size()` is the archive's own
+        // claim about the entry, so it decides neither how much we allocate
+        // nor how much we accept.
+        let remaining = limits.max_bytes - expanded;
+        let mut content = Vec::new();
+        let read = entry
+            .by_ref()
+            .take(remaining.saturating_add(1))
+            .read_to_end(&mut content)
+            .map_err(io_error)? as u64;
+        if read > remaining {
+            return Err(LificError::BadRequest(format!(
+                "export archive expands past the {} byte limit",
+                limits.max_bytes
+            )));
         }
-        let mut content = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut content).map_err(io_error)?;
+        expanded += read;
+
         std::fs::write(&full_path, &content).map_err(io_error)?;
         written.push(full_path);
     }
     Ok(written)
 }
 
-/// Reduce an archive entry name to a relative path that cannot escape the
+/// Resolve an untrusted export path against `target_dir` and create the
+/// directories leading to it, refusing anything that would write outside the
+/// tree the user asked to export into.
+///
+/// Three checks, because the obvious one is not enough. [`contained_path`]
+/// rejects the path lexically. Then every component that already exists is
+/// tested for being a symlink, since a lexically contained path can still be
+/// redirected by a link sitting in the output tree. Finally the created
+/// parent is canonicalized and required to stay under the canonical
+/// `target_dir`, which catches whatever the component walk did not.
+fn prepare_output_path(target_dir: &Path, name: &str) -> Result<PathBuf, LificError> {
+    let relative = contained_path(name)?;
+
+    let mut current = target_dir.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if let Ok(metadata) = std::fs::symlink_metadata(&current)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(LificError::BadRequest(format!(
+                "export entry '{name}' would write through a symlink in the output directory"
+            )));
+        }
+    }
+
+    let full_path = target_dir.join(&relative);
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_error)?;
+        let canonical_root = std::fs::canonicalize(target_dir).map_err(io_error)?;
+        let canonical_parent = std::fs::canonicalize(parent).map_err(io_error)?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(LificError::BadRequest(format!(
+                "export entry '{name}' would write outside the output directory"
+            )));
+        }
+    }
+    Ok(full_path)
+}
+
+/// Reduce an export path to a relative path that cannot escape the
 /// directory it will be joined onto.
 fn contained_path(name: &str) -> Result<PathBuf, LificError> {
     let mut contained = PathBuf::new();
@@ -178,14 +278,14 @@ fn contained_path(name: &str) -> Result<PathBuf, LificError> {
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(LificError::BadRequest(format!(
-                    "export archive entry '{name}' would write outside the output directory"
+                    "export entry '{name}' would write outside the output directory"
                 )));
             }
         }
     }
     if contained.as_os_str().is_empty() {
         return Err(LificError::BadRequest(format!(
-            "export archive entry '{name}' has no file name"
+            "export entry '{name}' has no file name"
         )));
     }
     Ok(contained)
@@ -602,6 +702,196 @@ mod tests {
                 "unexpected error for '{escape}': {error}"
             );
         }
+    }
+
+    /// The CLI's HTTP backend hands `write_bundle_to_directory` a bundle it
+    /// deserialized from a remote server, so the JSON path needs the same
+    /// containment the archive path has: a hostile `path` must not plant a
+    /// file next to the directory the user asked to export into.
+    #[test]
+    fn refuses_bundle_files_that_climb_out_of_the_output_directory() {
+        for escape in ["../escaped.md", "EXP/../../escaped.md", "../../escaped.md"] {
+            let root = scratch_dir("bundle-json-escape");
+            let output = root.path().join("out");
+            std::fs::create_dir_all(&output).unwrap();
+
+            let error = write_bundle_to_directory(
+                &ExportBundle {
+                    root: "EXP".into(),
+                    files: vec![ExportFile {
+                        path: escape.into(),
+                        content: "owned".into(),
+                    }],
+                },
+                &output,
+            )
+            .expect_err("'{escape}' should be rejected");
+            assert!(
+                error.to_string().contains("outside the output directory"),
+                "unexpected error for '{escape}': {error}"
+            );
+            assert!(
+                !root.path().join("escaped.md").exists(),
+                "'{escape}' wrote outside the output directory"
+            );
+            assert!(
+                !root.path().parent().unwrap().join("escaped.md").exists(),
+                "'{escape}' wrote outside the output directory"
+            );
+        }
+    }
+
+    /// An absolute path would ignore the output directory entirely, so it is
+    /// rejected rather than silently rewritten.
+    #[test]
+    fn refuses_bundle_files_with_absolute_paths() {
+        let output = scratch_dir("bundle-json-absolute");
+        let error = write_bundle_to_directory(
+            &ExportBundle {
+                root: "EXP".into(),
+                files: vec![ExportFile {
+                    path: "/tmp/lific-absolute-escape.md".into(),
+                    content: "owned".into(),
+                }],
+            },
+            output.path(),
+        )
+        .expect_err("an absolute path should be rejected");
+        assert!(
+            error.to_string().contains("outside the output directory"),
+            "unexpected error: {error}"
+        );
+        assert!(!Path::new("/tmp/lific-absolute-escape.md").exists());
+    }
+
+    /// Containment by string inspection alone is not enough: `EXP/evil.md` is
+    /// a perfectly relative path, and still escapes if `EXP` is a symlink
+    /// pointing somewhere else.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_bundle_files_that_write_through_a_symlink() {
+        let root = scratch_dir("bundle-symlink");
+        let output = root.path().join("out");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, output.join("EXP")).unwrap();
+
+        let error = write_bundle_to_directory(
+            &ExportBundle {
+                root: "EXP".into(),
+                files: vec![ExportFile {
+                    path: "EXP/evil.md".into(),
+                    content: "owned".into(),
+                }],
+            },
+            &output,
+        )
+        .expect_err("a symlinked directory should be rejected");
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !elsewhere.join("evil.md").exists(),
+            "the write followed the symlink out of the output directory"
+        );
+    }
+
+    /// Same protection on the archive path, where the symlink can be planted
+    /// by an earlier entry of the very same archive.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_archive_entries_that_write_through_a_symlink() {
+        let root = scratch_dir("archive-symlink");
+        let output = root.path().join("out");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, output.join("EXP")).unwrap();
+
+        let archive = bundle_to_zip(&ExportBundle {
+            root: "EXP".into(),
+            files: vec![ExportFile {
+                path: "EXP/evil.md".into(),
+                content: "owned".into(),
+            }],
+        })
+        .unwrap();
+
+        let error = unpack_zip_to_directory(&archive, &output)
+            .expect_err("a symlinked directory should be rejected");
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected error: {error}"
+        );
+        assert!(!elsewhere.join("evil.md").exists());
+    }
+
+    /// A server that answers an export with a million entries should not turn
+    /// into a million files on the caller's disk.
+    #[test]
+    fn refuses_archives_with_too_many_entries() {
+        let archive = bundle_to_zip(&ExportBundle {
+            root: "EXP".into(),
+            files: (0..4)
+                .map(|index| ExportFile {
+                    path: format!("EXP/issues/exp-{index}.md"),
+                    content: "body".into(),
+                })
+                .collect(),
+        })
+        .unwrap();
+
+        let output = scratch_dir("archive-entry-cap");
+        let error = unpack_zip_with_limits(
+            &archive,
+            output.path(),
+            &UnpackLimits {
+                max_entries: 3,
+                max_bytes: MAX_ARCHIVE_BYTES,
+            },
+        )
+        .expect_err("an over-long archive should be rejected");
+        assert!(
+            error.to_string().contains("more than the 3 allowed"),
+            "unexpected error: {error}"
+        );
+        assert!(!output.path().join("EXP").exists());
+    }
+
+    /// The compressed size says nothing about the expanded size, so the cap
+    /// counts what actually lands on disk.
+    #[test]
+    fn refuses_archives_that_expand_past_the_size_limit() {
+        let archive = bundle_to_zip(&ExportBundle {
+            root: "EXP".into(),
+            files: (0..3)
+                .map(|index| ExportFile {
+                    path: format!("EXP/issues/exp-{index}.md"),
+                    content: "x".repeat(100),
+                })
+                .collect(),
+        })
+        .unwrap();
+
+        let output = scratch_dir("archive-byte-cap");
+        let error = unpack_zip_with_limits(
+            &archive,
+            output.path(),
+            &UnpackLimits {
+                max_entries: MAX_ARCHIVE_ENTRIES,
+                max_bytes: 150,
+            },
+        )
+        .expect_err("an over-large archive should be rejected");
+        assert!(
+            error.to_string().contains("past the 150 byte limit"),
+            "unexpected error: {error}"
+        );
+        // The first entry fit under the cap; the second is what tripped it.
+        assert!(output.path().join("EXP/issues/exp-0.md").exists());
+        assert!(!output.path().join("EXP/issues/exp-2.md").exists());
     }
 
     /// Unique per call, so these tests can run beside each other. The guard
