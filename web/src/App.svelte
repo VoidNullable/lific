@@ -82,7 +82,9 @@
   let realtimeActivityRevision = $state(0);
   let realtimeActivityRefresh: ReturnType<typeof setTimeout> | null = null;
   let realtimeActivityBaselineRefresh: ReturnType<typeof setInterval> | null = null;
+  let realtimeHeartbeat: ReturnType<typeof setInterval> | null = null;
   const REALTIME_ACTIVITY_BASELINE_REFRESH_MS = 3_600_000;
+  const REALTIME_HEARTBEAT_MS = 30_000;
 
   function refreshRealtimeActivity() {
     realtimeActivityRefresh = null;
@@ -203,6 +205,10 @@
     }
     realtimeDelayMs = 1000;
     realtimeNeedsResync = false;
+    if (realtimeHeartbeat) {
+      clearInterval(realtimeHeartbeat);
+      realtimeHeartbeat = null;
+    }
     resetRealtimeActivity();
     const socket = realtimeSocket;
     realtimeSocket = null;
@@ -265,6 +271,16 @@
     );
   }
 
+  function startRealtimeHeartbeat() {
+    if (realtimeHeartbeat) clearInterval(realtimeHeartbeat);
+    realtimeHeartbeat = setInterval(() => {
+      const socket = realtimeSocket;
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "heartbeat" }));
+      }
+    }, REALTIME_HEARTBEAT_MS);
+  }
+
   async function reconnectAfterFailedRealtimeAttempt(sessionToken: string | null) {
     const session = await me();
 
@@ -296,6 +312,7 @@
         dispatchRealtimeEvent({ type: "resync.required" });
       }
       startRealtimeActivityBaselineRefresh();
+      startRealtimeHeartbeat();
     });
     socket.addEventListener("message", (message) => {
       if (
@@ -331,6 +348,10 @@
     socket.addEventListener("close", () => {
       if (realtimeSocket === socket) {
         realtimeSocket = null;
+        if (realtimeHeartbeat) {
+          clearInterval(realtimeHeartbeat);
+          realtimeHeartbeat = null;
+        }
         resetRealtimeActivity();
         realtimeNeedsResync = true;
         if (opened) {

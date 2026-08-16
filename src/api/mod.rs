@@ -16,8 +16,8 @@ mod views;
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Extension, Json, Query, State, ws::WebSocketUpgrade},
-    http::{HeaderMap, header},
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{self, CorsLayer};
@@ -335,37 +335,76 @@ async fn events_ws(
     Extension(allowed_origins): Extension<Vec<String>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, LificError> {
-    let session_token = validate_websocket_request(&db, &headers, &allowed_origins)?;
-    Ok(ws.on_upgrade(move |socket| {
-        crate::realtime::serve_socket(socket, realtime, db, session_token)
-    }))
+) -> Result<Response, LificError> {
+    let validated = validate_websocket_request(&db, &headers, &allowed_origins)?;
+    let Some(slot) = realtime.try_register(validated.user.id) else {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "websocket connection limit reached" })),
+        )
+            .into_response());
+    };
+    // Realtime is server-pushed, with only the bounded
+    // `activity.baseline.request` control message accepted from clients. Cap
+    // application data far below Axum/Tungstenite's 64 MiB default so an
+    // authenticated peer cannot force large discarded message allocations.
+    Ok(ws
+        .read_buffer_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
+        .max_message_size(crate::realtime::MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(crate::realtime::MAX_CLIENT_FRAME_BYTES)
+        .on_upgrade(move |socket| {
+            crate::realtime::serve_socket(
+                socket,
+                realtime,
+                db,
+                validated.session_token,
+                validated.user,
+                slot,
+            )
+        })
+        .into_response())
+}
+
+struct ValidatedWebSocket {
+    session_token: String,
+    user: AuthUser,
 }
 
 fn validate_websocket_request(
     db: &DbPool,
     headers: &HeaderMap,
     allowed_origins: &[String],
-) -> Result<String, LificError> {
+) -> Result<ValidatedWebSocket, LificError> {
     match (
         websocket_origin_allowed(headers, allowed_origins),
         websocket_session_token(headers),
     ) {
         (false, _) => Err(LificError::Forbidden("websocket origin not allowed".into())),
         (true, None) => Err(LificError::Forbidden("authentication required".into())),
-        (true, Some(token)) => with_read(db, |conn| {
-            match crate::db::queries::users::validate_session(conn, token) {
-                Ok(_) => Ok(token.to_string()),
-                Err(LificError::BadRequest(message))
-                    if message == crate::db::queries::users::INVALID_SESSION_MESSAGE =>
-                {
-                    Err(LificError::Forbidden(
-                        crate::db::queries::users::INVALID_SESSION_MESSAGE.into(),
-                    ))
-                }
-                Err(error) => Err(error),
-            }
-        }),
+        (true, Some(token)) => {
+            with_read(
+                db,
+                |conn| match crate::db::queries::users::validate_session(conn, token) {
+                    Ok(user) => Ok(ValidatedWebSocket {
+                        session_token: token.to_string(),
+                        user: AuthUser {
+                            id: user.id,
+                            username: user.username,
+                            display_name: user.display_name,
+                            is_admin: user.is_admin,
+                        },
+                    }),
+                    Err(LificError::BadRequest(message))
+                        if message == crate::db::queries::users::INVALID_SESSION_MESSAGE =>
+                    {
+                        Err(LificError::Forbidden(
+                            crate::db::queries::users::INVALID_SESSION_MESSAGE.into(),
+                        ))
+                    }
+                    Err(error) => Err(error),
+                },
+            )
+        }
     }
 }
 
@@ -1229,6 +1268,15 @@ mod authz_gating_tests {
     use super::test_helpers::*;
     use crate::db::models::*;
     use axum::http::StatusCode;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{
+        Message,
+        client::IntoClientRequest,
+        protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        },
+    };
 
     // ── Reads: single-resource Viewer gate ──────────────────────
 
@@ -2138,6 +2186,230 @@ mod authz_gating_tests {
                 .token
         };
         (db, token)
+    }
+
+    async fn websocket_test_server(
+        db: crate::db::DbPool,
+        realtime: crate::realtime::RealtimeHub,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = super::router(db, &[]).layer(axum::Extension(realtime));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("ws://{address}/api/events/ws"), server)
+    }
+
+    fn websocket_request(url: &str, token: &str) -> axum::http::Request<()> {
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            axum::http::header::COOKIE,
+            format!("lific_token={token}").parse().unwrap(),
+        );
+        request
+    }
+
+    type TestWebSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn request_activity_baseline(socket: &mut TestWebSocket) -> i64 {
+        socket
+            .send(Message::Text(
+                r#"{"type":"activity.baseline.request"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(Message::Text(text))) = socket.next().await else {
+            panic!("expected activity baseline response");
+        };
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["day_count"]
+            .as_i64()
+            .unwrap()
+    }
+
+    async fn assert_websocket_closed(socket: &mut TestWebSocket) {
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await,
+            Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn websocket_socket_cap_rejects_before_upgrade() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+        let mut sockets = Vec::new();
+
+        for _ in 0..16 {
+            let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+            request_activity_baseline(&mut socket).await;
+            sockets.push(socket);
+        }
+
+        match tokio_tungstenite::connect_async(websocket_request(&url, &token)).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            }
+            Ok(_) => panic!("socket cap must reject before returning HTTP 101"),
+            Err(error) => panic!("expected HTTP rejection, got {error}"),
+        }
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_reuses_recent_activity_baseline() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db.clone(), realtime).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        let initial = request_activity_baseline(&mut socket).await;
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "After baseline".into(),
+                    identifier: "AFTER".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(request_activity_baseline(&mut socket).await, initial);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_closes_on_client_message_flood() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        for _ in 0..65 {
+            socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+        }
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await,
+            Ok(Some(Ok(Message::Close(_))))
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_enforces_frame_and_message_size_limits() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+
+        let (mut oversized_frame, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+        let mut valid_json = r#"{"type":"activity.baseline.request"}"#.to_owned();
+        valid_json.push_str(&" ".repeat(4 * 1024));
+        oversized_frame
+            .send(Message::Text(valid_json.into()))
+            .await
+            .unwrap();
+        assert_websocket_closed(&mut oversized_frame).await;
+
+        let (mut oversized_message, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+        oversized_message
+            .send(Message::Frame(Frame::message(
+                r#"{"type":"activity.baseline.request"}"#,
+                OpCode::Data(Data::Text),
+                false,
+            )))
+            .await
+            .unwrap();
+        for is_final in [false, false, false, true] {
+            oversized_message
+                .send(Message::Frame(Frame::message(
+                    vec![b' '; 4 * 1024],
+                    OpCode::Data(Data::Continue),
+                    is_final,
+                )))
+                .await
+                .unwrap();
+        }
+        assert_websocket_closed(&mut oversized_message).await;
+
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_closes_incomplete_fragment_after_progress_deadline() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        socket
+            .send(Message::Frame(Frame::message(
+                Vec::new(),
+                OpCode::Data(Data::Text),
+                false,
+            )))
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        assert_websocket_closed(&mut socket).await;
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_accepts_baseline_and_closes_on_invalid_payloads() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+
+        let (mut valid, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+        valid
+            .send(Message::Text(r#"{"type":"heartbeat"}"#.into()))
+            .await
+            .unwrap();
+        request_activity_baseline(&mut valid).await;
+
+        let (mut invalid_text, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+        invalid_text.send(Message::Text("{}".into())).await.unwrap();
+        assert_websocket_closed(&mut invalid_text).await;
+
+        let (mut invalid_binary, _) =
+            tokio_tungstenite::connect_async(websocket_request(&url, &token))
+                .await
+                .unwrap();
+        invalid_binary
+            .send(Message::Binary(Vec::new().into()))
+            .await
+            .unwrap();
+        assert_websocket_closed(&mut invalid_binary).await;
+
+        server.abort();
     }
 
     #[test]
