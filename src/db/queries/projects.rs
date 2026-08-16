@@ -402,6 +402,68 @@ mod tests {
         assert!(id > 0);
     }
 
+    /// LIF-348: `projects.identifier` carries `COLLATE NOCASE` (migration
+    /// 039), so a bare `identifier = ?` is case-insensitive everywhere —
+    /// no per-callsite COLLATE, and the same fix reaches issue and page
+    /// identifier resolution, which resolve their project half the same way.
+    #[test]
+    fn resolve_project_identifier_is_case_insensitive() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = create_project(
+            &conn,
+            &CreateProject {
+                name: "Lific".into(),
+                identifier: "LIF".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        for spelling in ["LIF", "lif", "Lif", "lIF"] {
+            assert_eq!(
+                resolve_project_identifier(&conn, spelling)
+                    .unwrap_or_else(|e| panic!("{spelling} should resolve: {e}")),
+                project.id
+            );
+        }
+
+        // Still whole-string matching: a prefix is not a match.
+        assert!(resolve_project_identifier(&conn, "li").is_err());
+    }
+
+    /// LIF-348: the NOCASE unique index rejects a case-variant duplicate.
+    /// `validate_identifier` gets there first for a lowercase spelling (it
+    /// only accepts uppercase), so both layers are asserted: the API-level
+    /// rejection, and the constraint itself via a raw INSERT that bypasses
+    /// validation the way a legacy row or a manual edit would.
+    #[test]
+    fn case_variant_identifier_is_rejected() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        create_project(
+            &conn,
+            &CreateProject {
+                name: "Upper".into(),
+                identifier: "ABC".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = try_create(&conn, "abc");
+        assert!(result.is_err(), "got: {result:?}");
+
+        let raw = conn.execute(
+            "INSERT INTO projects (name, identifier) VALUES ('Lower', 'abc')",
+            [],
+        );
+        assert!(
+            raw.is_err(),
+            "NOCASE unique index must reject 'abc' alongside 'ABC'"
+        );
+    }
+
     #[test]
     fn resolve_project_not_found() {
         let pool = test_db();

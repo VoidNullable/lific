@@ -185,7 +185,35 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "bot identity unique",
         include_str!("../../migrations/038_bot_identity_unique.sql"),
     ),
+    (
+        39,
+        "project identifier nocase",
+        include_str!("../../migrations/039_project_identifier_nocase.sql"),
+    ),
 ];
+
+/// Migrations that rebuild a table other tables reference by foreign key.
+///
+/// SQLite cannot change a column's collating sequence in place, so those
+/// migrations drop and recreate the table. Two connection pragmas have to be
+/// set around the rebuild, and neither can be set from inside the migration
+/// file itself:
+///
+/// * `foreign_keys = OFF` — the pragma is a silent no-op inside a transaction
+///   (and the migration runs in a savepoint). Without it, `DROP TABLE parent`
+///   performs an implicit `DELETE FROM` that fires `ON DELETE CASCADE` and
+///   takes every child row with it.
+/// * `legacy_alter_table = ON` — otherwise `ALTER TABLE x RENAME TO parent`
+///   reparses every trigger in the schema and fails with "error in trigger
+///   audit_issues_insert: no such table: main.projects", since the old table
+///   is already gone by then. Legacy mode also leaves child `REFERENCES`
+///   clauses alone, which is what we want: ids are preserved verbatim.
+///
+/// This is the standard SQLite table-rebuild procedure. The migration still
+/// runs inside its savepoint, so it remains atomic, and a
+/// `PRAGMA foreign_key_check` inside that savepoint rolls the whole thing back
+/// if the rebuild somehow orphaned a row.
+const FK_REBUILD_MIGRATIONS: &[i64] = &[39];
 
 /// Highest migration version this binary knows how to apply. Used by
 /// `lific dump`/`restore` (LIF-266) to stamp and gate archives on schema
@@ -216,15 +244,44 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     for &(version, name, sql) in MIGRATIONS {
         if version > current_version {
             info!(version, name, "applying migration");
+            let rebuild = FK_REBUILD_MIGRATIONS.contains(&version);
+            if rebuild {
+                conn.execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     PRAGMA legacy_alter_table = ON;",
+                )?;
+            }
             let sp = format!("migrate_v{version}");
-            crate::db::queries::savepoint(conn, &sp, || {
+            let applied = crate::db::queries::savepoint(conn, &sp, || {
                 conn.execute_batch(sql)?;
+                if rebuild {
+                    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+                    let mut rows = stmt.query([])?;
+                    if rows.next()?.is_some() {
+                        return Err(crate::error::LificError::Internal(format!(
+                            "migration {version} ({name}) left dangling foreign key references"
+                        )));
+                    }
+                }
                 conn.execute(
                     "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
                     rusqlite::params![version, name],
                 )?;
                 Ok(())
-            })?;
+            });
+            // Restore the pragmas whether the rebuild succeeded or not — the
+            // connection outlives this function and every other caller assumes
+            // foreign keys are enforced.
+            let restored = if rebuild {
+                conn.execute_batch(
+                    "PRAGMA foreign_keys = ON;
+                     PRAGMA legacy_alter_table = OFF;",
+                )
+            } else {
+                Ok(())
+            };
+            applied?;
+            restored?;
         }
     }
 
@@ -244,4 +301,193 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database in the exact state a real instance is in just before
+    /// migration `stop`: every earlier migration applied and stamped. The
+    /// pool helpers (`db::open_memory`) always run the full set, so this is
+    /// the only way to exercise an upgrade path's data handling.
+    fn migrated_up_to(stop: i64) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _migrations (
+                version    INTEGER PRIMARY KEY,
+                name       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .unwrap();
+        for &(version, name, sql) in MIGRATIONS {
+            if version >= stop {
+                break;
+            }
+            conn.execute_batch(sql)
+                .unwrap_or_else(|e| panic!("migration {version} ({name}): {e}"));
+            conn.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                rusqlite::params![version, name],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn identifiers(conn: &Connection) -> Vec<(i64, String)> {
+        let mut stmt = conn
+            .prepare("SELECT id, identifier FROM projects ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// LIF-348: migration 039 puts a NOCASE unique index on
+    /// `projects.identifier`, so a legacy database holding both `ABCDE` and
+    /// `abcde` has to be deduplicated on the way through — and the migration
+    /// runs at startup, so a UNIQUE violation here would be an instance that
+    /// refuses to boot.
+    ///
+    /// The two collision groups are the case an earlier `base || rn` scheme
+    /// got wrong: `ABCDE`/`abcde` and `ABCDF`/`abcdf` both truncate to
+    /// `ABCD2` at the 5-character limit, so the two *generated* names
+    /// collided with each other even though neither collided with anything
+    /// that already existed. `P1` and `P2` are seeded to push the synthetic
+    /// names off their first choice as well.
+    #[test]
+    fn project_identifier_rebuild_resolves_case_collisions_without_losing_rows() {
+        let conn = migrated_up_to(39);
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, identifier) VALUES
+                 (1, 'Upper E',  'ABCDE'),
+                 (2, 'Lower E',  'abcde'),
+                 (3, 'Upper F',  'ABCDF'),
+                 (4, 'Lower F',  'abcdf'),
+                 (5, 'Taken P1', 'P1'),
+                 (6, 'Taken P2', 'P2'),
+                 (7, 'Lific',    'LIF');
+             INSERT INTO issues (project_id, sequence, title) VALUES
+                 (1, 1, 'keeps its project'),
+                 (2, 1, 'renamed project'),
+                 (4, 1, 'renamed project'),
+                 (7, 1, 'untouched project');
+             INSERT INTO modules (project_id, name) VALUES (2, 'a module');",
+        )
+        .unwrap();
+
+        run(&conn).expect("migration 039 must not abort on case collisions");
+
+        // Oldest row of each group keeps its identifier; the later colliders
+        // (ids 2 and 4, ranked k=1 and k=2) land on Q1/Q2 because P1/P2 are
+        // already taken.
+        assert_eq!(
+            identifiers(&conn),
+            vec![
+                (1, "ABCDE".to_string()),
+                (2, "Q1".to_string()),
+                (3, "ABCDF".to_string()),
+                (4, "Q2".to_string()),
+                (5, "P1".to_string()),
+                (6, "P2".to_string()),
+                (7, "LIF".to_string()),
+            ]
+        );
+
+        // Nothing was cascaded away by the rebuild's DROP TABLE.
+        let issues: i64 = conn
+            .query_row("SELECT count(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        let modules: i64 = conn
+            .query_row("SELECT count(*) FROM modules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((issues, modules), (4, 1));
+
+        // Identifiers are unique case-insensitively, and lookups now are too.
+        let distinct: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT lower(identifier)) FROM projects",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct, 7);
+        for spelling in ["LIF", "lif", "Lif"] {
+            let id: i64 = conn
+                .query_row(
+                    "SELECT id FROM projects WHERE identifier = ?1",
+                    rusqlite::params![spelling],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|e| panic!("{spelling} should resolve: {e}"));
+            assert_eq!(id, 7);
+        }
+
+        // The rebuild's pragmas were restored: enforcement is back on, so a
+        // dangling reference is rejected and a delete still cascades.
+        let fk_on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fk_on, 1);
+        assert!(
+            conn.execute(
+                "INSERT INTO issues (project_id, sequence, title) VALUES (999, 1, 'orphan')",
+                [],
+            )
+            .is_err(),
+            "foreign key enforcement must be restored after the rebuild"
+        );
+        conn.execute("DELETE FROM projects WHERE id = 2", [])
+            .unwrap();
+        let issues: i64 = conn
+            .query_row("SELECT count(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        let modules: i64 = conn
+            .query_row("SELECT count(*) FROM modules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (issues, modules),
+            (3, 0),
+            "ON DELETE CASCADE must still fire"
+        );
+    }
+
+    /// The happy path: a database with no case collisions passes through the
+    /// rebuild with every identifier byte-identical, and the new column
+    /// collation makes an existing identifier unrepeatable in any casing.
+    #[test]
+    fn project_identifier_rebuild_is_a_no_op_without_collisions() {
+        let conn = migrated_up_to(39);
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, identifier, sort_order) VALUES
+                 (1, 'Lific', 'LIF', 3),
+                 (2, 'Other', 'OTH', 1);",
+        )
+        .unwrap();
+
+        run(&conn).expect("migration 039");
+
+        assert_eq!(
+            identifiers(&conn),
+            vec![(1, "LIF".to_string()), (2, "OTH".to_string())]
+        );
+        let sort_order: i64 = conn
+            .query_row("SELECT sort_order FROM projects WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sort_order, 3, "columns added by later migrations survive");
+        assert!(
+            conn.execute(
+                "INSERT INTO projects (name, identifier) VALUES ('Dup', 'lif')",
+                [],
+            )
+            .is_err(),
+            "the unique index must now be case-insensitive"
+        );
+    }
 }

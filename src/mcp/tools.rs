@@ -4150,18 +4150,29 @@ mod tests {
         )
     }
 
+    /// LIF-348: project identifiers resolve case-insensitively, like every
+    /// other name in the system (modules, folders, usernames, emails). The
+    /// `COLLATE NOCASE` on `projects.identifier` (migration 039) does it, so
+    /// `resolve_project` gains this for free — no per-callsite COLLATE.
+    /// Matching stays whole-string: a prefix is still not a match.
     #[test]
-    fn project_resolver_matches_exact_identifiers_only() {
+    fn project_resolver_matches_identifiers_case_insensitively() {
         let (m, _guard) = mcp();
         seed_project(&m, "Resolver Project", "RSL");
 
-        assert!(
-            resolve_project(&m.read_conn().unwrap(), "RSL")
-                .expect("exact identifier should resolve")
-                > 0
-        );
+        let canonical = resolve_project(&m.read_conn().unwrap(), "RSL")
+            .expect("exact identifier should resolve");
+        assert!(canonical > 0);
 
-        for identifier in ["rsl", "RS", "MISSING"] {
+        for identifier in ["rsl", "Rsl", "rSL"] {
+            assert_eq!(
+                resolve_project(&m.read_conn().unwrap(), identifier)
+                    .unwrap_or_else(|e| panic!("{identifier} should resolve: {e}")),
+                canonical
+            );
+        }
+
+        for identifier in ["RS", "RSLX", "MISSING"] {
             let error = resolve_project(&m.read_conn().unwrap(), identifier)
                 .expect_err("identifier should not resolve");
             assert!(
@@ -4169,6 +4180,77 @@ mod tests {
                 "got: {error}"
             );
         }
+    }
+
+    /// LIF-348: the case-insensitive project half must not blur issue or page
+    /// identifiers into each other. `LIF-DOC-3` is a page, `LIF-3` an issue,
+    /// and both resolve through the same NOCASE project lookup — the `DOC`
+    /// marker (reserved by `validate_identifier`) keeps them apart no matter
+    /// how the caller cases the string.
+    #[test]
+    fn issue_and_page_identifiers_resolve_case_insensitively_without_ambiguity() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Case Project", "CSE");
+
+        let issue = m
+            .write(|conn| {
+                queries::create_issue(
+                    conn,
+                    &models::CreateIssue {
+                        project_id: project_id_for(&m, "CSE"),
+                        title: "An issue".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("issue");
+        let page = m
+            .write(|conn| {
+                queries::create_page(
+                    conn,
+                    &models::CreatePage {
+                        project_id: Some(project_id_for(&m, "CSE")),
+                        title: "A page".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("page");
+        let page_sequence = page.sequence.expect("project page has a sequence");
+
+        for spelling in ["CSE", "cse", "Cse"] {
+            assert_eq!(
+                m.read(|conn| queries::resolve_identifier(
+                    conn,
+                    &format!("{spelling}-{}", issue.sequence)
+                ))
+                .unwrap_or_else(|e| panic!("issue {spelling} should resolve: {e}")),
+                issue.id
+            );
+            assert_eq!(
+                m.read(|conn| queries::resolve_page_identifier(
+                    conn,
+                    &format!("{spelling}-DOC-{page_sequence}")
+                ))
+                .unwrap_or_else(|e| panic!("page {spelling} should resolve: {e}")),
+                page.id
+            );
+        }
+
+        // The page identifier is not an issue identifier, and vice versa.
+        assert!(
+            m.read(|conn| queries::resolve_identifier(conn, &format!("cse-DOC-{page_sequence}")))
+                .is_err(),
+            "page identifier must not resolve as an issue"
+        );
+        assert!(
+            m.read(|conn| queries::resolve_page_identifier(
+                conn,
+                &format!("cse-{}", issue.sequence)
+            ))
+            .is_err(),
+            "issue identifier must not resolve as a page"
+        );
     }
 
     #[test]
