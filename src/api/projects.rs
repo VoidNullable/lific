@@ -613,6 +613,40 @@ mod tests {
         assert_eq!(board["unassigned"].as_array().unwrap().len(), 1);
     }
 
+    /// LIF-364 (dr.leech's report): with `authz_enforced` ON, an instance
+    /// admin must see every project in `GET /api/projects` — including ones
+    /// they are not a member of — while a plain non-member sees none. This
+    /// pins the full REST stack (identity extension → visible_project_ids →
+    /// filter_visible), not just the authz unit.
+    #[tokio::test]
+    async fn enforced_admin_sees_all_projects_non_member_sees_none() {
+        let (db, admin, _lead, _maint, _viewer, non_member, project_id) =
+            setup_membership_test();
+
+        let resp = json_get(&app_as_user(db.clone(), &admin), "/api/projects").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let projects = parse_json(resp).await;
+        let ids: Vec<i64> = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_i64().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&project_id),
+            "admin (non-member) must see the project, got {ids:?}"
+        );
+
+        let resp = json_get(&app_as_user(db, &non_member), "/api/projects").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let projects = parse_json(resp).await;
+        assert_eq!(
+            projects.as_array().unwrap().len(),
+            0,
+            "plain non-member must see no projects under enforcement"
+        );
+    }
+
     // ── Project lead permission tests ────────────────────────
 
     #[tokio::test]

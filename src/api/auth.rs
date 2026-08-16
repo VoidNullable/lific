@@ -42,7 +42,10 @@ fn clear_cookie(secure: bool) -> String {
 // ── Auth endpoints ───────────────────────────────────────────
 
 /// Public signup request — intentionally excludes is_admin and is_bot
-/// to prevent privilege escalation. Those can only be set via CLI.
+/// to prevent privilege escalation. Those can only be set via CLI, with one
+/// carve-out: the first user on a zero-user instance is granted admin by the
+/// handler itself (LIF-364), because a client-supplied flag and a
+/// server-decided bootstrap are different threat models.
 #[derive(serde::Deserialize)]
 pub(super) struct SignupRequest {
     username: String,
@@ -106,6 +109,19 @@ pub(super) async fn auth_signup(
         }
     }
 
+    // LIF-364: the first account on a zero-user instance becomes the
+    // instance admin (the standard self-hosted bootstrap: Immich, Portainer,
+    // Grafana all do this). Without it a web-signup-only instance has NO
+    // admin and no way to mint one short of `lific user promote` on the
+    // server's shell — which is how dr.leech ended up unable to see his own
+    // agents' projects under enforced authz. LIF-209's "signup never grants
+    // admin" rationale (privilege escalation by a stranger) doesn't apply to
+    // user #1 on an empty instance: whoever reaches an open-signup empty
+    // instance first owns it in every way that matters. Any pre-existing
+    // user (CLI-created included) disables the grant, and we're inside the
+    // single write connection so the count can't race a concurrent signup.
+    let is_first_user: bool = conn.query_row("SELECT COUNT(*) = 0 FROM users", [], |r| r.get(0))?;
+
     let user = crate::db::queries::users::create_user(
         &conn,
         &CreateUser {
@@ -113,7 +129,7 @@ pub(super) async fn auth_signup(
             email: input.email,
             password: input.password,
             display_name: input.display_name,
-            is_admin: false,
+            is_admin: is_first_user,
             is_bot: false,
         },
     )?;
@@ -790,6 +806,98 @@ mod tests {
         assert_eq!(data["user"]["username"], "blake");
         assert!(data["token"].as_str().unwrap().starts_with("lific_sess_"));
         assert!(data["expires_at"].as_str().is_some());
+    }
+
+    /// A router over a genuinely EMPTY database — no seeded admin fixture —
+    /// because the LIF-364 bootstrap tests are about what happens on an
+    /// instance where web signup is the first thing that ever creates a user.
+    fn zero_user_app(db: crate::db::DbPool) -> axum::Router {
+        with_client_ip_test_layers(
+            with_attachment_layers(crate::api::router(db, &[])),
+            test_peer(),
+        )
+        .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+        .layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            required: false,
+            secure_cookies: false,
+        }))
+    }
+
+    /// LIF-364: the first signup on a zero-user instance bootstraps as
+    /// instance admin; every later signup is a plain user. Without this a
+    /// web-signup-only instance has no admin at all, and under the
+    /// enforced-authz default (LIF-261 seeds it ON for fresh installs) the
+    /// operator can't even see projects their other users create.
+    #[tokio::test]
+    async fn first_signup_bootstraps_admin_second_does_not() {
+        let app = zero_user_app(crate::db::open_memory().expect("test db"));
+
+        let resp = json_post(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "username": "operator",
+                "email": "op@test.com",
+                "password": "securepass123"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["user"]["is_admin"], true, "first user is the admin");
+
+        let resp = json_post(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "username": "agent",
+                "email": "agent@test.com",
+                "password": "securepass123"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["user"]["is_admin"], false, "second user is plain");
+    }
+
+    /// LIF-364 guard: a pre-existing user (e.g. CLI-created) disables the
+    /// first-signup admin grant — the bootstrap is strictly for instances
+    /// where signup is the ONLY thing that has ever created a user.
+    #[tokio::test]
+    async fn signup_after_cli_user_gets_no_admin() {
+        let db = crate::db::open_memory().expect("test db");
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "clifirst".into(),
+                    email: "cli@test.com".into(),
+                    password: "securepass123".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+        }
+        let app = zero_user_app(db);
+
+        let resp = json_post(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "username": "weblater",
+                "email": "web@test.com",
+                "password": "securepass123"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["user"]["is_admin"], false);
     }
 
     #[tokio::test]

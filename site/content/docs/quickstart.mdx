@@ -51,7 +51,7 @@ In login-free mode, the web UI signs you in as the administrator that `lific ini
 
 In password mode, sign in as that administrator with the password you chose during initialization.
 
-Later accounts come from the signup screen or from `lific user create`. Signup creates a regular user account and a session; it cannot create an administrator account. Promote an account from a terminal, replacing `<username>` with the username you want to promote.
+Later accounts come from the signup screen or from `lific user create`. Signup creates a regular user account and a session, with one exception: on an instance with no users at all, the first signup becomes the instance administrator, so an instance bootstrapped entirely from the browser still has an operator. Every signup after that is a regular account. To make another account an administrator, promote it from a terminal, replacing `<username>` with the username you want to promote.
 
 ```bash
 lific user promote --username <username>
