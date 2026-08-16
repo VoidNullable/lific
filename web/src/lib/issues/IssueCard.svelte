@@ -7,6 +7,7 @@
   import Tooltip from "../Tooltip.svelte";
   import TimeAgo from "../TimeAgo.svelte";
   import { PanelRight, ExternalLink, Copy } from "lucide-svelte";
+  import { longpress } from "../actions/longpress"; // press-and-hold peek on touch
   import { openContextMenu } from "../contextMenuState.svelte"; // LIF-248
   import { projectCodeOf } from "../references"; // LIF-248
   import { copyToClipboard } from "../clipboard";
@@ -68,6 +69,7 @@
          hover:border-[var(--text-faint)]
          transition-colors group"
   tabindex="0"
+  use:longpress={{ onLongPress: () => onPeek(issue) }}
   onclick={(e) => {
     if (e.ctrlKey || e.metaKey || e.shiftKey) {
       e.preventDefault();

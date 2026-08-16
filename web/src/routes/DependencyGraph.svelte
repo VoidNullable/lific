@@ -40,6 +40,7 @@
   import Skeleton from "../lib/Skeleton.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import { toast } from "../lib/toast/toast.svelte";
+  import { openPeek } from "../lib/issues/peek.svelte";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
   import { ChevronRight, MoveRight, ArrowLeftRight, Unlink, X } from "lucide-svelte";
   import { getContext } from "svelte";
@@ -164,7 +165,9 @@
       id: String(issue.id),
       type: "issue",
       position: layout.positions.get(issue.id) ?? { x: 0, y: 0 },
-      data: { issue },
+      // onLongPress: touch's stand-in for the desktop hover card — opens
+      // the issue peek bottom sheet (mounted globally in Layout).
+      data: { issue, onLongPress: (i: Issue) => openPeek(i.identifier) },
       deletable: false,
       // Cards are fixed-size with fixed handle spots, so declare BOTH
       // statically (xyflow's SSR path). Without this, nodes hide behind

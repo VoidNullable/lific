@@ -38,6 +38,8 @@
   import SubTabs from "../lib/SubTabs.svelte";
   import Tooltip from "../lib/Tooltip.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
+  import { longpress } from "../lib/actions/longpress"; // press-and-hold page peek on touch
+  import { openPagePeek } from "../lib/pages/pagePeek.svelte";
   import Mascot from "../lib/Mascot.svelte";
   import { fuzzyMatch, buildSnippet } from "../lib/fuzzy";
   import ErrorState from "../lib/ErrorState.svelte";
@@ -1236,6 +1238,7 @@
                          shadow-[0_1px_2px_rgba(0,0,0,0.06)]
                          hover:shadow-[0_6px_16px_rgba(0,0,0,0.10)]
                          transition motion-safe:hover:-translate-y-0.5"
+                  use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
                   onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
                 >
                   <div class="flex items-start gap-2.5">
@@ -1484,6 +1487,7 @@
         <button
           class="w-full flex items-start gap-2 py-2 px-1.5 -mx-1.5 border-b border-[var(--border)]
                  last:border-b-0 rounded-md text-left transition-colors hover:bg-[var(--bg-subtle)]"
+          use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
           onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
         >
           <span
@@ -1633,6 +1637,7 @@
       class="w-full flex items-start gap-2 py-1.5 px-1.5 -mx-1.5 rounded-md
              text-left group transition-colors
              {isDragging ? 'opacity-40' : 'hover:bg-[var(--bg-subtle)]'}"
+      use:longpress={{ onLongPress: () => openPagePeek(page.id, `/${projectIdentifier}/pages/${page.id}`) }}
       onclick={() => navigate(`/${projectIdentifier}/pages/${page.id}`)}
       draggable={canEdit}
       ondragstart={(e) => { if (canEdit) onDragStartPage(e, page.id); }}

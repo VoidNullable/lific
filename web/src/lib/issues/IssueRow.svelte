@@ -11,6 +11,7 @@
   // reviewable and build-verifiable.
   import type { Issue, Label, Module } from "../api";
   import { Check, Signal, Layers, PanelRight, ExternalLink, Copy } from "lucide-svelte";
+  import { longpress } from "../actions/longpress"; // press-and-hold peek on touch
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
   import ProjectIcon from "../ProjectIcon.svelte";
@@ -163,6 +164,7 @@
   data-issue-index={idx}
   role="button"
   tabindex="-1"
+  use:longpress={{ onLongPress: () => onPeek(issue) }}
   onclick={(e) => {
     // LIF-149: shift-click extends a range, ctrl/cmd-click toggles —
     // plain click still opens the issue.

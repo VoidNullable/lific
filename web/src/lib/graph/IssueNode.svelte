@@ -12,21 +12,26 @@
   import { Handle, Position, type NodeProps } from "@xyflow/svelte";
   import StatusIcon from "../StatusIcon.svelte";
   import PriorityIcon from "../PriorityIcon.svelte";
+  import { longpress } from "../actions/longpress";
   import type { Issue } from "../api";
 
   let { data, isConnectable }: NodeProps & {
-    data: { issue: Issue };
+    data: { issue: Issue; onLongPress?: (issue: Issue) => void };
   } = $props();
 
   let issue = $derived(data.issue as Issue);
   let closed = $derived(issue.status === "done" || issue.status === "cancelled");
 </script>
 
+<!-- Touch has no hover, so press-and-hold stands in for the hover preview:
+     it opens the issue peek bottom sheet (the richer surface), while a plain
+     tap keeps meaning navigate. -->
 <div
   class="w-[200px] h-[58px] text-left rounded-lg border bg-[var(--surface)]
          shadow-[0_1px_2px_rgba(0,0,0,0.06)] px-2.5 py-1.5 overflow-hidden
          border-[var(--border)] hover:border-[var(--accent)] transition-colors
-         {closed ? 'opacity-50' : ''}"
+         select-none {closed ? 'opacity-50' : ''}"
+  use:longpress={{ onLongPress: () => data.onLongPress?.(issue) }}
 >
   <span class="flex items-center gap-1.5">
     <StatusIcon status={issue.status} size={12} />

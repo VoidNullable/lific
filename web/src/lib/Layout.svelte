@@ -33,6 +33,7 @@
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
+  import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
   import { contextMenuState, openContextMenu } from "./contextMenuState.svelte";
   import { toast } from "./toast/toast.svelte";
   import ContextMenu from "./ContextMenu.svelte"; // LIF-248
@@ -1329,5 +1330,6 @@
        inside a route makes no visual difference; it just makes them
        reachable from everywhere. -->
   <PeekPanel {navigate} />
+  <PagePeekPanel {navigate} />
   <ContextMenu />
 {/if}
