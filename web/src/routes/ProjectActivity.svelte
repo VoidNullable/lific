@@ -28,6 +28,12 @@
   } from "lucide-svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
+  import {
+    diffLines,
+    foldContext,
+    isUnchanged,
+    type DiffRow,
+  } from "../lib/linediff";
   import { getContext } from "svelte";
 
   const PAGE_SIZE = 50;
@@ -246,6 +252,28 @@
   }
 
   let maxActions = $derived(actors.reduce((m, s) => Math.max(m, s.actions), 1));
+
+  // ── Value diffing ────────────────────────────────────
+  //
+  // Description and content edits are multi-line, and showing the whole old
+  // value in red above the whole new value in green buried a one-word change
+  // in a wall of text. Those get a line diff instead. Single-line fields
+  // (status, priority, title) keep the two-block rendering, and so does any
+  // document too large to diff cheaply. Only the expanded row is diffed.
+
+  type ValueDiff = { rows: DiffRow[]; unchanged: boolean };
+
+  let expandedDiff = $derived.by<ValueDiff | null>(() => {
+    if (expandedId === null) return null;
+    const a = items.find((entry) => entry.id === expandedId);
+    if (!a) return null;
+    const oldText = a.old_value ?? "";
+    const newText = a.new_value ?? "";
+    if (!oldText.includes("\n") && !newText.includes("\n")) return null;
+    const lines = diffLines(oldText, newText);
+    if (lines === null) return null; // too large: fall back to whole values
+    return { rows: foldContext(lines), unchanged: isUnchanged(lines) };
+  });
 
   function toggleExpand(id: number) {
     expandedId = expandedId === id ? null : id;
@@ -584,10 +612,58 @@
                           </p>
                         </div>
 
-                        <!-- Values: full old → new, any field -->
+                        <!-- Values: a line diff for multi-line text, full
+                             old → new blocks for everything else -->
                         {#if a.old_value !== null || a.new_value !== null}
                           <div class="sm:col-span-2 flex flex-col gap-1.5">
-                            {#if a.old_value !== null}
+                            {#if expandedDiff}
+                              <!-- Line diff: red for removed, green for added,
+                                   plain for context, with long unchanged runs
+                                   folded behind a divider. -->
+                              <div
+                                class="text-caption leading-relaxed rounded-md
+                                       border border-[var(--border)] overflow-hidden
+                                       max-h-[320px] overflow-y-auto"
+                              >
+                                {#if expandedDiff.unchanged}
+                                  <p class="px-3 py-2 m-0 text-[var(--text-faint)] italic">
+                                    No line-level changes
+                                  </p>
+                                {/if}
+                                {#each expandedDiff.rows as row, i (i)}
+                                  {#if row.kind === "fold"}
+                                    <div
+                                      class="flex items-center gap-2 px-3 py-1
+                                             bg-[var(--bg-subtle)] select-none"
+                                    >
+                                      <span class="h-px flex-1 bg-[var(--border)]"></span>
+                                      <span class="text-micro text-[var(--text-faint)] tabular-nums">
+                                        {row.count} unchanged line{row.count === 1 ? "" : "s"}
+                                      </span>
+                                      <span class="h-px flex-1 bg-[var(--border)]"></span>
+                                    </div>
+                                  {:else}
+                                    <div
+                                      class="flex gap-2 px-3 min-h-[1.5em]
+                                             {row.kind === 'removed'
+                                        ? 'bg-[var(--error-bg)] text-[var(--text-muted)]'
+                                        : row.kind === 'added'
+                                          ? 'bg-[var(--success-bg)] text-[var(--text)]'
+                                          : 'text-[var(--text-muted)]'}"
+                                    >
+                                      <span
+                                        class="shrink-0 w-3 font-mono select-none
+                                               text-[var(--text-faint)]"
+                                        aria-hidden="true"
+                                      >{row.kind === "removed" ? "-" : row.kind === "added" ? "+" : ""}</span>
+                                      <span
+                                        class="flex-1 min-w-0 whitespace-pre-wrap break-words"
+                                      >{row.text}</span>
+                                    </div>
+                                  {/if}
+                                {/each}
+                              </div>
+                            {:else if a.old_value !== null}
                               <div
                                 class="text-caption leading-relaxed px-3 py-2 rounded-md
                                        border border-[var(--border)] bg-[var(--error-bg)]
@@ -595,7 +671,7 @@
                                        max-h-[240px] overflow-y-auto"
                               >{a.old_value}</div>
                             {/if}
-                            {#if a.new_value !== null}
+                            {#if !expandedDiff && a.new_value !== null}
                               <div
                                 class="text-caption leading-relaxed px-3 py-2 rounded-md
                                        border border-[var(--border)] bg-[var(--success-bg)]
