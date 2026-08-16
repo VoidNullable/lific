@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Identifiers
+
+- **Project identifiers now resolve case-insensitively.** `lific issue list --project lif`, `get_issue("lif-42")`, and every other project, issue, or page lookup across the CLI, REST, and MCP now accept any casing, matching how modules, folders, and usernames have always behaved. As a consequence, creating a project `abc` when `ABC` exists is now rejected. Existing databases with case-colliding identifiers (only possible via raw SQL) are renamed deterministically on upgrade.
+
+### API
+
+- **`GET /api/auth/me` now answers 403 `authentication required` when unauthenticated**, like every other endpoint. It was the one endpoint that escaped the v2.6.0 consolidation and still returned a 400.
+
+### Fixes
+
+- Duplicate agent identities can no longer be minted by two simultaneous connects: bot uniqueness per (owner, tool) is now enforced by the database, and upgrading merges any existing duplicates into the oldest bot without losing memberships, groups, or saved views.
+- Session validation no longer takes the database's single writer lock on every request. Expired sessions are swept at login and logout instead, so authenticated traffic reads concurrently.
+- An IPv6 loopback bind (`host = "::1"`) now prints valid URLs like `http://[::1]:7777` instead of `http://::1:7777` in init output, `service status`, the doctor, and the OAuth issuer.
+
 ## v2.6.0 (2026-08-15)
 
 Who is acting is now resolved one way everywhere: connected AI agents get identities of their own and act as themselves, login-free mode genuinely works, and `lific init` asks how you want to sign in instead of leaving that decision to a hand-edited config file. Alongside the identity work: two security fixes worth upgrading for on their own, comments you can edit and link to, and identifiers you can copy from wherever you see them.
