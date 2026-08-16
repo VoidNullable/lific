@@ -115,7 +115,7 @@ pub fn build_app(
             "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
             h => h,
         };
-        format!("http://{}:{}", host, cfg.server.port)
+        format!("http://{}:{}", crate::display_host(host), cfg.server.port)
     });
 
     let manager_ext = Arc::new(manager.clone());

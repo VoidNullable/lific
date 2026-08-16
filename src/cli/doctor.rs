@@ -136,6 +136,18 @@ fn connect_host(host: &str) -> &str {
     }
 }
 
+/// The base URL a client on this machine would dial to reach the configured
+/// server. Bind-all is rewritten to loopback and IPv6 literals are bracketed,
+/// so a `[server] host = "::1"` yields `http://[::1]:PORT` rather than the
+/// unparseable `http://::1:PORT`.
+fn connect_base(cfg: &Config) -> String {
+    format!(
+        "http://{}:{}",
+        crate::display_host(connect_host(&cfg.server.host)),
+        cfg.server.port
+    )
+}
+
 /// Entry point invoked from `main`.
 ///
 /// Returns `Ok(())` when no check failed, or `Err(message)` when at least one
@@ -182,11 +194,7 @@ pub async fn build_report_with_config_path(
     }
 
     // Build the base URL a client would use to reach this server.
-    let base = format!(
-        "http://{}:{}",
-        connect_host(&cfg.server.host),
-        cfg.server.port
-    );
+    let base = connect_base(cfg);
 
     // LIF-252/LIF-258: if no --key/LIFIC_API_KEY was given, fall back to a
     // token stored by `lific login` (env > keyring > file). We probe the
@@ -902,6 +910,33 @@ mod tests {
         assert_eq!(connect_host("[::]"), "127.0.0.1");
         assert_eq!(connect_host("127.0.0.1"), "127.0.0.1");
         assert_eq!(connect_host("example.com"), "example.com");
+    }
+
+    #[test]
+    fn connect_base_brackets_ipv6_literal_hosts() {
+        let mut cfg = Config::default();
+        cfg.server.host = "::1".into();
+        cfg.server.port = 7777;
+        assert_eq!(connect_base(&cfg), "http://[::1]:7777");
+
+        cfg.server.host = "fd00::5".into();
+        assert_eq!(connect_base(&cfg), "http://[fd00::5]:7777");
+    }
+
+    #[test]
+    fn connect_base_leaves_ipv4_and_hostnames_bare() {
+        let mut cfg = Config::default();
+        cfg.server.port = 3456;
+
+        cfg.server.host = "127.0.0.1".into();
+        assert_eq!(connect_base(&cfg), "http://127.0.0.1:3456");
+
+        cfg.server.host = "tracker.example".into();
+        assert_eq!(connect_base(&cfg), "http://tracker.example:3456");
+
+        // Bind-all still rewrites to loopback before bracketing applies.
+        cfg.server.host = "::".into();
+        assert_eq!(connect_base(&cfg), "http://127.0.0.1:3456");
     }
 
     // ── config check (provenance + parse-error surfacing) ────────────────
