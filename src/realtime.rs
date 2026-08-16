@@ -762,6 +762,12 @@ mod tests {
     }
 
     #[test]
+    fn client_data_limits_are_pinned() {
+        assert_eq!(MAX_CLIENT_FRAME_BYTES, 4 * 1024);
+        assert_eq!(MAX_CLIENT_MESSAGE_BYTES, 16 * 1024);
+    }
+
+    #[test]
     fn client_actions_cover_every_supported_message_kind() {
         assert_eq!(
             client_action(Message::Ping(vec![1, 2, 3].into())),
