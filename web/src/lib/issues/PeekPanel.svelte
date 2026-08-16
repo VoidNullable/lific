@@ -35,6 +35,7 @@
     type Label,
   } from "../api";
   import { peekState, closePeek, notifyPeekSync } from "./peek.svelte";
+  import { sheetDrag } from "../actions/sheetdrag"; // swipe-down dismiss (mobile sheet)
   import { updateIssueWithUndo } from "./state.svelte";
   import { toast } from "../toast/toast.svelte";
   import { STATUSES, PRIORITIES } from "./grouping";
@@ -208,7 +209,16 @@
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 240 } : { x: 480, duration: 240 };
   }
+  // Swipe-down dismiss (mobile): sheetDrag animates the sheet off-screen
+  // itself before closing, so the out: transition must not replay the slide
+  // from the top. One-shot flag, consumed by panelOutParams.
+  let sheetEl = $state<HTMLElement | null>(null);
+  let dragDismissed = false;
   function panelOutParams() {
+    if (dragDismissed) {
+      dragDismissed = false;
+      return { duration: 0 };
+    }
     if (motionReduced()) return { duration: 0 };
     return isMobileViewport() ? { y: 480, duration: 180 } : { x: 480, duration: 180 };
   }
@@ -249,21 +259,34 @@
            md:inset-y-0 md:right-0 md:left-auto md:bottom-auto
            md:h-full md:w-[480px] md:max-w-[92vw]
            md:rounded-none md:border-t-0 md:border-l"
+    bind:this={sheetEl}
     in:fly={panelInParams()}
     out:fly={panelOutParams()}
     role="dialog"
     aria-modal="true"
     aria-label={issue ? `${issue.identifier} preview` : "Issue preview"}
   >
-    <!-- Drag-handle visual (mobile bottom sheet only — decorative, scrim
-         click is the close affordance, not a drag gesture). -->
+    <!-- Grab zone: pill + header. On mobile, dragging anywhere here slides
+         the sheet down to dismiss (sheetdrag.ts); the pill is the visual
+         hint that this is possible. Scrim click and the X still work. -->
+    <div
+      class="shrink-0"
+      use:sheetDrag={{
+        sheet: () => sheetEl,
+        onDismiss: () => {
+          dragDismissed = true;
+          closePeek();
+        },
+      }}
+    >
+    <!-- Drag-handle visual (mobile bottom sheet only). -->
     <div class="md:hidden flex justify-center pt-2 pb-1 shrink-0">
       <div class="h-1 w-9 rounded-full bg-[var(--border)]"></div>
     </div>
 
     <!-- Header: identifier + copy + close. Stays put while the body below
          scrolls. -->
-    <div class="shrink-0 flex items-center gap-2 px-4 pt-2 pb-2 md:pt-4 border-b border-[var(--border)]">
+    <div class="flex items-center gap-2 px-4 pt-2 pb-2 md:pt-4 border-b border-[var(--border)]">
       {#if issue}
         <!-- `label` echoes the visible identifier so the accessible name is
              "Copy LIF-42", keeping the pill's visible text inside its name
@@ -296,6 +319,7 @@
       >
         <X size={16} />
       </button>
+    </div>
     </div>
 
     <!-- Body: its own scroll region, independent of the list behind it. -->
