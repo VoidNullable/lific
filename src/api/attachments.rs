@@ -636,8 +636,8 @@ mod api_tests {
     ) -> serde_json::Value {
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("no realtime event arrived within 1s (see LIF-347 before blaming load)")
+            .expect("realtime broadcast recv failed (Closed or Lagged); capacity is 256, so Lagged here means something structural");
         let axum::extract::ws::Message::Text(text) = event.message else {
             panic!("expected text realtime event");
         };
