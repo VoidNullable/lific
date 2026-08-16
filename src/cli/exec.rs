@@ -616,7 +616,7 @@ fn module(
             queries::delete_module(&conn, module_id)?;
 
             if json {
-                println!("{{\"deleted\": true, \"name\": {:?}}}", name);
+                print_json(&render::Deleted::named(name));
             } else {
                 print!("{}", render::module_deleted(name));
             }
@@ -700,7 +700,7 @@ fn label(
             queries::delete_label(&conn, label_id)?;
 
             if json {
-                println!("{{\"deleted\": true, \"name\": {:?}}}", name);
+                print_json(&render::Deleted::named(name));
             } else {
                 print!("{}", render::label_deleted(name));
             }
@@ -778,7 +778,7 @@ fn folder(
             queries::delete_folder(&conn, folder_id)?;
 
             if json {
-                println!("{{\"deleted\": true, \"name\": {:?}}}", name);
+                print_json(&render::Deleted::named(name));
             } else {
                 print!("{}", render::folder_deleted(name));
             }

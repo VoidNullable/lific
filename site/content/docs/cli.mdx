@@ -27,7 +27,7 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 HTTP mode uses the authenticated server identity for mutations. In particular, `comment add --user` is only available with the direct SQL backend.
 
-HTTP mode currently uses pretty-printed JSON for human-readable output. Remote project export downloads one archive file from the server into the output directory rather than writing individual Markdown files.
+Both backends print the same thing. Human-readable output goes through one set of renderers, and every data command produces the same JSON, so what you see does not depend on how the command reached the data. A payload from a server this CLI does not recognize still falls back to pretty-printed JSON rather than failing.
 
 When HTTP mode returns issues, projects, pages, plans, modules, or comments, JSON output includes a `web_url` built from the configured server URL. Human-readable output renders the corresponding identifier, name, or comment handle as a Markdown link. Direct SQL mode cannot add these links because it has no authoritative external hostname.
 
@@ -1077,7 +1077,7 @@ lific export page <IDENTIFIER> --output <DIRECTORY>
 
 ### export project
 
-Exports a project to an output directory. In HTTP mode, this downloads one ZIP archive from the server.
+Exports a project as Markdown files in an output directory. HTTP mode downloads the project as one ZIP archive and unpacks it, so both backends leave the same files in the same places.
 
 ```shell
 lific export project <PROJECT> --output <DIRECTORY>

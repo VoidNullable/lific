@@ -1,4 +1,6 @@
-//! Human-readable rendering for the data commands, shared by both backends.
+//! Output for the data commands, shared by both backends: the human-readable
+//! renderers, plus the result types a command has to invent when there is no
+//! model to print.
 //!
 //! LIF-373: `lific issue list` used to print a formatted table when it ran
 //! against the local database and a raw JSON dump when it ran against
@@ -10,13 +12,43 @@
 //! Every function returns the exact text to print, trailing newlines
 //! included, so callers `print!` it and tests can compare the two backends'
 //! output directly.
+//!
+//! LIF-341 finished the job for the commands LIF-373 did not reach: exports
+//! (the HTTP backend now writes the same files to the same paths, unpacking
+//! the project archive locally) and deletes (both backends print the
+//! [`Deleted`] below).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::db::models::{
     Comment, Folder, Issue, Label, Module, Page, Priority, Project, SearchResult, Status,
 };
+
+/// What a `delete` prints under `--json`.
+///
+/// Deleting a module, label, or folder returns no row to serialize, so each
+/// backend used to hand-roll its own answer: the SQL executor printed a
+/// compact `{"deleted": true, "name": ...}` while the HTTP backend turned a
+/// `204 No Content` into a pretty-printed `{"deleted": true}` with no name at
+/// all. Both now build this (LIF-341).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deleted {
+    pub deleted: bool,
+    pub name: String,
+}
+
+impl Deleted {
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        Self {
+            deleted: true,
+            name: name.to_owned(),
+        }
+    }
+}
 
 /// `writeln!` into a `String` cannot fail, so the renderers would otherwise
 /// be littered with `let _ =`. With no format arguments this writes a bare

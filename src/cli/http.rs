@@ -16,8 +16,8 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::{
-    Client, Method, RequestBuilder, StatusCode,
-    header::{CONTENT_DISPOSITION, HeaderMap},
+    Client, Method, RequestBuilder,
+    header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap},
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -649,7 +649,7 @@ impl HttpBackend {
             ModuleAction::Delete { project, name } => {
                 let project = self.project_identity(project).await?;
                 let id = self.module_id(project.id, name).await?;
-                self.send_empty(Method::DELETE, &format!("/api/modules/{id}"))
+                self.send_delete(&format!("/api/modules/{id}"), name)
                     .await
                     .map(|value| (value, project.identifier))
             }
@@ -696,8 +696,7 @@ impl HttpBackend {
             }
             LabelAction::Delete { project, name } => {
                 let id = self.label_id(self.project_id(project).await?, name).await?;
-                self.send_empty(Method::DELETE, &format!("/api/labels/{id}"))
-                    .await
+                self.send_delete(&format!("/api/labels/{id}"), name).await
             }
         }
     }
@@ -746,34 +745,83 @@ impl HttpBackend {
                 let id = self
                     .folder_id(self.project_id(project).await?, name)
                     .await?;
-                self.send_empty(Method::DELETE, &format!("/api/folders/{id}"))
-                    .await
+                self.send_delete(&format!("/api/folders/{id}"), name).await
             }
         }
     }
 
+    /// Write a remote export to disk in the layout a direct-SQL export
+    /// produces, so `--backend http` and the default backend leave the same
+    /// tree behind (LIF-341).
+    ///
+    /// A single issue or page is fetched as its `ExportBundle` (`format=json`)
+    /// and handed to `write_bundle_to_directory`, the very writer the SQL
+    /// backend calls, so the file lands at its nested `PROJ/issues/....md`
+    /// path instead of as a bare basename in the output directory. A project
+    /// export stays one ZIP on the wire and is unpacked here; the archive's
+    /// entry names are the bundle paths, so the result is the same either way.
+    ///
+    /// The returned array of written paths is what both the JSON output and
+    /// the shared renderer key off, matching the SQL backend's own.
     async fn export(&self, action: &ExportAction) -> Result<Value> {
-        let (path, output) = match action {
+        let (path, output, kind) = match action {
             ExportAction::Issue { identifier, output } => (
                 format!("/api/export/issues/{}", segment(identifier)),
                 output,
+                ExportShape::Bundle,
             ),
-            ExportAction::Page { identifier, output } => {
-                (format!("/api/export/pages/{}", segment(identifier)), output)
+            ExportAction::Page { identifier, output } => (
+                format!("/api/export/pages/{}", segment(identifier)),
+                output,
+                ExportShape::Bundle,
+            ),
+            ExportAction::Project { project, output } => (
+                format!("/api/export/projects/{}", segment(project)),
+                output,
+                ExportShape::Archive,
+            ),
+        };
+        let params: &[QueryParam<'_>] = match kind {
+            ExportShape::Bundle => &[("format", Cow::Borrowed("json"))],
+            ExportShape::Archive => &[],
+        };
+
+        let response = self
+            .send(self.request_builder(Method::GET, &path).query(params))
+            .await?;
+        let filename = export_filename(response.headers());
+        let json_body = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"));
+        let body = response.bytes().await?;
+
+        let written = match kind {
+            ExportShape::Archive => crate::export::unpack_zip_to_directory(&body, output)?,
+            // A server too old to answer `format=json` ignores the parameter
+            // and sends the markdown file itself. Save it under the name the
+            // server chose rather than failing outright, the same courtesy
+            // `human` extends to unrecognized payloads.
+            ExportShape::Bundle if !json_body => {
+                let filename = filename.unwrap_or_else(|| "export.bin".into());
+                fs::create_dir_all(output)?;
+                let path = output.join(&filename);
+                fs::File::create(&path)?.write_all(&body)?;
+                vec![path]
             }
-            ExportAction::Project { project, output } => {
-                (format!("/api/export/projects/{}", segment(project)), output)
+            ExportShape::Bundle => {
+                let bundle: crate::export::ExportBundle = serde_json::from_slice(&body)?;
+                crate::export::write_bundle_to_directory(&bundle, output)?
             }
         };
-        let mut response = self.send(self.request_builder(Method::GET, &path)).await?;
-        let filename = export_filename(response.headers()).unwrap_or_else(|| "export.bin".into());
-        fs::create_dir_all(output)?;
-        let path = output.join(&filename);
-        let mut file = fs::File::create(&path)?;
-        while let Some(chunk) = response.chunk().await? {
-            file.write_all(&chunk)?;
-        }
-        Ok(json!([path.display().to_string()]))
+
+        Ok(json!(
+            written
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        ))
     }
 
     async fn project_id(&self, identifier: &str) -> Result<i64> {
@@ -897,13 +945,14 @@ impl HttpBackend {
             .await?)
     }
 
-    async fn send_empty(&self, method: Method, path: &str) -> Result<Value> {
-        let response = self.send(self.request_builder(method, path)).await?;
-        if response.status() == StatusCode::NO_CONTENT {
-            Ok(json!({"deleted": true}))
-        } else {
-            Ok(response.json().await?)
-        }
+    /// Delete a resource and answer with the shape the SQL backend prints
+    /// (LIF-341). The server replies `204 No Content`, so the name the user
+    /// asked us to delete is the only thing left to report, and both backends
+    /// now report it the same way.
+    async fn send_delete(&self, path: &str, name: &str) -> Result<Value> {
+        self.send(self.request_builder(Method::DELETE, path))
+            .await?;
+        Ok(serde_json::to_value(render::Deleted::named(name))?)
     }
 
     async fn send(&self, request: RequestBuilder) -> Result<reqwest::Response> {
@@ -1035,6 +1084,16 @@ fn sanitize_error_detail(detail: &str) -> String {
             }
         })
         .collect()
+}
+
+/// How the server delivers an export, and so how this backend turns it back
+/// into the on-disk layout both backends share (LIF-341).
+#[derive(Clone, Copy)]
+enum ExportShape {
+    /// One `ExportBundle` as JSON, written through the shared writer.
+    Bundle,
+    /// One ZIP whose entry names are the bundle's paths, unpacked locally.
+    Archive,
 }
 
 #[derive(Clone, Copy)]
@@ -1247,7 +1306,11 @@ fn pretty(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use axum::{
         Extension, Json, Router,
@@ -1259,7 +1322,7 @@ mod tests {
     };
     use reqwest::{
         Method,
-        header::{CONTENT_DISPOSITION, HeaderMap},
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap},
     };
     use serde_json::json;
     use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
@@ -1269,14 +1332,17 @@ mod tests {
             json_post, parse_json, seed_project, test_peer, with_attachment_layers,
             with_client_ip_test_layers,
         },
-        cli::{Command, ExportAction, IssueAction, PageAction, ProjectAction, split_csv},
+        cli::{
+            Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction,
+            ModuleAction, PageAction, ProjectAction, split_csv,
+        },
         config::AuthConfig,
         db::models::AuthUser,
         realtime::RealtimeHub,
     };
 
     use super::{
-        ERROR_BODY_LIMIT, HttpBackend, IssueLinkOutput, ResourceKind, error_detail,
+        ERROR_BODY_LIMIT, HttpBackend, IssueLinkOutput, ResourceKind, decode, error_detail,
         export_filename, find_resource, is_loopback_host, linked_comments, linked_modules,
         linked_resources, models, render, resource_from_object, resource_url, safe_filename,
         sanitize_error_detail, segment,
@@ -1290,6 +1356,10 @@ mod tests {
         project_page_identifier: String,
         workspace_page_identifier: String,
         issue_identifier: String,
+        /// The very database the router serves. Cloning the pool lets a test
+        /// run the SQL backend over the same rows the HTTP backend just read,
+        /// which is what makes a real parity assertion possible (LIF-341).
+        db: crate::db::DbPool,
         server: JoinHandle<()>,
     }
 
@@ -1315,7 +1385,7 @@ mod tests {
             conn.last_insert_rowid()
         };
         let app = with_client_ip_test_layers(
-            with_attachment_layers(crate::api::router(db, &[])),
+            with_attachment_layers(crate::api::router(db.clone(), &[])),
             test_peer(),
         )
         .layer(Extension(RealtimeHub::new()))
@@ -1377,6 +1447,7 @@ mod tests {
             project_page_identifier: project_page["identifier"].as_str().unwrap().to_owned(),
             workspace_page_identifier: workspace_page["identifier"].as_str().unwrap().to_owned(),
             issue_identifier: issue["identifier"].as_str().unwrap().to_owned(),
+            db,
             server,
         }
     }
@@ -1729,14 +1800,516 @@ mod tests {
         server.abort();
     }
 
+    /// Unique per call: tests share a process, so a fixed directory name
+    /// would have parallel tests writing over each other.
+    fn scratch_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "lific-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    /// Every file under `root` as (path relative to `root`, contents),
+    /// sorted, so two export directories can be compared as values.
+    fn tree(root: &Path) -> Vec<(String, String)> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", dir.display()))
+            {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    out.push((
+                        relative(&path, root),
+                        std::fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn relative(path: &Path, root: &Path) -> String {
+        path.strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// Export the same thing through both backends and require the results to
+    /// be indistinguishable: same files, same relative paths, same contents,
+    /// and the same list of written paths reported back (LIF-341).
+    async fn assert_export_parity(
+        fixture: &RealApiFixture,
+        backend: &HttpBackend,
+        label: &str,
+        action: impl Fn(PathBuf) -> ExportAction,
+    ) {
+        let remote_dir = scratch_dir(&format!("export-http-{label}"));
+        let local_dir = scratch_dir(&format!("export-sql-{label}"));
+
+        let reported = backend
+            .execute(
+                &Command::Export {
+                    action: action(remote_dir.clone()),
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+        crate::cli::exec::run(
+            &fixture.db,
+            &Command::Export {
+                action: action(local_dir.clone()),
+            },
+            false,
+        )
+        .unwrap();
+
+        let remote = tree(&remote_dir);
+        assert_eq!(
+            remote,
+            tree(&local_dir),
+            "the {label} export differed between backends"
+        );
+        assert!(!remote.is_empty(), "the {label} export wrote nothing");
+        assert!(
+            remote.iter().all(|(path, _)| path.ends_with(".md")),
+            "the {label} export left something other than markdown: {remote:?}"
+        );
+
+        // The paths the command reports are exactly the files it wrote, which
+        // is what `--json` prints and what the shared renderer lists.
+        let mut written: Vec<String> = decode::<Vec<String>>(&reported)
+            .expect("export reports an array of paths")
+            .iter()
+            .map(|path| relative(Path::new(path), &remote_dir))
+            .collect();
+        written.sort();
+        assert_eq!(
+            written,
+            remote
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+            "the {label} export reported paths it did not write"
+        );
+
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+        std::fs::remove_dir_all(&local_dir).unwrap();
+    }
+
+    /// LIF-341: `lific export` leaves the same tree on disk whichever backend
+    /// ran it. A project still crosses the wire as one ZIP, so this also
+    /// covers the HTTP backend unpacking that archive into the individual
+    /// markdown files the SQL backend writes directly.
     #[tokio::test]
-    async fn writes_http_export_response_using_server_filename() {
+    async fn writes_remote_exports_into_the_same_tree_as_the_sql_backend() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        // A page filed in a folder: its export path is nested below the
+        // folder, so a backend that only knew the file's basename could not
+        // reproduce it.
+        let project_id = backend.project_id("TST").await.unwrap();
+        let folder = backend
+            .send_json(
+                Method::POST,
+                "/api/folders",
+                &models::CreateFolder {
+                    project_id,
+                    parent_id: None,
+                    name: "Design notes".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let filed_page = backend
+            .send_json(
+                Method::POST,
+                "/api/pages",
+                &json!({
+                    "project_id": project_id,
+                    "folder_id": folder["id"],
+                    "title": "Filed page",
+                    "content": "Body of the filed page"
+                }),
+            )
+            .await
+            .unwrap();
+        let filed_page = filed_page["identifier"].as_str().unwrap().to_owned();
+
+        let issue = fixture.issue_identifier.clone();
+        assert_export_parity(&fixture, &backend, "issue", |output| ExportAction::Issue {
+            identifier: issue.clone(),
+            output,
+        })
+        .await;
+
+        assert_export_parity(&fixture, &backend, "filed-page", |output| {
+            ExportAction::Page {
+                identifier: filed_page.clone(),
+                output,
+            }
+        })
+        .await;
+
+        let workspace_page = fixture.workspace_page_identifier.clone();
+        assert_export_parity(&fixture, &backend, "workspace-page", |output| {
+            ExportAction::Page {
+                identifier: workspace_page.clone(),
+                output,
+            }
+        })
+        .await;
+
+        assert_export_parity(&fixture, &backend, "project", |output| {
+            ExportAction::Project {
+                project: "TST".into(),
+                output,
+            }
+        })
+        .await;
+
+        fixture.server.abort();
+    }
+
+    /// The archive is unpacked, not saved: a served ZIP becomes the files it
+    /// contains, at the paths its entries name, and no `.zip` is left behind.
+    #[tokio::test]
+    async fn unpacks_a_served_project_archive_into_its_files() {
+        let bundle = crate::export::ExportBundle {
+            root: "TST".into(),
+            files: vec![
+                crate::export::ExportFile {
+                    path: "TST/issues/tst-1-first.md".into(),
+                    content: "# First".into(),
+                },
+                crate::export::ExportFile {
+                    path: "TST/pages/design-notes/tst-doc-1-filed.md".into(),
+                    content: "# Filed".into(),
+                },
+            ],
+        };
+        let archive = crate::export::bundle_to_zip(&bundle).unwrap();
+        let router = Router::new().route(
+            "/api/export/projects/{identifier}",
+            get(move || {
+                let archive = archive.clone();
+                async move {
+                    let mut response = Response::new(Body::from(archive));
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+                    response.headers_mut().insert(
+                        CONTENT_DISPOSITION,
+                        HeaderValue::from_static("attachment; filename=tst-export.zip"),
+                    );
+                    response
+                }
+            }),
+        );
+        let (url, server) = spawn_server(router).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+        let output_dir = scratch_dir("export-archive");
+
+        let reported = backend
+            .execute(
+                &Command::Export {
+                    action: ExportAction::Project {
+                        project: "TST".into(),
+                        output: output_dir.clone(),
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tree(&output_dir),
+            vec![
+                ("TST/issues/tst-1-first.md".to_owned(), "# First".to_owned()),
+                (
+                    "TST/pages/design-notes/tst-doc-1-filed.md".to_owned(),
+                    "# Filed".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            reported,
+            json!([
+                output_dir
+                    .join("TST/issues/tst-1-first.md")
+                    .display()
+                    .to_string(),
+                output_dir
+                    .join("TST/pages/design-notes/tst-doc-1-filed.md")
+                    .display()
+                    .to_string(),
+            ])
+        );
+
+        std::fs::remove_dir_all(&output_dir).unwrap();
+        server.abort();
+    }
+
+    /// LIF-341: every list command prints the same thing through either
+    /// backend, not just `issue list`. Each of these goes out over HTTP and
+    /// is compared against the shared renderer fed straight from the
+    /// database, so a response this binary cannot decode (which would quietly
+    /// fall back to a JSON dump) fails the test instead of shipping.
+    #[tokio::test]
+    async fn renders_every_list_command_identically_to_the_sql_backend() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let project_id = backend.project_id("TST").await.unwrap();
+
+        backend
+            .send_json(
+                Method::POST,
+                "/api/modules",
+                &models::CreateModule {
+                    project_id,
+                    name: "Core".into(),
+                    description: "The engine".into(),
+                    status: "active".into(),
+                    emoji: None,
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .send_json(
+                Method::POST,
+                "/api/labels",
+                &models::CreateLabel {
+                    project_id,
+                    name: "bug".into(),
+                    color: "#ff0000".into(),
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .send_json(
+                Method::POST,
+                "/api/folders",
+                &models::CreateFolder {
+                    project_id,
+                    parent_id: None,
+                    name: "Design notes".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let issue = fixture.issue_identifier.clone();
+        backend
+            .execute(
+                &Command::Comment {
+                    action: CommentAction::Add {
+                        identifier: issue.clone(),
+                        content: "A remark\nover two lines".into(),
+                        user: None,
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+
+        let commands = [
+            Command::Project {
+                action: ProjectAction::List,
+            },
+            Command::Project {
+                action: ProjectAction::Get {
+                    identifier: "TST".into(),
+                },
+            },
+            Command::Page {
+                action: PageAction::List {
+                    project: Some("TST".into()),
+                    folder: None,
+                    label: None,
+                },
+            },
+            Command::Page {
+                action: PageAction::Get {
+                    identifier: fixture.project_page_identifier.clone(),
+                },
+            },
+            Command::Search {
+                query: "page".into(),
+                project: None,
+                limit: None,
+            },
+            Command::Comment {
+                action: CommentAction::List {
+                    identifier: issue.clone(),
+                },
+            },
+            Command::Module {
+                action: ModuleAction::List {
+                    project: "TST".into(),
+                },
+            },
+            Command::Label {
+                action: LabelAction::List {
+                    project: "TST".into(),
+                },
+            },
+            Command::Folder {
+                action: FolderAction::List {
+                    project: "TST".into(),
+                },
+            },
+        ];
+
+        // Every HTTP round trip happens first, so the database connection
+        // below is never held across an await.
+        let mut remote = Vec::new();
+        for command in &commands {
+            let value = backend
+                .execute(command, IssueLinkOutput::Url)
+                .await
+                .unwrap();
+            remote.push(backend.human(command, &value).await);
+        }
+
+        let conn = fixture.db.read().unwrap();
+        use crate::db::queries;
+        let issue_id = queries::resolve_identifier(&conn, &issue).unwrap();
+        let page_id =
+            queries::resolve_page_identifier(&conn, &fixture.project_page_identifier).unwrap();
+        let local = [
+            render::project_list(&queries::list_projects(&conn).unwrap()),
+            render::project_detail(&queries::get_project(&conn, project_id).unwrap()),
+            render::page_list(
+                &queries::list_pages(
+                    &conn,
+                    Some(project_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            ),
+            render::page_detail(&queries::get_page(&conn, page_id).unwrap()),
+            render::search_results(
+                &queries::search(
+                    &conn,
+                    &models::SearchQuery {
+                        query: "page".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            ),
+            render::comment_list(
+                &queries::comments::list_comments(
+                    &conn,
+                    queries::comments::CommentParent::Issue(issue_id),
+                    None,
+                    None,
+                )
+                .unwrap(),
+                &issue,
+            ),
+            render::module_list(&queries::list_modules(&conn, project_id).unwrap(), "TST"),
+            render::label_list(&queries::list_labels(&conn, project_id).unwrap(), "TST"),
+            render::folder_list(&queries::list_folders(&conn, project_id).unwrap(), "TST"),
+        ];
+
+        // `Command` is not `Debug`, so name the cases for the failure message.
+        let names = [
+            "project list",
+            "project get",
+            "page list",
+            "page get",
+            "search",
+            "comment list",
+            "module list",
+            "label list",
+            "folder list",
+        ];
+        assert_eq!(names.len(), commands.len());
+        for ((name, remote), local) in names.iter().zip(&remote).zip(&local) {
+            assert_eq!(remote, local, "backends disagreed on `{name}`");
+            assert!(
+                !remote.starts_with('{') && !remote.starts_with('['),
+                "`{name}` fell back to a JSON dump: {remote}"
+            );
+        }
+
+        fixture.server.abort();
+    }
+
+    /// LIF-341: a delete reports the same JSON either way. The SQL backend
+    /// prints `render::Deleted`; the HTTP backend gets back only a `204 No
+    /// Content` and used to answer with a nameless `{"deleted": true}` of its
+    /// own, so it now builds that same value.
+    #[tokio::test]
+    async fn reports_deletes_the_way_the_sql_backend_does() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let project_id = backend.project_id("TST").await.unwrap();
+        backend
+            .send_json(
+                Method::POST,
+                "/api/labels",
+                &models::CreateLabel {
+                    project_id,
+                    name: "chore".into(),
+                    color: "#ffffff".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let deleted = backend
+            .execute(
+                &Command::Label {
+                    action: LabelAction::Delete {
+                        project: "TST".into(),
+                        name: "chore".into(),
+                    },
+                },
+                IssueLinkOutput::Url,
+            )
+            .await
+            .unwrap();
+
+        // The SQL backend prints exactly `render::Deleted::named(name)`.
+        assert_eq!(
+            deleted,
+            serde_json::to_value(render::Deleted::named("chore")).unwrap()
+        );
+        assert_eq!(deleted, json!({"deleted": true, "name": "chore"}));
+        fixture.server.abort();
+    }
+
+    /// A server too old to answer `format=json` sends the markdown file
+    /// itself. That still produces a file rather than an error, the same
+    /// courtesy `human` extends to payloads it cannot decode.
+    #[tokio::test]
+    async fn falls_back_to_the_server_filename_when_no_bundle_comes_back() {
         let router = Router::new().route("/api/export/issues/{identifier}", get(export_response));
         let (url, server) = spawn_server(router).await;
         let backend = HttpBackend::new(&url, None).unwrap();
-        let output_dir =
-            std::env::temp_dir().join(format!("lific-http-export-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&output_dir);
+        let output_dir = scratch_dir("export-legacy");
 
         let output = backend
             .execute(

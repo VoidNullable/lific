@@ -406,15 +406,15 @@ Response: the standard delete response.
 
 ### GET `/api/export/issues/{identifier}`
 
-Exports an issue as a Markdown attachment. Path parameter: `identifier` (string such as `LIF-1`). It has no query parameters or request body.
+Exports an issue. Path parameter: `identifier` (string such as `LIF-1`). Query parameter: `format` (string, optional). `format` accepts `markdown` by default or `json`. It has no request body.
 
-Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8`.
+Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8` for `format=markdown`. For `format=json`, the response is an export bundle in the same shape the project export returns, carrying the path the file belongs at as well as its content.
 
 ### GET `/api/export/pages/{identifier}`
 
-Exports a page as a Markdown attachment. Path parameter: `identifier` (string such as `LIF-DOC-1` or `DOC-1`). It has no query parameters or request body.
+Exports a page. Path parameter: `identifier` (string such as `LIF-DOC-1` or `DOC-1`). Query parameter: `format` (string, optional). `format` accepts `markdown` by default or `json`. It has no request body.
 
-Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8`.
+Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8` for `format=markdown`. For `format=json`, the response is an export bundle in the same shape the project export returns, carrying the path the file belongs at as well as its content.
 
 ### GET `/api/export/projects/{identifier}`
 

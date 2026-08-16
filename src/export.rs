@@ -1,22 +1,26 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Cursor, Read, Write};
+use std::path::{Component, Path, PathBuf};
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::{
     models::Comment, models::Folder, models::Issue, models::Page, models::Project, queries,
 };
 use crate::error::LificError;
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` matters as much as `Serialize` here: the CLI's HTTP backend
+/// asks the server for the bundle and hands it straight to
+/// [`write_bundle_to_directory`], the same writer the SQL backend uses, so a
+/// remote export lands on disk exactly like a local one (LIF-341).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportFile {
     pub path: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportBundle {
     pub root: String,
     pub files: Vec<ExportFile>,
@@ -128,6 +132,63 @@ pub fn write_bundle_to_directory(
         written.push(full_path);
     }
     Ok(written)
+}
+
+/// Unpack a project export archive into the tree
+/// [`write_bundle_to_directory`] would have written (LIF-341).
+///
+/// Remote project exports stay a single ZIP on the wire, so the client is
+/// what has to unpack them: the archive's entry names are exactly the
+/// bundle's relative paths, so writing each entry under `target_dir` leaves
+/// the same individual markdown files behind that a direct-SQL export does.
+///
+/// Entry names come off the network, so they are checked rather than
+/// trusted. Anything that could climb out of `target_dir` (an absolute path,
+/// a `..` segment, a Windows drive prefix) is rejected instead of written.
+pub fn unpack_zip_to_directory(
+    archive: &[u8],
+    target_dir: &Path,
+) -> Result<Vec<PathBuf>, LificError> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(archive)).map_err(zip_error)?;
+    let mut written = Vec::new();
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(zip_error)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let full_path = target_dir.join(contained_path(entry.name())?);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        let mut content = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut content).map_err(io_error)?;
+        std::fs::write(&full_path, &content).map_err(io_error)?;
+        written.push(full_path);
+    }
+    Ok(written)
+}
+
+/// Reduce an archive entry name to a relative path that cannot escape the
+/// directory it will be joined onto.
+fn contained_path(name: &str) -> Result<PathBuf, LificError> {
+    let mut contained = PathBuf::new();
+    for component in Path::new(name).components() {
+        match component {
+            Component::Normal(segment) => contained.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(LificError::BadRequest(format!(
+                    "export archive entry '{name}' would write outside the output directory"
+                )));
+            }
+        }
+    }
+    if contained.as_os_str().is_empty() {
+        return Err(LificError::BadRequest(format!(
+            "export archive entry '{name}' has no file name"
+        )));
+    }
+    Ok(contained)
 }
 
 pub fn bundle_to_zip(bundle: &ExportBundle) -> Result<Vec<u8>, LificError> {
@@ -466,5 +527,95 @@ mod tests {
             "target frontmatter should list duplicated_by: {}",
             canonical_file.content
         );
+    }
+
+    /// LIF-341: unpacking the archive is how the CLI's HTTP backend lands a
+    /// remote project export on disk, so it has to leave the same tree
+    /// `write_bundle_to_directory` writes locally.
+    #[test]
+    fn unpacking_an_archive_matches_writing_the_bundle_directly() {
+        let bundle = ExportBundle {
+            root: "EXP".into(),
+            files: vec![
+                ExportFile {
+                    path: "EXP/issues/exp-1-ship-export.md".into(),
+                    content: "# Ship export\n".into(),
+                },
+                ExportFile {
+                    path: "EXP/pages/docs/handbook/exp-doc-1-guide.md".into(),
+                    content: "# Guide\n".into(),
+                },
+            ],
+        };
+
+        let direct_dir = scratch_dir("bundle-direct");
+        let unpacked_dir = scratch_dir("bundle-unpacked");
+        let direct = write_bundle_to_directory(&bundle, &direct_dir).unwrap();
+        let unpacked =
+            unpack_zip_to_directory(&bundle_to_zip(&bundle).unwrap(), &unpacked_dir).unwrap();
+
+        // Same paths, in the same order, holding the same bytes.
+        let relative = |paths: &[PathBuf], root: &Path| -> Vec<String> {
+            paths
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect()
+        };
+        assert_eq!(
+            relative(&unpacked, &unpacked_dir),
+            relative(&direct, &direct_dir)
+        );
+        for (unpacked, direct) in unpacked.iter().zip(&direct) {
+            assert_eq!(
+                std::fs::read_to_string(unpacked).unwrap(),
+                std::fs::read_to_string(direct).unwrap()
+            );
+        }
+
+        std::fs::remove_dir_all(direct_dir).unwrap();
+        std::fs::remove_dir_all(unpacked_dir).unwrap();
+    }
+
+    /// Entry names arrive over the network, so a hostile one must not be able
+    /// to plant a file outside the directory the user asked to export into.
+    #[test]
+    fn refuses_archive_entries_that_climb_out_of_the_output_directory() {
+        for escape in ["../escaped.md", "EXP/../../escaped.md", "/etc/escaped.md"] {
+            let archive = bundle_to_zip(&ExportBundle {
+                root: "EXP".into(),
+                files: vec![ExportFile {
+                    path: escape.into(),
+                    content: "owned".into(),
+                }],
+            })
+            .unwrap();
+
+            let output = scratch_dir("bundle-escape");
+            let error = unpack_zip_to_directory(&archive, &output)
+                .expect_err("'{escape}' should be rejected");
+            assert!(
+                error.to_string().contains("outside the output directory"),
+                "unexpected error for '{escape}': {error}"
+            );
+            let _ = std::fs::remove_dir_all(output);
+        }
+    }
+
+    /// Unique per call, so these tests can run beside each other.
+    fn scratch_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "lific-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
     }
 }
