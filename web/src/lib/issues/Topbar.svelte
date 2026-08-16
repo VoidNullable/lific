@@ -107,6 +107,59 @@
       { id: "closed", label: "Closed", count: countFor("done") + countFor("cancelled") },
     ];
   });
+
+  // ── LIF-350 follow-up: sub-`sm` overflow group keyboard/AT behaviour ──
+  // The panel is a disclosure region, not a menu. Its contents are composite
+  // widgets in their own right (SavedViews owns a menu with rename/create
+  // forms; Sort and Display each own their own popover), and `role="menu"`
+  // would promise arrow-key traversal over a flat list of menuitems that
+  // this panel does not and should not have. So the trigger advertises
+  // `aria-expanded` + `aria-controls` and nothing more, which is what the
+  // interaction actually is: a button that reveals a chunk of the toolbar.
+  const OVERFLOW_PANEL_ID = "issue-view-options";
+  const FOCUSABLE_SELECTOR =
+    'a[href], button:not([disabled]), input:not([disabled]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  let overflowTriggerEl = $state<HTMLButtonElement | null>(null);
+  let overflowPanelEl = $state<HTMLDivElement | null>(null);
+  let overflowWasOpen = false;
+
+  /** True only while the sub-`sm` layout is live: at `sm` and up the trigger
+   *  is `hidden`, so there is nothing to focus into or back out of. */
+  function overflowIsMobile(): boolean {
+    return !!overflowTriggerEl && overflowTriggerEl.offsetParent !== null;
+  }
+
+  // Focus follows the disclosure both ways. Opening moves focus to the first
+  // control in the panel; closing puts it back on the trigger, whichever way
+  // the close came (the panel's own trigger, Escape or an outside click,
+  // both of which are handled on `window` in IssueList). Restoring is
+  // skipped when something else has already claimed focus, so clicking
+  // straight from the open panel onto another control doesn't yank it back.
+  $effect(() => {
+    const open = view.overflowOpen;
+    if (open === overflowWasOpen) return;
+    overflowWasOpen = open;
+    if (!overflowIsMobile()) return;
+
+    if (open) {
+      // The panel is revealed by class, not by `{#if}`, so wait a frame for
+      // it to be laid out before asking it for a focusable child.
+      requestAnimationFrame(() => {
+        if (!view.overflowOpen) return;
+        overflowPanelEl?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+      });
+      return;
+    }
+
+    const active = document.activeElement;
+    const cameFromPanel =
+      active === null ||
+      active === document.body ||
+      (active instanceof Node && !!overflowPanelEl?.contains(active));
+    if (cameFromPanel) overflowTriggerEl?.focus();
+  });
 </script>
 
 <div class="relative flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
@@ -347,8 +400,9 @@
                hover:bg-[var(--bg-subtle)] transition-colors
                {view.overflowOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
         aria-label="View options"
-        aria-haspopup="menu"
         aria-expanded={view.overflowOpen}
+        aria-controls={OVERFLOW_PANEL_ID}
+        bind:this={overflowTriggerEl}
         onclick={(e) => {
           e.stopPropagation();
           view.overflowOpen = !view.overflowOpen;
@@ -362,6 +416,8 @@
         <MoreHorizontal size={14} />
       </button>
       <div
+        id={OVERFLOW_PANEL_ID}
+        bind:this={overflowPanelEl}
         class="sm:contents max-sm:absolute max-sm:right-0 max-sm:top-full max-sm:mt-1.5
                max-sm:z-30 max-sm:w-[212px] max-sm:flex-col max-sm:gap-0.5 max-sm:p-1
                max-sm:rounded-lg max-sm:border max-sm:border-[var(--border)]

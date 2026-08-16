@@ -22,11 +22,26 @@ export type DiffFold = {
 export type DiffRow = DiffLine | DiffFold;
 
 /**
- * Largest document, in lines, we are willing to diff. LCS is O(n*m) in time
- * and memory, so anything past this bails out and the caller falls back to
+ * Largest LCS table, in cells, we are willing to allocate. The table is
+ * `(n + 1) * (m + 1)` Int32s, so the real cost is the *product* of the two
+ * side lengths, not either one alone: a 3000-line cap per side still let
+ * two 3000-line values ask for a 9M-cell table, ~36 MB and ~80-100ms of
+ * fill. 4M cells is a 16 MB Int32Array, comfortably under a frame's worth
+ * of work, and anything past it bails out so the caller falls back to
  * whole-value rendering rather than freezing the tab.
+ *
+ * Measured against what actually gets allocated, i.e. after the shared
+ * head/tail have been trimmed away. A one-word edit to a 5000-line
+ * description trims down to a handful of lines and still diffs.
  */
-export const MAX_DIFF_LINES = 3000;
+export const MAX_DIFF_CELLS = 4_000_000;
+
+/**
+ * Generous per-side line cap, kept only as a guard on the linear work that
+ * runs before the table is sized (splitting, trimming, building the row
+ * list). `MAX_DIFF_CELLS` is what bounds the memory.
+ */
+export const MAX_DIFF_LINES = 100_000;
 
 /** Unchanged lines kept on each side of a change before folding kicks in. */
 export const DEFAULT_CONTEXT_LINES = 3;
@@ -55,9 +70,9 @@ function asLines(texts: string[], kind: DiffKind): DiffLine[] {
  * Diff two texts line by line.
  *
  * Returns the lines in old-to-new order: at each change point the removed
- * lines come first, then the added ones. Returns `null` when either side
- * exceeds `MAX_DIFF_LINES`, which is the caller's cue to fall back to
- * rendering both values whole.
+ * lines come first, then the added ones. Returns `null` when the diff is
+ * too big to be worth doing (see `MAX_DIFF_CELLS` and `MAX_DIFF_LINES`),
+ * which is the caller's cue to fall back to rendering both values whole.
  */
 export function diffLines(oldText: string, newText: string): DiffLine[] | null {
   const oldLines = splitLines(oldText);
@@ -87,6 +102,12 @@ export function diffLines(oldText: string, newText: string): DiffLine[] | null {
   ) {
     oldEnd--;
     newEnd--;
+  }
+
+  // What survives trimming is exactly what the LCS table is sized over, so
+  // that is what the cell budget is measured against.
+  if ((oldEnd - head + 1) * (newEnd - head + 1) > MAX_DIFF_CELLS) {
+    return null;
   }
 
   return [
