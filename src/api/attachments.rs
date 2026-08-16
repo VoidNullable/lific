@@ -850,11 +850,10 @@ mod api_tests {
         };
         use axum::Extension;
         use std::sync::Arc;
+        let (store, _tmp) = test_attachment_store();
         let app = crate::api::router(db, &[])
             .layer(Extension(crate::realtime::RealtimeHub::new()))
-            .layer(Extension(crate::storage::AttachmentStore::new(
-                std::env::temp_dir().join(format!("lific_sz_{}", std::process::id())),
-            )))
+            .layer(Extension(store))
             .layer(Extension(super::AttachmentConfig { max_bytes: 4 }))
             .layer(Extension(Arc::new(super::AttachmentUploadLimiter(
                 crate::ratelimit::RateLimiter::new(1000, std::time::Duration::from_secs(3600)),
@@ -1063,7 +1062,7 @@ mod api_tests {
     #[tokio::test]
     async fn orphan_gc_collects_unlinked_and_keeps_linked() {
         // A dedicated store + db so the sweep sees exactly this app's data.
-        let store = test_attachment_store();
+        let (store, _tmp) = test_attachment_store();
         let db = crate::db::open_memory().unwrap();
         let admin_id = {
             let conn = db.write().unwrap();

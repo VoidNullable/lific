@@ -945,8 +945,8 @@ mod tests {
     fn config_check_fails_on_unparseable_file() {
         // A file that exists but is broken TOML must surface as a FAIL rather
         // than aborting the run. We exercise the parse branch directly.
-        let dir = std::env::temp_dir().join(format!("lific_doctor_cfg_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("bad.toml");
         std::fs::write(&path, "{{{ not toml").unwrap();
 
@@ -954,24 +954,20 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         let parsed = toml::from_str::<Config>(&contents);
         assert!(parsed.is_err(), "broken toml must fail to parse");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── database check ───────────────────────────────────────────────────
 
     #[test]
     fn database_check_warns_when_missing_but_parent_writable() {
-        let dir = std::env::temp_dir().join(format!("lific_doctor_db_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let mut cfg = Config::default();
         cfg.database.path = dir.join("nope.db");
 
         let c = check_database(&cfg);
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("first start"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -986,8 +982,8 @@ mod tests {
 
     #[test]
     fn database_check_passes_on_real_db() {
-        let dir = std::env::temp_dir().join(format!("lific_doctor_realdb_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let db_path = dir.join("lific.db");
         // Create a real migrated DB.
         let _pool = crate::db::open(&db_path).unwrap();
@@ -997,8 +993,6 @@ mod tests {
         let c = check_database(&cfg);
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
         assert!(c.detail.contains("migrations applied"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── backups check ────────────────────────────────────────────────────
@@ -1012,8 +1006,8 @@ mod tests {
 
     #[test]
     fn backups_check_warns_when_dir_missing() {
-        let dir = std::env::temp_dir().join(format!("lific_doctor_bk_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let mut cfg = Config::default();
         cfg.backup.enabled = true;
         cfg.database.path = dir.join("lific.db");
@@ -1021,12 +1015,12 @@ mod tests {
         let c = check_backups(&cfg).unwrap();
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("first backup"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn backups_check_warns_when_empty_but_writable() {
-        let dir = std::env::temp_dir().join(format!("lific_doctor_bk2_{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let bkdir = dir.join("backups");
         std::fs::create_dir_all(&bkdir).unwrap();
         let mut cfg = Config::default();
@@ -1036,12 +1030,12 @@ mod tests {
         let c = check_backups(&cfg).unwrap();
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("no backups yet"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn backups_check_passes_with_recent_backup() {
-        let dir = std::env::temp_dir().join(format!("lific_doctor_bk3_{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let bkdir = dir.join("backups");
         std::fs::create_dir_all(&bkdir).unwrap();
         std::fs::write(bkdir.join("lific-20260101.db"), b"x").unwrap();
@@ -1052,14 +1046,14 @@ mod tests {
         cfg.backup.dir = std::path::PathBuf::from("backups");
         let c = check_backups(&cfg).unwrap();
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn backups_check_recognizes_tar_gz_archives() {
         // LIF-266: the interval task now writes `lific_*.tar.gz` archives.
         // Freshness must be reported against the new naming.
-        let dir = std::env::temp_dir().join(format!("lific_doctor_bk4_{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let bkdir = dir.join("backups");
         std::fs::create_dir_all(&bkdir).unwrap();
         std::fs::write(bkdir.join("lific_20260101_120000.tar.gz"), b"x").unwrap();
@@ -1070,7 +1064,6 @@ mod tests {
         cfg.backup.dir = std::path::PathBuf::from("backups");
         let c = check_backups(&cfg).unwrap();
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1078,7 +1071,8 @@ mod tests {
         // A backup dir containing only a leftover mirrored `attachments/` dir
         // (and no archive) must still report "no backups yet", not treat the
         // dir's contents as a fresh backup.
-        let dir = std::env::temp_dir().join(format!("lific_doctor_bk5_{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let bkdir = dir.join("backups");
         std::fs::create_dir_all(bkdir.join("attachments")).unwrap();
         std::fs::write(bkdir.join("attachments").join("deadbeef"), b"blob").unwrap();
@@ -1090,7 +1084,6 @@ mod tests {
         let c = check_backups(&cfg).unwrap();
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
         assert!(c.detail.contains("no backups yet"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── server probe (offline) ───────────────────────────────────────────
@@ -1238,9 +1231,8 @@ mod tests {
 
     #[tokio::test]
     async fn full_report_offline_has_no_fails_and_skips_http() {
-        let dir =
-            std::env::temp_dir().join(format!("lific_doctor_offline_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let mut cfg = Config::default();
         cfg.database.path = dir.join("lific.db");
         // Point at a port nothing listens on.
@@ -1263,7 +1255,5 @@ mod tests {
         assert_eq!(by("server"), Some(Status::Warn));
         assert_eq!(by("oauth_discovery"), Some(Status::Skipped));
         assert_eq!(by("mcp"), Some(Status::Skipped));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

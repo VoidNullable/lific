@@ -271,31 +271,28 @@ pub fn checkpoint_wal(pool: &DbPool) {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use tempfile::TempDir;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn make_temp_dir() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("lific_backup_test_{}_{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// Scratch directory for one test. The returned guard removes the
+    /// directory on Drop, including while a failing assertion unwinds, so a
+    /// panicking test cannot leave stale state behind for a later run.
+    fn make_temp_dir() -> TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     #[test]
     fn rotate_keeps_only_retain_count() {
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
 
         // Create 5 fake archive files with lexicographic timestamps
         for i in 1..=5 {
             fs::write(dir.join(format!("lific_2026010{i}_120000.tar.gz")), "fake").unwrap();
         }
 
-        rotate_backups(&dir, "lific", 3);
+        rotate_backups(dir, "lific", 3);
 
-        let remaining: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(remaining.len(), 3);
 
         // Oldest two (01, 02) should be gone, newest three (03, 04, 05) kept
@@ -303,28 +300,26 @@ mod tests {
         assert!(!dir.join("lific_20260102_120000.tar.gz").exists());
         assert!(dir.join("lific_20260103_120000.tar.gz").exists());
         assert!(dir.join("lific_20260105_120000.tar.gz").exists());
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rotate_does_nothing_under_retain() {
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
 
         fs::write(dir.join("lific_20260101_120000.tar.gz"), "fake").unwrap();
         fs::write(dir.join("lific_20260102_120000.tar.gz"), "fake").unwrap();
 
-        rotate_backups(&dir, "lific", 5);
+        rotate_backups(dir, "lific", 5);
 
-        let count = fs::read_dir(&dir).unwrap().count();
+        let count = fs::read_dir(dir).unwrap().count();
         assert_eq!(count, 2);
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rotate_ignores_other_files() {
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
 
         // These should be ignored (wrong prefix / extension)
         fs::write(dir.join("other_20260101_120000.tar.gz"), "x").unwrap();
@@ -333,15 +328,13 @@ mod tests {
         fs::write(dir.join("lific_20260101_120000.tar.gz"), "x").unwrap();
         fs::write(dir.join("lific_20260102_120000.tar.gz"), "x").unwrap();
 
-        rotate_backups(&dir, "lific", 1);
+        rotate_backups(dir, "lific", 1);
 
         // Only 1 backup kept, non-matching files untouched
         assert!(dir.join("other_20260101_120000.tar.gz").exists());
         assert!(dir.join("lific_20260101_120000.txt").exists());
         assert!(!dir.join("lific_20260101_120000.tar.gz").exists()); // oldest removed
         assert!(dir.join("lific_20260102_120000.tar.gz").exists()); // kept
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -349,22 +342,21 @@ mod tests {
         // LIF-266: pre-archive `.db` snapshots from the old scheme are
         // rotation candidates too, so they age out naturally instead of
         // accumulating forever next to the new `.tar.gz` archives.
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
         // Two legacy .db snapshots (older timestamps) + two new archives.
         fs::write(dir.join("lific_20260101_120000.db"), "old1").unwrap();
         fs::write(dir.join("lific_20260102_120000.db"), "old2").unwrap();
         fs::write(dir.join("lific_20260103_120000.tar.gz"), "new1").unwrap();
         fs::write(dir.join("lific_20260104_120000.tar.gz"), "new2").unwrap();
 
-        rotate_backups(&dir, "lific", 2);
+        rotate_backups(dir, "lific", 2);
 
         // The two oldest (legacy .db) are gone; the two newest archives kept.
         assert!(!dir.join("lific_20260101_120000.db").exists());
         assert!(!dir.join("lific_20260102_120000.db").exists());
         assert!(dir.join("lific_20260103_120000.tar.gz").exists());
         assert!(dir.join("lific_20260104_120000.tar.gz").exists());
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// Backdate a file's mtime so the sweep sees it as stale.
@@ -378,7 +370,8 @@ mod tests {
         // LIF-329: crash leftovers (`*.dbsnapshot.tmp` / `*.archive.tmp`)
         // older than the stale threshold are swept; fresh staging files (a
         // possibly in-flight dump) and unrelated files are untouched.
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
         let old = STALE_TMP_AGE + Duration::from_secs(60);
 
         let stale_snap = dir.join("lific_20260101_120000.tar.dbsnapshot.tmp");
@@ -394,22 +387,21 @@ mod tests {
         backdate(&other_stem, old);
         backdate(&real_backup, old);
 
-        sweep_stale_tmps(&dir, "lific");
+        sweep_stale_tmps(dir, "lific");
 
         assert!(!stale_snap.exists(), "stale snapshot tmp must be swept");
         assert!(!stale_arch.exists(), "stale archive tmp must be swept");
         assert!(fresh_arch.exists(), "fresh staging tmp must survive");
         assert!(other_stem.exists(), "other stems are not ours to sweep");
         assert!(real_backup.exists(), "real archives are rotation's job, not the sweep's");
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_backup_sweeps_stale_tmps_even_when_it_writes_nothing_new() {
         // The sweep runs at the top of run_backup, so leftovers age out on
         // the next interval even if that run's dump were to fail.
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
         let db_path = dir.join("lific.db");
         let backup_dir = dir.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
@@ -422,8 +414,6 @@ mod tests {
         run_backup(&pool, &db_path, &backup_dir, 5, None);
 
         assert!(!stale.exists(), "run_backup must sweep stale staging files");
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -431,7 +421,8 @@ mod tests {
         // LIF-266: the interval task now emits a single self-contained
         // `.tar.gz` archive (same artifact as `lific dump`) carrying the DB
         // snapshot and every non-.tmp attachment blob.
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
         let db_path = dir.join("lific.db");
         let backup_dir = dir.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
@@ -485,8 +476,6 @@ mod tests {
             !names.iter().any(|n| n.ends_with(".tmp")),
             "in-progress .tmp writes must not be archived: {names:?}"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     // ── LIF-158: audit log retention ──────────────────────────────────────
@@ -558,7 +547,8 @@ mod tests {
 
     #[test]
     fn run_backup_prunes_audit_log_only_when_retention_is_configured() {
-        let dir = make_temp_dir();
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
         let db_path = dir.join("lific.db");
         let backup_dir = dir.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
@@ -573,7 +563,5 @@ mod tests {
         // Retention on: the same cycle prunes past the window.
         run_backup(&pool, &db_path, &backup_dir, 5, Some(30));
         assert_eq!(audit_labels(&pool), vec!["today"]);
-
-        fs::remove_dir_all(&dir).ok();
     }
 }

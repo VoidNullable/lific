@@ -507,8 +507,8 @@ mod tests {
 
     #[test]
     fn load_from_explicit_path() {
-        let dir = std::env::temp_dir().join(format!("lific_cfg_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("test.toml");
 
         let mut f = std::fs::File::create(&path).unwrap();
@@ -533,14 +533,12 @@ enabled = false
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
         assert!(!config.backup.enabled);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn relative_db_path_anchors_to_config_dir_not_cwd() {
-        let dir = std::env::temp_dir().join(format!("lific_cfg_anchor_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("lific.toml");
         std::fs::write(&path, "[database]\npath = \"lific.db\"\n").unwrap();
 
@@ -550,21 +548,16 @@ enabled = false
         assert_eq!(config.database.path, dir.join("lific.db"));
         // backup_dir derives from database.path, so it anchors too.
         assert_eq!(config.backup_dir(), dir.join("backups"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn absolute_db_path_is_untouched_by_anchoring() {
-        let dir = std::env::temp_dir().join(format!("lific_cfg_abs_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("lific.toml");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lific.toml");
         std::fs::write(&path, format!("[database]\npath = \"{ABSOLUTE_DB_PATH}\"\n")).unwrap();
 
         let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// No config file anywhere is a legitimate first-run state, so defaults
@@ -582,17 +575,14 @@ enabled = false
     /// a stderr warning behind.
     #[test]
     fn invalid_toml_is_a_hard_error() {
-        let dir = std::env::temp_dir().join(format!("lific_bad_cfg_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.toml");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.toml");
         std::fs::write(&path, "{{{{not valid toml!!!!").unwrap();
 
         let err = Config::load(Some(&path)).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         // The message names the offending file so the operator can fix it.
         assert!(err.to_string().contains("bad.toml"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A misspelled key is the exact scenario reported: the operator believes
@@ -600,17 +590,14 @@ enabled = false
     /// `allow_signup = true`. It must fail loudly instead.
     #[test]
     fn unknown_key_is_rejected_rather_than_ignored() {
-        let dir = std::env::temp_dir().join(format!("lific_typo_cfg_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("typo.toml");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("typo.toml");
         // `allow_signup` fat-fingered.
         std::fs::write(&path, "[auth]\nallow_signupp = false\n").unwrap();
 
         let err = Config::load(Some(&path)).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert!(err.to_string().contains("allow_signupp"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The whole point of the change: the permissive defaults an operator
@@ -626,8 +613,8 @@ enabled = false
 
     #[test]
     fn partial_config_fills_defaults() {
-        let dir = std::env::temp_dir().join(format!("lific_partial_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("partial.toml");
         std::fs::write(&path, "[server]\nport = 7777\n").unwrap();
 
@@ -636,8 +623,6 @@ enabled = false
         assert_eq!(config.server.host, "0.0.0.0"); // default
         // Default db filename, anchored beside the config file it came from.
         assert_eq!(config.database.path, dir.join("lific.db"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // LIF-158: audit log retention is opt-in. Unset and 0 both mean "keep

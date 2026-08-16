@@ -248,25 +248,13 @@ fn keyring_delete(key: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn tmp_store() -> (FileStore, tempdir::Guard) {
-        let dir = std::env::temp_dir().join(format!(
-            "lific_creds_{}_{}",
-            std::process::id(),
-            rand::random::<u32>()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("credentials.json");
-        (FileStore::new(path), tempdir::Guard(dir))
-    }
-
-    // Minimal RAII tempdir cleanup so tests don't litter /tmp.
-    mod tempdir {
-        pub struct Guard(pub std::path::PathBuf);
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
+    /// A file store in a fresh scratch directory. Hold onto the returned
+    /// [`TempDir`]: dropping it removes the directory, which also happens
+    /// while a failed assertion unwinds.
+    fn tmp_store() -> (FileStore, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials.json");
+        (FileStore::new(path), tmp)
     }
 
     #[test]
@@ -342,14 +330,9 @@ mod tests {
 
     #[test]
     fn file_store_creates_missing_parent_dir() {
-        let base = std::env::temp_dir().join(format!(
-            "lific_creds_deep_{}_{}",
-            std::process::id(),
-            rand::random::<u32>()
-        ));
-        let _g = tempdir::Guard(base.clone());
+        let tmp = tempfile::tempdir().unwrap();
         // Path two levels deep, neither of which exists yet.
-        let path = base.join("nested").join("credentials.json");
+        let path = tmp.path().join("deep").join("nested").join("credentials.json");
         let store = FileStore::new(path.clone());
         store.store("http://a", "tok").unwrap();
         assert!(path.exists());

@@ -1309,8 +1309,9 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
-        sync::atomic::{AtomicUsize, Ordering},
     };
+
+    use tempfile::TempDir;
 
     use axum::{
         Extension, Json, Router,
@@ -1801,16 +1802,14 @@ mod tests {
     }
 
     /// Unique per call: tests share a process, so a fixed directory name
-    /// would have parallel tests writing over each other.
-    fn scratch_dir(label: &str) -> PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "lific-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        path
+    /// would have parallel tests writing over each other. The guard removes
+    /// the directory when it drops, so hold it for as long as the export
+    /// under test needs the path.
+    fn scratch_dir(label: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("lific-{label}-"))
+            .tempdir()
+            .unwrap()
     }
 
     /// Every file under `root` as (path relative to `root`, contents),
@@ -1853,8 +1852,10 @@ mod tests {
         label: &str,
         action: impl Fn(PathBuf) -> ExportAction,
     ) {
-        let remote_dir = scratch_dir(&format!("export-http-{label}"));
-        let local_dir = scratch_dir(&format!("export-sql-{label}"));
+        let remote_tmp = scratch_dir(&format!("export-http-{label}"));
+        let local_tmp = scratch_dir(&format!("export-sql-{label}"));
+        let remote_dir = remote_tmp.path().to_path_buf();
+        let local_dir = local_tmp.path().to_path_buf();
 
         let reported = backend
             .execute(
@@ -1902,9 +1903,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the {label} export reported paths it did not write"
         );
-
-        std::fs::remove_dir_all(&remote_dir).unwrap();
-        std::fs::remove_dir_all(&local_dir).unwrap();
     }
 
     /// LIF-341: `lific export` leaves the same tree on disk whichever backend
@@ -2019,7 +2017,8 @@ mod tests {
         );
         let (url, server) = spawn_server(router).await;
         let backend = HttpBackend::new(&url, None).unwrap();
-        let output_dir = scratch_dir("export-archive");
+        let output_tmp = scratch_dir("export-archive");
+        let output_dir = output_tmp.path().to_path_buf();
 
         let reported = backend
             .execute(
@@ -2058,7 +2057,6 @@ mod tests {
             ])
         );
 
-        std::fs::remove_dir_all(&output_dir).unwrap();
         server.abort();
     }
 
@@ -2309,7 +2307,8 @@ mod tests {
         let router = Router::new().route("/api/export/issues/{identifier}", get(export_response));
         let (url, server) = spawn_server(router).await;
         let backend = HttpBackend::new(&url, None).unwrap();
-        let output_dir = scratch_dir("export-legacy");
+        let output_tmp = scratch_dir("export-legacy");
+        let output_dir = output_tmp.path().to_path_buf();
 
         let output = backend
             .execute(
@@ -2332,7 +2331,6 @@ mod tests {
             output,
             json!([output_dir.join("report.txt").display().to_string()])
         );
-        std::fs::remove_dir_all(output_dir).unwrap();
         server.abort();
     }
 

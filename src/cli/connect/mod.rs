@@ -1060,26 +1060,26 @@ mod tests {
 
     #[test]
     fn connect_refuses_when_database_does_not_exist() {
-        let dir = tmp();
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = tmp();
+        let dir = guard.path();
+        std::fs::create_dir_all(dir).unwrap();
         let mut cfg = Config::default();
         cfg.database.path = dir.join("lific.db");
         let err = ensure_instance_exists(&cfg).expect_err("must refuse a nonexistent db");
         assert!(err.contains("does not exist"), "got: {err}");
         assert!(err.contains("lific init"), "should point at init: {err}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn connect_accepts_an_existing_database() {
-        let dir = tmp();
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = tmp();
+        let dir = guard.path();
+        std::fs::create_dir_all(dir).unwrap();
         let db_path = dir.join("lific.db");
         std::fs::write(&db_path, b"").unwrap();
         let mut cfg = Config::default();
         cfg.database.path = db_path;
         assert!(ensure_instance_exists(&cfg).is_ok());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── target_url ───────────────────────────────────────────────
@@ -1115,17 +1115,11 @@ mod tests {
         }
     }
 
-    fn tmp() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "lific-connect-run-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// Scratch directory for one test. Dropping the guard removes it, which
+    /// also runs while a failed assertion unwinds, so no run inherits state
+    /// from a previous one.
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     // ── default_url ──────────────────────────────────────────
@@ -1158,8 +1152,9 @@ mod tests {
 
     #[test]
     fn resolve_explicit_clients_validates_and_dedups() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let got = resolve_clients_inner(
             &["opencode".into(), "codex".into(), "opencode".into()],
             true,
@@ -1169,13 +1164,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, vec!["opencode".to_string(), "codex".to_string()]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn resolve_unknown_client_errors() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let err = resolve_clients_inner(
             &["nope".into()],
             true,
@@ -1185,29 +1180,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown client"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn resolve_no_client_non_tty_refuses_naming_flags() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let err = resolve_clients_inner(&[], false, &b, Scope::Global, no_picker).unwrap_err();
         assert!(err.contains("--client"), "must name --client: {err}");
         assert!(err.contains("--yes"), "must name --yes: {err}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn resolve_no_client_tty_calls_picker() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let got = resolve_clients_inner(&[], true, &b, Scope::Global, |_| {
             Ok(vec!["cursor".into()])
         })
         .unwrap();
         assert_eq!(got, vec!["cursor".to_string()]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── transport resolution (LIFIC-19) ──────────────────────
@@ -1286,8 +1280,9 @@ mod tests {
 
     #[test]
     fn detect_finds_only_present_clients() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         // Create ~/.cursor/ and ~/.codex/config.toml in the injected home.
         std::fs::create_dir_all(b.home.join(".cursor")).unwrap();
         std::fs::create_dir_all(b.home.join(".codex")).unwrap();
@@ -1299,7 +1294,6 @@ mod tests {
         assert!(by_id("codex"), "codex should be detected");
         assert!(!by_id("gemini"), "gemini should not be detected");
         assert!(!by_id("windsurf"), "windsurf should not be detected");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── end-to-end run ───────────────────────────────────────
@@ -1339,8 +1333,9 @@ mod tests {
 
     #[test]
     fn run_writes_project_scope_configs_and_skips_no_project_clients() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         // goose has no project path → should be skipped with a warning.
@@ -1367,13 +1362,13 @@ mod tests {
             goose.error.as_ref().unwrap().contains("project"),
             "goose skip should mention project scope"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_stdio_writes_absolute_db_and_no_key() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let mut cfg = Config::default();
         cfg.database.path = dir.join("mydb.db");
@@ -1399,15 +1394,15 @@ mod tests {
             std::path::Path::new(db_arg).is_absolute(),
             "stdio db path must be absolute, got {db_arg}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── LIFIC-18: stdio agent token carrier ───────────────────────────────
 
     #[test]
     fn run_stdio_with_owner_mints_agent_key_written_into_env() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let owner_id = seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1442,13 +1437,13 @@ mod tests {
             .unwrap();
         assert!(is_bot, "opencode-solo must be a bot");
         assert_eq!(owner, Some(owner_id), "bot must be owned by the operator");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_stdio_openconfig_merges_with_existing_entries() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1478,7 +1473,6 @@ mod tests {
                 .as_str()
                 .is_some()
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── connect idempotency / self-healing the stdio token ────────────────
@@ -1491,8 +1485,9 @@ mod tests {
 
     #[test]
     fn run_stdio_reconnects_and_heals_a_tokenless_lific_entry() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1539,13 +1534,13 @@ mod tests {
             .unwrap();
         assert_eq!(bots, 1, "reconnect must not duplicate the agent bot");
         assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_stdio_rerun_keeps_the_token_and_agent_stable() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1582,13 +1577,13 @@ mod tests {
             .expect("token must be present after rerun");
         assert!(second_token.starts_with("lific_sk-live-"));
         assert_eq!(second_v["mcp"]["lific"]["type"], "local");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_stdio_codex_writes_env_table_in_toml() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1625,7 +1620,6 @@ mod tests {
             written.contains("lific_sk-live-"),
             "codex must carry a real minted key, not a placeholder:\n{written}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1633,8 +1627,9 @@ mod tests {
         // LIFIC-18 spec: "The config write merges into an existing tool config
         // without destroying other entries." opencode covered it; this pins the
         // codex TOML merge path, which touches a different writer branch.
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let mut cfg = Config::default();
@@ -1676,13 +1671,13 @@ mod tests {
             written.contains("LIFIC_TOKEN"),
             "codex must write LIFIC_TOKEN into env on merge:\n{written}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_dry_run_writes_nothing_but_returns_contents() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         let mut a = args(&["cursor"], Scope::Global);
@@ -1693,7 +1688,6 @@ mod tests {
         assert!(oc.dry_run_contents.is_some());
         // Nothing on disk.
         assert!(!b.home.join(".cursor/mcp.json").exists());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── per-tool key minting (LIF-259) ───────────────────────
@@ -1721,8 +1715,9 @@ mod tests {
 
     #[test]
     fn provided_key_is_used_verbatim_for_all_clients() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         // Two clients, one shared --key: both get the SAME verbatim key.
@@ -1738,13 +1733,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(key_count, 0, "--key mints nothing");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn fresh_install_mints_per_tool_unassigned_keys() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap(); // zero users
         let cfg = Config::default();
         let mut a = args(&["opencode", "cursor"], Scope::Global);
@@ -1781,13 +1776,13 @@ mod tests {
         assert!(oc_body.contains(&ock));
         let cur_body = std::fs::read_to_string(b.home.join(".cursor/mcp.json")).unwrap();
         assert!(cur_body.contains(&curk));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn single_user_mints_per_tool_bots_owned_by_them() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let owner_id = seed_user(&pool, "solo", true);
         let cfg = Config::default();
@@ -1833,13 +1828,13 @@ mod tests {
         // One active key per bot, each assigned to the right bot.
         assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
         assert_eq!(active_key_count(&pool, "cursor-solo"), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rerun_rotates_both_tool_keys_without_error() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let cfg = Config::default();
@@ -1870,7 +1865,6 @@ mod tests {
         assert_ne!(ock1, ock2, "re-run must rotate the opencode key");
         assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
         assert_eq!(active_key_count(&pool, "cursor-solo"), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── reconnect healing, all transports (idempotency) ────────────────────
@@ -1882,8 +1876,9 @@ mod tests {
 
     #[test]
     fn run_remote_reconnects_and_heals_a_stale_lific_entry() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let cfg = Config::default();
@@ -1924,13 +1919,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bots, 1, "remote reconnect must not duplicate the bot");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_oauth_reconnects_and_heals_a_stale_lific_entry() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true);
         let cfg = Config::default();
@@ -1966,7 +1961,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(keys, 0, "oauth reconnects mint no keys");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1979,8 +1973,9 @@ mod tests {
         a.key = None;
         a.user = Some("alice".into());
 
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let cfg = Config::default();
         let result = run(&a, &cfg, &pool, &b).unwrap();
         assert_eq!(result.key_origin, Some(KeyOrigin::Bot));
@@ -1994,7 +1989,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(owner, Some(alice), "explicit --user must own the bot");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2015,8 +2009,9 @@ mod tests {
         // resolved. A stdio config with no token runs as the operator, which is
         // the documented LIFIC-18 fallback — so the run succeeds and writes a
         // plain (token-less) stdio config.
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "a", false);
         seed_user(&pool, "b", false); // two humans, no single owner, no --user
@@ -2045,15 +2040,15 @@ mod tests {
             v["mcp"]["lific"].get("environment").is_none(),
             "ambiguous-owner stdio must write no token env field"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── --oauth mode (LIF-259) ───────────────────────────────
 
     #[test]
     fn oauth_writes_headerless_opencode_and_mints_nothing() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         seed_user(&pool, "solo", true); // a human exists — must still not mint
         let cfg = Config::default();
@@ -2089,13 +2084,13 @@ mod tests {
             .unwrap();
         assert_eq!(keys, 0, "oauth mints no keys");
         assert_eq!(bots, 0, "oauth creates no bots");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn oauth_codex_toml_has_url_and_no_bearer_env_var() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         let mut a = args(&["codex"], Scope::Global);
@@ -2113,13 +2108,13 @@ mod tests {
             doc["mcp_servers"]["lific"].get("bearer_token_env_var").is_none(),
             "oauth codex must not set bearer_token_env_var: {body}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn oauth_skips_incapable_clients_with_note() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         let mut a = args(&["opencode", "goose", "claude-desktop"], Scope::Global);
@@ -2139,13 +2134,13 @@ mod tests {
         // opencode still went through.
         let oc = result.outcomes.iter().find(|o| o.id == "opencode").unwrap();
         assert_eq!(oc.action.as_deref(), Some("created"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn oauth_and_stdio_conflict_errors() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         let mut a = args(&["opencode"], Scope::Global);
@@ -2154,28 +2149,28 @@ mod tests {
         a.stdio = true;
         let err = run(&a, &cfg, &pool, &b).unwrap_err();
         assert!(err.contains("--oauth") && err.contains("--stdio"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn oauth_and_key_conflict_errors() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
         let mut a = args(&["opencode"], Scope::Global); // provides --key
         a.oauth = true;
         let err = run(&a, &cfg, &pool, &b).unwrap_err();
         assert!(err.contains("--oauth") && err.contains("--key"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── AGENTS.md integration ────────────────────────────────
 
     #[test]
     fn run_writes_agents_md_in_project_scope_when_yes() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         std::fs::create_dir_all(&b.project).unwrap();
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
@@ -2187,13 +2182,13 @@ mod tests {
         assert!(b.project.join("AGENTS.md").exists());
         let content = std::fs::read_to_string(b.project.join("AGENTS.md")).unwrap();
         assert!(content.contains("lific:begin"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_skip_agents_writes_no_agents_md() {
-        let dir = tmp();
-        let b = base(&dir);
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
         std::fs::create_dir_all(&b.project).unwrap();
         let pool = db::open_memory().unwrap();
         let cfg = Config::default();
@@ -2201,6 +2196,5 @@ mod tests {
         let result = run(&a, &cfg, &pool, &b).unwrap();
         assert!(result.agents_md.is_none());
         assert!(!b.project.join("AGENTS.md").exists());
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

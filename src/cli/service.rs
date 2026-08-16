@@ -486,8 +486,8 @@ mod tests {
     // at a lific.toml in whatever directory the command happened to run in.
     #[test]
     fn for_config_file_anchors_workdir_to_the_config_dir() {
-        let dir = std::env::temp_dir().join(format!("lific_svc_plan_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let config = dir.join("lific.toml");
         std::fs::write(&config, "").unwrap();
 
@@ -495,8 +495,6 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
         assert_eq!(plan.workdir, canon_dir);
         assert_eq!(plan.config, canon_dir.join("lific.toml"));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

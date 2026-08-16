@@ -387,21 +387,18 @@ mod tests {
         ServerConfig::remote("http://127.0.0.1:3456/mcp", "lific_sk-live-K")
     }
 
-    fn tmp() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "lific-connect-writer-{}-{}",
-            std::process::id(),
-            // A per-call nonce so parallel tests don't collide.
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    /// Scratch root for one test. Callers work inside a `proj` subdirectory
+    /// that does not exist yet, matching the original fixture, where `write`
+    /// has to create the parent itself. Dropping the guard removes
+    /// everything, unwinding included.
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     #[test]
     fn json_creates_file_when_absent() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         let path = dir.join("opencode.json");
         let entry = find_client("opencode").unwrap().compile(&remote());
         let action = write(&path, Format::Json, &entry).unwrap();
@@ -411,12 +408,12 @@ mod tests {
         assert!(written.ends_with('\n'), "must end with a trailing newline");
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["mcp"]["lific"]["type"], "remote");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn json_preserves_sibling_servers_and_unrelated_keys() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.json");
         // Pre-existing config with another MCP server and unrelated top keys.
@@ -444,12 +441,12 @@ mod tests {
         assert_eq!(v["mcp"]["other"]["url"], "http://other");
         // Our entry added.
         assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn json_replaces_existing_lific_entry_not_duplicates() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.json");
         std::fs::write(
@@ -470,12 +467,12 @@ mod tests {
         // Exactly one lific key (object semantics guarantee no dup, but assert
         // the map has just the one server we expect).
         assert_eq!(v["mcp"].as_object().unwrap().len(), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn json_refuses_to_touch_unparseable_jsonc_and_returns_snippet() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.json");
         // JSONC with a comment — valid for OpenCode but not strict JSON.
@@ -489,12 +486,12 @@ mod tests {
         assert!(snippet.contains("lific"));
         // File must be byte-for-byte unchanged.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn toml_sets_only_our_table_and_preserves_comments() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let original = "# Codex config\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\nurl = \"http://other\"\n";
@@ -522,12 +519,12 @@ mod tests {
             Some("LIFIC_API_KEY")
         );
         assert!(!written.contains("lific_sk-live-K"), "must not inline the key");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn toml_creates_fresh_when_absent() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         let path = dir.join("config.toml");
         let entry = find_client("codex").unwrap().compile(&remote());
         let action = write(&path, Format::Toml, &entry).unwrap();
@@ -538,12 +535,12 @@ mod tests {
             doc["mcp_servers"]["lific"]["bearer_token_env_var"].as_str(),
             Some("LIFIC_API_KEY")
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn toml_refuses_unparseable_and_returns_snippet() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let original = "this is = = not valid toml [[[\n";
@@ -552,12 +549,12 @@ mod tests {
         let err = write(&path, Format::Toml, &entry).unwrap_err();
         assert!(err.manual_snippet.is_some());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn yaml_sets_extensions_lific_and_preserves_other_extensions() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         std::fs::write(
@@ -582,12 +579,12 @@ mod tests {
             Some("streamable_http")
         );
         assert_eq!(v["extensions"]["lific"]["uri"].as_str(), Some("http://127.0.0.1:3456/mcp"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn render_does_not_write_to_disk() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         let path = dir.join("opencode.json");
         let entry = find_client("opencode").unwrap().compile(&remote());
         let rendered = render(&path, Format::Json, &entry).unwrap();

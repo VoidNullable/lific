@@ -629,21 +629,26 @@ pub(crate) mod test_helpers {
     /// config + rate-limiter extensions the attachment routes need. Layered
     /// onto every test app so the attachment endpoints work in tests without a
     /// real data dir.
-    pub fn test_attachment_store() -> crate::storage::AttachmentStore {
-        let dir = std::env::temp_dir().join(format!(
-            "lific_att_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        crate::storage::AttachmentStore::new(dir)
+    /// Returns the store plus the guard that owns its directory. Keep the
+    /// guard alive for as long as the store is used; dropping it removes the
+    /// directory, including while a failed assertion unwinds.
+    pub fn test_attachment_store() -> (crate::storage::AttachmentStore, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("test attachment tempdir");
+        let store = crate::storage::AttachmentStore::new(tmp.path().to_path_buf());
+        (store, tmp)
     }
 
     /// Layer the three attachment extensions onto a router under test.
+    ///
+    /// The tempdir guard is layered onto the router as a fourth extension so
+    /// it lives exactly as long as the app under test does. No handler reads
+    /// it; the router is simply the only thing here that outlives the store,
+    /// and letting it own the guard means the scratch directory is removed
+    /// when the test ends, panic or not, without every caller having to
+    /// thread a guard binding through.
     pub fn with_attachment_layers(router: Router) -> Router {
-        with_attachment_layers_store(router, test_attachment_store())
+        let (store, guard) = test_attachment_store();
+        with_attachment_layers_store(router, store).layer(Extension(Arc::new(guard)))
     }
 
     pub fn with_attachment_layers_store(

@@ -336,40 +336,38 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn tmp_store() -> (AttachmentStore, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "lific_store_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        (AttachmentStore::new(dir.clone()), dir)
+    /// A store rooted in a fresh scratch directory. The caller must keep the
+    /// returned [`TempDir`] alive for as long as it uses the store; dropping
+    /// it removes the directory, which also happens while a failed assertion
+    /// unwinds.
+    fn tmp_store() -> (AttachmentStore, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        // A subdirectory that does not exist yet, matching production, where
+        // the attachments dir is created on first write.
+        let store = AttachmentStore::new(tmp.path().join("attachments"));
+        (store, tmp)
     }
 
     #[test]
     fn write_read_roundtrip_and_dedup() {
-        let (store, dir) = tmp_store();
+        let (store, _tmp) = tmp_store();
         let bytes = b"hello attachment world";
         let sha1 = store.write(bytes).unwrap();
         let sha2 = store.write(bytes).unwrap();
         assert_eq!(sha1, sha2, "same content hashes to same file");
         assert_eq!(store.read(&sha1).unwrap(), bytes);
         // Only one file on disk for the duplicate write.
-        let count = std::fs::read_dir(&dir).unwrap().count();
+        let count = std::fs::read_dir(store.dir()).unwrap().count();
         assert_eq!(count, 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn delete_is_idempotent() {
-        let (store, dir) = tmp_store();
+        let (store, _tmp) = tmp_store();
         let sha = store.write(b"x").unwrap();
         store.delete(&sha).unwrap();
         store.delete(&sha).unwrap(); // second delete: no error
         assert!(store.read(&sha).is_err());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

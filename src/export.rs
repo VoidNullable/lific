@@ -548,8 +548,10 @@ mod tests {
             ],
         };
 
-        let direct_dir = scratch_dir("bundle-direct");
-        let unpacked_dir = scratch_dir("bundle-unpacked");
+        let direct_tmp = scratch_dir("bundle-direct");
+        let unpacked_tmp = scratch_dir("bundle-unpacked");
+        let direct_dir = direct_tmp.path().to_path_buf();
+        let unpacked_dir = unpacked_tmp.path().to_path_buf();
         let direct = write_bundle_to_directory(&bundle, &direct_dir).unwrap();
         let unpacked =
             unpack_zip_to_directory(&bundle_to_zip(&bundle).unwrap(), &unpacked_dir).unwrap();
@@ -576,9 +578,6 @@ mod tests {
                 std::fs::read_to_string(direct).unwrap()
             );
         }
-
-        std::fs::remove_dir_all(direct_dir).unwrap();
-        std::fs::remove_dir_all(unpacked_dir).unwrap();
     }
 
     /// Entry names arrive over the network, so a hostile one must not be able
@@ -596,26 +595,22 @@ mod tests {
             .unwrap();
 
             let output = scratch_dir("bundle-escape");
-            let error = unpack_zip_to_directory(&archive, &output)
+            let error = unpack_zip_to_directory(&archive, output.path())
                 .expect_err("'{escape}' should be rejected");
             assert!(
                 error.to_string().contains("outside the output directory"),
                 "unexpected error for '{escape}': {error}"
             );
-            let _ = std::fs::remove_dir_all(output);
         }
     }
 
-    /// Unique per call, so these tests can run beside each other.
-    fn scratch_dir(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "lific-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        path
+    /// Unique per call, so these tests can run beside each other. The guard
+    /// removes the directory on Drop, unwinding included, so a failing
+    /// assertion cannot leave scratch state behind.
+    fn scratch_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("lific-{label}-"))
+            .tempdir()
+            .unwrap()
     }
 }

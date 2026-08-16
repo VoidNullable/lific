@@ -1123,28 +1123,10 @@ mod init_target_tests {
 
     // A temp dir that self-destructs, so cmd_init's filesystem writes stay out
     // of the repo tree and don't collide across tests.
-    struct TempDir(std::path::PathBuf);
-    impl TempDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "lific-init-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    use tempfile::TempDir;
+
+    fn temp_dir() -> TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     /// Run `lific init --config <dir>/lific.toml --no-service` for the operator
@@ -1188,7 +1170,7 @@ mod init_target_tests {
     // when given `--name` non-interactively (login-free mode).
     #[tokio::test]
     async fn init_fresh_install_creates_first_admin_with_name() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let out = run_init(&dir, Some("Blake Alston"), Some("login-free"), None)
             .await
             .unwrap();
@@ -1199,7 +1181,7 @@ mod init_target_tests {
     // "default" key (passwordless mode) — no key is auto-generated.
     #[tokio::test]
     async fn init_fresh_install_skips_default_key_when_admin_created() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let out = run_init(&dir, Some("Blake"), Some("login-free"), None)
             .await
             .unwrap();
@@ -1214,7 +1196,7 @@ mod init_target_tests {
     // skips creation — idempotent, existing setup untouched.
     #[tokio::test]
     async fn init_existing_install_skips_admin_creation() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let first = run_init(&dir, Some("Blake"), Some("login-free"), None)
             .await
             .unwrap();
@@ -1234,7 +1216,7 @@ mod init_target_tests {
     // web_auto_login=true, and a passwordless admin.
     #[tokio::test]
     async fn init_login_free_wires_config_db_and_passwordless_admin() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let out = run_init(&dir, Some("Blake"), Some("login-free"), None)
             .await
             .unwrap();
@@ -1248,7 +1230,7 @@ mod init_target_tests {
     // web_auto_login=false, and creates an admin with the chosen password.
     #[tokio::test]
     async fn init_passwords_wires_config_db_and_passworded_admin() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let out = run_init(&dir, Some("Blake"), Some("passwords"), Some("hunter22!"))
             .await
             .unwrap();
@@ -1263,7 +1245,7 @@ mod init_target_tests {
     // LIFIC-25: an invalid --auth-mode is rejected.
     #[tokio::test]
     async fn init_rejects_invalid_auth_mode() {
-        let dir = TempDir::new();
+        let dir = temp_dir();
         let config_path = dir.path().join("lific.toml");
         let err = cmd_init(
             Some(&config_path),

@@ -137,15 +137,12 @@ fn merge(current: &str, block: &str) -> Result<(String, AgentsAction), String> {
 mod tests {
     use super::*;
 
-    fn tmp() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "lific-agents-md-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    /// Scratch root for one test. Callers work inside a `proj` subdirectory
+    /// that does not exist yet, matching the original fixture, where `write`
+    /// has to create the parent itself. Dropping the guard removes
+    /// everything, unwinding included.
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     #[test]
@@ -166,7 +163,8 @@ mod tests {
 
     #[test]
     fn creates_file_when_absent() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         let path = dir.join("AGENTS.md");
         let action = write(&path, Some("LIF")).unwrap();
         assert_eq!(action, AgentsAction::Created);
@@ -174,12 +172,12 @@ mod tests {
         assert!(content.contains(BEGIN_MARKER));
         assert!(content.contains(END_MARKER));
         assert!(content.contains("LIF-1"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn inserts_after_existing_content_preserving_it() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("AGENTS.md");
         let original = "# My Project\n\nSome existing agent instructions.\n";
@@ -192,12 +190,12 @@ mod tests {
         assert!(content.starts_with("# My Project"));
         assert!(content.contains("Some existing agent instructions."));
         assert!(content.contains(BEGIN_MARKER));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rerun_is_idempotent_single_block() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("AGENTS.md");
         std::fs::write(&path, "# Header\n\nBody.\n").unwrap();
@@ -215,12 +213,12 @@ mod tests {
         // Surrounding content preserved.
         assert!(after_second.starts_with("# Header"));
         assert!(after_second.contains("Body."));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn replace_updates_project_identifier_and_preserves_surroundings() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("AGENTS.md");
         std::fs::write(&path, "Top.\n").unwrap();
@@ -237,17 +235,16 @@ mod tests {
         assert!(content.starts_with("Top."));
         assert!(content.contains("Trailing note."));
         assert_eq!(content.matches(BEGIN_MARKER).count(), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn inverted_markers_error() {
-        let dir = tmp();
+        let guard = tmp();
+        let dir = guard.path().join("proj");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("AGENTS.md");
         std::fs::write(&path, format!("{END_MARKER}\nx\n{BEGIN_MARKER}\n")).unwrap();
         let err = write(&path, Some("LIF")).unwrap_err();
         assert!(err.contains("marker"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

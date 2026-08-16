@@ -602,25 +602,24 @@ pub fn server_maybe_running(db_path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use tempfile::TempDir;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lific_dump_{tag}_{}_{n}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// Scratch directory for one test. The guard removes it on Drop, which
+    /// also runs while a failed assertion unwinds, so nothing is left for a
+    /// later run to trip over.
+    fn temp_dir(tag: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("lific_dump_{tag}_"))
+            .tempdir()
+            .unwrap()
     }
 
     /// Build a real on-disk DB with a seeded project, plus an attachments dir
-    /// containing one real blob and one `.tmp` stray. Returns (dir, db_path).
-    fn seed_data_dir(tag: &str) -> (PathBuf, PathBuf) {
-        let dir = temp_dir(tag);
+    /// containing one real blob and one `.tmp` stray. Returns (dir guard,
+    /// db_path).
+    fn seed_data_dir(tag: &str) -> (TempDir, PathBuf) {
+        let tmp = temp_dir(tag);
+        let dir = tmp.path();
         let db_path = dir.join("lific.db");
         {
             let pool = crate::db::open(&db_path).unwrap();
@@ -642,7 +641,7 @@ mod tests {
         fs::write(att.join("deadbeef01"), b"blob one").unwrap();
         fs::write(att.join("deadbeef02"), b"second blob bytes").unwrap();
         fs::write(att.join("deadbeef02.tmp"), b"partial write").unwrap();
-        (dir, db_path)
+        (tmp, db_path)
     }
 
     /// List the entry names inside an archive.
@@ -658,7 +657,8 @@ mod tests {
 
     #[test]
     fn dump_archive_contains_db_manifest_and_blobs_excluding_tmp() {
-        let (dir, db_path) = seed_data_dir("contents");
+        let (dir_tmp, db_path) = seed_data_dir("contents");
+        let dir = dir_tmp.path();
         let out = dir.join("out.tar.gz");
         let manifest = write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
 
@@ -677,20 +677,18 @@ mod tests {
         assert_eq!(manifest.lific_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest.schema_version, crate::db::migrate::latest_version());
         assert!(manifest.db_size_bytes > 0);
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn dump_archive_is_owner_only_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, db_path) = seed_data_dir("perms");
+        let (dir_tmp, db_path) = seed_data_dir("perms");
+        let dir = dir_tmp.path();
         let out = dir.join("out.tar.gz");
         write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
         let mode = fs::metadata(&out).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "archive must be chmod 0600");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -698,7 +696,8 @@ mod tests {
         // LIF-329: force a failure *after* the staging archive exists by
         // squatting the final path with a directory (rename onto a directory
         // fails on every platform). Neither staging file may survive.
-        let (dir, db_path) = seed_data_dir("errclean");
+        let (dir_tmp, db_path) = seed_data_dir("errclean");
+        let dir = dir_tmp.path();
         let out = dir.join("blocked.tar.gz");
         fs::create_dir_all(&out).unwrap();
 
@@ -713,13 +712,12 @@ mod tests {
             !out.with_extension("dbsnapshot.tmp").exists(),
             "db snapshot staging file must be cleaned on error"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn dumped_db_is_openable_sqlite_with_seeded_data() {
-        let (dir, db_path) = seed_data_dir("snapshot");
+        let (dir_tmp, db_path) = seed_data_dir("snapshot");
+        let dir = dir_tmp.path();
         let out = dir.join("snap.tar.gz");
         write_dump(&crate::db::open(&db_path).unwrap(), &db_path, &out).unwrap();
 
@@ -746,12 +744,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, "DumpTest");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn run_dump_into_directory_uses_default_filename() {
-        let (dir, db_path) = seed_data_dir("outdir");
+        let (dir_tmp, db_path) = seed_data_dir("outdir");
+        let dir = dir_tmp.path();
         let target = dir.join("dumps");
         fs::create_dir_all(&target).unwrap();
         let res = run_dump(&db_path, Some(&target)).unwrap();
@@ -760,17 +758,18 @@ mod tests {
         assert!(fname.starts_with("lific_"));
         assert!(fname.ends_with(".tar.gz"));
         assert!(res.archive_path.exists());
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn restore_round_trip_matches_entities_and_blob_bytes() {
-        let (src_dir, src_db) = seed_data_dir("rt_src");
+        let (src_dir_tmp, src_db) = seed_data_dir("rt_src");
+        let src_dir = src_dir_tmp.path();
         let out = src_dir.join("backup.tar.gz");
         write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &out).unwrap();
 
         // Fresh, empty destination dir.
-        let dst_dir = temp_dir("rt_dst");
+        let dst_dir_tmp = temp_dir("rt_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         let res = run_restore(&out, &dst_db, false).unwrap();
         assert_eq!(res.attachment_count, 2);
@@ -794,37 +793,35 @@ mod tests {
             fs::read(dst_dir.join("attachments").join("deadbeef02")).unwrap(),
             b"second blob bytes"
         );
-
-        fs::remove_dir_all(&src_dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[test]
     fn restore_refuses_existing_db_without_force() {
-        let (src_dir, src_db) = seed_data_dir("guard_src");
+        let (src_dir_tmp, src_db) = seed_data_dir("guard_src");
+        let src_dir = src_dir_tmp.path();
         let out = src_dir.join("b.tar.gz");
         write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &out).unwrap();
 
         // Destination already has a db.
-        let dst_dir = temp_dir("guard_dst");
+        let dst_dir_tmp = temp_dir("guard_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         let _ = crate::db::open(&dst_db).unwrap();
 
         let err = run_restore(&out, &dst_db, false).unwrap_err();
         assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
-
-        fs::remove_dir_all(&src_dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn restore_force_moves_existing_db_aside() {
-        let (src_dir, src_db) = seed_data_dir("force_src");
+        let (src_dir_tmp, src_db) = seed_data_dir("force_src");
+        let src_dir = src_dir_tmp.path();
         let out = src_dir.join("b.tar.gz");
         write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &out).unwrap();
 
-        let dst_dir = temp_dir("force_dst");
+        let dst_dir_tmp = temp_dir("force_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         // Seed a DIFFERENT project so we can tell the old db apart.
         {
@@ -864,14 +861,12 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM projects WHERE identifier='DMP'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(dmp, 1);
-
-        fs::remove_dir_all(&src_dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[test]
     fn restore_refuses_newer_schema_version() {
-        let (src_dir, src_db) = seed_data_dir("newer_src");
+        let (src_dir_tmp, src_db) = seed_data_dir("newer_src");
+        let src_dir = src_dir_tmp.path();
         let out = src_dir.join("b.tar.gz");
         write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &out).unwrap();
 
@@ -880,19 +875,18 @@ mod tests {
         let bumped = src_dir.join("bumped.tar.gz");
         rewrite_archive_with_schema(&out, &bumped, crate::db::migrate::latest_version() + 5);
 
-        let dst_dir = temp_dir("newer_dst");
+        let dst_dir_tmp = temp_dir("newer_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         let err = run_restore(&bumped, &dst_db, false).unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
         assert!(!dst_db.exists(), "nothing should be restored on schema refusal");
-
-        fs::remove_dir_all(&src_dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[test]
     fn restore_rejects_path_traversal_entry() {
-        let dir = temp_dir("traversal");
+        let dir_tmp = temp_dir("traversal");
+        let dir = dir_tmp.path();
         let archive = dir.join("evil.tar.gz");
         // Craft an archive with a manifest, a db, and a malicious attachment
         // entry that tries to escape the attachments dir.
@@ -924,7 +918,8 @@ mod tests {
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
 
         // And a full restore attempt must also refuse, leaving no db behind.
-        let dst_dir = temp_dir("traversal_dst");
+        let dst_dir_tmp = temp_dir("traversal_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         assert!(run_restore(&archive, &dst_db, false).is_err());
         assert!(!dst_db.exists());
@@ -932,9 +927,6 @@ mod tests {
             !dst_dir.join("attachments").join("sub").exists(),
             "traversal entry must not write nested dirs"
         );
-
-        fs::remove_dir_all(&dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[cfg(unix)]
@@ -943,7 +935,8 @@ mod tests {
         // A corrupt archive (valid manifest+db header claim, truncated body)
         // must fail extraction WITHOUT clobbering the pre-existing db when
         // --force moved it aside — the rollback restores it.
-        let (src_dir, src_db) = seed_data_dir("midfail_src");
+        let (src_dir_tmp, src_db) = seed_data_dir("midfail_src");
+        let src_dir = src_dir_tmp.path();
         let good = src_dir.join("good.tar.gz");
         write_dump(&crate::db::open(&src_db).unwrap(), &src_db, &good).unwrap();
 
@@ -952,7 +945,8 @@ mod tests {
         let bytes = fs::read(&good).unwrap();
         fs::write(&corrupt, &bytes[..bytes.len() / 2]).unwrap();
 
-        let dst_dir = temp_dir("midfail_dst");
+        let dst_dir_tmp = temp_dir("midfail_dst");
+        let dst_dir = dst_dir_tmp.path();
         let dst_db = dst_dir.join("lific.db");
         {
             let pool = crate::db::open(&dst_db).unwrap();
@@ -980,16 +974,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM projects WHERE identifier='ORG'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(org, 1, "original data must survive a failed restore");
-
-        fs::remove_dir_all(&src_dir).ok();
-        fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[test]
     fn failed_rollback_error_names_both_failures_and_the_surviving_db_path() {
         // LIF-371: when the moved-aside db cannot be renamed back, the user
         // must be told the restore failed AND where their database still is.
-        let dir = temp_dir("rollback_fail");
+        let dir_tmp = temp_dir("rollback_fail");
+        let dir = dir_tmp.path();
         let db_path = dir.join("lific.db");
         // A source that does not exist makes the rollback rename fail.
         let moved = dir.join("lific.db.pre-restore-gone");
@@ -1014,13 +1006,12 @@ mod tests {
             msg.contains(&db_path.display().to_string()),
             "must name where to move it back to: {msg}"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn successful_rollback_surfaces_the_original_error_unchanged() {
-        let dir = temp_dir("rollback_ok");
+        let dir_tmp = temp_dir("rollback_ok");
+        let dir = dir_tmp.path();
         let db_path = dir.join("lific.db");
         let moved = dir.join("lific.db.pre-restore-1");
         fs::write(&moved, b"original db bytes").unwrap();
@@ -1034,8 +1025,6 @@ mod tests {
         assert!(matches!(err, LificError::BadRequest(ref m) if m == "archive is missing lific.db"));
         assert_eq!(fs::read(&db_path).unwrap(), b"original db bytes");
         assert!(!moved.exists());
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

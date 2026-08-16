@@ -1049,10 +1049,10 @@ mod tests {
         seed_project(&pool, "TST");
         seed_issue(&pool, "TST", "Export this issue");
 
-        let tmp = std::env::temp_dir().join(format!("lific-export-test-{}", std::process::id()));
-        if tmp.exists() {
-            std::fs::remove_dir_all(&tmp).unwrap();
-        }
+        let guard = tempfile::tempdir().unwrap();
+        // A subdirectory that does not exist yet: the export command creates
+        // its own output directory.
+        let tmp = guard.path().join("export");
 
         let cmd = Command::Export {
             action: ExportAction::Project {
@@ -1066,8 +1066,6 @@ mod tests {
         assert!(issue_path.exists());
         let content = std::fs::read_to_string(issue_path).unwrap();
         assert!(content.contains("identifier: TST-1"));
-
-        std::fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]
