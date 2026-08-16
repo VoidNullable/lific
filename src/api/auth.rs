@@ -736,7 +736,25 @@ pub(super) struct UserListItem {
     username: String,
     display_name: String,
     is_admin: bool,
+    /// LIF-214: false for a deactivated account. Deactivated users stay in
+    /// the list so an admin can find and restore them; clients that are
+    /// picking someone to hand work to (the project-member picker) filter
+    /// them out.
+    is_active: bool,
     created_at: String,
+}
+
+impl From<User> for UserListItem {
+    fn from(u: User) -> Self {
+        UserListItem {
+            id: u.id,
+            username: u.username,
+            display_name: u.display_name,
+            is_admin: u.is_admin,
+            is_active: u.is_active,
+            created_at: u.created_at,
+        }
+    }
 }
 
 pub(super) async fn list_users(
@@ -747,16 +765,131 @@ pub(super) async fn list_users(
         Ok(users
             .into_iter()
             .filter(|u| !u.is_bot)
-            .map(|u| UserListItem {
-                id: u.id,
-                username: u.username,
-                display_name: u.display_name,
-                is_admin: u.is_admin,
-                created_at: u.created_at,
-            })
+            .map(UserListItem::from)
             .collect())
     })
     .map(Json)
+}
+
+// ── Instance-admin roster management (LIF-214) ───────────────
+//
+// Four admin-gated mutations behind the member roster on the Instance
+// settings page: create an account, promote it, demote it, switch it off (and
+// back on). This is the instance-admin axis only. Project-scoped roles live
+// in `api::members` and are a separate thing entirely.
+//
+// The guard rails are NOT here. `require_admin` is the only check this module
+// makes; "you cannot strand the instance with no admin" and "you cannot point
+// any of this at a bot" are enforced in `db::queries::users`
+// (`set_admin_guarded` / `set_active`), so the CLI and any future caller get
+// them too rather than trusting a handler to remember.
+
+#[derive(serde::Deserialize)]
+pub(super) struct CreateUserRequest {
+    username: String,
+    password: String,
+    /// Optional. A local instance rarely has a real address for a teammate,
+    /// and `users.email` is NOT NULL UNIQUE, so an omitted one becomes the
+    /// same `{username}@local` placeholder `create_passwordless_admin` uses.
+    email: Option<String>,
+    display_name: Option<String>,
+    /// Create the account already holding instance admin. Off by default;
+    /// only an admin can reach this endpoint at all, so this is the same
+    /// authority `lific user create --admin` has.
+    #[serde(default)]
+    is_admin: bool,
+}
+
+/// POST /api/users: create a local account. Admin only.
+///
+/// Never mints a bot: `is_bot` is not part of the request at all. Connected
+/// tools come from `POST /api/auth/bots` and the OAuth flow, which own the
+/// (owner, tool) identity rules.
+pub(super) async fn create_user_handler(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Json(input): Json<CreateUserRequest>,
+) -> Result<Json<UserListItem>, LificError> {
+    require_admin(&identity)?;
+
+    let username = input.username.trim().to_string();
+    let email = match input.email.as_deref().map(str::trim) {
+        Some(e) if !e.is_empty() => e.to_string(),
+        _ => format!("{username}@local"),
+    };
+
+    let user = with_write(&db, |conn| {
+        crate::db::queries::users::create_user(
+            conn,
+            &CreateUser {
+                username: username.clone(),
+                email,
+                password: input.password.clone(),
+                display_name: input.display_name.clone(),
+                is_admin: input.is_admin,
+                is_bot: false,
+            },
+        )
+    })?;
+
+    Ok(Json(user.into()))
+}
+
+/// POST /api/users/{id}/promote: grant instance admin. Admin only.
+pub(super) async fn promote_user(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<UserListItem>, LificError> {
+    require_admin(&identity)?;
+    let user = with_write(&db, |conn| {
+        crate::db::queries::users::set_admin_guarded(conn, id, true)
+    })?;
+    Ok(Json(user.into()))
+}
+
+/// POST /api/users/{id}/demote: revoke instance admin. Admin only. 409 if
+/// this would leave the instance without one.
+pub(super) async fn demote_user(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<UserListItem>, LificError> {
+    require_admin(&identity)?;
+    let user = with_write(&db, |conn| {
+        crate::db::queries::users::set_admin_guarded(conn, id, false)
+    })?;
+    Ok(Json(user.into()))
+}
+
+/// POST /api/users/{id}/deactivate: switch an account off without deleting
+/// the history it owns. Admin only. 409 if it is the last admin who can sign
+/// in.
+pub(super) async fn deactivate_user(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<UserListItem>, LificError> {
+    require_admin(&identity)?;
+    let user = with_write(&db, |conn| {
+        crate::db::queries::users::set_active(conn, id, false)
+    })?;
+    Ok(Json(user.into()))
+}
+
+/// POST /api/users/{id}/reactivate: restore a deactivated account. Admin
+/// only. The credentials torn down at deactivation are not restored; the user
+/// signs in again.
+pub(super) async fn reactivate_user(
+    State(db): State<DbPool>,
+    Path(id): Path<i64>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<UserListItem>, LificError> {
+    require_admin(&identity)?;
+    let user = with_write(&db, |conn| {
+        crate::db::queries::users::set_active(conn, id, true)
+    })?;
+    Ok(Json(user.into()))
 }
 
 #[cfg(test)]
@@ -1676,9 +1809,9 @@ mod tests {
             "attacker IP should be capped: {attacker}"
         );
         // A different IP is unaffected.
-        let (_, other) = login_attempt(&app, "someone", "198.51.100.2").await;
+        let (status, other) = signup_attempt(&app, 60, "198.51.100.8").await;
         assert!(
-            !is_rate_limited(&other),
+            status == StatusCode::OK,
             "distinct IP should not be limited: {other}"
         );
     }
@@ -1766,5 +1899,252 @@ mod tests {
             StatusCode::OK,
             "distinct IP should not be limited: {other}"
         );
+    }
+
+    // ── Instance-admin roster management (LIF-214) ───────────
+
+    use crate::db::DbPool;
+    use crate::db::models::{CreateUser, User};
+    use serde_json::json;
+
+    /// An instance with two admins, a plain member, and a bot owned by the
+    /// first admin. Two admins by default so the last-admin guard is out of
+    /// the way for the happy-path tests; the guard tests demote one first.
+    fn roster_db() -> (DbPool, User, User, User, User) {
+        let db = crate::db::open_memory().expect("test db");
+        let conn = db.write().unwrap();
+
+        let mk = |username: &str, is_admin: bool| {
+            crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: username.into(),
+                    email: format!("{username}@test.com"),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin,
+                    is_bot: false,
+                },
+            )
+            .unwrap()
+        };
+
+        let admin = mk("admin", true);
+        let other_admin = mk("second-admin", true);
+        let member = mk("member", false);
+        let bot =
+            crate::db::queries::users::ensure_bot(&conn, admin.id, "opencode", "OpenCode").unwrap();
+
+        drop(conn);
+        (db, admin, other_admin, member, bot)
+    }
+
+    fn reload(db: &DbPool, id: i64) -> User {
+        let conn = db.read().unwrap();
+        crate::db::queries::users::get_user_by_id(&conn, id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_can_create_a_user_from_the_roster() {
+        let (db, admin, _other, _member, _bot) = roster_db();
+        let app = app_as_user(db.clone(), &admin);
+
+        let resp = json_post(
+            &app,
+            "/api/users",
+            serde_json::json!({ "username": "newcomer", "password": "securepass123" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["username"], "newcomer");
+        assert_eq!(data["is_admin"], false);
+        assert_eq!(data["is_active"], true);
+
+        // A username-only form still produces a schema-valid account, and it
+        // is a human one.
+        let created = reload(&db, data["id"].as_i64().unwrap());
+        assert_eq!(created.email, "newcomer@local");
+        assert!(!created.is_bot, "the roster never mints a bot");
+    }
+
+    #[tokio::test]
+    async fn admin_can_promote_and_demote_a_member() {
+        let (db, admin, _other, member, _bot) = roster_db();
+        let app = app_as_user(db.clone(), &admin);
+
+        let resp = json_post(&app, &format!("/api/users/{}/promote", member.id), json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["is_admin"], true);
+        assert!(reload(&db, member.id).is_admin);
+
+        let resp = json_post(&app, &format!("/api/users/{}/demote", member.id), json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["is_admin"], false);
+        assert!(!reload(&db, member.id).is_admin);
+    }
+
+    #[tokio::test]
+    async fn admin_can_deactivate_and_restore_a_member() {
+        let (db, admin, _other, member, _bot) = roster_db();
+        let app = app_as_user(db.clone(), &admin);
+
+        let resp = json_post(
+            &app,
+            &format!("/api/users/{}/deactivate", member.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["is_active"], false);
+        assert!(!reload(&db, member.id).is_active);
+
+        // Still on the roster, so an admin can find and restore them.
+        let listed = parse_json(json_get(&app, "/api/users").await).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|u| u["id"] == member.id && u["is_active"] == false),
+            "a deactivated member stays visible: {listed}"
+        );
+
+        let resp = json_post(
+            &app,
+            &format!("/api/users/{}/reactivate", member.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["is_active"], true);
+        assert!(reload(&db, member.id).is_active);
+    }
+
+    /// Deactivation has to end access, not just paint a badge: the account's
+    /// existing session dies with the flag.
+    #[tokio::test]
+    async fn deactivation_kills_the_accounts_sessions() {
+        let (db, admin, _other, member, _bot) = roster_db();
+        let token = {
+            let conn = db.write().unwrap();
+            crate::db::queries::users::create_session(&conn, member.id, None)
+                .unwrap()
+                .token
+        };
+        let app = app_as_user(db.clone(), &admin);
+
+        let resp = json_post(
+            &app,
+            &format!("/api/users/{}/deactivate", member.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let conn = db.read().unwrap();
+        assert!(
+            crate::db::queries::users::validate_session(&conn, &token).is_err(),
+            "the deactivated user's session must no longer authenticate"
+        );
+    }
+
+    /// Every mutation is admin-only. A plain member gets 403 and nothing
+    /// moves.
+    #[tokio::test]
+    async fn a_non_admin_cannot_reach_any_roster_mutation() {
+        let (db, admin, _other, member, _bot) = roster_db();
+        let app = app_as_user(db.clone(), &member);
+
+        let resp = json_post(
+            &app,
+            "/api/users",
+            serde_json::json!({ "username": "smuggled", "password": "securepass123" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "create is admin-only");
+
+        for action in ["promote", "demote", "deactivate", "reactivate"] {
+            let resp = json_post(&app, &format!("/api/users/{}/{action}", admin.id), json!({})).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{action} must be admin-only"
+            );
+        }
+
+        // The target admin is untouched by any of it.
+        let still = reload(&db, admin.id);
+        assert!(still.is_admin && still.is_active);
+        assert!(
+            crate::db::queries::users::get_user_by_username(&db.read().unwrap(), "smuggled")
+                .is_err(),
+            "the rejected create wrote nothing"
+        );
+    }
+
+    /// The instance must never end up with nobody who can administer it.
+    #[tokio::test]
+    async fn the_last_admin_cannot_be_demoted_or_deactivated() {
+        let (db, admin, other, _member, _bot) = roster_db();
+        let app = app_as_user(db.clone(), &admin);
+
+        // Down to a single admin.
+        let resp = json_post(&app, &format!("/api/users/{}/demote", other.id), json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            {
+                let conn = db.read().unwrap();
+                crate::db::queries::users::count_active_admins(&conn).unwrap()
+            },
+            1
+        );
+
+        for action in ["demote", "deactivate"] {
+            let resp =
+                json_post(&app, &format!("/api/users/{}/{action}", admin.id), json!({})).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CONFLICT,
+                "{action} of the last admin must be refused"
+            );
+            let data = parse_json(resp).await;
+            assert!(
+                data["error"].as_str().unwrap().contains("last instance admin"),
+                "{action}: {data}"
+            );
+        }
+
+        let still = reload(&db, admin.id);
+        assert!(
+            still.is_admin && still.is_active,
+            "the last admin survived both attempts"
+        );
+    }
+
+    /// A connected tool is not a roster member. None of these endpoints may
+    /// be pointed at one, least of all `promote`, which would hand an agent's
+    /// API key the run of the instance.
+    #[tokio::test]
+    async fn bot_identities_are_not_roster_targets() {
+        let (db, admin, _other, _member, bot) = roster_db();
+        let app = app_as_user(db.clone(), &admin);
+
+        for action in ["promote", "demote", "deactivate", "reactivate"] {
+            let resp = json_post(&app, &format!("/api/users/{}/{action}", bot.id), json!({})).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{action} must refuse a bot target"
+            );
+            let data = parse_json(resp).await;
+            assert!(
+                data["error"].as_str().unwrap().contains("Connected Tools"),
+                "{action}: {data}"
+            );
+        }
+
+        let still = reload(&db, bot.id);
+        assert!(!still.is_admin && still.is_active, "the bot is unchanged");
     }
 }

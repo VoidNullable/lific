@@ -88,7 +88,7 @@ pub fn create_user(conn: &Connection, input: &CreateUser) -> Result<User, LificE
 
 pub fn get_user_by_id(conn: &Connection, id: i64) -> Result<User, LificError> {
     conn.query_row(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users WHERE id = ?1",
         params![id],
         row_to_user,
@@ -101,7 +101,7 @@ pub fn get_user_by_id(conn: &Connection, id: i64) -> Result<User, LificError> {
 
 pub fn get_user_by_username(conn: &Connection, username: &str) -> Result<User, LificError> {
     conn.query_row(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users WHERE username = ?1 COLLATE NOCASE",
         params![username],
         row_to_user,
@@ -117,7 +117,7 @@ pub fn get_user_by_username(conn: &Connection, username: &str) -> Result<User, L
 pub fn get_user_by_email(conn: &Connection, email: &str) -> Result<User, LificError> {
     let email = email.trim().to_lowercase();
     conn.query_row(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users WHERE email = ?1 COLLATE NOCASE",
         params![email],
         row_to_user,
@@ -160,6 +160,13 @@ pub fn authenticate(conn: &Connection, identity: &str, password: &str) -> Result
     let password_ok = verify_password(password, &hash).unwrap_or(false);
 
     match user {
+        // LIF-214: a deactivated account is told so rather than being handed
+        // the generic wrong-password message. The check sits *after* the
+        // Argon2 verify on purpose: answering before it would turn the login
+        // form into an oracle for which usernames are deactivated.
+        Some(u) if password_ok && !u.is_active => Err(LificError::BadRequest(
+            "this account has been deactivated. Ask an admin to restore it.".into(),
+        )),
         Some(u) if password_ok => Ok(u),
         _ => Err(LificError::BadRequest(
             "invalid username/email or password".into(),
@@ -235,7 +242,7 @@ pub fn update_password(
 
 pub fn list_users(conn: &Connection) -> Result<Vec<User>, LificError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users ORDER BY created_at",
     )?;
     let rows = stmt.query_map([], row_to_user)?;
@@ -268,6 +275,7 @@ fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
         is_bot: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        is_active: row.get(9)?,
     })
 }
 
@@ -275,7 +283,9 @@ fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
 /// Used as a fallback author for MCP stdio sessions where no HTTP auth is present.
 pub fn first_admin(conn: &Connection) -> Result<Option<AuthUser>, LificError> {
     match conn.query_row(
-        "SELECT id, username, display_name, is_admin FROM users WHERE is_admin = 1 ORDER BY created_at LIMIT 1",
+        // LIF-214: a deactivated admin is not an identity anything may fall
+        // back to, so the passwordless/stdio resolver skips them.
+        "SELECT id, username, display_name, is_admin FROM users WHERE is_admin = 1 AND is_active = 1 ORDER BY created_at LIMIT 1",
         [],
         |row| {
             Ok(AuthUser {
@@ -496,7 +506,14 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
             other => other.into(),
         })?;
 
-    get_user_by_id(conn, user_id)
+    let user = get_user_by_id(conn, user_id)?;
+    // LIF-214: deactivation revokes access, so a session row that outlives it
+    // (a race with the sweep, or a token minted before the flag flipped) must
+    // not authenticate. Same error the middleware already maps to 401.
+    if !user.is_active {
+        return Err(LificError::BadRequest(INVALID_SESSION_MESSAGE.into()));
+    }
+    Ok(user)
 }
 
 /// Delete a session (logout). Hashes the plaintext token before lookup.
@@ -624,16 +641,125 @@ pub fn create_bot_user(
     get_user_by_id(conn, bot_user_id)
 }
 
-/// Set or unset admin status on a user.
-pub fn set_admin(conn: &Connection, username: &str, is_admin: bool) -> Result<(), LificError> {
-    let changed = conn.execute(
-        "UPDATE users SET is_admin = ?1, updated_at = datetime('now') WHERE username = ?2 COLLATE NOCASE",
-        params![is_admin, username],
+// ── Instance-admin roster management (LIF-214) ───────────────
+//
+// One code path, two front doors. `lific user promote/demote` (src/cli/user.rs)
+// keeps the raw, unguarded write, because the local shell is the recovery tool
+// and must be able to put an instance back into any state it can also get it
+// out of. The REST surface (`src/api/auth.rs`, admin-gated) goes through the
+// `_guarded` wrappers, which refuse to strand an instance with no admin and
+// refuse to touch a bot identity at all. Both end up in the same UPDATE.
+
+/// Write the admin flag on one user by id. Deliberately guard-free: the two
+/// callers below decide what is allowed before reaching here.
+fn write_admin_flag(conn: &Connection, user_id: i64, is_admin: bool) -> Result<(), LificError> {
+    conn.execute(
+        "UPDATE users SET is_admin = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![is_admin, user_id],
     )?;
-    if changed == 0 {
-        return Err(LificError::NotFound(format!("user '{username}' not found")));
-    }
     Ok(())
+}
+
+/// Set or unset admin status on a user, by username. The CLI path: no last-
+/// admin guard, since `lific user promote` can always undo a `demote` from
+/// the same shell, and an operator locked out of their own instance needs
+/// exactly this escape hatch.
+pub fn set_admin(conn: &Connection, username: &str, is_admin: bool) -> Result<(), LificError> {
+    let user = get_user_by_username(conn, username)?;
+    write_admin_flag(conn, user.id, is_admin)
+}
+
+/// How many admins can actually sign in right now. Bots are excluded (they
+/// are never instance admins) and so are deactivated accounts, since an admin
+/// who cannot authenticate is not an admin anyone can reach.
+pub fn count_active_admins(conn: &Connection) -> Result<i64, LificError> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND is_active = 1 AND is_bot = 0",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Resolve the target of a roster action, refusing bot identities.
+///
+/// A connected tool is not a member of the instance in the sense this roster
+/// means: it has no password, is owned by a human, and is switched on and off
+/// through Connected Tools (`disconnect_bot` / `delete_bot`). Promoting one to
+/// instance admin would hand an agent's API key the run of the instance, so
+/// every entry point here stops at the same door.
+fn manageable_target(conn: &Connection, user_id: i64) -> Result<User, LificError> {
+    let user = get_user_by_id(conn, user_id)?;
+    if user.is_bot {
+        return Err(LificError::BadRequest(
+            "bot identities are managed from Connected Tools, not the member roster".into(),
+        ));
+    }
+    Ok(user)
+}
+
+/// Promote or demote a user on the instance-admin axis. Returns the refreshed
+/// row.
+///
+/// Refuses to demote the last admin who can still sign in (409 `Conflict`),
+/// mirroring the last-lead guard on project membership. Demoting an already
+/// deactivated admin is fine: they were not part of that count to begin with.
+pub fn set_admin_guarded(
+    conn: &Connection,
+    user_id: i64,
+    is_admin: bool,
+) -> Result<User, LificError> {
+    let target = manageable_target(conn, user_id)?;
+
+    if target.is_admin && target.is_active && !is_admin && count_active_admins(conn)? <= 1 {
+        return Err(LificError::Conflict(
+            "cannot demote the last instance admin. Promote someone else first.".into(),
+        ));
+    }
+
+    write_admin_flag(conn, target.id, is_admin)?;
+    get_user_by_id(conn, target.id)
+}
+
+/// Deactivate or restore an account. Returns the refreshed row.
+///
+/// Refuses to deactivate the last admin who can still sign in (409
+/// `Conflict`), for the same reason [`set_admin_guarded`] refuses to demote
+/// them.
+///
+/// Deactivation ends access, it does not erase anything: the row and every
+/// issue, comment and audit entry attributed to it stay exactly where they
+/// are. To make "ends access" true rather than decorative, every credential
+/// the account holds is torn down in the same write: sessions deleted, API
+/// keys and OAuth tokens revoked. Restoring the account does not bring the
+/// credentials back; the user signs in again and mints fresh ones.
+pub fn set_active(conn: &Connection, user_id: i64, is_active: bool) -> Result<User, LificError> {
+    let target = manageable_target(conn, user_id)?;
+
+    if !is_active && target.is_admin && target.is_active && count_active_admins(conn)? <= 1 {
+        return Err(LificError::Conflict(
+            "cannot deactivate the last instance admin. Promote someone else first.".into(),
+        ));
+    }
+
+    conn.execute(
+        "UPDATE users SET is_active = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![is_active, target.id],
+    )?;
+
+    if !is_active {
+        delete_all_sessions(conn, target.id)?;
+        conn.execute(
+            "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+            params![target.id],
+        )?;
+        conn.execute(
+            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+            params![target.id],
+        )?;
+    }
+
+    get_user_by_id(conn, target.id)
 }
 
 /// Find a bot by its stable (owner, tool) pairing (LIFIC-17).
@@ -646,7 +772,7 @@ pub fn find_bot_by_owner_and_tool(
     tool_id: &str,
 ) -> Result<Option<crate::db::models::User>, LificError> {
     match conn.query_row(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users WHERE owner_id = ?1 AND tool_id = ?2 AND is_bot = 1 LIMIT 1",
         params![owner_id, tool_id],
         row_to_user,
@@ -672,7 +798,7 @@ pub fn find_bot_legacy_by_tool_prefix(
     tool_id: &str,
 ) -> Result<Option<crate::db::models::User>, LificError> {
     match conn.query_row(
-        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at
+        "SELECT id, username, email, password_hash, display_name, is_admin, is_bot, created_at, updated_at, is_active
          FROM users WHERE owner_id = ?1 AND is_bot = 1 AND tool_id IS NULL
               AND username GLOB ?2 LIMIT 1",
         params![owner_id, format!("{tool_id}-*")],

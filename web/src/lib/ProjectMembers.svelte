@@ -99,6 +99,9 @@
 
   let eligibleUsers = $derived(
     allUsers
+      // LIF-214: a deactivated account can't sign in, so it has no business
+      // being offered as someone to hand a project role to.
+      .filter((u) => u.is_active)
       .filter((u) => !members.some((m) => m.user_id === u.id))
       .map((u) => ({ value: u.id, label: u.display_name || u.username, username: u.username })),
   );

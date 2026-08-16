@@ -705,6 +705,9 @@ pub struct User {
     pub display_name: String,
     pub is_admin: bool,
     pub is_bot: bool,
+    /// LIF-214: false once an admin deactivates the account. The row and
+    /// everything it authored stay put; the credentials stop working.
+    pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
 }

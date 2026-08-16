@@ -188,6 +188,29 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
                 "global user directory for UI dropdowns; auth-required only, via the outer auth_middleware_wrapper",
             ),
         ),
+        // LIF-214: the instance-admin axis. Orthogonal to project roles:
+        // `require_admin` in the handler, plus the last-admin and no-bots
+        // guard rails in db::queries::users.
+        (
+            ("POST", "/api/users"),
+            Exempt("instance-admin roster: create an account, require_admin"),
+        ),
+        (
+            ("POST", "/api/users/{id}/promote"),
+            Exempt("instance-admin roster: grant instance admin, require_admin"),
+        ),
+        (
+            ("POST", "/api/users/{id}/demote"),
+            Exempt("instance-admin roster: revoke instance admin, require_admin"),
+        ),
+        (
+            ("POST", "/api/users/{id}/deactivate"),
+            Exempt("instance-admin roster: switch an account off, require_admin"),
+        ),
+        (
+            ("POST", "/api/users/{id}/reactivate"),
+            Exempt("instance-admin roster: restore an account, require_admin"),
+        ),
         // ── Comments: Viewer to read/create (project resolved from parent) ──
         (("GET", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
         (("POST", "/api/issues/{issue_id}/comments"), Gated(Viewer)),

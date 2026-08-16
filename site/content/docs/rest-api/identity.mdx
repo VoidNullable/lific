@@ -200,4 +200,42 @@ Response: the standard delete response.
 
 Lists non-bot users for selection controls. This endpoint has no path or query parameters. It has no request body.
 
-Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `is_admin` (boolean), and `created_at` (string).
+Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `is_admin` (boolean), `is_active` (boolean), and `created_at` (string). Deactivated accounts stay in the list so an administrator can find and restore them; filter on `is_active` when the list is used to choose someone to assign work to.
+
+### POST `/api/users`
+
+Creates a local account. Administrators only.
+
+Request body fields: `username` (string, required), `password` (string, required, at least 8 characters), `email` (string, optional, defaults to `{username}@local`), `display_name` (string, optional), and `is_admin` (boolean, optional, defaults to false). This endpoint never creates a bot; connected tools come from `POST /api/auth/bots` and the OAuth flow.
+
+Response: the created user, in the same shape `GET /api/users` returns.
+
+### POST `/api/users/{id}/promote`
+
+Grants instance administrator to a user. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
+
+Response: the updated user.
+
+### POST `/api/users/{id}/demote`
+
+Revokes instance administrator from a user. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
+
+Responds `409 Conflict` when the target is the last administrator who can still sign in, and `400 Bad Request` when the target is a bot identity.
+
+Response: the updated user.
+
+### POST `/api/users/{id}/deactivate`
+
+Switches an account off. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
+
+The account keeps everything it authored; its sessions are deleted and its API keys and OAuth tokens are revoked, so it can no longer authenticate. Responds `409 Conflict` when the target is the last administrator who can still sign in, and `400 Bad Request` when the target is a bot identity.
+
+Response: the updated user.
+
+### POST `/api/users/{id}/reactivate`
+
+Restores a deactivated account. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
+
+Credentials revoked at deactivation are not restored; the user signs in again and mints new ones.
+
+Response: the updated user.

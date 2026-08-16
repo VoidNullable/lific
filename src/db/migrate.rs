@@ -190,6 +190,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project identifier nocase",
         include_str!("../../migrations/039_project_identifier_nocase.sql"),
     ),
+    (
+        40,
+        "user active flag",
+        include_str!("../../migrations/040_user_active.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

@@ -292,11 +292,52 @@ export interface UserSummary {
   username: string;
   display_name: string;
   is_admin: boolean;
+  /** LIF-214: false once an admin has deactivated the account. Deactivated
+   *  people stay in this list so an admin can restore them, so anywhere the
+   *  list is used to pick someone to hand work to, filter on this. */
+  is_active: boolean;
   created_at: string;
 }
 
 export async function listUsers() {
   return request<UserSummary[]>("/users");
+}
+
+// ── Instance member management (LIF-214) ────────────────────
+//
+// The instance-admin axis: who administers this Lific instance, and whose
+// account still works. Admin-only server-side; the guard rails (never strand
+// the instance without an admin, never target a bot identity) are enforced
+// there too, so a rejected action comes back as a 409/400 with a message
+// worth showing.
+
+export async function createUser(input: {
+  username: string;
+  password: string;
+  email?: string;
+  display_name?: string;
+  is_admin?: boolean;
+}) {
+  return request<UserSummary>("/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function promoteUser(id: number) {
+  return request<UserSummary>(`/users/${id}/promote`, { method: "POST" });
+}
+
+export async function demoteUser(id: number) {
+  return request<UserSummary>(`/users/${id}/demote`, { method: "POST" });
+}
+
+export async function deactivateUser(id: number) {
+  return request<UserSummary>(`/users/${id}/deactivate`, { method: "POST" });
+}
+
+export async function reactivateUser(id: number) {
+  return request<UserSummary>(`/users/${id}/reactivate`, { method: "POST" });
 }
 
 // ── Project members (LIF-199 / LIF-200) ─────────────────────

@@ -237,8 +237,17 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             put(resources::update_structure::<resources::Folders>)
                 .delete(resources::delete_structure::<resources::Folders>),
         )
-        // Users (for dropdowns)
-        .route("/api/users", get(auth::list_users))
+        // Users (for dropdowns). The roster read is open to any authenticated
+        // caller; every mutation below it is admin-gated in the handler and
+        // guard-railed in the query layer (LIF-214).
+        .route(
+            "/api/users",
+            get(auth::list_users).post(auth::create_user_handler),
+        )
+        .route("/api/users/{id}/promote", post(auth::promote_user))
+        .route("/api/users/{id}/demote", post(auth::demote_user))
+        .route("/api/users/{id}/deactivate", post(auth::deactivate_user))
+        .route("/api/users/{id}/reactivate", post(auth::reactivate_user))
         .route("/api/events/ws", get(events_ws))
         // Search
         .route("/api/search", get(search))

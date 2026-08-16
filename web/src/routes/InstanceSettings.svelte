@@ -7,6 +7,11 @@
     listUsers,
     getInstanceSettings,
     updateInstanceSettings,
+    createUser,
+    promoteUser,
+    demoteUser,
+    deactivateUser,
+    reactivateUser,
     type AuthUser,
     type UserSummary,
     type InstanceSettings,
@@ -15,7 +20,7 @@
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
-  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users } from "lucide-svelte";
+  import { ShieldCheck, Lock, SlidersHorizontal, Check, AlertTriangle, DoorOpen, DoorClosed, Users, ShieldPlus, ShieldMinus, UserMinus, UserPlus, RotateCcw } from "lucide-svelte";
   import { getContext, onMount } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
@@ -144,7 +149,67 @@
     return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
   }
 
-  const adminCount = $derived(users.filter((u) => u.is_admin).length);
+  const adminCount = $derived(users.filter((u) => u.is_admin && u.is_active).length);
+
+  // ── Member management (LIF-214) ─────────────────────────
+  // The instance-admin axis: who administers this instance, and whose account
+  // still works. Every action here is admin-only and guard-railed on the
+  // server (the last admin can't be demoted or deactivated, and none of it
+  // can be pointed at a bot), so a refusal comes back as a message worth
+  // showing on the row rather than something to pre-empt in the client.
+
+  // Destructive actions confirm in place, same shape as ProjectMembers'
+  // remove: the button swaps for a red confirm plus Cancel.
+  type PendingAction = { id: number; kind: "demote" | "deactivate" };
+  let pending = $state<PendingAction | null>(null);
+  let rowBusy = $state<number | null>(null);
+  let rowError = $state<{ id: number; message: string } | null>(null);
+
+  function applyUser(updated: UserSummary) {
+    users = users.map((u) => (u.id === updated.id ? updated : u));
+  }
+
+  async function runAction(
+    u: UserSummary,
+    action: (id: number) => ReturnType<typeof promoteUser>,
+  ) {
+    if (rowBusy !== null) return;
+    rowBusy = u.id;
+    rowError = null;
+    const res = await action(u.id);
+    rowBusy = null;
+    pending = null;
+    if (res.ok) applyUser(res.data);
+    else rowError = { id: u.id, message: res.error };
+  }
+
+  // ── Create a member ─────────────────────────────────────
+  // Deliberately minimal: a username and a password is everything the server
+  // needs (it fills in a {username}@local address), and this is an admin
+  // handing someone their first credential, not a profile editor.
+  let newUsername = $state("");
+  let newPassword = $state("");
+  let creating = $state(false);
+  let createError = $state("");
+  let createdName = $state("");
+
+  async function submitCreate() {
+    const username = newUsername.trim();
+    if (!username || !newPassword || creating) return;
+    creating = true;
+    createError = "";
+    createdName = "";
+    const res = await createUser({ username, password: newPassword });
+    creating = false;
+    if (res.ok) {
+      users = [...users, res.data];
+      createdName = res.data.username;
+      newUsername = "";
+      newPassword = "";
+    } else {
+      createError = res.error;
+    }
+  }
 </script>
 
 {#snippet topbarContent()}
@@ -464,15 +529,61 @@
           </p>
 
           <div class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] overflow-hidden">
+            <!-- Create a member: username + password is all the server needs. -->
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)] flex-wrap">
+              <input
+                bind:value={newUsername}
+                placeholder="username"
+                autocomplete="off"
+                class="flex-1 min-w-[150px] px-3 py-1.5 text-body-sm font-mono rounded-md border border-[var(--border)]
+                       bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              />
+              <input
+                bind:value={newPassword}
+                type="password"
+                placeholder="password"
+                autocomplete="new-password"
+                class="flex-1 min-w-[150px] px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
+                       bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              />
+              <button
+                class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)]
+                       bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
+                       transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                disabled={creating || !newUsername.trim() || !newPassword}
+                onclick={submitCreate}
+              >
+                <UserPlus size={14} />
+                {creating ? "Creating…" : "Create"}
+              </button>
+            </div>
+            {#if createError}
+              <div class="px-4 py-2 text-caption text-[var(--error)] bg-[var(--error-bg)]">{createError}</div>
+            {:else if createdName}
+              <div class="px-4 py-2 text-caption text-[var(--success)]">
+                Created <span class="font-mono">@{createdName}</span>. Share the password with them; they can change it in their settings.
+              </div>
+            {/if}
+
             {#each users as u, i (u.id)}
-              <div class="flex items-center gap-3 px-4 py-3 {i > 0 ? 'border-t border-[var(--border)]' : ''}">
+              <div class="flex items-center gap-3 px-4 py-3 {i > 0 ? 'border-t border-[var(--border)]' : ''} {u.is_active ? '' : 'opacity-60'}">
                 <div class="size-8 shrink-0 rounded-full bg-[var(--accent)] text-[var(--accent-text)] grid place-items-center text-micro font-semibold tracking-wide">
                   {initials(u.display_name || u.username)}
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="text-body text-[var(--text)] truncate leading-tight">{u.display_name || u.username}</div>
+                  <div class="text-body text-[var(--text)] truncate leading-tight">
+                    {u.display_name || u.username}
+                    {#if u.id === user?.id}
+                      <span class="text-caption text-[var(--text-faint)]">(you)</span>
+                    {/if}
+                  </div>
                   <div class="text-caption font-mono text-[var(--text-faint)] truncate leading-tight mt-0.5">@{u.username}</div>
                 </div>
+                {#if !u.is_active}
+                  <span class="text-micro font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 text-[var(--warn-text)] bg-[color-mix(in_oklab,var(--warn)_15%,var(--bg))]">
+                    Deactivated
+                  </span>
+                {/if}
                 <span
                   class="text-micro font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0
                          {u.is_admin
@@ -484,9 +595,94 @@
                 <span class="hidden sm:block text-caption text-[var(--text-faint)] tabular-nums shrink-0 w-[5.5rem] text-right">
                   <TimeAgo date={u.created_at} />
                 </span>
+
+                <!-- Actions. Never on your own row: demoting or deactivating
+                     yourself from the page you are standing on is a footgun,
+                     and another admin (or the CLI) can always do it. -->
+                {#if u.id !== user?.id}
+                  {#if pending?.id === u.id}
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <button
+                        class="text-caption font-medium text-[var(--error-text)] bg-[var(--error)] px-2 py-1 rounded-md
+                               hover:opacity-90 transition-opacity disabled:opacity-40"
+                        disabled={rowBusy === u.id}
+                        onclick={() =>
+                          runAction(u, pending?.kind === "demote" ? demoteUser : deactivateUser)}
+                      >
+                        {#if rowBusy === u.id}
+                          …
+                        {:else}
+                          {pending.kind === "demote" ? "Demote" : "Deactivate"}
+                        {/if}
+                      </button>
+                      <button
+                        class="text-caption text-[var(--text-muted)] px-2 py-1 rounded-md hover:bg-[var(--bg-subtle)] transition-colors"
+                        onclick={() => { pending = null; }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  {:else}
+                    <div class="flex items-center gap-1 shrink-0">
+                      {#if u.is_admin}
+                        <button
+                          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
+                                 hover:text-[var(--warn-text)] hover:bg-[var(--bg-subtle)] transition-colors"
+                          onclick={() => { pending = { id: u.id, kind: "demote" }; rowError = null; }}
+                          title="Remove instance admin"
+                          aria-label="Remove instance admin from {u.display_name || u.username}"
+                        >
+                          <ShieldMinus size={14} />
+                        </button>
+                      {:else}
+                        <button
+                          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
+                                 hover:text-[var(--accent)] hover:bg-[var(--accent-subtle)] transition-colors
+                                 disabled:opacity-40 disabled:cursor-not-allowed"
+                          disabled={rowBusy === u.id}
+                          onclick={() => runAction(u, promoteUser)}
+                          title="Make instance admin"
+                          aria-label="Make {u.display_name || u.username} an instance admin"
+                        >
+                          <ShieldPlus size={14} />
+                        </button>
+                      {/if}
+                      {#if u.is_active}
+                        <button
+                          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
+                                 hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-colors"
+                          onclick={() => { pending = { id: u.id, kind: "deactivate" }; rowError = null; }}
+                          title="Deactivate account"
+                          aria-label="Deactivate {u.display_name || u.username}"
+                        >
+                          <UserMinus size={14} />
+                        </button>
+                      {:else}
+                        <button
+                          class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
+                                 hover:text-[var(--success)] hover:bg-[var(--success-bg)] transition-colors
+                                 disabled:opacity-40 disabled:cursor-not-allowed"
+                          disabled={rowBusy === u.id}
+                          onclick={() => runAction(u, reactivateUser)}
+                          title="Restore account"
+                          aria-label="Restore {u.display_name || u.username}"
+                        >
+                          <RotateCcw size={14} />
+                        </button>
+                      {/if}
+                    </div>
+                  {/if}
+                {/if}
               </div>
+              {#if rowError?.id === u.id}
+                <div class="px-4 pb-2.5 -mt-1 text-caption text-[var(--error)]">{rowError.message}</div>
+              {/if}
             {/each}
           </div>
+          <p class="text-caption text-[var(--text-faint)] mt-2 max-w-[60ch] leading-relaxed">
+            Deactivating an account ends its sessions and revokes its API keys and tokens. Nothing it wrote is
+            removed. The last admin who can still sign in cannot be demoted or deactivated.
+          </p>
         </section>
       {/if}
     {/if}

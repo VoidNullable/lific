@@ -1,0 +1,12 @@
+-- LIF-214: account deactivation on the instance-admin axis.
+--
+-- The member roster needs a way to switch an account off without destroying
+-- what it did. A user row is referenced by issues, comments, attachments,
+-- audit_log, project_members and more, so a hard DELETE either cascades that
+-- history away or leaves it dangling. A flag is the only shape that keeps the
+-- record intact while ending the account's access.
+--
+-- Defaults to 1 so every existing account stays active through the upgrade.
+-- Bots are unaffected: they are switched off through Connected Tools
+-- (disconnect/delete), never through this column.
+ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;
