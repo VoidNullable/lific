@@ -3,7 +3,7 @@ title: MCP tools
 description: Reference for the MCP tools exposed by Lific.
 ---
 
-Lific exposes 27 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
+Lific exposes 30 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
 When MCP is reached over HTTP and its origin is known, issue, project, page, plan, module, and comment references are rendered as Markdown links to their canonical web routes. Comment links include an anchor that scrolls the issue or page thread to that comment. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain references.
 
@@ -383,3 +383,43 @@ Reads audit history for an issue, page, or project.
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
 
 Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).
+
+## Attachments
+
+Uploads share the REST limits exactly: 10 MiB per file, and a magic-byte allowlist of PNG, JPEG, GIF, WebP, SVG, PDF, ZIP and plain text. The declared extension only decides the type for formats with no signature (`.svg`, `.txt`, `.log`, `.md`, `.csv`, `.json`); everything else is read from the bytes, so a renamed executable is rejected.
+
+### `upload_attachment`
+
+Uploads base64 file content and returns the attachment id plus a markdown snippet ready to embed (`![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise). Pass at most one link target. An upload with no target stays unlinked and the orphan sweep collects it after 24 hours, so embed the snippet in an issue, page, or comment body before then.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `filename` | `string` | Yes | File name, e.g. crash-log.txt or screenshot.png |
+| `content_base64` | `string` | Yes | File bytes, base64 encoded (max 10 MiB decoded) |
+| `entity` | `string` | No | Link the upload to this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
+| `comment_id` | `integer` | No | Link the upload to this comment id instead of an issue or page |
+
+Linking to an issue or page requires Maintainer on its project, the same role editing it directly requires; linking to a comment requires Viewer. Uploading without a link target is open to any authenticated caller.
+
+### `get_attachment`
+
+Reads one attachment. Text is returned sliced by line with a header and a paging hint; PNG, JPEG, GIF and WebP come back as MCP image content a multimodal agent can look at; every other type returns a metadata summary and its download path rather than bytes.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `attachment_id` | `integer` | Yes | Attachment id, e.g. 12 for /api/attachments/12 |
+| `offset` | `integer` | No | Text only: zero-indexed first line to return |
+| `limit` | `integer` | No | Text only: max lines to return (default 200, cap 500) |
+
+Reading requires Viewer on any project the attachment is linked into. An attachment that is not linked anywhere yet has no project to gate on, so only its uploader or an admin can read it.
+
+### `list_attachments`
+
+Lists attachments on one entity, or across a whole project. Each row carries the id, filename, type, size, uploader, creation time, and the entities it is linked to. Links in projects the caller cannot see are omitted.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `entity` | `string` | No | List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
+| `project` | `string` | No | List every attachment in this project (e.g. LIF) instead |
+
+Pass exactly one of `entity` or `project`. Either scope requires Viewer on the project involved.

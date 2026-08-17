@@ -45,6 +45,18 @@ pub fn get_attachment(conn: &Connection, id: i64) -> Result<Attachment, LificErr
     .ok_or_else(|| LificError::NotFound(format!("attachment {id} not found")))
 }
 
+/// [`ATTACHMENT_COLUMNS`] with a table alias prefix, for joined queries where
+/// bare column names would be ambiguous. Keeps every read on the one shared
+/// column list so [`row_to_attachment`] never sees a short row (the exact
+/// failure mode that broke `list_for_project` when columns were added).
+fn prefixed_attachment_columns(alias: &str) -> String {
+    ATTACHMENT_COLUMNS
+        .split(", ")
+        .map(|c| format!("{alias}.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<Attachment> {
     let mime: String = row.get(3)?;
     let width: Option<i64> = row.get(7)?;
@@ -184,11 +196,7 @@ pub fn list_for_entity(
     entity: AttachmentEntity,
     entity_id: i64,
 ) -> Result<Vec<Attachment>, LificError> {
-    let columns = ATTACHMENT_COLUMNS
-        .split(", ")
-        .map(|c| format!("a.{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let columns = prefixed_attachment_columns("a");
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {columns}
          FROM attachments a
@@ -197,6 +205,53 @@ pub fn list_for_entity(
          ORDER BY l.created_at, a.id"
     ))?;
     let rows = stmt.query_map(params![entity.as_str(), entity_id], row_to_attachment)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Every entity an attachment is linked to, in link order. Unknown
+/// `entity_type` values (impossible under the table's CHECK, but cheap to be
+/// defensive about) are skipped rather than erroring.
+pub fn links_for(
+    conn: &Connection,
+    attachment_id: i64,
+) -> Result<Vec<(AttachmentEntity, i64)>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entity_type, entity_id FROM attachment_links
+         WHERE attachment_id = ?1
+         ORDER BY created_at, entity_id",
+    )?;
+    let rows = stmt.query_map(params![attachment_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut links = Vec::new();
+    for row in rows {
+        let (entity_type, entity_id) = row?;
+        if let Ok(entity) = entity_type.parse::<AttachmentEntity>() {
+            links.push((entity, entity_id));
+        }
+    }
+    Ok(links)
+}
+
+/// Every attachment linked to any entity owned by `project_id`, deduplicated
+/// (one attachment can be linked into several entities in the same project).
+/// Comment links resolve through the comment's parent issue or page, matching
+/// how `attachment_allowed_for_project` scopes an attachment to a project.
+pub fn list_for_project(conn: &Connection, project_id: i64) -> Result<Vec<Attachment>, LificError> {
+    let columns = prefixed_attachment_columns("a");
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT DISTINCT {columns}
+         FROM attachments a
+         JOIN attachment_links l ON l.attachment_id = a.id
+         LEFT JOIN issues i ON l.entity_type = 'issue' AND i.id = l.entity_id
+         LEFT JOIN pages p ON l.entity_type = 'page' AND p.id = l.entity_id
+         LEFT JOIN comments c ON l.entity_type = 'comment' AND c.id = l.entity_id
+         LEFT JOIN issues ci ON ci.id = c.issue_id
+         LEFT JOIN pages cp ON cp.id = c.page_id
+         WHERE ?1 IN (i.project_id, p.project_id, ci.project_id, cp.project_id)
+         ORDER BY a.id"
+    ))?;
+    let rows = stmt.query_map(params![project_id], row_to_attachment)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 

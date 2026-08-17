@@ -251,7 +251,7 @@ pub(super) async fn list_entity_attachments(
 
 /// Resolve the project id owning an entity (for the list endpoint's gate).
 /// `None` for a workspace-level page. Errors if the entity doesn't exist.
-fn resolve_entity_project(
+pub(crate) fn resolve_entity_project(
     db: &DbPool,
     entity: AttachmentEntity,
     entity_id: i64,
@@ -822,7 +822,7 @@ pub(super) async fn attachment_preview(
 /// Return the invalidation event for one attachment link. Comment links refresh
 /// their parent issue or project page. Missing entities are ignored so an old
 /// dangling link does not prevent attachment deletion.
-fn linked_entity_event(
+pub(crate) fn linked_entity_event(
     conn: &rusqlite::Connection,
     entity: AttachmentEntity,
     entity_id: i64,
@@ -951,7 +951,7 @@ fn owning_project_ids(
 /// A workspace-level page (no project) falls back to workspace-admin, the
 /// same fallback `list_entity_attachments` uses on the read side. A link to a
 /// nonexistent entity is `NotFound`, via `resolve_entity_project`.
-fn authorize_link(
+pub(crate) fn authorize_link(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     entity: AttachmentEntity,
@@ -972,7 +972,7 @@ fn authorize_link(
 /// attachment. When enforcement is off, `require_role(.., Viewer)` is an
 /// unconditional allow (legacy mode), so this reduces to today's open read
 /// behavior — matching every other GET while the flag is off.
-fn authorize_read(
+pub(crate) fn authorize_read(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     attachment: &Attachment,
@@ -1037,7 +1037,7 @@ pub struct AttachmentUploadLimiter(pub RateLimiter);
 /// Strip path components and control characters from a client-supplied
 /// filename so it's safe to store and echo back. Never used as an on-disk path
 /// (bytes are content-addressed) — this is purely the display/download name.
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
     let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
     if cleaned.is_empty() {

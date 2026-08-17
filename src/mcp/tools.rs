@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use base64::Engine as _;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
@@ -14,7 +15,7 @@ use crate::{
 };
 
 use super::schemas::*;
-use super::{LificMcp, current_issue_link_context};
+use super::{LificMcp, current_issue_link_context, sanitize_error};
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
 /// **zero** projects, so the first agent connecting to a fresh install learns
@@ -3973,6 +3974,312 @@ impl LificMcp {
             }
         }))
     }
+
+    // ── Attachments (LIF-418) ────────────────────────────────
+
+    #[tool(
+        description = "Upload a file (base64) and get a markdown snippet to embed. Optionally links it to an issue (LIF-42), page (LIF-DOC-3), or comment. Max 10 MiB; images, PDF, zip, SVG and plain text only."
+    )]
+    fn upload_attachment(&self, Parameters(input): Parameters<UploadAttachmentInput>) -> String {
+        self.upload_attachment_inner(input)
+            .unwrap_or_else(error_response)
+    }
+
+    fn upload_attachment_inner(&self, input: UploadAttachmentInput) -> Result<String, String> {
+        let entity = input
+            .entity
+            .as_deref()
+            .map(str::trim)
+            .filter(|ident| !ident.is_empty());
+        if entity.is_some() && input.comment_id.is_some() {
+            return Err("pass entity or comment_id, not both".into());
+        }
+
+        // Decode before anything else: a malformed payload is the caller's
+        // mistake and costs nothing to reject.
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(input.content_base64.trim())
+            .map_err(|error| format!("content_base64 is not valid base64: {error}"))?;
+        if bytes.is_empty() {
+            return Err("empty file".into());
+        }
+        // The cap is REST's cap, read from the same type `server.rs` injects
+        // into the upload route, so the two transports can never drift.
+        let max_bytes = crate::api::AttachmentConfig::default().max_bytes;
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "file too large: {} bytes (max {max_bytes})",
+                bytes.len()
+            ));
+        }
+
+        let filename = crate::api::attachments::sanitize_filename(&input.filename);
+        // MCP carries no content-type header, so the extension stands in as
+        // the "declared" type for the signature-less formats. Everything with
+        // real magic bytes is still decided by the bytes, and the allowlist
+        // check below is REST's.
+        let mime =
+            crate::storage::sniff_and_validate(&bytes, declared_mime_for_filename(&filename))
+                .map_err(sanitize_error)?;
+        if !crate::storage::ALLOWED_MIMES.contains(&mime.as_str()) {
+            return Err(format!("rejected: '{mime}' is not an allowed file type"));
+        }
+
+        // Resolve and authorize the link target before a single byte lands,
+        // so a refused link leaves no orphan blob behind (REST's LIF-405
+        // ordering).
+        let link = match (entity, input.comment_id) {
+            (Some(ident), _) => Some(self.resolve_attachment_entity(ident)?),
+            (None, Some(comment_id)) => Some((models::AttachmentEntity::Comment, comment_id)),
+            (None, None) => None,
+        };
+        if let Some((entity, entity_id)) = link {
+            crate::api::attachments::authorize_link(
+                &self.db,
+                &super::current_identity(&self.db),
+                entity,
+                entity_id,
+            )
+            .map_err(sanitize_error)?;
+        }
+
+        let size = bytes.len() as i64;
+        let sha = self.store.write(&bytes).map_err(sanitize_error)?;
+        let (attachment, event) = self.transaction(|conn| {
+            let uploader = resolve_attachment_uploader_conn(conn)?;
+            let attachment = queries::attachments::create_attachment(
+                conn,
+                &sha,
+                &filename,
+                &mime,
+                size,
+                Some(uploader),
+            )?;
+            let event = match link {
+                Some((entity, entity_id)) => {
+                    queries::attachments::link_attachment(conn, attachment.id, entity, entity_id)?;
+                    crate::api::attachments::linked_entity_event(conn, entity, entity_id)?
+                }
+                None => None,
+            };
+            Ok((attachment, event))
+        })?;
+        event.into_iter().for_each(|event| self.emit(event));
+
+        let snippet = attachment_markdown(&attachment.filename, &attachment.mime, attachment.id);
+        Ok(render_response(|output| {
+            write!(
+                output,
+                "Attachment {} uploaded: {} ({}, {})",
+                attachment.id,
+                attachment.filename,
+                attachment.mime,
+                HumanSize(attachment.size_bytes)
+            )?;
+            match link {
+                Some(_) => writeln!(output, ", linked.")?,
+                // The orphan GC collects unlinked uploads after 24h, so the
+                // agent needs to know the snippet is load-bearing.
+                None => writeln!(
+                    output,
+                    ". Not linked yet: embed the snippet below within 24h or it is garbage collected."
+                )?,
+            }
+            write!(output, "{snippet}")
+        }))
+    }
+
+    #[tool(
+        description = "Read an attachment by id. Text is returned by line (offset/limit), images as viewable image content, other types as a metadata summary."
+    )]
+    fn get_attachment(
+        &self,
+        Parameters(input): Parameters<GetAttachmentInput>,
+    ) -> rmcp::model::CallToolResult {
+        // The only tool that returns something other than text, so it builds
+        // its own result. Failures still render as the `Error: ` text every
+        // other tool returns, rather than a protocol-level error, so agents
+        // parse one shape everywhere.
+        let contents = self
+            .get_attachment_inner(input)
+            .unwrap_or_else(|error| vec![rmcp::model::Content::text(error_response(error))]);
+        rmcp::model::CallToolResult::success(contents)
+    }
+
+    fn get_attachment_inner(
+        &self,
+        input: GetAttachmentInput,
+    ) -> Result<Vec<rmcp::model::Content>, String> {
+        use rmcp::model::Content;
+
+        let attachment =
+            self.read(|conn| queries::attachments::get_attachment(conn, input.attachment_id))?;
+        // Exactly REST's read gate: Viewer on any project the attachment is
+        // linked into, or uploader/admin while it is still unlinked.
+        crate::api::attachments::authorize_read(
+            &self.db,
+            &super::current_identity(&self.db),
+            &attachment,
+        )
+        .map_err(sanitize_error)?;
+        let bytes = self
+            .store
+            .read(&attachment.sha256)
+            .map_err(sanitize_error)?;
+
+        if attachment.mime.starts_with("text/") {
+            return Ok(vec![Content::text(render_attachment_text(
+                &attachment,
+                &bytes,
+                input.offset,
+                input.limit,
+            ))]);
+        }
+        if crate::storage::is_inline_safe_mime(&attachment.mime) {
+            // The raster formats a multimodal agent can actually look at.
+            // SVG is deliberately excluded, matching `is_inline_safe_mime`.
+            return Ok(vec![
+                Content::text(format!(
+                    "attachment {}: {} ({}, {})",
+                    attachment.id,
+                    attachment.filename,
+                    attachment.mime,
+                    HumanSize(attachment.size_bytes)
+                )),
+                Content::image(
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    attachment.mime.clone(),
+                ),
+            ]);
+        }
+        Ok(vec![Content::text(format!(
+            "attachment {}: {} ({}, {}, sha {}). Binary, download at /api/attachments/{}",
+            attachment.id,
+            attachment.filename,
+            attachment.mime,
+            HumanSize(attachment.size_bytes),
+            &attachment.sha256[..attachment.sha256.len().min(12)],
+            attachment.id
+        ))])
+    }
+
+    #[tool(
+        description = "List attachments on an issue (LIF-42) or page (LIF-DOC-3), or across a whole project."
+    )]
+    fn list_attachments(&self, Parameters(input): Parameters<ListAttachmentsInput>) -> String {
+        self.list_attachments_inner(input)
+            .unwrap_or_else(error_response)
+    }
+
+    fn list_attachments_inner(&self, input: ListAttachmentsInput) -> Result<String, String> {
+        let entity = input
+            .entity
+            .as_deref()
+            .map(str::trim)
+            .filter(|ident| !ident.is_empty());
+        let project = input
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|ident| !ident.is_empty());
+
+        let (scope, attachments) = match (entity, project) {
+            (Some(_), Some(_)) => return Err("pass entity or project, not both".into()),
+            (None, None) => return Err("pass entity or project".into()),
+            (Some(ident), None) => {
+                let (entity, entity_id) = self.resolve_attachment_entity(ident)?;
+                let project_id =
+                    crate::api::attachments::resolve_entity_project(&self.db, entity, entity_id)
+                        .map_err(sanitize_error)?;
+                require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                let listed = self
+                    .read(|conn| queries::attachments::list_for_entity(conn, entity, entity_id))?;
+                (ident.to_string(), listed)
+            }
+            (None, Some(ident)) => {
+                let project_id = resolve_project(&*self.read_conn()?, ident)?;
+                require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+                let listed =
+                    self.read(|conn| queries::attachments::list_for_project(conn, project_id))?;
+                (ident.to_string(), listed)
+            }
+        };
+
+        if attachments.is_empty() {
+            return Ok(format!("No attachments on {scope}."));
+        }
+        let rows = self.attachment_rows(&attachments)?;
+        Ok(render_response(|output| {
+            writeln!(output, "{} attachment(s) on {scope}:", rows.len())?;
+            write!(output, "{}", AttachmentLines(&rows))
+        }))
+    }
+
+    /// Resolve an issue or page identifier into the attachment-link entity it
+    /// names. Attachments never hang off a project, so the bare-project shape
+    /// other tools accept is not a target here.
+    fn resolve_attachment_entity(
+        &self,
+        identifier: &str,
+    ) -> Result<(models::AttachmentEntity, i64), String> {
+        let conn = self.read_conn()?;
+        if looks_like_page_identifier(identifier) {
+            let page_id =
+                queries::resolve_page_identifier(&conn, identifier).map_err(sanitize_error)?;
+            Ok((models::AttachmentEntity::Page, page_id))
+        } else {
+            let issue_id =
+                queries::resolve_identifier(&conn, identifier).map_err(sanitize_error)?;
+            Ok((models::AttachmentEntity::Issue, issue_id))
+        }
+    }
+
+    /// Decorate attachment rows for `list_attachments`: uploader username and
+    /// the identifiers of every linked entity the caller can actually see. An
+    /// attachment reused across projects must not disclose the entities in the
+    /// ones the caller has no role on, so invisible links are dropped rather
+    /// than rendered.
+    fn attachment_rows(
+        &self,
+        attachments: &[models::Attachment],
+    ) -> Result<Vec<AttachmentRow>, String> {
+        let visible = visible_project_ids_mcp(&self.db)?;
+        let is_visible = |project_id: Option<i64>| match (&visible, project_id) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(set), Some(id)) => set.contains(&id),
+        };
+        self.read(|conn| {
+            attachments
+                .iter()
+                .map(|attachment| {
+                    let uploader = attachment
+                        .uploader_id
+                        .and_then(|id| queries::users::get_user_by_id(conn, id).ok())
+                        .map(|user| user.username);
+                    let mut links = Vec::new();
+                    for (entity, entity_id) in queries::attachments::links_for(conn, attachment.id)?
+                    {
+                        if let Some(label) = attachment_link_label(conn, entity, entity_id)?
+                            .filter(|(_, project_id)| is_visible(*project_id))
+                            .map(|(label, _)| label)
+                        {
+                            links.push(label);
+                        }
+                    }
+                    Ok(AttachmentRow {
+                        id: attachment.id,
+                        filename: attachment.filename.clone(),
+                        mime: attachment.mime.clone(),
+                        size_bytes: attachment.size_bytes,
+                        uploader: uploader.unwrap_or_else(|| "unknown".into()),
+                        created_at: attachment.created_at.clone(),
+                        links,
+                    })
+                })
+                .collect()
+        })
+    }
 }
 
 /// Recursively resolve an MCP PlanStepInput (issue identifiers → ids) into a
@@ -3998,6 +4305,200 @@ fn build_create_step(
         issue_id,
         done: s.done.unwrap_or(false),
         steps,
+    })
+}
+
+// ── Attachment helpers (LIF-418) ─────────────────────────────
+
+/// Lines `get_attachment` returns from a text file when the caller names no
+/// limit. Enough to read a short log or config in one call, small enough that
+/// a 20k-line file does not blow the context window open by accident.
+const ATTACHMENT_TEXT_DEFAULT_LINES: i64 = 200;
+
+/// Render a byte count the way a person reads it. Sizes are informational
+/// (deciding whether to fetch a file), so one decimal place is plenty.
+struct HumanSize(i64);
+
+impl Display for HumanSize {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+        if self.0 < 1024 {
+            return write!(formatter, "{} B", self.0);
+        }
+        let mut value = self.0 as f64 / 1024.0;
+        let mut unit = UNITS[0];
+        for next in &UNITS[1..] {
+            if value < 1024.0 {
+                break;
+            }
+            value /= 1024.0;
+            unit = next;
+        }
+        write!(formatter, "{value:.1} {unit}")
+    }
+}
+
+/// The markdown an agent pastes into an issue, page or comment body to use an
+/// attachment. Images embed, everything else links, matching what the web
+/// composer inserts (and what `parse_referenced_ids` scans back out on save).
+fn attachment_markdown(filename: &str, mime: &str, id: i64) -> String {
+    let embed = if mime.starts_with("image/") { "!" } else { "" };
+    format!("{embed}[{filename}](/api/attachments/{id})")
+}
+
+/// The content type an MCP upload "declares". There is no header to read, so
+/// the extension speaks for the formats `sniff_and_validate` cannot recognize
+/// from magic bytes (SVG and plain text). Anything with a real signature is
+/// decided by the bytes regardless of what this returns.
+fn declared_mime_for_filename(filename: &str) -> Option<&'static str> {
+    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    match extension.as_str() {
+        "svg" => Some("image/svg+xml"),
+        "txt" | "log" | "md" | "csv" | "json" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+/// The user an MCP upload is attributed to: the request's authenticated agent,
+/// or the fallback identity `resolve_caller` picks for a credential-less
+/// session (the same resolution comment mutations use).
+fn resolve_attachment_uploader_conn(
+    conn: &rusqlite::Connection,
+) -> Result<i64, crate::error::LificError> {
+    crate::resolve_caller::resolve_caller_conn(
+        conn,
+        super::current_auth_user(),
+        crate::actor::Transport::Mcp,
+    )?
+    .map(|identity| identity.user.id)
+    .ok_or_else(|| {
+        crate::error::LificError::Forbidden(
+            "no admin user exists to attribute the upload to.".into(),
+        )
+    })
+}
+
+/// Slice a text attachment by line for `get_attachment`. Mirrors the paging
+/// contract every other read tool uses: a header naming the window, then the
+/// content, then a hint carrying the exact next offset.
+fn render_attachment_text(
+    attachment: &models::Attachment,
+    bytes: &[u8],
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len() as i64;
+    let offset = offset.unwrap_or(0).max(0);
+    let limit = limit
+        .unwrap_or(ATTACHMENT_TEXT_DEFAULT_LINES)
+        .clamp(1, queries::MAX_PAGE_LIMIT);
+    let start = offset.min(total);
+    let end = offset.saturating_add(limit).min(total);
+    let shown = &lines[start as usize..end as usize];
+
+    render_response(|output| {
+        if shown.is_empty() {
+            return write!(
+                output,
+                "attachment {}: {} ({}, {}, no lines at offset {offset} of {total})",
+                attachment.id,
+                attachment.filename,
+                attachment.mime,
+                HumanSize(attachment.size_bytes)
+            );
+        }
+        writeln!(
+            output,
+            "attachment {}: {} ({}, {}, lines {}-{end} of {total})",
+            attachment.id,
+            attachment.filename,
+            attachment.mime,
+            HumanSize(attachment.size_bytes),
+            start + 1
+        )?;
+        write!(output, "{}", shown.join("\n"))?;
+        if end < total {
+            write!(
+                output,
+                "\n... {} more line(s), call again with offset={end}",
+                total - end
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// One `list_attachments` row, already resolved to displayable strings.
+struct AttachmentRow {
+    id: i64,
+    filename: String,
+    mime: String,
+    size_bytes: i64,
+    uploader: String,
+    created_at: String,
+    links: Vec<String>,
+}
+
+struct AttachmentLines<'a>(&'a [AttachmentRow]);
+
+impl Display for AttachmentLines<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|row| {
+            writeln!(
+                formatter,
+                "{} | {} | {} | {} | {} | {} | {}",
+                row.id,
+                row.filename,
+                row.mime,
+                HumanSize(row.size_bytes),
+                row.uploader,
+                row.created_at,
+                match row.links.is_empty() {
+                    true => "unlinked".to_string(),
+                    false => row.links.join(","),
+                }
+            )
+        })
+    }
+}
+
+/// Render one attachment link as `(display label, owning project)`. The
+/// project comes back so the caller can drop links it has no role on;
+/// `None` means the linked entity is gone (a dangling link the GC has not
+/// swept yet) and the row simply omits it.
+fn attachment_link_label(
+    conn: &rusqlite::Connection,
+    entity: models::AttachmentEntity,
+    entity_id: i64,
+) -> Result<Option<(String, Option<i64>)>, crate::error::LificError> {
+    Ok(match entity {
+        models::AttachmentEntity::Issue => queries::get_issue(conn, entity_id)
+            .ok()
+            .map(|issue| (issue.identifier, Some(issue.project_id))),
+        models::AttachmentEntity::Page => queries::get_page(conn, entity_id)
+            .ok()
+            .map(|page| (page.identifier, page.project_id)),
+        models::AttachmentEntity::Comment => {
+            match queries::comments::get_comment(conn, entity_id).ok() {
+                None => None,
+                Some(comment) => {
+                    let parent = match (comment.issue_id, comment.page_id) {
+                        (Some(issue_id), _) => queries::get_issue(conn, issue_id)
+                            .ok()
+                            .map(|issue| (issue.identifier, Some(issue.project_id))),
+                        (None, Some(page_id)) => queries::get_page(conn, page_id)
+                            .ok()
+                            .map(|page| (page.identifier, page.project_id)),
+                        (None, None) => None,
+                    };
+                    parent.map(|(identifier, project_id)| {
+                        (format!("{identifier}#c{entity_id}"), project_id)
+                    })
+                }
+            }
+        }
     })
 }
 
@@ -9786,6 +10287,400 @@ mod tests {
         }));
         assert_no_html_escape(&plan, &[raw_step]);
     }
+
+    // ── Attachments (LIF-418) ────────────────────────────────
+
+    /// A scratch attachment store. The caller keeps the `TempDir` alive for
+    /// the test's duration; dropping it removes the blobs, including while a
+    /// failed assertion unwinds.
+    pub(super) fn attachment_store_tempdir() -> (crate::storage::AttachmentStore, tempfile::TempDir)
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = crate::storage::AttachmentStore::new(tmp.path().join("attachments"));
+        (store, tmp)
+    }
+
+    /// An MCP instance whose attachment bytes land in a scratch directory
+    /// rather than wherever the test process happens to be running.
+    ///
+    /// The trailing `first_admin_guard` is load-bearing: the attachment tools
+    /// resolve the caller (uploader attribution, read gates), so a stale
+    /// `MCP_REQUEST_USER` left by another test would attribute the upload to a
+    /// user id that does not exist in this test's database and trip the
+    /// `attachments.uploader_id` foreign key.
+    #[allow(clippy::type_complexity)]
+    fn mcp_with_attachments() -> (
+        LificMcp,
+        tempfile::TempDir,
+        McpTestGuard,
+        tokio::sync::MutexGuard<'static, ()>,
+    ) {
+        let (m, guard) = mcp();
+        let identity = first_admin_guard();
+        let (store, tmp) = attachment_store_tempdir();
+        (m.with_attachment_store(store), tmp, guard, identity)
+    }
+
+    /// Minimal PNG: the 8-byte signature is all the magic-byte sniffer reads.
+    pub(super) fn png_base64() -> String {
+        let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(b"pixels");
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    }
+
+    fn text_base64(body: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
+    }
+
+    /// Pull the attachment id out of an `upload_attachment` receipt.
+    fn attachment_id_from(receipt: &str) -> i64 {
+        receipt
+            .strip_prefix("Attachment ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no attachment id in: {receipt}"))
+    }
+
+    fn text_of(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn upload_attachment_stores_bytes_and_returns_an_embeddable_snippet() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        seed_project(&m, "Attach", "ATT");
+        seed_issue(&m, "ATT", "Has a screenshot");
+
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "shot.png".into(),
+            content_base64: png_base64(),
+            entity: Some("ATT-1".into()),
+            comment_id: None,
+        }));
+        let id = attachment_id_from(&receipt);
+        assert!(receipt.contains("shot.png (image/png, 14 B)"), "{receipt}");
+        assert!(receipt.contains("linked."), "{receipt}");
+        assert!(
+            receipt.ends_with(&format!("![shot.png](/api/attachments/{id})")),
+            "{receipt}"
+        );
+
+        // The link is real: the entity listing shows it.
+        let listed = m.list_attachments(Parameters(ListAttachmentsInput {
+            entity: Some("ATT-1".into()),
+            project: None,
+        }));
+        assert!(listed.starts_with("1 attachment(s) on ATT-1:"), "{listed}");
+        assert!(
+            listed.contains("| shot.png | image/png | 14 B |"),
+            "{listed}"
+        );
+        assert!(listed.trim_end().ends_with("| ATT-1"), "{listed}");
+    }
+
+    #[test]
+    fn upload_attachment_links_a_page_and_a_comment() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        seed_project(&m, "Attach", "ATT");
+        seed_issue(&m, "ATT", "Discussion");
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("ATT".into()),
+            title: "Design".into(),
+            ..Default::default()
+        }));
+        let comment_id = comment_id_from(&m.add_comment(Parameters(AddCommentInput {
+            identifier: "ATT-1".into(),
+            content: "see attached".into(),
+        })));
+
+        let page_receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "notes.txt".into(),
+            content_base64: text_base64("hello"),
+            entity: Some("ATT-DOC-1".into()),
+            comment_id: None,
+        }));
+        assert!(page_receipt.contains("linked."), "{page_receipt}");
+        assert!(
+            page_receipt.contains("[notes.txt](/api/attachments/"),
+            "a non-image links rather than embeds: {page_receipt}"
+        );
+        assert!(
+            !page_receipt.contains("![notes.txt]"),
+            "a non-image must not embed: {page_receipt}"
+        );
+
+        let comment_receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "trace.log".into(),
+            content_base64: text_base64("boom"),
+            entity: None,
+            comment_id: Some(comment_id),
+        }));
+        assert!(comment_receipt.contains("linked."), "{comment_receipt}");
+
+        let listed = m.list_attachments(Parameters(ListAttachmentsInput {
+            entity: None,
+            project: Some("ATT".into()),
+        }));
+        assert!(listed.starts_with("2 attachment(s) on ATT:"), "{listed}");
+        assert!(listed.contains("| ATT-DOC-1"), "{listed}");
+        assert!(
+            listed.contains(&format!("| ATT-1#c{comment_id}")),
+            "comment links render against their parent: {listed}"
+        );
+    }
+
+    #[test]
+    fn upload_attachment_without_a_target_warns_about_the_orphan_sweep() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "loose.txt".into(),
+            content_base64: text_base64("unattached"),
+            entity: None,
+            comment_id: None,
+        }));
+        assert!(receipt.contains("Not linked yet"), "{receipt}");
+        assert!(receipt.contains("24h"), "{receipt}");
+    }
+
+    #[test]
+    fn upload_attachment_rejects_a_payload_over_the_rest_size_cap() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let max = crate::api::AttachmentConfig::default().max_bytes;
+        let oversized = base64::engine::general_purpose::STANDARD.encode(vec![b'a'; max + 1]);
+
+        let result = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "huge.txt".into(),
+            content_base64: oversized,
+            entity: None,
+            comment_id: None,
+        }));
+        assert_eq!(
+            result,
+            format!("Error: file too large: {} bytes (max {max})", max + 1)
+        );
+    }
+
+    #[test]
+    fn upload_attachment_rejects_malformed_base64_and_empty_content() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+
+        let malformed = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "bad.txt".into(),
+            content_base64: "not base64 !!!".into(),
+            entity: None,
+            comment_id: None,
+        }));
+        assert!(
+            malformed.starts_with("Error: content_base64 is not valid base64:"),
+            "{malformed}"
+        );
+
+        let empty = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "empty.txt".into(),
+            content_base64: String::new(),
+            entity: None,
+            comment_id: None,
+        }));
+        assert_eq!(empty, "Error: empty file");
+    }
+
+    #[test]
+    fn upload_attachment_rejects_an_executable_however_it_is_named() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let elf = base64::engine::general_purpose::STANDARD.encode(b"\x7FELFpayload");
+
+        let result = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "harmless.txt".into(),
+            content_base64: elf,
+            entity: None,
+            comment_id: None,
+        }));
+        assert_eq!(
+            result,
+            "Error: Bad request: rejected: file looks like an executable"
+        );
+    }
+
+    #[test]
+    fn upload_attachment_refuses_two_link_targets_at_once() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let result = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "a.txt".into(),
+            content_base64: text_base64("x"),
+            entity: Some("ATT-1".into()),
+            comment_id: Some(1),
+        }));
+        assert_eq!(result, "Error: pass entity or comment_id, not both");
+    }
+
+    #[test]
+    fn get_attachment_slices_text_by_line_and_hints_the_next_offset() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let body: String = (1..=250)
+            .map(|n| format!("line {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "big.log".into(),
+            content_base64: text_base64(&body),
+            entity: None,
+            comment_id: None,
+        })));
+
+        // Default window: 200 lines, with the continuation hint.
+        let first = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+        })));
+        assert!(
+            first.starts_with(&format!(
+                "attachment {id}: big.log (text/plain, 2.1 KB, lines 1-200 of 250)"
+            )),
+            "{first}"
+        );
+        assert!(first.contains("\nline 1\n"), "{first}");
+        assert!(first.contains("line 200"), "{first}");
+        assert!(!first.contains("line 201"), "{first}");
+        assert!(
+            first.ends_with("... 50 more line(s), call again with offset=200"),
+            "{first}"
+        );
+
+        // Following the hint returns the tail with no hint of its own.
+        let second = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: Some(200),
+            limit: None,
+        })));
+        assert!(second.contains("lines 201-250 of 250"), "{second}");
+        assert!(second.trim_end().ends_with("line 250"), "{second}");
+        assert!(!second.contains("more line(s)"), "{second}");
+
+        // An explicit window, and an offset past the end.
+        let window = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: Some(10),
+            limit: Some(2),
+        })));
+        assert!(window.contains("lines 11-12 of 250"), "{window}");
+        assert!(window.contains("line 11\nline 12"), "{window}");
+        let past = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: Some(9000),
+            limit: None,
+        })));
+        assert!(past.contains("no lines at offset 9000 of 250"), "{past}");
+    }
+
+    #[test]
+    fn get_attachment_returns_image_content_for_a_raster_image() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let data = png_base64();
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "shot.png".into(),
+            content_base64: data.clone(),
+            entity: None,
+            comment_id: None,
+        })));
+
+        let result = m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+        }));
+        let image = result
+            .content
+            .iter()
+            .find_map(|content| content.as_image())
+            .expect("a raster image comes back as image content");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, data, "the bytes round-trip unchanged");
+        assert!(
+            text_of(&result).contains(&format!("attachment {id}: shot.png (image/png, 14 B)")),
+            "{:?}",
+            text_of(&result)
+        );
+    }
+
+    #[test]
+    fn get_attachment_summarizes_other_binary_types_without_the_bytes() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody");
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "spec.pdf".into(),
+            content_base64: pdf,
+            entity: None,
+            comment_id: None,
+        })));
+
+        let result = m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+        }));
+        assert!(
+            result.content.iter().all(|c| c.as_image().is_none()),
+            "a PDF must not be handed back as image content"
+        );
+        let text = text_of(&result);
+        assert!(
+            text.starts_with(&format!(
+                "attachment {id}: spec.pdf (application/pdf, 13 B, sha "
+            )),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&format!("Binary, download at /api/attachments/{id}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn get_attachment_reports_an_unknown_id_as_not_found() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let result = text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: 4242,
+            offset: None,
+            limit: None,
+        })));
+        assert_eq!(result, "Error: Not found: attachment 4242 not found");
+    }
+
+    #[test]
+    fn list_attachments_needs_exactly_one_scope() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        assert_eq!(
+            m.list_attachments(Parameters(ListAttachmentsInput::default())),
+            "Error: pass entity or project"
+        );
+        assert_eq!(
+            m.list_attachments(Parameters(ListAttachmentsInput {
+                entity: Some("ATT-1".into()),
+                project: Some("ATT".into()),
+            })),
+            "Error: pass entity or project, not both"
+        );
+    }
+
+    #[test]
+    fn list_attachments_says_so_when_there_are_none() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        seed_project(&m, "Attach", "ATT");
+        seed_issue(&m, "ATT", "Bare");
+        assert_eq!(
+            m.list_attachments(Parameters(ListAttachmentsInput {
+                entity: Some("ATT-1".into()),
+                project: None,
+            })),
+            "No attachments on ATT-1."
+        );
+    }
 }
 
 /// LIF-198: project-scoped authorization enforcement across every MCP tool.
@@ -9797,7 +10692,7 @@ mod tests {
 /// by default and already prove that in full.
 #[cfg(test)]
 mod authz_gating_tests {
-    use super::tests::{comment_id_from, setup_membership_mcp};
+    use super::tests::{attachment_store_tempdir, comment_id_from, setup_membership_mcp};
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
@@ -11329,5 +12224,217 @@ mod authz_gating_tests {
             !is_forbidden(&result),
             "flag off: a non-member agent must still be able to mutate (MCP's historical behavior): {result}"
         );
+    }
+
+    // ── Attachments (LIF-418) ───────────────────────────────────
+
+    /// The membership fixture, with attachment bytes pointed at a scratch
+    /// directory. The `TempDir` must outlive the returned `LificMcp`.
+    fn membership_mcp_with_attachments() -> (
+        LificMcp,
+        models::AuthUser,
+        models::AuthUser,
+        models::AuthUser,
+        models::AuthUser,
+        tempfile::TempDir,
+        McpTestGuard,
+    ) {
+        let (m, _admin, lead, maintainer, viewer, non_member, _project_id, guard) =
+            setup_membership_mcp();
+        let (store, tmp) = attachment_store_tempdir();
+        (
+            m.with_attachment_store(store),
+            lead,
+            maintainer,
+            viewer,
+            non_member,
+            tmp,
+            guard,
+        )
+    }
+
+    fn upload_as(user: &models::AuthUser, m: &LificMcp, entity: Option<&str>) -> String {
+        as_user(user, || {
+            m.upload_attachment(Parameters(UploadAttachmentInput {
+                filename: "secret.txt".into(),
+                content_base64: base64::engine::general_purpose::STANDARD
+                    .encode(b"classified line one\nclassified line two"),
+                entity: entity.map(str::to_string),
+                comment_id: None,
+            }))
+        })
+    }
+
+    /// Linking a file onto an issue mutates that issue, so it needs what
+    /// editing the issue needs (Maintainer) and refuses everyone below it.
+    #[test]
+    fn upload_attachment_link_denies_non_member_and_viewer_when_enforced() {
+        let (m, lead, maintainer, viewer, non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        let created = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Target".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let denied = upload_as(&non_member, &m, Some("MEM-1"));
+        assert!(is_forbidden(&denied), "non-member link: {denied}");
+        let viewer_denied = upload_as(&viewer, &m, Some("MEM-1"));
+        assert!(is_forbidden(&viewer_denied), "viewer link: {viewer_denied}");
+
+        let allowed = upload_as(&maintainer, &m, Some("MEM-1"));
+        assert!(!is_forbidden(&allowed), "maintainer link: {allowed}");
+        assert!(allowed.contains("linked."), "{allowed}");
+    }
+
+    /// A refused link must leave nothing behind: no row, and therefore no
+    /// attachment for the caller to read back by guessing an id.
+    #[test]
+    fn upload_attachment_writes_no_row_when_the_link_is_refused() {
+        let (m, lead, _maintainer, _viewer, non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Target".into(),
+                ..Default::default()
+            }))
+        });
+
+        assert!(is_forbidden(&upload_as(&non_member, &m, Some("MEM-1"))));
+        let rows: i64 = m
+            .read(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "a refused link must not create an attachment row");
+    }
+
+    /// Reading an attachment is reading the project it lives in. A non-member
+    /// is refused, and the refusal carries neither the filename nor a byte of
+    /// the content.
+    #[test]
+    fn get_attachment_denies_non_member_without_leaking_the_file() {
+        let (m, _lead, maintainer, viewer, non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        as_user(&maintainer, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Target".into(),
+                ..Default::default()
+            }))
+        });
+        let receipt = upload_as(&maintainer, &m, Some("MEM-1"));
+        let id: i64 = receipt
+            .strip_prefix("Attachment ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no attachment id in: {receipt}"));
+
+        let denied = as_user(&non_member, || {
+            text_of_result(&m.get_attachment(Parameters(GetAttachmentInput {
+                attachment_id: id,
+                offset: None,
+                limit: None,
+            })))
+        });
+        assert!(is_forbidden(&denied), "non-member get_attachment: {denied}");
+        assert!(!denied.contains("secret.txt"), "{denied}");
+        assert!(!denied.contains("classified"), "{denied}");
+
+        let allowed = as_user(&viewer, || {
+            text_of_result(&m.get_attachment(Parameters(GetAttachmentInput {
+                attachment_id: id,
+                offset: None,
+                limit: None,
+            })))
+        });
+        assert!(allowed.contains("secret.txt"), "viewer read: {allowed}");
+        assert!(allowed.contains("classified line one"), "{allowed}");
+    }
+
+    /// An unlinked upload has no project to gate on, so only its uploader (or
+    /// an admin) can read it back, exactly as REST decides it.
+    #[test]
+    fn get_attachment_on_an_unlinked_upload_is_uploader_only() {
+        let (m, _lead, maintainer, viewer, _non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        let receipt = upload_as(&maintainer, &m, None);
+        let id: i64 = receipt
+            .strip_prefix("Attachment ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no attachment id in: {receipt}"));
+
+        let uploader_read = as_user(&maintainer, || {
+            text_of_result(&m.get_attachment(Parameters(GetAttachmentInput {
+                attachment_id: id,
+                offset: None,
+                limit: None,
+            })))
+        });
+        assert!(uploader_read.contains("secret.txt"), "{uploader_read}");
+
+        let other_read = as_user(&viewer, || {
+            text_of_result(&m.get_attachment(Parameters(GetAttachmentInput {
+                attachment_id: id,
+                offset: None,
+                limit: None,
+            })))
+        });
+        assert!(is_forbidden(&other_read), "{other_read}");
+    }
+
+    #[test]
+    fn list_attachments_denies_non_member_in_both_scopes() {
+        let (m, _lead, maintainer, viewer, non_member, _tmp, _guard) =
+            membership_mcp_with_attachments();
+        as_user(&maintainer, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Target".into(),
+                ..Default::default()
+            }))
+        });
+        upload_as(&maintainer, &m, Some("MEM-1"));
+
+        for scope in [
+            ListAttachmentsInput {
+                entity: Some("MEM-1".into()),
+                project: None,
+            },
+            ListAttachmentsInput {
+                entity: None,
+                project: Some("MEM".into()),
+            },
+        ] {
+            let entity = scope.entity.clone();
+            let project = scope.project.clone();
+            let denied = as_user(&non_member, || {
+                m.list_attachments(Parameters(ListAttachmentsInput { entity, project }))
+            });
+            assert!(is_forbidden(&denied), "non-member list: {denied}");
+            assert!(!denied.contains("secret.txt"), "{denied}");
+        }
+
+        let allowed = as_user(&viewer, || {
+            m.list_attachments(Parameters(ListAttachmentsInput {
+                entity: Some("MEM-1".into()),
+                project: None,
+            }))
+        });
+        assert!(allowed.contains("secret.txt"), "viewer list: {allowed}");
+    }
+
+    fn text_of_result(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

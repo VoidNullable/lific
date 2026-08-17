@@ -556,6 +556,26 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
             "delete_comment",
             Exempt("author-or-admin ownership check (ownership, not project role)"),
         ),
+        // LIF-418: attachment tools. Their gates are REST's, called directly
+        // (`api::attachments::authorize_link` / `authorize_read`), so the two
+        // transports cannot drift apart.
+        (
+            "upload_attachment",
+            Mixed(
+                "dispatches on the link target: entity=issue/page = Maintainer (workspace page \
+                 falls back to workspace-admin); comment_id = Viewer; no target = open to any \
+                 authenticated user, mirroring REST POST /api/attachments",
+            ),
+        ),
+        (
+            "get_attachment",
+            Mixed(
+                "dispatches on link state: an attachment linked into any project = Viewer on any \
+                 one of them; an unlinked attachment = uploader-or-admin ownership check. Mirrors \
+                 REST GET /api/attachments/{id}",
+            ),
+        ),
+        ("list_attachments", Gated(Viewer)),
         ("create_plan", Gated(Maintainer)),
         ("get_plan", Gated(Viewer)),
         ("edit_plan_step", Gated(Maintainer)),
