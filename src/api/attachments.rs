@@ -8,7 +8,11 @@
 //! Authorization model (project-scoped, LIF-196/197):
 //! - **Upload** requires any authenticated user (attachments are owned by
 //!   their uploader and only become project-visible once linked into an
-//!   issue/page/comment). A per-user rate limit caps abuse.
+//!   issue/page/comment). A per-user rate limit caps abuse. LIF-405: the
+//!   optional `entity_type`/`entity_id` form fields, which link the new blob
+//!   into an entity in the same request, are gated separately by
+//!   [`authorize_link`] — that part *is* a mutation of someone else's issue,
+//!   page or comment.
 //! - **Download** requires `Viewer` on the owning project when
 //!   `authz_enforced` is on. An unlinked attachment (not yet referenced
 //!   anywhere) is readable only by its uploader / an admin — there's no
@@ -132,6 +136,12 @@ pub(super) async fn upload_attachment(
                 let _ = field.bytes().await;
             }
         }
+    }
+
+    // LIF-405: authorize the requested link target BEFORE any bytes hit the
+    // store or any row is written, so a rejected link leaves nothing behind.
+    if let (Some(entity), Some(entity_id)) = (link_entity, link_entity_id) {
+        authorize_link(&db, &identity, entity, entity_id)?;
     }
 
     let bytes =
@@ -448,6 +458,38 @@ fn owning_project_ids(
         }
     }
     Ok(project_ids)
+}
+
+/// LIF-405: link gate. Uploading a blob is open to any authenticated user,
+/// but attaching it to an entity mutates *that* entity — before this check a
+/// stranger could drop files onto issues, pages and comments in projects they
+/// had no membership in at all.
+///
+/// The required role mirrors the entity's own mutation path, so linking never
+/// buys more than editing the thing directly would:
+/// - issue / page → `Maintainer`, matching `PUT /api/issues/{id}` and
+///   `PUT /api/pages/{id}`.
+/// - comment → `Viewer`, matching `POST /api/issues/{id}/comments`, which is
+///   the path that puts an attachment on a comment in the first place.
+///
+/// A workspace-level page (no project) falls back to workspace-admin, the
+/// same fallback `list_entity_attachments` uses on the read side. A link to a
+/// nonexistent entity is `NotFound`, via `resolve_entity_project`.
+fn authorize_link(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    entity: AttachmentEntity,
+    entity_id: i64,
+) -> Result<(), LificError> {
+    let project_id = resolve_entity_project(db, entity, entity_id)?;
+    let min = match entity {
+        AttachmentEntity::Issue | AttachmentEntity::Page => Role::Maintainer,
+        AttachmentEntity::Comment => Role::Viewer,
+    };
+    match project_id {
+        Some(pid) => authz::require_role(db, identity, pid, min),
+        None => authz::require_workspace_admin(db, identity),
+    }
 }
 
 /// Read gate: Viewer on any owning project, or uploader/admin for an unlinked
@@ -962,6 +1004,99 @@ mod api_tests {
 
         // The lead (member) can read it.
         let resp = json_get(&lead_app, &format!("/api/attachments/{att_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// LIF-405: the upload's optional link fields used to be taken on trust.
+    /// Any authenticated account could post a file with `entity_type=issue`
+    /// and an id from a project it had no membership in, and the attachment
+    /// would show up in that issue's Attachments section.
+    #[tokio::test]
+    async fn non_member_cannot_link_an_upload_to_a_foreign_issue() {
+        let (db, _admin, lead, maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+
+        let lead_app = app_as_user(db.clone(), &lead);
+        let issue = parse_json(
+            json_post(
+                &lead_app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": "not yours" }),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
+
+        let link_count = |db: &crate::db::DbPool| -> i64 {
+            let conn = db.read().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM attachment_links", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        // A non-member is refused, and nothing is recorded.
+        let non_member_app = app_as_user(db.clone(), &non_member);
+        let resp = upload(
+            &non_member_app,
+            "sneak.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(link_count(&db), 0, "a rejected link must leave no row");
+
+        // So is a Viewer: attaching to an issue is an edit of that issue, and
+        // `PUT /api/issues/{id}` is Maintainer-gated.
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        let resp = upload(
+            &viewer_app,
+            "viewer.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(link_count(&db), 0);
+
+        // A Maintainer on the project still links normally.
+        let maintainer_app = app_as_user(db.clone(), &maintainer);
+        let resp = upload(
+            &maintainer_app,
+            "ok.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let att_id = parse_json(resp).await["id"].as_i64().unwrap();
+        assert_eq!(link_count(&db), 1);
+
+        let list = parse_json(
+            json_get(
+                &maintainer_app,
+                &format!("/api/attachments?entity_type=issue&entity_id={issue_id}"),
+            )
+            .await,
+        )
+        .await;
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"].as_i64().unwrap(), att_id);
+    }
+
+    /// A plain unlinked upload is still open to any authenticated user —
+    /// LIF-405 gates the link, not the blob.
+    #[tokio::test]
+    async fn non_member_can_still_upload_without_a_link() {
+        let (db, _admin, _lead, _maintainer, _viewer, non_member, _project_id) =
+            setup_membership_test();
+
+        let non_member_app = app_as_user(db.clone(), &non_member);
+        let resp = upload(&non_member_app, "mine.png", "image/png", &png_bytes(), None).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

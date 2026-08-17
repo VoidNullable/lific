@@ -204,21 +204,30 @@ pub(super) async fn update_comment_handler(
 ) -> Result<Json<Comment>, LificError> {
     let user = require_user(&identity)?;
 
-    // Check ownership: only the author or an admin can edit
     let existing = with_read(&db, |conn| {
         crate::db::queries::comments::get_comment(conn, id)
     })?;
+
+    // LIF-410: visibility before ownership. Authorship is not access — a user
+    // dropped from the project can no longer read the comment, so they can no
+    // longer edit it either. Same `Viewer` gate (and same 403) the read path
+    // applies, checked first so a comment the caller can't see never reveals
+    // whether they wrote it.
+    //
+    // LIF-263 also needs the parent project to recompute the mention set
+    // against its visible members. Resolved once here from the comment's
+    // parent (issue_id XOR page_id); a page comment may have a NULL project
+    // (workspace page), which `mention_candidates` handles.
+    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
+    require_comment_viewer(&db, &identity, project_id)?;
+
+    // Check ownership: only the author or an admin can edit
     if existing.user_id != user.id && !user.is_admin {
         return Err(LificError::BadRequest(
             "you can only edit your own comments".into(),
         ));
     }
 
-    // LIF-263: recompute the mention set against the parent project's
-    // visible members. Resolve the project from the comment's parent
-    // (issue_id XOR page_id) — a page comment may have a NULL project
-    // (workspace page), which `mention_candidates` handles.
-    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
     let member_scoped = authz::authz_enforced(&db)?;
 
     let comment = with_write(&db, |conn| {
@@ -266,17 +275,23 @@ pub(super) async fn delete_comment_handler(
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
 
-    // Check ownership: only the author or an admin can delete
     let existing = with_read(&db, |conn| {
         crate::db::queries::comments::get_comment(conn, id)
     })?;
+
+    // LIF-410: visibility before ownership, exactly as in the update path —
+    // being the author of a comment in a project you were removed from does
+    // not carry a standing right to delete it.
+    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
+    require_comment_viewer(&db, &identity, project_id)?;
+
+    // Check ownership: only the author or an admin can delete
     if existing.user_id != user.id && !user.is_admin {
         return Err(LificError::BadRequest(
             "you can only delete your own comments".into(),
         ));
     }
 
-    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
     with_write(&db, |conn| {
         crate::db::queries::comments::delete_comment(conn, id)
     })?;
@@ -1353,6 +1368,94 @@ mod tests {
                 .id
         };
         assert_eq!(resolved, vec![viewer_id]);
+    }
+
+    /// LIF-410: authorship is not a standing right. Both mutation paths used
+    /// to check only author-or-admin, so a user removed from a project could
+    /// keep editing and deleting their old comments there by id, forever,
+    /// with no membership at all. Visibility is now checked first, and answers
+    /// the same 403 the read path gives a non-member.
+    #[tokio::test]
+    async fn ex_member_author_cannot_edit_or_delete_their_comment() {
+        let (db, _admin, lead, maintainer, _viewer, _non_member, project_id) =
+            setup_membership_test();
+
+        let issue_id = {
+            let conn = db.write().unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id,
+                    title: "Enforced".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+
+        // A member comments, then edits their own comment: both fine.
+        let author_app = app_as_user(db.clone(), &maintainer);
+        let resp = json_post(
+            &author_app,
+            &format!("/api/issues/{issue_id}/comments"),
+            serde_json::json!({"content": "while I was on the team"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let comment_id = parse_json(resp).await["id"].as_i64().unwrap();
+
+        let resp = json_put(
+            &author_app,
+            &format!("/api/comments/{comment_id}"),
+            serde_json::json!({"content": "edited as a member"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // They lose their membership.
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::remove_member(&conn, project_id, maintainer.id).unwrap();
+        }
+
+        // Neither mutation is available to them any more.
+        let resp = json_put(
+            &author_app,
+            &format!("/api/comments/{comment_id}"),
+            serde_json::json!({"content": "edited after removal"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = json_delete(&author_app, &format!("/api/comments/{comment_id}")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // And the comment is exactly as the member left it.
+        let lead_app = app_as_user(db.clone(), &lead);
+        let list =
+            parse_json(json_get(&lead_app, &format!("/api/issues/{issue_id}/comments")).await)
+                .await;
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["content"], "edited as a member");
+
+        // Restore the membership: the gate is the membership and nothing
+        // else, so the author can delete their comment again.
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::members::upsert_member(
+                &conn,
+                project_id,
+                maintainer.id,
+                Role::Maintainer,
+            )
+            .unwrap();
+        }
+        let resp = json_delete(&author_app, &format!("/api/comments/{comment_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
