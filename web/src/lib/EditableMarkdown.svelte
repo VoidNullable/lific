@@ -65,10 +65,8 @@
     type SuggestionHit,
   } from "./references";
   import type { AttachmentEntity } from "./api";
-  import { filesFromClipboard, insertAtCaret } from "./attachments/compose";
-  import { createUploadController } from "./attachments/uploads.svelte";
-  import DropOverlay from "./attachments/DropOverlay.svelte";
-  import PendingUploads from "./attachments/PendingUploads.svelte";
+  import { createComposerAttachments } from "./attachments/composer.svelte";
+  import AttachComposer from "./attachments/AttachComposer.svelte";
   import { onDestroy } from "svelte";
 
   let {
@@ -108,8 +106,6 @@
     attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
     floatingToggle?: boolean;
   } = $props();
-
-  let fileInputEl = $state<HTMLInputElement | null>(null);
 
   // Draft only matters while editing. enterEdit() copies the current
   // `value` into it at swap time, so initializing it empty here avoids
@@ -300,6 +296,10 @@
 
   async function commitEdit() {
     if (mode !== "edit") return;
+    // An upload still running would insert its markdown into a draft nobody
+    // is looking at any more, so the reference would be lost. The Save button
+    // is disabled for the same reason; this covers ⌘S and the mode toggle.
+    if (attach.uploads.pending) return;
     const anchor = captureEditAnchor();
     const next = draft;
     mode = "read";
@@ -317,6 +317,9 @@
 
   function cancelEdit() {
     if (mode !== "edit") return;
+    // Abandoning the draft abandons its uploads too: anything still in flight
+    // would otherwise finish and insert a reference into text nobody can see.
+    attach.destroy();
     const anchor = captureEditAnchor();
     mode = "read";
     lockedMinHeight = null;
@@ -354,43 +357,28 @@
     }
   }
 
-  // ── LIF-262: attachment uploads ──────────────────────────
+  // ── LIF-262 / LIF-418: attachment uploads ────────────────
+  //
+  // One shared composer wiring drives drag, paste, the Attach button, the
+  // pending strip and the big-paste offer. Identical code path to the comment
+  // boxes and the new-issue form; only the layout differs.
 
-  function insertSnippet(snippet: string) {
-    const el = textareaEl;
-    if (!el) return;
-    const { text, caret } = insertAtCaret(el, draft, snippet);
-    draft = text;
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(caret, caret);
-      autoResize();
-    });
-  }
-
-  // Shared pending-upload controller (LIF-268) — same model as the comment
-  // composer so drag / paste / button all resolve into the same chip strip.
-  const uploads = createUploadController({
+  const attach = createComposerAttachments({
+    el: () => textareaEl,
+    text: () => draft,
+    apply: (text, caret) => {
+      draft = text;
+      requestAnimationFrame(() => {
+        const el = textareaEl;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+        autoResize();
+      });
+    },
     link: () => attachTo,
-    onInsert: insertSnippet,
   });
-  onDestroy(() => uploads.destroy());
-
-  function onEditorPaste(e: ClipboardEvent) {
-    const files = filesFromClipboard(e);
-    if (files.length > 0) {
-      e.preventDefault();
-      uploads.enqueue(files);
-    }
-  }
-
-  function onEditorFilePicked(e: Event) {
-    const input = e.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      uploads.enqueue(Array.from(input.files));
-      input.value = "";
-    }
-  }
+  onDestroy(() => attach.destroy());
 
   // ── LIF-282: markdown formatting toolbar + shortcuts ──────
   //
@@ -602,6 +590,9 @@
   }
 
   function handleTextareaKey(e: KeyboardEvent) {
+    // The big-paste offer owns Enter and Escape while it is up, and stops
+    // Escape from also cancelling the edit.
+    if (attach.handleKeydown(e)) return;
     if (acOpen) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -737,7 +728,7 @@
       the parent prose font + line-height so vertical math also matches.
     -->
     <!-- svelte-ignore a11y_autofocus -->
-    <DropOverlay radius="0.375rem" onFiles={(files) => uploads.enqueue(files)}>
+    <AttachComposer composer={attach} radius="0.375rem" {footer}>
       <!--
         LIF-282: compact formatting toolbar. Buttons prevent focus theft
         via onmousedown preventDefault so the textarea selection survives
@@ -768,41 +759,10 @@
         onkeydown={handleTextareaKey}
         oninput={handleTextareaInput}
         onblur={closeAutocomplete}
-        onpaste={onEditorPaste}
+        onpaste={(e) => attach.handlePaste(e)}
         autofocus
       ></textarea>
-
-      <PendingUploads controller={uploads} />
-
-      <div class="em-footer">
-        <button class="em-save" onclick={commitEdit} disabled={saving}>
-          {saving ? "Saving..." : "Save"}
-        </button>
-        <button class="em-cancel" onclick={cancelEdit} disabled={saving}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          class="em-attach"
-          onclick={() => fileInputEl?.click()}
-          disabled={saving || uploads.busy}
-          title="Attach files"
-          aria-label="Attach files"
-        >
-          <Paperclip size={13} />
-          {uploads.busy ? "Uploading…" : "Attach"}
-        </button>
-        <span class="em-hint">Markdown · drag/paste to upload · ⌘S to save</span>
-      </div>
-    </DropOverlay>
-    <input
-      bind:this={fileInputEl}
-      type="file"
-      class="em-file-input"
-      multiple
-      accept="image/*,application/pdf,text/plain,.log,application/zip"
-      onchange={onEditorFilePicked}
-    />
+    </AttachComposer>
   {/if}
 
   <!--
@@ -813,6 +773,29 @@
     affordance unobstructed).
   -->
 </div>
+
+{#snippet footer()}
+  <div class="em-footer">
+    <button class="em-save" onclick={commitEdit} disabled={saving || attach.uploads.pending}>
+      {saving ? "Saving..." : "Save"}
+    </button>
+    <button class="em-cancel" onclick={cancelEdit} disabled={saving}>
+      Cancel
+    </button>
+    <button
+      type="button"
+      class="em-attach"
+      onclick={() => attach.openFilePicker()}
+      disabled={saving}
+      title="Attach files"
+      aria-label="Attach files"
+    >
+      <Paperclip size={13} />
+      {attach.uploads.busy ? "Uploading…" : "Attach"}
+    </button>
+    <span class="em-hint">Markdown · drag/paste to upload · ⌘S to save</span>
+  </div>
+{/snippet}
 
 {#if editable && hasContent && floatingToggle}
   <ModeToggle
@@ -986,10 +969,6 @@
   }
   .em-textarea::placeholder {
     color: var(--text-faint);
-  }
-
-  .em-file-input {
-    display: none;
   }
 
   .em-attach {
