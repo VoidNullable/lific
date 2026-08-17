@@ -15,6 +15,7 @@ mod import;
 mod links;
 mod mcp;
 mod oauth;
+mod preview;
 mod ratelimit;
 mod resolve_caller;
 mod realtime;
