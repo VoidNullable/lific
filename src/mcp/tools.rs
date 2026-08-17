@@ -1338,6 +1338,28 @@ impl LificMcp {
         })?;
         require_role_mcp(&self.db, project_id, min)
     }
+
+    /// LIF-407: every issue a `create_plan` payload mirrors is an issue link,
+    /// at any depth of the step tree. Without this gate a plan is a side
+    /// channel: an unauthorized identifier resolves, the step renders it, and
+    /// the plan then reports its status — leaking both existence and state of
+    /// issues in projects the caller cannot see. Same `min` (Maintainer) the
+    /// `attach_issue` / `add_child_issue` edges use.
+    fn require_plan_step_issue_roles(
+        &self,
+        steps: &[PlanStepInput],
+        min: models::Role,
+    ) -> Result<(), String> {
+        steps.iter().try_for_each(|step| {
+            if let Some(ident) = &step.issue {
+                self.require_issue_ident_role_mcp(ident, min)?;
+            }
+            match &step.steps {
+                Some(children) => self.require_plan_step_issue_roles(children, min),
+                None => Ok(()),
+            }
+        })
+    }
 }
 
 #[tool_router]
@@ -3614,6 +3636,15 @@ impl LificMcp {
     fn create_plan_inner(&self, input: CreatePlanInput) -> Result<String, String> {
         let pid = resolve_project(&*self.read_conn()?, &input.project)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        // LIF-407: the anchor and every step-linked issue can live outside
+        // this plan's project; each needs Maintainer on its own project,
+        // mirroring `link_issues`' both-sides check.
+        if let Some(ref ident) = input.anchor_issue {
+            self.require_issue_ident_role_mcp(ident, models::Role::Maintainer)?;
+        }
+        if let Some(ref steps) = input.steps {
+            self.require_plan_step_issue_roles(steps, models::Role::Maintainer)?;
+        }
         let plan = self.write(|conn| {
             let anchor = match &input.anchor_issue {
                 Some(ident) => Some(queries::resolve_identifier(conn, ident)?),
@@ -3761,6 +3792,14 @@ impl LificMcp {
             && let Some(step_id) = input.step_id
         {
             self.require_step_issue_role_mcp(step_id, models::Role::Maintainer)?;
+        }
+        // LIF-407: re-anchoring the plan resolves an arbitrary issue
+        // identifier too (plan-level update only — `anchor_issue` is ignored
+        // when `step_id` is set).
+        if input.step_id.is_none()
+            && let Some(ref ident) = input.anchor_issue
+        {
+            self.require_issue_ident_role_mcp(ident, models::Role::Maintainer)?;
         }
 
         let context = current_issue_link_context();
@@ -9792,6 +9831,149 @@ mod authz_gating_tests {
         });
         assert!(!is_forbidden(&allowed), "viewer get_issue: {allowed}");
         assert!(allowed.contains("Secret work"), "got: {allowed}");
+    }
+
+    /// Seed a second project the fixture's members have no role on, with one
+    /// issue in it. Returns `(project_id, issue_identifier, issue_id)`.
+    fn seed_foreign_project(m: &LificMcp) -> (i64, String, i64) {
+        let conn = m.db.write().unwrap();
+        let project = queries::create_project(
+            &conn,
+            &models::CreateProject {
+                name: "Foreign".into(),
+                identifier: "FGN".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let issue = queries::create_issue(
+            &conn,
+            &models::CreateIssue {
+                project_id: project.id,
+                title: "Classified".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (project.id, issue.identifier.clone(), issue.id)
+    }
+
+    // ── LIF-407: plans must not launder issue references ─────────
+
+    /// A plan step resolves an arbitrary issue identifier, renders it, and
+    /// later reports its status — so `create_plan` is a read (and eventually a
+    /// write) on that issue's project. Referencing an issue the caller cannot
+    /// see must be refused, at any depth of the step tree, and for the plan
+    /// anchor too.
+    #[test]
+    fn create_plan_cannot_reference_an_issue_from_an_invisible_project() {
+        let (m, _admin, lead, _maintainer, _viewer, _non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        let (_foreign_project, foreign_ident, _foreign_issue) = seed_foreign_project(&m);
+
+        let via_step = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "MEM".into(),
+                title: "Leaky".into(),
+                anchor_issue: None,
+                steps: Some(vec![PlanStepInput {
+                    title: "mirror".into(),
+                    issue: Some(foreign_ident.clone()),
+                    ..Default::default()
+                }]),
+            }))
+        });
+        assert!(is_forbidden(&via_step), "top-level step: {via_step}");
+
+        let via_child = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "MEM".into(),
+                title: "Leaky nested".into(),
+                anchor_issue: None,
+                steps: Some(vec![PlanStepInput {
+                    title: "parent".into(),
+                    steps: Some(vec![PlanStepInput {
+                        title: "child".into(),
+                        issue: Some(foreign_ident.clone()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }]),
+            }))
+        });
+        assert!(is_forbidden(&via_child), "nested step: {via_child}");
+
+        let via_anchor = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "MEM".into(),
+                title: "Leaky anchor".into(),
+                anchor_issue: Some(foreign_ident.clone()),
+                steps: None,
+            }))
+        });
+        assert!(is_forbidden(&via_anchor), "anchor: {via_anchor}");
+
+        // Nothing was created by any of the refused calls.
+        let plans = as_user(&lead, || {
+            m.list_resources(Parameters(ListResourcesInput {
+                resource_type: "plan".into(),
+                project: Some("MEM".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(
+            !plans.contains("Leaky"),
+            "no plan may have been created: {plans}"
+        );
+
+        // A step linked to an issue the caller *can* see still works.
+        let allowed = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Mine".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(allowed.starts_with("Created"), "got: {allowed}");
+        let ok = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "MEM".into(),
+                title: "Fine".into(),
+                anchor_issue: None,
+                steps: Some(vec![PlanStepInput {
+                    title: "mirror".into(),
+                    issue: Some("MEM-1".into()),
+                    ..Default::default()
+                }]),
+            }))
+        });
+        assert!(ok.starts_with("Created"), "got: {ok}");
+    }
+
+    /// The same gate on the plan-level anchor update path.
+    #[test]
+    fn update_plan_cannot_anchor_to_an_issue_from_an_invisible_project() {
+        let (m, _admin, lead, _maintainer, _viewer, _non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        let (_foreign_project, foreign_ident, _foreign_issue) = seed_foreign_project(&m);
+        let plan = as_user(&lead, || {
+            m.create_plan(Parameters(CreatePlanInput {
+                project: "MEM".into(),
+                title: "Anchorable".into(),
+                anchor_issue: None,
+                steps: None,
+            }))
+        });
+        assert!(plan.starts_with("Created"), "got: {plan}");
+
+        let denied = as_user(&lead, || {
+            m.update_plan_step(Parameters(UpdatePlanStepInput {
+                plan: "MEM-PLAN-1".into(),
+                anchor_issue: Some(foreign_ident),
+                ..Default::default()
+            }))
+        });
+        assert!(is_forbidden(&denied), "got: {denied}");
     }
 
     #[test]
