@@ -1438,6 +1438,24 @@ impl LificMcp {
                         ),
                     );
                     writeln!(output, "- {comment} on {parent} — {}", result.snippet)
+                } else if result.result_type == "attachment" {
+                    // LIF-418: an attachment hit is a file, not an entity. It
+                    // renders as the filename plus the issue/page it is
+                    // attached to, so the reader knows where to open it, and
+                    // carries its numeric id for `/api/attachments/{id}`.
+                    let parent = reference_with_context(
+                        link_context.as_deref(),
+                        result
+                            .parent_page_id
+                            .map_or(ReferenceKind::Issue(identifier), |page_id| {
+                                ReferenceKind::Page(identifier, page_id)
+                            }),
+                    );
+                    writeln!(
+                        output,
+                        "- [attachment] {} (#{}) on {parent}: {}",
+                        result.title, result.id, result.snippet
+                    )
                 } else {
                     let kind = match result.result_type.as_str() {
                         "page" => ReferenceKind::Page(identifier, result.id),
@@ -6214,6 +6232,48 @@ mod tests {
             ..Default::default()
         }));
         assert!(result.contains("invalid mode"), "got: {result}");
+    }
+
+    // LIF-418: a file attached to an issue is searchable by name and by the
+    // text inside it, and renders as the filename plus the entity it hangs
+    // off, so an agent knows where to open it.
+    #[test]
+    fn mcp_search_renders_attachment_hits_with_their_entity() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Test", "SRC");
+        seed_issue(&m, "SRC", "Crash on startup");
+        let issue_id = m
+            .read(|conn| queries::resolve_identifier(conn, "SRC-1"))
+            .expect("issue id");
+        let attachment_id = m
+            .write(|conn| {
+                use crate::db::queries::attachments as att;
+                let attachment = att::create_attachment(
+                    conn,
+                    "sha",
+                    "server.log",
+                    "text/plain",
+                    64,
+                    None,
+                )?;
+                att::link_attachment(
+                    conn,
+                    attachment.id,
+                    models::AttachmentEntity::Issue,
+                    issue_id,
+                )?;
+                att::set_extracted_text(conn, attachment.id, "panicked at gribblenaut::render")?;
+                Ok(attachment.id)
+            })
+            .expect("seed attachment");
+
+        let result = m.search(Parameters(SearchInput {
+            query: "gribblenaut".into(),
+            ..Default::default()
+        }));
+        assert!(result.contains("[attachment] server.log"), "got: {result}");
+        assert!(result.contains(&format!("#{attachment_id}")), "got: {result}");
+        assert!(result.contains("SRC-1"), "got: {result}");
     }
 
     #[test]

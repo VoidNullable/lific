@@ -277,6 +277,16 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
                 "same dynamic read gate as the download it derives from. See api::attachments::authorize_read (LIF-418)",
             ),
         ),
+        // LIF-418: the project files manager reads one project's whole
+        // attachment set, so unlike the endpoints above it has a single fixed
+        // project to gate on. Viewer, checked before the project is touched at
+        // all so a non-member cannot tell an existing project from a
+        // nonexistent one.
+        (("GET", "/api/projects/{id}/attachments"), Gated(Viewer)),
+        (
+            ("GET", "/api/projects/{id}/attachments/orphans"),
+            Gated(Viewer),
+        ),
         // ── Projects ──
         (("GET", "/api/projects"), Filtered),
         (

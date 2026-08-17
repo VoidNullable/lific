@@ -1052,6 +1052,125 @@ export async function deleteAttachment(id: number) {
   });
 }
 
+// ── Project files manager (LIF-418) ──────────────────────────
+
+/** An entity that references a file, resolved enough to render a chip and
+ *  navigate to it. For a comment link, `identifier`/`title` describe the
+ *  issue or page the thread lives on. */
+export interface LinkedEntity {
+  entity_type: AttachmentEntity;
+  entity_id: number;
+  identifier: string | null;
+  title: string;
+  /** Set when the link lands on a page (a page, or a comment on one). Pages
+   *  are routed by numeric id, so the identifier alone can't build the link. */
+  page_id: number | null;
+}
+
+/** Coarse bucket the server assigns to a MIME type. Drives the filter chips
+ *  and the row icons, so both always agree with what the filter matched. */
+export type MimeClass =
+  | "image"
+  | "video"
+  | "audio"
+  | "text"
+  | "pdf"
+  | "archive"
+  | "other";
+
+export interface ProjectAttachment {
+  id: number;
+  filename: string;
+  mime: string;
+  mime_class: MimeClass;
+  size_bytes: number;
+  uploader_id: number | null;
+  uploader: string | null;
+  uploader_display_name: string | null;
+  created_at: string;
+  /** The entities in THIS project that reference the file. */
+  entities: LinkedEntity[];
+}
+
+export interface ProjectAttachmentPage {
+  items: ProjectAttachment[];
+  has_more: boolean;
+  /** Count and bytes for the whole filtered set, not just this page. */
+  total_count: number;
+  total_bytes: number;
+}
+
+export interface ProjectAttachmentParams {
+  mime_class?: MimeClass | null;
+  uploader?: string | null;
+  entity_type?: AttachmentEntity | null;
+  sort?: "created_at" | "size" | "filename";
+  order?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+/** One page of the project's files. */
+export async function listProjectAttachments(
+  projectId: number,
+  params: ProjectAttachmentParams = {},
+) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, String(value));
+    }
+  }
+  const suffix = query.toString() ? `?${query}` : "";
+  return request<ProjectAttachmentPage>(
+    `/projects/${projectId}/attachments${suffix}`,
+  );
+}
+
+/** An unlinked upload waiting on the orphan sweeper. */
+export interface PendingOrphan {
+  id: number;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  uploader_id: number | null;
+  uploader: string | null;
+  uploaded_at: string;
+  age_seconds: number;
+  /** Seconds left before the sweeper may collect it; 0 means "next sweep". */
+  seconds_until_sweep: number;
+}
+
+export interface PendingOrphanList {
+  items: PendingOrphan[];
+  grace_seconds: number;
+  total_bytes: number;
+}
+
+export async function listProjectOrphans(projectId: number) {
+  return request<PendingOrphanList>(`/projects/${projectId}/attachments/orphans`);
+}
+
+/** Where-used for one attachment: every entity that references it, plus other
+ *  attachment rows that share the same bytes.
+ *
+ *  Served by a sibling workstream. Callers must tolerate a 404 (the endpoint
+ *  is simply not deployed) and fall back to the entities the listing already
+ *  carries. */
+export interface AttachmentLinks {
+  entities: LinkedEntity[];
+  duplicates: {
+    id: number;
+    filename: string;
+    uploader: string | null;
+    entities: LinkedEntity[];
+  }[];
+}
+
+export async function getAttachmentLinks(id: number) {
+  return request<AttachmentLinks>(`/attachments/${id}/links`);
+}
+
 /** Human-readable byte size (e.g. "1.4 MB"). Small standalone helper so the
  *  chip renderer and the detail-section share one formatting. */
 export function formatBytes(bytes: number): string {

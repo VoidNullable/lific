@@ -219,13 +219,67 @@ pub fn sweep_orphans(
     Ok(collected)
 }
 
+/// LIF-418: index the contents of text attachments that aren't in
+/// `attachments_fts` yet.
+///
+/// Two populations need this: uploads that predate migration 042 (the
+/// migration can seed filenames from SQLite, but the bytes live on disk where
+/// SQL can't reach them), and any upload whose extraction was interrupted.
+/// Idempotent by construction — the driving query only returns rows with an
+/// empty `extracted_text`, so a second run finds nothing and does nothing.
+///
+/// A blob missing from disk or holding invalid UTF-8 is skipped rather than
+/// failing the pass; one bad file must not stop the rest from being indexed.
+pub fn backfill_attachment_text(
+    pool: &crate::db::DbPool,
+    store: &AttachmentStore,
+) -> Result<usize, LificError> {
+    use crate::db::queries::attachments as q;
+
+    let pending = {
+        let conn = pool.read()?;
+        q::unindexed_text_attachments(&conn)?
+    };
+
+    let mut indexed = 0;
+    for (id, sha256) in pending {
+        let Ok(bytes) = store.read(&sha256) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        // An empty file has nothing to index; skipping it also keeps it out of
+        // the "still empty" retry set forever, which is correct — there is
+        // nothing to find in it.
+        if text.is_empty() {
+            continue;
+        }
+        {
+            let conn = pool.write()?;
+            q::set_extracted_text(&conn, id, &text)?;
+        }
+        indexed += 1;
+    }
+    Ok(indexed)
+}
+
 /// Spawn a background task that sweeps orphaned attachments hourly. Mirrors the
 /// backup task's shape (initial delay then a fixed interval).
+///
+/// LIF-418: this is also where the attachment text backfill runs, once, before
+/// the sweep loop starts. Same task on purpose: both are "reconcile the
+/// attachment store with the database" chores that must not block startup.
 pub fn start_gc_task(
     pool: crate::db::DbPool,
     store: AttachmentStore,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        match backfill_attachment_text(&pool, &store) {
+            Ok(n) if n > 0 => tracing::info!(indexed = n, "attachment text backfill indexed files"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "attachment text backfill failed"),
+        }
         // Let the server settle before the first sweep.
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
@@ -636,6 +690,59 @@ mod tests {
         assert_eq!(
             AttachmentStore::hash_bytes(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    // ── Attachment text backfill (LIF-418) ───────────────────
+
+    #[test]
+    fn backfill_indexes_text_uploads_and_is_idempotent() {
+        use crate::db::queries::attachments as q;
+
+        let (store, _tmp) = tmp_store();
+        let pool = crate::db::open_memory().expect("test db");
+
+        // A text upload whose bytes are on disk but whose contents never made
+        // it into the index: exactly the shape of a pre-migration-042 row.
+        let body = b"thread panicked at gribblenaut::render";
+        let sha = store.write(body).unwrap();
+        let text_id = {
+            let conn = pool.write().unwrap();
+            q::create_attachment(
+                &conn,
+                &sha,
+                "server.log",
+                "text/plain",
+                body.len() as i64,
+                None,
+            )
+            .unwrap()
+            .id
+        };
+        // A row whose blob is missing from disk must be skipped, not fatal.
+        {
+            let conn = pool.write().unwrap();
+            q::create_attachment(&conn, "no-such-blob", "ghost.log", "text/plain", 10, None)
+                .unwrap();
+        }
+
+        assert_eq!(backfill_attachment_text(&pool, &store).unwrap(), 1);
+
+        let indexed: String = {
+            let conn = pool.read().unwrap();
+            conn.query_row(
+                "SELECT extracted_text FROM attachments_fts WHERE attachment_id = ?1",
+                rusqlite::params![text_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(indexed, String::from_utf8_lossy(body));
+
+        assert_eq!(
+            backfill_attachment_text(&pool, &store).unwrap(),
+            0,
+            "a second pass has nothing left to index"
         );
     }
 

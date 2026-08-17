@@ -10,6 +10,7 @@
   import ProjectNew from "./routes/ProjectNew.svelte";
   import ProjectSettings from "./routes/ProjectSettings.svelte";
   import PageList from "./routes/PageList.svelte";
+  import Files from "./routes/Files.svelte";
   import PageDetail from "./routes/PageDetail.svelte";
   import ModuleList from "./routes/ModuleList.svelte";
   import ModuleDetail from "./routes/ModuleDetail.svelte";
@@ -364,6 +365,7 @@
       }
     | { type: "app"; page: "issue-detail"; project: string; identifier: string }
     | { type: "app"; page: "pages"; project: string }
+    | { type: "app"; page: "files"; project: string }
     | { type: "app"; page: "page-detail"; project: string; pageId: number }
     | { type: "app"; page: "modules"; project: string }
     | { type: "app"; page: "module-detail"; project: string; moduleId: number }
@@ -465,6 +467,12 @@
     const pageListMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/pages$/i);
     if (pageListMatch) {
       return { type: "app", page: "pages", project: pageListMatch[1] };
+    }
+
+    // Project-scoped: /{IDENTIFIER}/files (the files manager, LIF-418)
+    const filesMatch = r.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/files$/i);
+    if (filesMatch) {
+      return { type: "app", page: "files", project: filesMatch[1] };
     }
 
     // Project-scoped: /{IDENTIFIER}/pages/{ID}
@@ -629,6 +637,8 @@
       />
     {:else if parsed.page === "pages"}
       <PageList {navigate} projectIdentifier={parsed.project} />
+    {:else if parsed.page === "files"}
+      <Files {navigate} projectIdentifier={parsed.project} />
     {:else if parsed.page === "page-detail"}
       <PageDetail {navigate} projectIdentifier={parsed.project} pageId={parsed.pageId} />
     {:else if parsed.page === "modules"}

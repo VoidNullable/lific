@@ -201,6 +201,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "attachment metadata",
         include_str!("../../migrations/041_attachment_metadata.sql"),
     ),
+    (
+        42,
+        "attachment search",
+        include_str!("../../migrations/042_attachment_search.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
