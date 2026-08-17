@@ -9,6 +9,16 @@ use axum::http::HeaderMap;
 const MAX_KEYS: usize = 10_000;
 const MAX_KEY_BYTES: usize = 1024;
 
+/// Format a rate-limit response without claiming that an unavailable retry
+/// delay is zero seconds.
+pub(crate) fn retry_after_message(prefix: &str, retry_after: u64) -> String {
+    if retry_after == 0 {
+        format!("{prefix} — try again later")
+    } else {
+        format!("{prefix} — try again in {retry_after} seconds")
+    }
+}
+
 /// A validated IP address or CIDR range trusted to supply client-IP headers.
 ///
 /// Plain IPs represent a single host (`/32` for IPv4 or `/128` for IPv6).
@@ -242,11 +252,11 @@ impl RateLimiter {
         if key.len() > MAX_KEY_BYTES {
             return false;
         }
-        let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
         match state.attempts.get_mut(key) {
             Some(entry) => {
-                entry.retain(|t| now.duration_since(*t) < self.window);
+                entry.retain(|t| now.saturating_duration_since(*t) < self.window);
                 entry.len() < self.max_attempts
             }
             None => true,
@@ -274,12 +284,12 @@ impl RateLimiter {
 
     /// How many seconds until the oldest attempt in the window expires.
     pub fn retry_after(&self, key: &str) -> u64 {
-        let now = Instant::now();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
         match state.attempts.get(key) {
             Some(entries) if !entries.is_empty() => {
                 let oldest = entries[0];
-                let elapsed = now.duration_since(oldest);
+                let elapsed = now.saturating_duration_since(oldest);
                 if elapsed < self.window {
                     (self.window - elapsed).as_secs() + 1
                 } else {
@@ -303,6 +313,18 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_message_omits_zero_delay() {
+        assert_eq!(
+            retry_after_message("too many requests", 0),
+            "too many requests — try again later"
+        );
+        assert_eq!(
+            retry_after_message("too many requests", 3),
+            "too many requests — try again in 3 seconds"
+        );
+    }
 
     #[test]
     fn allows_under_limit() {

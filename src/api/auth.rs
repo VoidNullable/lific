@@ -105,15 +105,15 @@ pub(super) async fn auth_signup(
     if let Some(Extension(ref rl)) = limiter {
         if !rl.check(&ip_key) {
             let retry = rl.retry_after(&ip_key);
-            return Err(LificError::BadRequest(format!(
-                "too many signup attempts — try again in {retry} seconds"
-            )));
+            return Err(LificError::BadRequest(
+                crate::ratelimit::retry_after_message("too many signup attempts", retry),
+            ));
         }
         if !rl.check(&email_key) {
             let retry = rl.retry_after(&email_key);
-            return Err(LificError::BadRequest(format!(
-                "too many signup attempts — try again in {retry} seconds"
-            )));
+            return Err(LificError::BadRequest(
+                crate::ratelimit::retry_after_message("too many signup attempts", retry),
+            ));
         }
     }
 
@@ -266,9 +266,9 @@ pub(super) async fn auth_login(
         && (!rl.peek(&ip_key) || !rl.peek(&id_key))
     {
         let retry = rl.retry_after(&id_key).max(rl.retry_after(&ip_key));
-        return Err(LificError::BadRequest(format!(
-            "too many login attempts — try again in {retry} seconds"
-        )));
+        return Err(LificError::BadRequest(
+            crate::ratelimit::retry_after_message("too many login attempts", retry),
+        ));
     }
 
     let user = match authenticate_off_writer(&db, &input.identity, &input.password).await {
