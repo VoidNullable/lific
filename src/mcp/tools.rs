@@ -1364,24 +1364,29 @@ impl LificMcp {
     }
 
     fn search_inner(&self, input: SearchInput) -> Result<String, String> {
-        // Cross-project read (LIF-198 scope item 2): non-visible projects'
-        // hits are silently absent, never a 403 — even when `project` narrows
-        // the search to one project a non-member can't see, mirroring the
-        // REST /api/search handler.
         let visible = visible_project_ids_mcp(&self.db)?;
-        // LIF-411: for a *restricted* caller, resolving `project` first made a
-        // hidden-but-existing project distinguishable from a nonexistent one
-        // ("project 'X' not found" vs. an empty result). Both now produce the
-        // same empty result. An unrestricted caller (admin, or enforcement
-        // off) has nothing hidden from them, so they keep the helpful
-        // resolution error.
         let project_id = match &input.project {
-            Some(p) => match resolve_project(&*self.read_conn()?, p) {
-                Ok(pid) if visible.as_ref().is_none_or(|ids| ids.contains(&pid)) => Some(pid),
-                Ok(_) => return Ok(self.empty_search_result()),
-                Err(_) if visible.is_some() => return Ok(self.empty_search_result()),
-                Err(error) => return Err(error),
-            },
+            Some(p) => {
+                let conn = self.read_conn()?;
+                match queries::resolve_project_identifier(&conn, p) {
+                    Ok(project_id)
+                        if visible.as_ref().is_none_or(|ids| ids.contains(&project_id)) =>
+                    {
+                        Some(project_id)
+                    }
+                    Ok(_) if visible.is_some() => return Ok(self.empty_search_result()),
+                    Err(crate::error::LificError::NotFound(error)) if visible.is_some() => {
+                        return Ok(self.empty_search_result());
+                    }
+                    Err(crate::error::LificError::NotFound(error)) => {
+                        return Err(error.to_string());
+                    }
+                    Ok(_) => {
+                        return Ok(self.empty_search_result());
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             None => None,
         };
         // The query owns the default (20) and the cap; clamping here too gives
@@ -1404,11 +1409,15 @@ impl LificMcp {
                     limit: Some(limit),
                     offset: Some(offset),
                 },
+                visible.as_ref(),
             )
         })?;
         let has_more = hits.has_more;
-        let results = filter_visible(hits.items, &visible, |r| r.project_id);
+        let results = hits.items;
         if results.is_empty() {
+            if let Some(nudge) = self.no_projects_nudge() {
+                return Ok(nudge);
+            }
             return Ok(self.empty_search_result());
         }
         let link_context = current_issue_link_context();

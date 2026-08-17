@@ -1,53 +1,62 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode, types::Value};
+use std::collections::HashSet;
 
-use crate::db::models::*;
+use crate::db::models::{SearchQuery, SearchResult};
 use crate::error::LificError;
 
 /// Default hits per search page. Smaller than the shared page default on
 /// purpose. Public so a transport that has to publish the same default in its
-/// own paging hints reads it from here rather than restating `20`.
+/// own paging hints reads from here rather than restating 20.
 pub const DEFAULT_SEARCH_LIMIT: i64 = 20;
+pub const MAX_LITERAL_QUERY_BYTES: usize = 256;
+pub const MAX_LITERAL_MATCHES: usize = 10_000;
+pub const MAX_FTS_QUERY_BYTES: usize = 4 * 1024;
+pub const MAX_SEARCH_OFFSET: i64 = 100_000;
+const LITERAL_PROGRESS_INTERVAL: i32 = 10_000;
+const MAX_LITERAL_PROGRESS_CALLBACKS: usize = 100;
 
-/// Search, discarding the `has_more` signal.
+/// Search, discarding the has-more signal.
 pub fn search(conn: &Connection, q: &SearchQuery) -> Result<Vec<SearchResult>, LificError> {
-    Ok(search_page(conn, q)?.items)
+    Ok(search_page(conn, q, None)?.items)
 }
 
-/// [`search`] as a [`Page`](super::Page). The over-fetch happens under this
-/// query's clamp, so `has_more` stays correct at the cap (LIF-388).
+/// Search one page. Project visibility is applied in SQL before ranking,
+/// sorting, and pagination; None means the caller is unrestricted.
 pub fn search_page(
     conn: &Connection,
     q: &SearchQuery,
+    visible_project_ids: Option<&HashSet<i64>>,
 ) -> Result<super::Page<SearchResult>, LificError> {
-    // Search publishes a smaller default page than the shared 50: an FTS hit
-    // list is a preview, not a data dump. The cap stays the shared one.
-    let (limit, offset) = super::page_with(
+    let (limit, raw_offset) = super::page_with(
         q.limit,
         q.offset,
         DEFAULT_SEARCH_LIMIT,
         super::MAX_PAGE_LIMIT,
     );
+    let offset = raw_offset.min(MAX_SEARCH_OFFSET);
     let fetch = super::over_fetch(limit);
 
-    // Validate enum-ish params up front so a typo'd filter errors instead
-    // of silently returning everything.
-    if let Some(ref rt) = q.result_type
-        && rt != "issue"
-        && rt != "page"
-        && rt != "comment"
+    let max_query_bytes = if q.mode.as_deref() == Some("literal") {
+        MAX_LITERAL_QUERY_BYTES
+    } else {
+        MAX_FTS_QUERY_BYTES
+    };
+    if q.query.len() > max_query_bytes {
+        return Err(LificError::BadRequest(format!(
+            "search query exceeds {max_query_bytes} bytes"
+        )));
+    }
+    if let Some(result_type) = q.result_type.as_deref()
+        && !matches!(result_type, "issue" | "page" | "comment")
     {
         return Err(LificError::BadRequest(format!(
-            "invalid result_type '{rt}'. Use issue, page, or comment."
+            "invalid result_type '{result_type}'. Use issue, page, or comment."
         )));
     }
 
-    // LIF-304: dispatch on match mode. `fts` (default) tokenizes the query
-    // through FTS5; `literal` does a case-insensitive substring scan for
-    // punctuation-heavy needles (e.g. `core:sodom`, `[RequiredSpecs]`) that
-    // FTS's tokenizer strips away.
     let hits = match q.mode.as_deref() {
-        None | Some("fts") => search_fts(conn, q, fetch, offset),
-        Some("literal") => search_literal(conn, q, fetch, offset),
+        None | Some("fts") => search_fts(conn, q, fetch, offset, visible_project_ids),
+        Some("literal") => search_literal(conn, q, fetch, offset, visible_project_ids),
         Some(other) => Err(LificError::BadRequest(format!(
             "invalid mode '{other}'. Use fts or literal."
         ))),
@@ -55,16 +64,14 @@ pub fn search_page(
     Ok(super::Page::from_over_fetch(hits, limit))
 }
 
-/// FTS5 full-text path (the original `search` body).
+/// FTS5 full-text path.
 fn search_fts(
     conn: &Connection,
     q: &SearchQuery,
     limit: i64,
     offset: i64,
+    visible_project_ids: Option<&HashSet<i64>>,
 ) -> Result<Vec<SearchResult>, LificError> {
-    // "relevance" = BM25 rank (FTS5 default). "recent" = most recently
-    // updated entity first; both joins are LEFT so COALESCE picks whichever
-    // side matched. Fixed fragments only — never interpolated user input.
     let order_clause = match q.sort.as_deref() {
         None | Some("relevance") => "ORDER BY rank",
         Some("recent") => {
@@ -77,37 +84,38 @@ fn search_fts(
         }
     };
 
-    let fts_query: String = q
+    let fts_query = q
         .query
         .split_whitespace()
-        .map(|word| {
-            let escaped = word.replace('"', "\"\"");
-            format!("\"{escaped}\"*")
-        })
+        .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ");
-
-    // LIF-133: an empty or whitespace-only query tokenizes to an empty FTS
-    // expression, and `MATCH ''` is an fts5 syntax error. Return no results
-    // instead of surfacing a database error.
     if fts_query.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Comment hits (LIF-146) carry no title of their own; they link back to a
-    // parent issue or page. `c` is the comment row; `ci`/`cpg` are its parent
-    // issue/page, and `cip`/`cpp` those parents' projects — so a comment match
-    // renders as "on <parent identifier>" and navigates to the parent.
-    let base_sql = "SELECT s.entity_type, s.entity_id, s.title,
+    let base_sql = "SELECT s.entity_type, s.entity_id,
+                CASE s.entity_type
+                    WHEN 'issue' THEN p.identifier || '-' || i.sequence
+                    WHEN 'page' THEN
+                        CASE WHEN p.identifier IS NULL
+                            THEN 'DOC-' || pg.sequence
+                            ELSE p.identifier || '-DOC-' || pg.sequence
+                        END
+                    WHEN 'comment' THEN
+                        CASE WHEN c.issue_id IS NOT NULL
+                            THEN cip.identifier || '-' || ci.sequence
+                            WHEN cpp.identifier IS NULL
+                            THEN 'DOC-' || cpg.sequence
+                            ELSE cpp.identifier || '-DOC-' || cpg.sequence
+                        END
+                END,
+                s.title,
                 CASE WHEN s.body = '' OR s.body IS NULL
                      THEN snippet(search_index, 0, '**', '**', '...', 32)
                      ELSE snippet(search_index, 1, '**', '**', '...', 32)
                 END,
-                s.project_id,
-                p.identifier, i.sequence, pg.sequence,
-                c.issue_id, c.page_id,
-                cip.identifier, ci.sequence,
-                cpp.identifier, cpg.sequence
+                s.project_id, c.page_id
          FROM search_index s
          LEFT JOIN issues i ON s.entity_type = 'issue' AND i.id = s.entity_id
          LEFT JOIN pages pg ON s.entity_type = 'page' AND pg.id = s.entity_id
@@ -118,80 +126,45 @@ fn search_fts(
          LEFT JOIN projects cip ON cip.id = ci.project_id
          LEFT JOIN projects cpp ON cpp.id = cpg.project_id";
 
-    let mut conditions = vec!["search_index MATCH ?1".to_string()];
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query.clone())];
-    if let Some(pid) = q.project_id {
-        conditions.push(format!("s.project_id = ?{}", params.len() + 1));
-        params.push(Box::new(pid));
+    let mut conditions = vec!["search_index MATCH ?".to_string()];
+    let mut params = vec![Value::Text(fts_query)];
+    if let Some(project_id) = q.project_id {
+        conditions.push("s.project_id = ?".into());
+        params.push(Value::Integer(project_id));
     }
-    if let Some(ref rt) = q.result_type {
-        conditions.push(format!("s.entity_type = ?{}", params.len() + 1));
-        params.push(Box::new(rt.clone()));
+    if let Some(result_type) = q.result_type.as_deref() {
+        if !matches!(result_type, "issue" | "page" | "comment") {
+            return Err(LificError::BadRequest(format!(
+                "invalid result_type '{result_type}'. Use issue, page, or comment."
+            )));
+        }
+        conditions.push("s.entity_type = ?".into());
+        params.push(Value::Text(result_type.into()));
     }
+    let (visibility, visible_ids) = project_visibility_sql("s.project_id", visible_project_ids);
+    conditions.push(visibility);
+    params.extend(visible_ids.into_iter().map(Value::Integer));
     let sql = format!(
-        "{base_sql} WHERE {} {order_clause} LIMIT ?{} OFFSET ?{}",
+        "{base_sql} WHERE {} {order_clause} LIMIT ? OFFSET ?",
         conditions.join(" AND "),
-        params.len() + 1,
-        params.len() + 2,
     );
-    params.push(Box::new(limit));
-    params.push(Box::new(offset));
+    params.extend([Value::Integer(limit), Value::Integer(offset)]);
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        let entity_type: String = row.get(0)?;
-        let project_ident: Option<String> = row.get(5)?;
-        let issue_seq: Option<i64> = row.get(6)?;
-        let page_seq: Option<i64> = row.get(7)?;
-        // Comment parent linkage (LIF-146): a comment resolves to its parent's
-        // identifier so the hit navigates to the issue/page it lives on.
-        let cmt_issue_id: Option<i64> = row.get(8)?;
-        let cmt_page_id: Option<i64> = row.get(9)?;
-        let cmt_issue_proj: Option<String> = row.get(10)?;
-        let cmt_issue_seq: Option<i64> = row.get(11)?;
-        let cmt_page_proj: Option<String> = row.get(12)?;
-        let cmt_page_seq: Option<i64> = row.get(13)?;
-        let identifier = match entity_type.as_str() {
-            "issue" => match (project_ident.as_deref(), issue_seq) {
-                (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
-                _ => None,
-            },
-            "page" => match (project_ident.as_deref(), page_seq) {
-                (Some(pi), Some(seq)) => Some(format!("{pi}-DOC-{seq}")),
-                (None, Some(seq)) => Some(format!("DOC-{seq}")),
-                _ => None,
-            },
-            "comment" => {
-                if cmt_issue_id.is_some() {
-                    match (cmt_issue_proj.as_deref(), cmt_issue_seq) {
-                        (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
-                        _ => None,
-                    }
-                } else if cmt_page_id.is_some() {
-                    match (cmt_page_proj.as_deref(), cmt_page_seq) {
-                        (Some(pi), Some(seq)) => Some(format!("{pi}-DOC-{seq}")),
-                        (None, Some(seq)) => Some(format!("DOC-{seq}")),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        Ok(SearchResult {
-            result_type: entity_type,
-            id: row.get(1)?,
-            identifier,
-            title: row.get(2)?,
-            snippet: row.get(3)?,
-            project_id: row.get(4)?,
-            parent_page_id: cmt_page_id,
-        })
-    })?;
-
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), row_to_search_result)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn row_to_search_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        result_type: row.get(0)?,
+        id: row.get(1)?,
+        identifier: row.get(2)?,
+        title: row.get(3)?,
+        snippet: row.get(4)?,
+        project_id: row.get(5)?,
+        parent_page_id: row.get(6)?,
+    })
 }
 
 /// Case-insensitive substring path (LIF-304).
@@ -200,7 +173,7 @@ fn search_fts(
 /// pages (title + content), comments (content) — using
 /// `instr(lower(field), lower(?)) > 0`. This avoids LIKE-wildcard injection
 /// (a needle containing `%` / `_` is matched literally) at the cost of
-/// ASCII-only case folding: SQLite's `lower()` only folds A–Z, so non-ASCII
+/// ASCII-only case folding: `SQLite`'s `lower()` only folds `A–Z`, so non-ASCII
 /// letters compare case-sensitively. That's an acceptable limitation for the
 /// punctuation-heavy identifiers this mode targets (`core:sodom`,
 /// `[RequiredSpecs]`, `--trace-plans`).
@@ -214,10 +187,8 @@ fn search_literal(
     q: &SearchQuery,
     limit: i64,
     offset: i64,
+    visible_project_ids: Option<&HashSet<i64>>,
 ) -> Result<Vec<SearchResult>, LificError> {
-    // Accept the same sort values the FTS path does, but both map to recency
-    // here (see doc comment) — reject only genuinely unknown values so the
-    // contract stays identical.
     match q.sort.as_deref() {
         None | Some("relevance") | Some("recent") => {}
         Some(other) => {
@@ -226,181 +197,274 @@ fn search_literal(
             )));
         }
     }
+    with_literal_progress_budget(conn, || {
+        search_literal_unbounded(conn, q, limit, offset, visible_project_ids)
+    })
+}
 
+fn with_literal_progress_budget<T>(
+    conn: &Connection,
+    query: impl FnOnce() -> Result<T, LificError>,
+) -> Result<T, LificError> {
+    let mut callbacks = 0;
+    conn.progress_handler(
+        LITERAL_PROGRESS_INTERVAL,
+        Some(move || {
+            callbacks += 1;
+            callbacks >= MAX_LITERAL_PROGRESS_CALLBACKS
+        }),
+    );
+    let result = query();
+    conn.progress_handler(0, None::<fn() -> bool>);
+
+    result.map_err(|error| match error {
+        LificError::Database(error)
+            if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) =>
+        {
+            LificError::BadRequest(
+                "literal search exceeded its execution budget; narrow the query".into(),
+            )
+        }
+        error => error,
+    })
+}
+
+fn search_literal_unbounded(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+    visible_project_ids: Option<&HashSet<i64>>,
+) -> Result<Vec<SearchResult>, LificError> {
     let needle = q.query.trim();
     // LIF-133 parity: an empty / whitespace-only needle returns nothing
     // rather than matching every row (instr(x, '') is always > 0).
     if needle.is_empty() {
         return Ok(Vec::new());
     }
+    if needle.len() > MAX_LITERAL_QUERY_BYTES {
+        return Err(LificError::BadRequest(format!(
+            "literal search query exceeds {MAX_LITERAL_QUERY_BYTES} bytes"
+        )));
+    }
     let needle = needle.to_string();
-
-    let want = |rt: &str| q.result_type.as_deref().is_none_or(|f| f == rt);
-
-    // Collect (updated_at, SearchResult) so we can globally sort by recency
-    // across the three entity kinds before applying offset/limit. Each branch
-    // mirrors the FTS path's identifier + parent-linkage logic.
+    let want = |result_type| {
+        q.result_type
+            .as_deref()
+            .is_none_or(|filter| filter == result_type)
+    };
     let mut rows: Vec<(String, SearchResult)> = Vec::new();
 
     if want("issue") {
-        let mut stmt = conn.prepare(
-            "SELECT i.id, p.identifier, i.sequence, i.title, i.description,
-                    i.project_id, i.updated_at
-             FROM issues i
-             JOIN projects p ON p.id = i.project_id
-             WHERE instr(lower(i.title), lower(?1)) > 0
-                OR instr(lower(i.description), lower(?1)) > 0",
-        )?;
-        let mapped = stmt.query_map([&needle], |row| {
-            let id: i64 = row.get(0)?;
-            let proj: String = row.get(1)?;
-            let seq: i64 = row.get(2)?;
-            let title: String = row.get(3)?;
-            let body: String = row.get(4)?;
-            let project_id: Option<i64> = row.get(5)?;
-            let updated_at: String = row.get(6)?;
-            let snippet = literal_snippet(&title, &body, &needle);
-            Ok((
-                updated_at,
-                SearchResult {
-                    result_type: "issue".into(),
-                    id,
-                    identifier: Some(format!("{proj}-{seq}")),
-                    title,
-                    snippet,
-                    project_id,
-                    parent_page_id: None,
-                },
-            ))
-        })?;
-        for r in mapped {
-            rows.push(r?);
-        }
+        search_literal_issues(conn, q, &needle, visible_project_ids, &mut rows)?;
     }
-
     if want("page") {
-        let mut stmt = conn.prepare(
-            "SELECT pg.id, p.identifier, pg.sequence, pg.title, pg.content,
-                    pg.project_id, pg.updated_at
-             FROM pages pg
-             LEFT JOIN projects p ON p.id = pg.project_id
-             WHERE instr(lower(pg.title), lower(?1)) > 0
-                OR instr(lower(pg.content), lower(?1)) > 0",
-        )?;
-        let mapped = stmt.query_map([&needle], |row| {
-            let id: i64 = row.get(0)?;
-            let proj: Option<String> = row.get(1)?;
-            let seq: i64 = row.get(2)?;
-            let title: String = row.get(3)?;
-            let body: String = row.get(4)?;
-            let project_id: Option<i64> = row.get(5)?;
-            let updated_at: String = row.get(6)?;
-            let identifier = match proj.as_deref() {
-                Some(pi) => Some(format!("{pi}-DOC-{seq}")),
-                None => Some(format!("DOC-{seq}")),
-            };
-            let snippet = literal_snippet(&title, &body, &needle);
-            Ok((
-                updated_at,
-                SearchResult {
-                    result_type: "page".into(),
-                    id,
-                    identifier,
-                    title,
-                    snippet,
-                    project_id,
-                    parent_page_id: None,
-                },
-            ))
-        })?;
-        for r in mapped {
-            rows.push(r?);
-        }
+        search_literal_pages(conn, q, &needle, visible_project_ids, &mut rows)?;
     }
-
     if want("comment") {
-        // Mirror the FTS path's parent-linkage joins so a comment hit resolves
-        // to its parent issue/page identifier and inherits the parent's
-        // project_id for visibility filtering.
-        let mut stmt = conn.prepare(
-            "SELECT c.id, c.content, c.updated_at,
-                    c.issue_id, c.page_id,
-                    cip.identifier, ci.sequence, ci.project_id,
-                    cpp.identifier, cpg.sequence, cpg.project_id
-             FROM comments c
-             LEFT JOIN issues ci ON c.issue_id = ci.id
-             LEFT JOIN pages cpg ON c.page_id = cpg.id
-             LEFT JOIN projects cip ON cip.id = ci.project_id
-             LEFT JOIN projects cpp ON cpp.id = cpg.project_id
-             WHERE instr(lower(c.content), lower(?1)) > 0",
-        )?;
-        let mapped = stmt.query_map([&needle], |row| {
-            let id: i64 = row.get(0)?;
-            let content: String = row.get(1)?;
-            let updated_at: String = row.get(2)?;
-            let cmt_issue_id: Option<i64> = row.get(3)?;
-            let cmt_page_id: Option<i64> = row.get(4)?;
-            let cmt_issue_proj: Option<String> = row.get(5)?;
-            let cmt_issue_seq: Option<i64> = row.get(6)?;
-            let cmt_issue_project_id: Option<i64> = row.get(7)?;
-            let cmt_page_proj: Option<String> = row.get(8)?;
-            let cmt_page_seq: Option<i64> = row.get(9)?;
-            let cmt_page_project_id: Option<i64> = row.get(10)?;
-            let (identifier, project_id) = if cmt_issue_id.is_some() {
-                let ident = match (cmt_issue_proj.as_deref(), cmt_issue_seq) {
-                    (Some(pi), Some(seq)) => Some(format!("{pi}-{seq}")),
-                    _ => None,
-                };
-                (ident, cmt_issue_project_id)
-            } else if cmt_page_id.is_some() {
-                let ident = match (cmt_page_proj.as_deref(), cmt_page_seq) {
-                    (Some(pi), Some(seq)) => Some(format!("{pi}-DOC-{seq}")),
-                    (None, Some(seq)) => Some(format!("DOC-{seq}")),
-                    _ => None,
-                };
-                (ident, cmt_page_project_id)
-            } else {
-                (None, None)
-            };
-            // A comment has no title of its own, so the snippet always comes
-            // from the body.
-            let snippet = literal_snippet("", &content, &needle);
-            Ok((
-                updated_at,
-                SearchResult {
-                    result_type: "comment".into(),
-                    id,
-                    identifier,
-                    title: String::new(),
-                    snippet,
-                    project_id,
-                    parent_page_id: cmt_page_id,
-                },
-            ))
-        })?;
-        for r in mapped {
-            rows.push(r?);
-        }
-    }
-
-    // Project filter: applied uniformly across all three entity kinds after
-    // collection (a comment's project_id is its parent's, resolved above). A
-    // workspace page has project_id = None and is only kept when the caller
-    // didn't scope to a project.
-    if let Some(pid) = q.project_id {
-        rows.retain(|(_, r)| r.project_id == Some(pid));
+        search_literal_comments(conn, q, &needle, visible_project_ids, &mut rows)?;
     }
 
     // Global recency sort (updated_at DESC), then id DESC as a stable
     // tiebreak, before paging.
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.id.cmp(&a.1.id)));
 
+    let offset = usize::try_from(offset).expect("search offset is clamped");
+    let fetch = usize::try_from(super::over_fetch(limit)).expect("search limit is clamped");
     Ok(rows
         .into_iter()
         .map(|(_, r)| r)
-        .skip(offset as usize)
-        .take(limit as usize)
+        .skip(offset)
+        .take(fetch)
         .collect())
+}
+
+fn search_literal_issues(
+    conn: &Connection,
+    q: &SearchQuery,
+    needle: &str,
+    visible_project_ids: Option<&HashSet<i64>>,
+    rows: &mut Vec<(String, SearchResult)>,
+) -> Result<(), LificError> {
+    let mut params = literal_params(needle, q.project_id);
+    let (visibility, visible_ids) = project_visibility_sql("i.project_id", visible_project_ids);
+    params.extend(visible_ids.into_iter().map(Value::Integer));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.id, p.identifier, i.sequence, i.title, i.description,
+                i.project_id, i.updated_at
+         FROM issues i
+         JOIN projects p ON p.id = i.project_id
+         WHERE (instr(lower(i.title), lower(?1)) > 0
+            OR instr(lower(i.description), lower(?1)) > 0)
+           AND (?2 IS NULL OR i.project_id = ?2)
+           AND {visibility}",
+    ))?;
+    let mapped = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        let title: String = row.get(3)?;
+        let body: String = row.get(4)?;
+        Ok((
+            row.get(6)?,
+            SearchResult {
+                result_type: "issue".into(),
+                id: row.get(0)?,
+                identifier: Some(format!(
+                    "{}-{}",
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?
+                )),
+                snippet: literal_snippet(&title, &body, needle),
+                title,
+                project_id: row.get(5)?,
+                parent_page_id: None,
+            },
+        ))
+    })?;
+    extend_literal_rows(rows, mapped)
+}
+
+fn search_literal_pages(
+    conn: &Connection,
+    q: &SearchQuery,
+    needle: &str,
+    visible_project_ids: Option<&HashSet<i64>>,
+    rows: &mut Vec<(String, SearchResult)>,
+) -> Result<(), LificError> {
+    let mut params = literal_params(needle, q.project_id);
+    let (visibility, visible_ids) = project_visibility_sql("pg.project_id", visible_project_ids);
+    params.extend(visible_ids.into_iter().map(Value::Integer));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT pg.id, p.identifier, pg.sequence, pg.title, pg.content,
+                pg.project_id, pg.updated_at
+         FROM pages pg
+         LEFT JOIN projects p ON p.id = pg.project_id
+         WHERE (instr(lower(pg.title), lower(?1)) > 0
+            OR instr(lower(pg.content), lower(?1)) > 0)
+           AND (?2 IS NULL OR pg.project_id = ?2)
+           AND {visibility}",
+    ))?;
+    let mapped = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        let project = row.get::<_, Option<String>>(1)?;
+        let sequence = row.get::<_, i64>(2)?;
+        let title: String = row.get(3)?;
+        let body: String = row.get(4)?;
+        Ok((
+            row.get(6)?,
+            SearchResult {
+                result_type: "page".into(),
+                id: row.get(0)?,
+                identifier: Some(match project {
+                    Some(project) => format!("{project}-DOC-{sequence}"),
+                    None => format!("DOC-{sequence}"),
+                }),
+                snippet: literal_snippet(&title, &body, needle),
+                title,
+                project_id: row.get(5)?,
+                parent_page_id: None,
+            },
+        ))
+    })?;
+    extend_literal_rows(rows, mapped)
+}
+
+fn search_literal_comments(
+    conn: &Connection,
+    q: &SearchQuery,
+    needle: &str,
+    visible_project_ids: Option<&HashSet<i64>>,
+    rows: &mut Vec<(String, SearchResult)>,
+) -> Result<(), LificError> {
+    let mut params = literal_params(needle, q.project_id);
+    let (visibility, visible_ids) = project_visibility_sql(
+        "COALESCE(ci.project_id, cpg.project_id)",
+        visible_project_ids,
+    );
+    params.extend(visible_ids.into_iter().map(Value::Integer));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.id, c.content, c.updated_at, c.issue_id, c.page_id,
+                cip.identifier, ci.sequence, ci.project_id,
+                cpp.identifier, cpg.sequence, cpg.project_id
+         FROM comments c
+         LEFT JOIN issues ci ON c.issue_id = ci.id
+         LEFT JOIN pages cpg ON c.page_id = cpg.id
+         LEFT JOIN projects cip ON cip.id = ci.project_id
+         LEFT JOIN projects cpp ON cpp.id = cpg.project_id
+         WHERE instr(lower(c.content), lower(?1)) > 0
+           AND (?2 IS NULL OR COALESCE(ci.project_id, cpg.project_id) = ?2)
+           AND {visibility}",
+    ))?;
+    let mapped = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        let content = row.get::<_, String>(1)?;
+        let issue_id = row.get::<_, Option<i64>>(3)?;
+        let page_id = row.get::<_, Option<i64>>(4)?;
+        let (identifier, project_id) = if issue_id.is_some() {
+            let project = row.get::<_, Option<String>>(5)?;
+            let sequence = row.get::<_, Option<i64>>(6)?;
+            (
+                project
+                    .zip(sequence)
+                    .map(|(project, sequence)| format!("{project}-{sequence}")),
+                row.get(7)?,
+            )
+        } else if page_id.is_some() {
+            let project = row.get::<_, Option<String>>(8)?;
+            let sequence = row.get::<_, Option<i64>>(9)?;
+            (
+                sequence.map(|sequence| match project {
+                    Some(project) => format!("{project}-DOC-{sequence}"),
+                    None => format!("DOC-{sequence}"),
+                }),
+                row.get(10)?,
+            )
+        } else {
+            (None, None)
+        };
+        Ok((
+            row.get(2)?,
+            SearchResult {
+                result_type: "comment".into(),
+                id: row.get(0)?,
+                identifier,
+                title: String::new(),
+                snippet: literal_snippet("", &content, needle),
+                project_id,
+                parent_page_id: page_id,
+            },
+        ))
+    })?;
+    extend_literal_rows(rows, mapped)
+}
+
+fn literal_params(needle: &str, project_id: Option<i64>) -> Vec<Value> {
+    vec![
+        Value::Text(needle.into()),
+        project_id.map_or(Value::Null, Value::Integer),
+    ]
+}
+
+fn extend_literal_rows(
+    rows: &mut Vec<(String, SearchResult)>,
+    mapped: impl IntoIterator<Item = rusqlite::Result<(String, SearchResult)>>,
+) -> Result<(), LificError> {
+    for row in mapped {
+        if rows.len() >= MAX_LITERAL_MATCHES {
+            return Err(LificError::BadRequest(
+                "literal search matched too many records; narrow the query".into(),
+            ));
+        }
+        rows.push(row?);
+    }
+    Ok(())
+}
+
+fn project_visibility_sql(column: &str, visible: Option<&HashSet<i64>>) -> (String, Vec<i64>) {
+    match visible {
+        None => ("1=1".into(), Vec::new()),
+        Some(ids) if ids.is_empty() => ("1=0".into(), Vec::new()),
+        Some(ids) => (
+            format!("{column} IN ({})", vec!["?"; ids.len()].join(", ")),
+            ids.iter().copied().collect(),
+        ),
+    }
 }
 
 /// Build a snippet around the first case-insensitive match of `needle`.
@@ -445,7 +509,7 @@ fn literal_snippet(title: &str, body: &str, needle: &str) -> String {
 }
 
 /// Byte offset of the first case-insensitive (ASCII-fold) occurrence of
-/// `needle` in `haystack`, or None. Matches SQLite's `instr(lower(), lower())`
+/// `needle` in `haystack`, or `None`. Matches `SQLite`'s `instr(lower(), lower())`
 /// semantics (ASCII-only folding), so query and render agree.
 fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     if needle.is_empty() {
@@ -492,6 +556,7 @@ fn clip_prefix(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::db::models::{CreateIssue, CreatePage, CreateProject};
     use crate::db::queries::comments::{self, CommentParent};
     use crate::db::queries::{issues, pages, projects};
     use rusqlite::params;
@@ -593,7 +658,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(results.len(), 1, "limit=-1 must clamp to 1, not return every match");
+        assert_eq!(
+            results.len(),
+            1,
+            "limit=-1 must clamp to 1, not return every match"
+        );
     }
 
     // LIF-133: empty and whitespace-only queries previously built `MATCH ''`,
@@ -726,6 +795,33 @@ mod tests {
         .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].identifier, Some("AAA-1".into()));
+    }
+
+    #[test]
+    fn visible_search_filters_before_pagination() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let visible_project = seed_project(&conn, "VIS");
+        let hidden_project = seed_project(&conn, "HID");
+
+        for number in 0..3 {
+            seed_issue(&conn, hidden_project, &format!("needle hidden {number}"));
+        }
+        let visible_issue = seed_issue(&conn, visible_project, "needle visible");
+
+        let results = search_page(
+            &conn,
+            &SearchQuery {
+                query: "needle".into(),
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(&HashSet::from([visible_project])),
+        )
+        .unwrap();
+
+        assert_eq!(results.items.len(), 1);
+        assert_eq!(results.items[0].id, visible_issue);
     }
 
     #[test]
@@ -905,7 +1001,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].result_type, "page", "fresher entity must rank first");
+        assert_eq!(
+            results[0].result_type, "page",
+            "fresher entity must rank first"
+        );
         assert_eq!(results[1].result_type, "issue");
     }
 
@@ -977,6 +1076,46 @@ mod tests {
         // A page comment links back to its parent page's DOC identifier.
         assert_eq!(results[0].identifier, Some("TST-DOC-1".into()));
         assert_eq!(results[0].parent_page_id, Some(page.id));
+    }
+
+    #[test]
+    fn search_formats_workspace_page_and_comment_identifiers() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let page = pages::create_page(
+            &conn,
+            &CreatePage {
+                title: "Workspace quokka".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let uid = seed_user(&conn, "wren");
+        comments::create_comment(&conn, CommentParent::Page(page.id), uid, "quokka details")
+            .unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "quokka".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|result| result.identifier.as_deref() == Some("DOC-1"))
+        );
+        assert_eq!(
+            results
+                .iter()
+                .find(|result| result.result_type == "comment")
+                .and_then(|result| result.parent_page_id),
+            Some(page.id)
+        );
     }
 
     #[test]
@@ -1073,8 +1212,13 @@ mod tests {
         // An issue and a comment that both match "overlap".
         let iid = seed_issue(&conn, pid, "overlap in the issue title");
         let uid = seed_user(&conn, "alice");
-        comments::create_comment(&conn, CommentParent::Issue(iid), uid, "overlap in the comment")
-            .unwrap();
+        comments::create_comment(
+            &conn,
+            CommentParent::Issue(iid),
+            uid,
+            "overlap in the comment",
+        )
+        .unwrap();
 
         let comments_only = search(
             &conn,
@@ -1162,6 +1306,40 @@ mod tests {
     }
 
     #[test]
+    fn literal_rejects_unbounded_query_text() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let query = lit(&"x".repeat(MAX_LITERAL_QUERY_BYTES + 1));
+        let error = search(&conn, &query).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn literal_progress_budget_interrupts_expensive_sql() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let error = with_literal_progress_budget(&conn, || {
+            conn.query_row(
+                "WITH RECURSIVE numbers(n) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT n + 1 FROM numbers WHERE n < 100000000
+                 )
+                 SELECT sum(n) FROM numbers",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("literal search exceeded its execution budget")
+        );
+    }
+
+    #[test]
     fn literal_finds_punctuation_needle_that_fts_misses() {
         let pool = test_db();
         let conn = pool.write().unwrap();
@@ -1191,7 +1369,11 @@ mod tests {
         let lits = search(&conn, &lit("core:sodom")).unwrap();
         assert_eq!(lits.len(), 1, "literal must find the exact needle");
         assert_eq!(lits[0].identifier, Some("TST-1".into()));
-        assert!(lits[0].snippet.contains("**core:sodom**"), "got: {}", lits[0].snippet);
+        assert!(
+            lits[0].snippet.contains("**core:sodom**"),
+            "got: {}",
+            lits[0].snippet
+        );
         // Sanity: the presence/absence of the FTS hit isn't what we assert;
         // literal is the reliable path here.
         let _ = fts;
@@ -1216,7 +1398,11 @@ mod tests {
         let lits = search(&conn, &lit("[RequiredSpecs]")).unwrap();
         assert_eq!(lits.len(), 1);
         assert_eq!(lits[0].result_type, "page");
-        assert!(lits[0].snippet.contains("**[RequiredSpecs]**"), "got: {}", lits[0].snippet);
+        assert!(
+            lits[0].snippet.contains("**[RequiredSpecs]**"),
+            "got: {}",
+            lits[0].snippet
+        );
     }
 
     #[test]
@@ -1267,20 +1453,6 @@ mod tests {
     }
 
     #[test]
-    fn literal_rejects_unbounded_query_text() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let query = SearchQuery {
-            query: "x".repeat(257),
-            mode: Some("literal".into()),
-            ..Default::default()
-        };
-
-        let error = search(&conn, &query).unwrap_err();
-        assert!(error.to_string().contains("exceeds"));
-    }
-
-    #[test]
     fn literal_respects_result_type_filter() {
         let pool = test_db();
         let conn = pool.write().unwrap();
@@ -1322,7 +1494,11 @@ mod tests {
         assert_eq!(lits.len(), 1);
         assert_eq!(lits[0].result_type, "comment");
         assert_eq!(lits[0].identifier, Some("TST-1".into()));
-        assert!(lits[0].snippet.contains("**--trace-plans**"), "got: {}", lits[0].snippet);
+        assert!(
+            lits[0].snippet.contains("**--trace-plans**"),
+            "got: {}",
+            lits[0].snippet
+        );
     }
 
     #[test]
@@ -1358,7 +1534,10 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(lits.is_empty(), "empty needle must match nothing: {query:?}");
+            assert!(
+                lits.is_empty(),
+                "empty needle must match nothing: {query:?}"
+            );
         }
     }
 

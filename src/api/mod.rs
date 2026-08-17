@@ -583,8 +583,10 @@ async fn search(
     // shouldn't be able to probe its existence via a 403 vs. empty-results
     // side channel here.
     let visible = crate::authz::visible_project_ids(&db, &identity)?;
-    let results = with_read(&db, |conn| queries::search(conn, &q))?;
-    Ok(Json(filter_visible(results, &visible, |r| r.project_id)))
+    let results = with_read(&db, |conn| {
+        queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
+    })?;
+    Ok(Json(results))
 }
 
 // ── Shared test helpers ──────────────────────────────────────
