@@ -246,6 +246,22 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
         )
         .unwrap_or(0);
 
+    // LIF-404: refuse to run against a schema this binary does not know.
+    // Deploys swap the binary in place over a live database, so rolling back
+    // to an older release points old code at a newer schema. Every migration
+    // is already stamped, so the loop below is a no-op and the instance comes
+    // up serving (and writing) a schema it was never compiled against.
+    let latest = latest_version();
+    if current_version > latest {
+        return Err(crate::error::LificError::Internal(format!(
+            "database schema version {current_version} is newer than this binary supports \
+             (it knows migrations up to version {latest}). The database was written by a \
+             newer Lific; running this binary against it would read and write an \
+             unsupported schema. Use a Lific binary whose schema version is {current_version} \
+             or higher, or restore a backup taken before the upgrade."
+        )));
+    }
+
     for &(version, name, sql) in MIGRATIONS {
         if version > current_version {
             info!(version, name, "applying migration");
@@ -340,6 +356,55 @@ mod tests {
             .unwrap();
         }
         conn
+    }
+
+    /// A fresh in-memory database with every migration applied by `run`
+    /// itself, which is the state a real instance boots into.
+    fn fully_migrated() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run(&conn).expect("initial migration");
+        conn
+    }
+
+    // ── LIF-404: downgrade guard ──────────────────────────────────────────
+
+    /// Deploys swap the binary in place, so rolling back to an older release
+    /// aims old code at a newer schema. Every migration it knows is already
+    /// stamped, so without this guard the runner does nothing and the
+    /// instance serves and writes a schema it was never compiled against.
+    #[test]
+    fn run_refuses_a_database_newer_than_this_binary() {
+        let conn = fully_migrated();
+        let newer = latest_version() + 1;
+        conn.execute(
+            "INSERT INTO _migrations (version, name) VALUES (?1, 'from the future')",
+            rusqlite::params![newer],
+        )
+        .unwrap();
+
+        let err = run(&conn).expect_err("a newer schema must not be accepted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&newer.to_string()) && msg.contains(&latest_version().to_string()),
+            "the error must name both versions: {msg}"
+        );
+        assert!(
+            msg.contains("newer than this binary supports"),
+            "the error must say what went wrong: {msg}"
+        );
+    }
+
+    /// The guard only fires on a genuinely newer schema: re-running against a
+    /// database this binary produced is the normal startup path.
+    #[test]
+    fn run_is_idempotent_on_a_database_at_this_binarys_version() {
+        let conn = fully_migrated();
+        run(&conn).expect("a second run must be a no-op");
+        let max: i64 = conn
+            .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(max, latest_version());
     }
 
     fn identifiers(conn: &Connection) -> Vec<(i64, String)> {
