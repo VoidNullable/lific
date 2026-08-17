@@ -215,10 +215,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 ///   is already gone by then. Legacy mode also leaves child `REFERENCES`
 ///   clauses alone, which is what we want: ids are preserved verbatim.
 ///
-/// This is the standard SQLite table-rebuild procedure. The migration still
-/// runs inside its savepoint, so it remains atomic, and a
-/// `PRAGMA foreign_key_check` inside that savepoint rolls the whole thing back
-/// if the rebuild somehow orphaned a row.
+/// This is the standard SQLite table-rebuild procedure. Both pragmas are
+/// silent no-ops inside a transaction, and `run` serializes the whole batch
+/// under one `BEGIN IMMEDIATE` (see below), so when a rebuild migration is
+/// pending the pragmas are set on the connection *before* that transaction
+/// and hold for the entire batch. Each migration still runs inside its own
+/// savepoint, the rebuild verifies itself with `PRAGMA foreign_key_check`
+/// before its savepoint releases, and `run_inner` repeats the check
+/// batch-wide before commit to cover every other migration that ran while
+/// enforcement was off.
 const FK_REBUILD_MIGRATIONS: &[i64] = &[39];
 
 /// Highest migration version this binary knows how to apply. Used by
@@ -251,6 +256,75 @@ fn short(digest: &str) -> &str {
 
 /// Ensure the migrations table exists and apply any pending migrations.
 pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
+    let current_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM _migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let needs_fk_rebuild = MIGRATIONS.iter().any(|(version, _, _)| {
+        *version > current_version && FK_REBUILD_MIGRATIONS.contains(version)
+    });
+
+    // SQLite ignores PRAGMA foreign_keys changes inside a transaction, so
+    // when the batch includes an FK-rebuild migration the connection has to
+    // be configured before the serializing transaction below begins. See
+    // `FK_REBUILD_MIGRATIONS` for why the rebuild needs these, and note the
+    // batch-wide `foreign_key_check` in `run_inner` that compensates for the
+    // widened enforcement-off window.
+    if needs_fk_rebuild {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;",
+        )?;
+    }
+
+    // Serialize migration discovery and application across processes. Without
+    // an IMMEDIATE transaction, two fresh connections can observe the same
+    // version and both execute the next migration, racing on the migrations
+    // table (notably on Windows where test/process startup is more concurrent).
+    let transaction_result: Result<(), crate::error::LificError> =
+        match conn.execute_batch("BEGIN IMMEDIATE") {
+            Ok(()) => match run_inner(conn, needs_fk_rebuild) {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => Err(error.into()),
+        };
+
+    if needs_fk_rebuild {
+        let restore_result = conn
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA legacy_alter_table = OFF;",
+            )
+            .map_err(Into::into);
+        match transaction_result {
+            Ok(()) => restore_result,
+            Err(error) => {
+                let _ = restore_result;
+                Err(error)
+            }
+        }
+    } else {
+        transaction_result
+    }
+}
+
+/// Returns true when `PRAGMA foreign_key_check` reports at least one
+/// dangling reference. Works inside a transaction (unlike toggling
+/// `PRAGMA foreign_keys` itself).
+fn has_fk_violations(conn: &Connection) -> Result<bool, crate::error::LificError> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn run_inner(conn: &Connection, fk_off: bool) -> Result<(), crate::error::LificError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             version    INTEGER PRIMARY KEY,
@@ -302,45 +376,35 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     for &(version, name, sql) in MIGRATIONS {
         if version > current_version {
             info!(version, name, "applying migration");
-            let rebuild = FK_REBUILD_MIGRATIONS.contains(&version);
-            if rebuild {
-                conn.execute_batch(
-                    "PRAGMA foreign_keys = OFF;
-                     PRAGMA legacy_alter_table = ON;",
-                )?;
-            }
             let sp = format!("migrate_v{version}");
-            let applied = crate::db::queries::savepoint(conn, &sp, || {
+            crate::db::queries::savepoint(conn, &sp, || {
                 conn.execute_batch(sql)?;
-                if rebuild {
-                    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
-                    let mut rows = stmt.query([])?;
-                    if rows.next()?.is_some() {
-                        return Err(crate::error::LificError::Internal(format!(
-                            "migration {version} ({name}) left dangling foreign key references"
-                        )));
-                    }
+                // A rebuild migration ran with enforcement off (see `run`);
+                // check it here so an orphaning bug rolls back just this
+                // savepoint with an error naming the migration.
+                if FK_REBUILD_MIGRATIONS.contains(&version) && has_fk_violations(conn)? {
+                    return Err(crate::error::LificError::Internal(format!(
+                        "migration {version} ({name}) left dangling foreign key references"
+                    )));
                 }
                 conn.execute(
                     "INSERT INTO _migrations (version, name, checksum) VALUES (?1, ?2, ?3)",
                     rusqlite::params![version, name, checksum(sql)],
                 )?;
                 Ok(())
-            });
-            // Restore the pragmas whether the rebuild succeeded or not — the
-            // connection outlives this function and every other caller assumes
-            // foreign keys are enforced.
-            let restored = if rebuild {
-                conn.execute_batch(
-                    "PRAGMA foreign_keys = ON;
-                     PRAGMA legacy_alter_table = OFF;",
-                )
-            } else {
-                Ok(())
-            };
-            applied?;
-            restored?;
+            })?;
         }
+    }
+
+    // When a rebuild was pending, *every* migration in this batch ran with
+    // foreign-key enforcement off, not just the rebuild (the pragma cannot
+    // be toggled inside the serializing transaction). The rebuild checked
+    // itself above; this sweep catches any other migration that would have
+    // violated a constraint, before the batch commits.
+    if fk_off && has_fk_violations(conn)? {
+        return Err(crate::error::LificError::Internal(
+            "migrations left dangling foreign key references".to_string(),
+        ));
     }
 
     if current_version == 0 {

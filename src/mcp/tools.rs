@@ -836,25 +836,22 @@ fn looks_like_page_identifier(s: &str) -> bool {
     s.starts_with("DOC-") || s.contains("-DOC-")
 }
 
-/// Resolve an identifier string into a CommentParent (Issue or Page) so MCP
-/// `add_comment` / `list_comments` accept both shapes through one entry point.
-fn resolve_comment_parent(
-    mcp: &LificMcp,
+/// Resolve an issue or page identifier for comment operations.
+fn resolve_comment_parent_conn(
+    conn: &rusqlite::Connection,
     identifier: &str,
-) -> Result<(queries::comments::CommentParent, String, Option<i64>), String> {
+) -> Result<(queries::comments::CommentParent, String, Option<i64>), crate::error::LificError> {
     if looks_like_page_identifier(identifier) {
-        let conn = mcp.db.read().map_err(|e| e.to_string())?;
-        let id = queries::resolve_page_identifier(&conn, identifier).map_err(|e| e.to_string())?;
-        let page = queries::get_page(&conn, id).map_err(|e| e.to_string())?;
+        let page_id = queries::resolve_page_identifier(conn, identifier)?;
+        let page = queries::get_page(conn, page_id)?;
         Ok((
             queries::comments::CommentParent::Page(page.id),
             page.identifier,
             page.project_id,
         ))
     } else {
-        let conn = mcp.db.read().map_err(|e| e.to_string())?;
-        let id = queries::resolve_identifier(&conn, identifier).map_err(|e| e.to_string())?;
-        let issue = queries::get_issue(&conn, id).map_err(|e| e.to_string())?;
+        let issue_id = queries::resolve_identifier(conn, identifier)?;
+        let issue = queries::get_issue(conn, issue_id)?;
         Ok((
             queries::comments::CommentParent::Issue(issue.id),
             issue.identifier,
@@ -863,33 +860,29 @@ fn resolve_comment_parent(
     }
 }
 
-/// Resolve an existing comment's canonical parent and project in one read.
-/// A page comment may have a NULL project (workspace page), which
-/// `mention_candidates` handles.
-fn resolve_comment_context(
-    conn: &rusqlite::Connection,
-    comment: &models::Comment,
-) -> Result<(Option<i64>, queries::comments::CommentParent, String), crate::error::LificError> {
-    if let Some(issue_id) = comment.issue_id {
-        let issue = queries::get_issue(conn, issue_id)?;
-        Ok((
-            Some(issue.project_id),
-            queries::comments::CommentParent::Issue(issue.id),
-            issue.identifier,
-        ))
-    } else if let Some(page_id) = comment.page_id {
-        let page = queries::get_page(conn, page_id)?;
-        Ok((
-            page.project_id,
-            queries::comments::CommentParent::Page(page.id),
-            page.identifier,
-        ))
-    } else {
-        Err(crate::error::LificError::Internal(format!(
-            "comment {} has no parent",
-            comment.id
-        )))
-    }
+fn resolve_comment_parent(
+    mcp: &LificMcp,
+    identifier: &str,
+) -> Result<(queries::comments::CommentParent, String, Option<i64>), String> {
+    mcp.read(|conn| resolve_comment_parent_conn(conn, identifier))
+}
+
+fn comment_updated_event(
+    parent: queries::comments::CommentParent,
+    project_id: Option<i64>,
+) -> Option<crate::realtime::RealtimeEvent> {
+    let project_id = project_id?;
+    Some(match parent {
+        queries::comments::CommentParent::Issue(issue_id) => {
+            crate::realtime::RealtimeEvent::IssueUpdated {
+                project_id,
+                issue_id,
+            }
+        }
+        queries::comments::CommentParent::Page(_) => {
+            crate::realtime::RealtimeEvent::ProjectUpdated { project_id }
+        }
+    })
 }
 
 /// Append a paging hint to `out` if `has_more` is true.
@@ -1251,6 +1244,21 @@ fn require_page_role_mcp(
     }
 }
 
+fn resolve_comment_actor_conn(
+    conn: &rusqlite::Connection,
+) -> Result<crate::resolve_caller::ResolvedIdentity, crate::error::LificError> {
+    crate::resolve_caller::resolve_caller_conn(
+        conn,
+        super::current_auth_user(),
+        crate::actor::Transport::Mcp,
+    )?
+    .ok_or_else(|| {
+        crate::error::LificError::Forbidden(
+            "no admin user exists to attribute comment mutations to.".into(),
+        )
+    })
+}
+
 fn visible_project_ids_mcp(
     db: &Arc<DbPool>,
 ) -> Result<Option<std::collections::HashSet<i64>>, String> {
@@ -1287,43 +1295,15 @@ impl LificMcp {
 
     /// Gate for comment read/create: Viewer (or Maintainer, for edges that
     /// need it) on the comment parent's project, falling back to
-    /// workspace-admin for a page with no project. Mirrors
-    /// `api::comments::require_comment_viewer`.
+    /// workspace-admin for a page with no project. Mirrors the REST comment
+    /// handlers' Viewer gate.
     fn require_comment_role_mcp(
         &self,
         parent: queries::comments::CommentParent,
-        min: models::Role,
+        minimum_role: models::Role,
     ) -> Result<(), String> {
-        let project_id: Option<i64> = match parent {
-            queries::comments::CommentParent::Issue(id) => {
-                Some(self.read(|conn| queries::get_issue(conn, id))?.project_id)
-            }
-            queries::comments::CommentParent::Page(id) => {
-                self.read(|conn| queries::get_page(conn, id))?.project_id
-            }
-        };
-        require_page_role_mcp(&self.db, project_id, min)
-    }
-
-    /// LIF-143: resolve the acting MCP user for a comment edit/delete the
-    /// same way `add_comment` resolves the author: the HTTP-auth user set in
-    /// the task-local, else fall back to the first admin for stdio/local
-    /// sessions. Returns `(user_id, is_admin)` for the author-or-admin
-    /// ownership check.
-    ///
-    /// LIFIC-8: the fallback now routes through `resolve_caller`, the single
-    /// place that decides "no credential → first admin" — replacing the
-    /// direct `first_admin` read.
-    fn resolve_comment_actor(&self) -> Result<(i64, bool), String> {
-        let identity = self.read(|conn| {
-            crate::resolve_caller::resolve_caller_conn(
-                conn,
-                super::current_auth_user(),
-                crate::actor::Transport::Mcp,
-            )
-        })?
-        .ok_or_else(|| "no admin user exists to attribute comment edits to.".to_string())?;
-        Ok((identity.user.id, identity.user.is_admin))
+        let project_id = self.read(|conn| parent.project_id(conn))?;
+        require_page_role_mcp(&self.db, project_id, minimum_role)
     }
 
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
@@ -3339,59 +3319,29 @@ impl LificMcp {
     }
 
     fn add_comment_inner(&self, input: AddCommentInput) -> Result<String, String> {
-        let (parent, parent_identifier, project_id) =
-            resolve_comment_parent(self, &input.identifier)?;
-        self.require_comment_role_mcp(parent, models::Role::Viewer)?;
-
-        // Resolve the authenticated user from the task-local set by the HTTP handler.
-        // For stdio/local MCP sessions (no HTTP auth), fall back to the first admin user.
-        //
-        // LIFIC-8: the fallback routes through `resolve_caller`, consolidating the
-        // "no credential → first admin" decision that was previously inline here.
-        let user_id = self
-            .read(|conn| {
-                crate::resolve_caller::resolve_caller_conn(
-                    conn,
-                    super::current_auth_user(),
-                    crate::actor::Transport::Mcp,
-                )
-            })?
-            .ok_or("no admin user exists to attribute comments to.")?
-            .user
-            .id;
-
-        // LIF-263: resolve the parent's project + the enforcement flag up
-        // front (read connections), then record @mentions in the same write
-        // that creates the comment. Same visible-member rules as the REST
-        // path — only tokens matching a visible member resolve.
-        let member_scoped = crate::authz::authz_enforced(&self.db).map_err(|e| e.to_string())?;
-
-        let (c, event) = self.write(|conn| {
-            // LIF-375: one shared implementation with the REST path — it also
-            // reconciles the attachment links the body references (LIF-369).
-            let c = queries::comments::create_comment_with_mentions(
+        let (comment, parent, parent_identifier, event) = self.transaction(|conn| {
+            let (parent, parent_identifier, project_id) =
+                resolve_comment_parent_conn(conn, &input.identifier)?;
+            let actor = resolve_comment_actor_conn(conn)?;
+            crate::authz::require_project_or_workspace_role_conn(
+                conn,
+                &Some(actor.clone()),
+                project_id,
+                models::Role::Viewer,
+            )?;
+            let member_scoped = crate::authz::authz_enforced_conn(conn)?;
+            let comment = queries::comments::create_comment_with_mentions(
                 conn,
                 parent,
                 project_id,
-                user_id,
+                models::CommentActor::from(&actor.user),
                 &input.content,
                 member_scoped,
             )?;
-            let event = match (c.issue_id, project_id) {
-                (Some(issue_id), Some(project_id)) => {
-                    Some(crate::realtime::RealtimeEvent::IssueUpdated {
-                        project_id,
-                        issue_id,
-                    })
-                }
-                (None, Some(project_id)) => {
-                    Some(crate::realtime::RealtimeEvent::ProjectUpdated { project_id })
-                }
-                (_, None) => None,
-            };
-            Ok((c, event))
+            let event = comment_updated_event(parent, project_id);
+            Ok((comment, parent, parent_identifier, event))
         })?;
-        // Don't echo c.content back — the agent already supplied it in the
+        // Don't echo the content back — the agent already supplied it in the
         // tool args, so repeating it just duplicates tokens in context
         // (LIF-115). The comment id is the useful new handle for any
         // follow-up edit/delete.
@@ -3403,21 +3353,21 @@ impl LificMcp {
                     "{} added to {} by {} at {}",
                     reference_with_context(
                         Some(context.as_ref()),
-                        comment_reference_kind(&parent_identifier, parent, c.id),
+                        comment_reference_kind(&parent_identifier, parent, comment.id),
                     ),
                     reference_with_context(
                         Some(context.as_ref()),
                         comment_parent_reference_kind(&parent_identifier, parent),
                     ),
-                    c.author,
-                    c.created_at
+                    comment.author,
+                    comment.created_at
                 )
             }),
             None => render_response(|output| {
                 write!(
                     output,
                     "Comment #{} added to {} by {} at {}",
-                    c.id, parent_identifier, c.author, c.created_at
+                    comment.id, parent_identifier, comment.author, comment.created_at
                 )
             }),
         })
@@ -3547,51 +3497,47 @@ impl LificMcp {
     }
 
     fn edit_comment_inner(&self, input: EditCommentInput) -> Result<String, String> {
-        // Resolve the acting user the same way add_comment does: the
-        // task-local HTTP-auth user, else fall back to the first admin for
-        // stdio/local sessions.
-        let (user_id, is_admin) = self.resolve_comment_actor()?;
-
-        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
-        // LIF-263: recompute the mention set against the parent project's
-        // visible members, resolving the project from the comment's parent.
-        let (project_id, parent, parent_identifier) =
-            self.read(|conn| resolve_comment_context(conn, &existing))?;
-        // LIF-410: authorship alone is not enough — a comment id is a global
-        // handle, so a user removed from the project could still mutate their
-        // old comments there. Require what the comment *read* path requires
-        // (Viewer, or workspace-admin for a project-less page), mirroring
-        // `api::comments::require_comment_viewer`.
-        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-
-        // Ownership: only the author or an admin may edit (mirrors
-        // api::comments::update_comment_handler).
-        if existing.user_id != user_id && !is_admin {
-            return Err("you can only edit your own comments".into());
-        }
-        let member_scoped = crate::authz::authz_enforced(&self.db).map_err(|e| e.to_string())?;
-
-        let c = self.write(|conn| {
-            // LIF-375: shared with the REST edit path; re-derives mentions and
-            // attachment links from the new body (LIF-369).
-            queries::comments::update_comment_with_mentions(
+        let (comment, context) = self.transaction(|conn| {
+            let actor = resolve_comment_actor_conn(conn)?;
+            let existing = queries::comments::get_comment(conn, input.comment_id)?;
+            let context = queries::comments::CommentContext::resolve(conn, &existing)?;
+            // LIF-410: authorship alone is not enough — a comment id is a
+            // global handle, so a user removed from the project could still
+            // mutate their old comments there. Require what the comment
+            // *read* path requires (Viewer, or workspace-admin for a
+            // project-less page), checked before ownership so a hidden
+            // comment never reveals whether the caller wrote it.
+            crate::authz::require_project_or_workspace_role_conn(
+                conn,
+                &Some(actor.clone()),
+                context.project_id(),
+                models::Role::Viewer,
+            )?;
+            if existing.user_id != actor.user.id && !actor.user.is_admin {
+                return Err(crate::error::LificError::BadRequest(
+                    "you can only edit your own comments".into(),
+                ));
+            }
+            let member_scoped = crate::authz::authz_enforced_conn(conn)?;
+            // LIF-375: shared with the REST edit path; re-derives mentions
+            // and attachment links from the new body (LIF-369).
+            let comment = queries::comments::update_comment_with_mentions(
                 conn,
                 input.comment_id,
-                project_id,
+                context.project_id(),
+                models::CommentActor::from(&actor.user),
                 &input.content,
                 member_scoped,
-            )
+            )?;
+            Ok((comment, context))
         })?;
+        let parent = context.parent();
+        let parent_identifier = context.parent_identifier();
+        if let Some(event) = comment_updated_event(parent, context.project_id()) {
+            self.emit(event);
+        }
         // Don't echo the new content back — the agent already supplied it
         // (LIF-115). The id is the stable handle.
-        if let (Some(issue_id), Some(project_id)) = (c.issue_id, project_id) {
-            self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
-                project_id,
-                issue_id,
-            });
-        } else if let Some(project_id) = project_id {
-            self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
-        }
         Ok(match current_issue_link_context() {
             Some(context) => render_response(|output| {
                 write!(
@@ -3599,13 +3545,17 @@ impl LificMcp {
                     "{} edited at {}",
                     reference_with_context(
                         Some(context.as_ref()),
-                        comment_reference_kind(&parent_identifier, parent, c.id),
+                        comment_reference_kind(parent_identifier, parent, comment.id),
                     ),
-                    c.updated_at
+                    comment.updated_at
                 )
             }),
             None => render_response(|output| {
-                write!(output, "Comment #{} edited at {}", c.id, c.updated_at)
+                write!(
+                    output,
+                    "Comment #{} edited at {}",
+                    comment.id, comment.updated_at
+                )
             }),
         })
     }
@@ -3617,30 +3567,30 @@ impl LificMcp {
     }
 
     fn delete_comment_inner(&self, input: DeleteCommentInput) -> Result<String, String> {
-        // Resolve the acting user the same way add_comment does.
-        let (user_id, is_admin) = self.resolve_comment_actor()?;
-
-        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
-        let (project_id, parent, parent_identifier) =
-            self.read(|conn| resolve_comment_context(conn, &existing))?;
-        // LIF-410: same current-visibility requirement as `edit_comment` —
-        // an ex-member must not be able to delete by comment id.
-        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-
-        // Ownership: only the author or an admin may delete (mirrors
-        // api::comments::delete_comment_handler).
-        if existing.user_id != user_id && !is_admin {
-            return Err("you can only delete your own comments".into());
-        }
-
-        self.write(|conn| queries::comments::delete_comment(conn, input.comment_id))?;
-        if let (Some(issue_id), Some(project_id)) = (existing.issue_id, project_id) {
-            self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
-                project_id,
-                issue_id,
-            });
-        } else if let Some(project_id) = project_id {
-            self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+        let context = self.transaction(|conn| {
+            let actor = resolve_comment_actor_conn(conn)?;
+            let existing = queries::comments::get_comment(conn, input.comment_id)?;
+            let context = queries::comments::CommentContext::resolve(conn, &existing)?;
+            // LIF-410: same current-visibility requirement as `edit_comment`
+            // — an ex-member must not be able to delete by comment id.
+            crate::authz::require_project_or_workspace_role_conn(
+                conn,
+                &Some(actor.clone()),
+                context.project_id(),
+                models::Role::Viewer,
+            )?;
+            if existing.user_id != actor.user.id && !actor.user.is_admin {
+                return Err(crate::error::LificError::BadRequest(
+                    "you can only delete your own comments".into(),
+                ));
+            }
+            queries::comments::delete_comment(conn, input.comment_id)?;
+            Ok(context)
+        })?;
+        let parent = context.parent();
+        let parent_identifier = context.parent_identifier();
+        if let Some(event) = comment_updated_event(parent, context.project_id()) {
+            self.emit(event);
         }
         Ok(match current_issue_link_context() {
             Some(context) => render_response(|output| {
@@ -3650,7 +3600,7 @@ impl LificMcp {
                     input.comment_id,
                     reference_with_context(
                         Some(context.as_ref()),
-                        comment_parent_reference_kind(&parent_identifier, parent),
+                        comment_parent_reference_kind(parent_identifier, parent),
                     )
                 )
             }),
@@ -8472,7 +8422,7 @@ mod tests {
     }
 
     /// Extract the "#N" comment id from an `add_comment` success string.
-    fn comment_id_from(result: &str) -> i64 {
+    pub(super) fn comment_id_from(result: &str) -> i64 {
         result
             .split('#')
             .nth(1)
@@ -9847,7 +9797,7 @@ mod tests {
 /// by default and already prove that in full.
 #[cfg(test)]
 mod authz_gating_tests {
-    use super::tests::setup_membership_mcp;
+    use super::tests::{comment_id_from, setup_membership_mcp};
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
@@ -10508,6 +10458,82 @@ mod authz_gating_tests {
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
+    }
+
+    #[test]
+    fn revoked_member_cannot_mutate_comments() {
+        let (m, _admin, lead, _maintainer, viewer, _non_member, project_id, _guard) =
+            setup_membership_mcp();
+        let created = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Revocation test".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let [edit_comment_id, delete_comment_id, foreign_edit_id, foreign_delete_id] = [
+            (&viewer, "Keep this comment"),
+            (&viewer, "Keep this one too"),
+            (&lead, "Do not disclose ownership"),
+            (&lead, "Do not disclose ownership either"),
+        ]
+        .map(|(author, content)| {
+            comment_id_from(&as_user(author, || {
+                m.add_comment(Parameters(AddCommentInput {
+                    identifier: "MEM-1".into(),
+                    content: content.into(),
+                }))
+            }))
+        });
+        m.write(|conn| queries::members::remove_member(conn, project_id, viewer.id))
+            .unwrap();
+
+        let edit = as_user(&viewer, || {
+            m.edit_comment(Parameters(EditCommentInput {
+                comment_id: edit_comment_id,
+                content: "tampered".into(),
+            }))
+        });
+        assert!(is_forbidden(&edit), "got: {edit}");
+
+        let delete = as_user(&viewer, || {
+            m.delete_comment(Parameters(DeleteCommentInput {
+                comment_id: delete_comment_id,
+            }))
+        });
+        assert!(is_forbidden(&delete), "got: {delete}");
+
+        let foreign_edit = as_user(&viewer, || {
+            m.edit_comment(Parameters(EditCommentInput {
+                comment_id: foreign_edit_id,
+                content: "tampered".into(),
+            }))
+        });
+        assert!(is_forbidden(&foreign_edit), "got: {foreign_edit}");
+
+        let foreign_delete = as_user(&viewer, || {
+            m.delete_comment(Parameters(DeleteCommentInput {
+                comment_id: foreign_delete_id,
+            }))
+        });
+        assert!(is_forbidden(&foreign_delete), "got: {foreign_delete}");
+
+        m.read(|conn| {
+            assert_eq!(
+                queries::comments::get_comment(conn, edit_comment_id)?.content,
+                "Keep this comment"
+            );
+            assert!(queries::comments::get_comment(conn, delete_comment_id).is_ok());
+            assert_eq!(
+                queries::comments::get_comment(conn, foreign_edit_id)?.content,
+                "Do not disclose ownership"
+            );
+            assert!(queries::comments::get_comment(conn, foreign_delete_id).is_ok());
+            Ok(())
+        })
+        .unwrap();
     }
 
     // ── Structure endpoints: loosened to Maintainer once enforced ──

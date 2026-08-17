@@ -113,7 +113,7 @@ fn user_of(identity: &Option<ResolvedIdentity>) -> Option<AuthUser> {
 
 // ── Instance setting read ───────────────────────────────────────
 
-fn authz_enforced_conn(conn: &Connection) -> Result<bool, LificError> {
+pub(crate) fn authz_enforced_conn(conn: &Connection) -> Result<bool, LificError> {
     Ok(queries::settings::get(conn)?.authz_enforced)
 }
 
@@ -172,7 +172,7 @@ pub(crate) fn can_view_project(
     ))
 }
 
-fn require_role_conn(
+pub(crate) fn require_role_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
     project_id: i64,
@@ -333,16 +333,35 @@ pub fn require_workspace_admin(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
 ) -> Result<(), LificError> {
-    if !authz_enforced(db)? {
+    let conn = db.read()?;
+    require_workspace_admin_conn(&conn, identity)
+}
+
+pub(crate) fn require_workspace_admin_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+) -> Result<(), LificError> {
+    if !authz_enforced_conn(conn)? {
         return Ok(());
     }
-    let conn = db.read()?;
-    let effective = effective_user(&conn, &user_of(identity));
+    let effective = effective_user(conn, &user_of(identity));
     match &effective {
         Some(u) if u.is_admin => Ok(()),
         _ => Err(LificError::Forbidden(
             "only an admin can access workspace-level pages".into(),
         )),
+    }
+}
+
+pub(crate) fn require_project_or_workspace_role_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+    project_id: Option<i64>,
+    minimum_role: Role,
+) -> Result<(), LificError> {
+    match project_id {
+        Some(project_id) => require_role_conn(conn, identity, project_id, minimum_role),
+        None => require_workspace_admin_conn(conn, identity),
     }
 }
 
@@ -518,7 +537,10 @@ mod tests {
     fn enable_enforcement(conn: &Connection) {
         update_settings(
             conn,
-            InstanceSettingsPatch { authz_enforced: Some(true), ..Default::default() },
+            InstanceSettingsPatch {
+                authz_enforced: Some(true),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -535,7 +557,10 @@ mod tests {
 
         for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
             let err = require_role_conn(&conn, &id(outsider.clone()), project, min).unwrap_err();
-            assert!(matches!(err, LificError::Forbidden(_)), "denied at {min} got {err:?}");
+            assert!(
+                matches!(err, LificError::Forbidden(_)),
+                "denied at {min} got {err:?}"
+            );
         }
     }
 
@@ -563,7 +588,9 @@ mod tests {
         upsert_member(&conn, project, maintainer.id, Role::Maintainer).unwrap();
 
         assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Viewer).is_ok());
-        assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Maintainer).is_ok());
+        assert!(
+            require_role_conn(&conn, &id(maintainer.clone()), project, Role::Maintainer).is_ok()
+        );
         assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Lead).is_err());
     }
 
@@ -680,7 +707,10 @@ mod tests {
         let outsider = seed_user(&conn, "outsider", false);
 
         for min in [Role::Viewer, Role::Maintainer] {
-            assert!(require_role_conn(&conn, &None, project, min).is_ok(), "None user at {min}");
+            assert!(
+                require_role_conn(&conn, &None, project, min).is_ok(),
+                "None user at {min}"
+            );
             assert!(
                 require_role_conn(&conn, &id(outsider.clone()), project, min).is_ok(),
                 "non-member at {min}"
@@ -852,7 +882,10 @@ mod tests {
             let conn = pool.write().unwrap();
             enable_enforcement(&conn);
         }
-        assert_eq!(visible_project_ids(&pool, &None).unwrap(), Some(HashSet::new()));
+        assert_eq!(
+            visible_project_ids(&pool, &None).unwrap(),
+            Some(HashSet::new())
+        );
     }
 
     // LIF-261 / LIFIC-10/14: an operator-trusted unbound key resolves (via
@@ -1110,7 +1143,10 @@ mod tests {
         // Flip it back off: legacy behavior returns immediately.
         update_settings(
             &conn,
-            InstanceSettingsPatch { authz_enforced: Some(false), ..Default::default() },
+            InstanceSettingsPatch {
+                authz_enforced: Some(false),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(require_role_conn(&conn, &id(outsider), project, Role::Viewer).is_ok());

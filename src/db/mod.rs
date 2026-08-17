@@ -3,7 +3,7 @@ pub mod models;
 pub mod queries;
 
 use crossbeam_queue::ArrayQueue;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -67,6 +67,12 @@ impl DbPool {
         }
     }
 
+    fn lock_writer(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LificError> {
+        self.writer
+            .lock()
+            .map_err(|error| LificError::Internal(format!("write lock poisoned: {error}")))
+    }
+
     /// Acquire the exclusive write connection.
     ///
     /// LIF-155: stamps the current actor context (task-local set by the
@@ -75,12 +81,25 @@ impl DbPool {
     /// exclusive guard makes the stamp race-free: nobody else can write
     /// between the stamp and the mutation.
     pub fn write(&self) -> Result<std::sync::MutexGuard<'_, Connection>, LificError> {
-        let guard = self
-            .writer
-            .lock()
-            .map_err(|e| LificError::Internal(format!("write lock poisoned: {e}")))?;
-        crate::actor::stamp(&guard, &crate::actor::current());
-        Ok(guard)
+        let connection = self.lock_writer()?;
+        crate::actor::stamp(&connection, &crate::actor::current());
+        Ok(connection)
+    }
+
+    /// Run a write operation in an immediate SQLite transaction.
+    ///
+    /// The immediate lock serializes the caller's reads and writes with
+    /// writers in other processes. Errors roll back on drop.
+    pub fn transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, LificError>,
+    ) -> Result<T, LificError> {
+        let mut connection = self.lock_writer()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::actor::stamp(&transaction, &crate::actor::current());
+        let result = operation(&transaction)?;
+        transaction.commit()?;
+        Ok(result)
     }
 }
 
@@ -225,4 +244,31 @@ pub fn open(path: &Path) -> Result<DbPool, LificError> {
         readers: Arc::new(readers),
         path: path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{models::CreateProject, queries};
+
+    #[test]
+    fn transaction_rolls_back_when_operation_fails() {
+        let db = open_memory().expect("test db");
+
+        let result: Result<(), LificError> = db.transaction(|conn| {
+            queries::create_project(
+                conn,
+                &CreateProject {
+                    name: "Rolled back".into(),
+                    identifier: "RBK".into(),
+                    ..Default::default()
+                },
+            )?;
+            Err(LificError::BadRequest("abort transaction".into()))
+        });
+
+        assert!(matches!(result, Err(LificError::BadRequest(_))));
+        let conn = db.read().unwrap();
+        assert!(queries::list_projects(&conn).unwrap().is_empty());
+    }
 }

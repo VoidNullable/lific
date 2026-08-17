@@ -4,52 +4,20 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::queries::comments::{self, CommentParent};
+use crate::db::queries::comments::{self, CommentContext, CommentParent};
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{require_user, with_read, with_write};
+use super::{require_user, with_read};
 
-/// Pool-level adaptor over [`comments::create_comment_with_mentions`]: the
-/// mention set (LIF-263) and the attachment links (LIF-262) are reconciled in
-/// the same write as the insert.
-///
-/// The `authz_enforced` flag is read *before* the write lock is taken (it
-/// opens its own read connection) to avoid nesting the pool's guards.
-fn create_comment_with_mentions(
-    db: &DbPool,
-    parent: CommentParent,
-    project_id: Option<i64>,
-    user_id: i64,
-    content: &str,
-) -> Result<Comment, LificError> {
-    let member_scoped = authz::authz_enforced(db)?;
-    with_write(db, |conn| {
-        comments::create_comment_with_mentions(
-            conn,
-            parent,
-            project_id,
-            user_id,
-            content,
-            member_scoped,
-        )
-    })
-}
-
-/// LIF-197: comments are gated at `Viewer` — anyone who can see a project
-/// can read and post comments on its issues/pages (the actual auth-required
-/// check for *who* the comment is attributed to is separate, below).
-/// Workspace-level pages (`project_id = None`) fall back to admin-only.
 fn require_comment_viewer(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
-    match project_id {
-        Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
-        None => authz::require_workspace_admin(db, identity),
-    }
+    let conn = db.read()?;
+    authz::require_project_or_workspace_role_conn(&conn, identity, project_id, Role::Viewer)
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -64,17 +32,9 @@ pub(super) struct ListCommentsQuery {
     offset: Option<i64>,
 }
 
-/// LIF-382: the project a comment's parent belongs to. Issues always have
-/// one; a workspace-level page may not, hence the `Option`.
 fn parent_project_id(db: &DbPool, parent: CommentParent) -> Result<Option<i64>, LificError> {
-    match parent {
-        CommentParent::Issue(issue_id) => Ok(Some(
-            with_read(db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id,
-        )),
-        CommentParent::Page(page_id) => {
-            Ok(with_read(db, |conn| crate::db::queries::get_page(conn, page_id))?.project_id)
-        }
-    }
+    let conn = db.read()?;
+    parent.project_id(&conn)
 }
 
 /// LIF-382: listing an issue's comments and listing a page's comments differ
@@ -101,10 +61,6 @@ fn list_for_parent(
     .map(Json)
 }
 
-/// LIF-382: shared body of the two comment-creation routes. Only the
-/// broadcast differs: an issue comment refreshes that issue, a page comment
-/// refreshes the project (and a workspace-level page refreshes nothing,
-/// there being no project to name).
 fn create_for_parent(
     db: &DbPool,
     realtime: &RealtimeHub,
@@ -112,12 +68,22 @@ fn create_for_parent(
     parent: CommentParent,
     content: &str,
 ) -> Result<Json<Comment>, LificError> {
-    let project_id = parent_project_id(db, parent)?;
-    require_comment_viewer(db, identity, project_id)?;
-
     let user = require_user(identity)?;
+    let (comment, project_id) = db.transaction(|conn| {
+        let project_id = parent.project_id(conn)?;
+        authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
+        let member_scoped = authz::authz_enforced_conn(conn)?;
+        let comment = comments::create_comment_with_mentions(
+            conn,
+            parent,
+            project_id,
+            CommentActor::from(&user),
+            content,
+            member_scoped,
+        )?;
+        Ok((comment, project_id))
+    })?;
 
-    let comment = create_comment_with_mentions(db, parent, project_id, user.id, content)?;
     if let Some(project_id) = project_id {
         realtime.send(match parent {
             CommentParent::Issue(issue_id) => issue_updated_event(project_id, issue_id),
@@ -195,6 +161,14 @@ pub(super) async fn mention_candidates(
     .map(Json)
 }
 
+fn comment_updated_event(context: &CommentContext) -> Option<RealtimeEvent> {
+    let project_id = context.project_id()?;
+    Some(match context.parent() {
+        CommentParent::Issue(issue_id) => issue_updated_event(project_id, issue_id),
+        CommentParent::Page(_) => RealtimeEvent::ProjectUpdated { project_id },
+    })
+}
+
 pub(super) async fn update_comment_handler(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
@@ -203,68 +177,36 @@ pub(super) async fn update_comment_handler(
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
     let user = require_user(&identity)?;
+    let (comment, context) = db.transaction(|conn| {
+        let existing = comments::get_comment(conn, id)?;
+        let context = CommentContext::resolve(conn, &existing)?;
+        let project_id = context.project_id();
+        authz::require_project_or_workspace_role_conn(conn, &identity, project_id, Role::Viewer)?;
+        if existing.user_id != user.id && !user.is_admin {
+            return Err(LificError::BadRequest(
+                "you can only edit your own comments".into(),
+            ));
+        }
 
-    let existing = with_read(&db, |conn| {
-        crate::db::queries::comments::get_comment(conn, id)
-    })?;
-
-    // LIF-410: visibility before ownership. Authorship is not access — a user
-    // dropped from the project can no longer read the comment, so they can no
-    // longer edit it either. Same `Viewer` gate (and same 403) the read path
-    // applies, checked first so a comment the caller can't see never reveals
-    // whether they wrote it.
-    //
-    // LIF-263 also needs the parent project to recompute the mention set
-    // against its visible members. Resolved once here from the comment's
-    // parent (issue_id XOR page_id); a page comment may have a NULL project
-    // (workspace page), which `mention_candidates` handles.
-    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
-    require_comment_viewer(&db, &identity, project_id)?;
-
-    // Check ownership: only the author or an admin can edit
-    if existing.user_id != user.id && !user.is_admin {
-        return Err(LificError::BadRequest(
-            "you can only edit your own comments".into(),
-        ));
-    }
-
-    let member_scoped = authz::authz_enforced(&db)?;
-
-    let comment = with_write(&db, |conn| {
-        comments::update_comment_with_mentions(
+        // LIF-410 semantics preserved from the pre-merge handler: visibility
+        // before ownership (the Viewer gate above runs first, so a comment the
+        // caller can't see never reveals whether they wrote it), now checked
+        // in the same transaction as the write (PR #31).
+        let member_scoped = authz::authz_enforced_conn(conn)?;
+        let comment = comments::update_comment_with_mentions(
             conn,
             id,
             project_id,
+            CommentActor::from(&user),
             &input.content,
             member_scoped,
-        )
+        )?;
+        Ok((comment, context))
     })?;
-    match (comment.issue_id, project_id) {
-        (Some(issue_id), Some(project_id)) => {
-            realtime.send(issue_updated_event(project_id, issue_id));
-        }
-        (None, Some(project_id)) if comment.page_id.is_some() => {
-            realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-        }
-        _ => {}
+    if let Some(event) = comment_updated_event(&context) {
+        realtime.send(event);
     }
     Ok(Json(comment))
-}
-
-/// Resolve the project a comment belongs to, via its issue or page parent.
-fn resolve_comment_project(
-    conn: &rusqlite::Connection,
-    comment: &Comment,
-) -> Result<Option<i64>, LificError> {
-    if let Some(issue_id) = comment.issue_id {
-        Ok(Some(
-            crate::db::queries::get_issue(conn, issue_id)?.project_id,
-        ))
-    } else if let Some(page_id) = comment.page_id {
-        Ok(crate::db::queries::get_page(conn, page_id)?.project_id)
-    } else {
-        Ok(None)
-    }
 }
 
 pub(super) async fn delete_comment_handler(
@@ -274,35 +216,29 @@ pub(super) async fn delete_comment_handler(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
-
-    let existing = with_read(&db, |conn| {
-        crate::db::queries::comments::get_comment(conn, id)
-    })?;
-
-    // LIF-410: visibility before ownership, exactly as in the update path —
-    // being the author of a comment in a project you were removed from does
-    // not carry a standing right to delete it.
-    let project_id = with_read(&db, |conn| resolve_comment_project(conn, &existing))?;
-    require_comment_viewer(&db, &identity, project_id)?;
-
-    // Check ownership: only the author or an admin can delete
-    if existing.user_id != user.id && !user.is_admin {
-        return Err(LificError::BadRequest(
-            "you can only delete your own comments".into(),
-        ));
-    }
-
-    with_write(&db, |conn| {
-        crate::db::queries::comments::delete_comment(conn, id)
-    })?;
-    match (existing.issue_id, project_id) {
-        (Some(issue_id), Some(project_id)) => {
-            realtime.send(issue_updated_event(project_id, issue_id));
+    let context = db.transaction(|conn| {
+        let existing = comments::get_comment(conn, id)?;
+        let context = CommentContext::resolve(conn, &existing)?;
+        authz::require_project_or_workspace_role_conn(
+            conn,
+            &identity,
+            context.project_id(),
+            Role::Viewer,
+        )?;
+        // LIF-410: visibility before ownership, exactly as in the update
+        // path — being the author of a comment in a project you were removed
+        // from does not carry a standing right to delete it.
+        if existing.user_id != user.id && !user.is_admin {
+            return Err(LificError::BadRequest(
+                "you can only delete your own comments".into(),
+            ));
         }
-        (None, Some(project_id)) if existing.page_id.is_some() => {
-            realtime.send(RealtimeEvent::ProjectUpdated { project_id });
-        }
-        _ => {}
+
+        comments::delete_comment(conn, id)?;
+        Ok(context)
+    })?;
+    if let Some(event) = comment_updated_event(&context) {
+        realtime.send(event);
     }
     Ok(Json(serde_json::json!({"deleted": true})))
 }
@@ -505,6 +441,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn revoked_member_cannot_mutate_comments() {
+        let (db, _admin, lead, _maintainer, viewer, _non_member, project_id) =
+            setup_membership_test();
+        let [
+            edit_comment_id,
+            delete_comment_id,
+            foreign_edit_id,
+            foreign_delete_id,
+        ] = {
+            let conn = db.write().unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id,
+                    title: "Revocation test".into(),
+                    status: Status::Todo,
+                    priority: Priority::Medium,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let parent = crate::db::queries::comments::CommentParent::Issue(issue.id);
+            let comment_ids = [
+                (viewer.id, "Keep this comment"),
+                (viewer.id, "Keep this one too"),
+                (lead.id, "Do not disclose ownership"),
+                (lead.id, "Do not disclose ownership either"),
+            ]
+            .map(|(user_id, content)| {
+                crate::db::queries::comments::create_comment(&conn, parent, user_id, content)
+                    .unwrap()
+                    .id
+            });
+            crate::db::queries::members::remove_member(&conn, project_id, viewer.id).unwrap();
+            comment_ids
+        };
+
+        let app = app_as_user(db.clone(), &viewer);
+        let resp = json_put(
+            &app,
+            &format!("/api/comments/{edit_comment_id}"),
+            serde_json::json!({"content": "tampered"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = json_delete(&app, &format!("/api/comments/{delete_comment_id}")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = json_put(
+            &app,
+            &format!("/api/comments/{foreign_edit_id}"),
+            serde_json::json!({"content": "tampered"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = json_delete(&app, &format!("/api/comments/{foreign_delete_id}")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let conn = db.read().unwrap();
+        assert_eq!(
+            crate::db::queries::comments::get_comment(&conn, edit_comment_id)
+                .unwrap()
+                .content,
+            "Keep this comment"
+        );
+        assert!(crate::db::queries::comments::get_comment(&conn, delete_comment_id).is_ok());
+        assert_eq!(
+            crate::db::queries::comments::get_comment(&conn, foreign_edit_id)
+                .unwrap()
+                .content,
+            "Do not disclose ownership"
+        );
+        assert!(crate::db::queries::comments::get_comment(&conn, foreign_delete_id).is_ok());
     }
 
     #[tokio::test]
@@ -849,9 +863,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/pages/{page_id}/comments?limit=1&offset=2"
-                    ))
+                    .uri(format!("/api/pages/{page_id}/comments?limit=1&offset=2"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
