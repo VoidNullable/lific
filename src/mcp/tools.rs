@@ -1251,6 +1251,33 @@ fn require_page_role_mcp(
     }
 }
 
+fn require_page_role_mcp_conn(
+    conn: &rusqlite::Connection,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    project_id: Option<i64>,
+    min: models::Role,
+) -> Result<(), crate::error::LificError> {
+    match project_id {
+        Some(pid) => crate::authz::require_role_conn(conn, identity, pid, min),
+        None => crate::authz::require_workspace_admin_conn(conn, identity),
+    }
+}
+
+fn resolve_comment_actor_conn(
+    conn: &rusqlite::Connection,
+) -> Result<crate::resolve_caller::ResolvedIdentity, crate::error::LificError> {
+    crate::resolve_caller::resolve_caller_conn(
+        conn,
+        super::current_auth_user(),
+        crate::actor::Transport::Mcp,
+    )?
+    .ok_or_else(|| {
+        crate::error::LificError::Forbidden(
+            "no admin user exists to attribute comment edits to.".into(),
+        )
+    })
+}
+
 fn visible_project_ids_mcp(
     db: &Arc<DbPool>,
 ) -> Result<Option<std::collections::HashSet<i64>>, String> {
@@ -1289,27 +1316,6 @@ impl LificMcp {
             }
         };
         require_page_role_mcp(&self.db, project_id, min)
-    }
-
-    /// LIF-143: resolve the acting MCP user for a comment edit/delete the
-    /// same way `add_comment` resolves the author: the HTTP-auth user set in
-    /// the task-local, else fall back to the first admin for stdio/local
-    /// sessions. Returns `(user_id, is_admin)` for the author-or-admin
-    /// ownership check.
-    ///
-    /// LIFIC-8: the fallback now routes through `resolve_caller`, the single
-    /// place that decides "no credential → first admin" — replacing the
-    /// direct `first_admin` read.
-    fn resolve_comment_actor(&self) -> Result<(i64, bool), String> {
-        let identity = self.read(|conn| {
-            crate::resolve_caller::resolve_caller_conn(
-                conn,
-                super::current_auth_user(),
-                crate::actor::Transport::Mcp,
-            )
-        })?
-        .ok_or_else(|| "no admin user exists to attribute comment edits to.".to_string())?;
-        Ok((identity.user.id, identity.user.is_admin))
     }
 
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
@@ -3500,36 +3506,34 @@ impl LificMcp {
     }
 
     fn edit_comment_inner(&self, input: EditCommentInput) -> Result<String, String> {
-        // Resolve the acting user the same way add_comment does: the
-        // task-local HTTP-auth user, else fall back to the first admin for
-        // stdio/local sessions.
-        let (user_id, is_admin) = self.resolve_comment_actor()?;
+        let (c, project_id, parent, parent_identifier) = self.write(|conn| {
+            let actor = resolve_comment_actor_conn(conn)?;
+            let existing = queries::comments::get_comment(conn, input.comment_id)?;
+            if existing.user_id != actor.user.id && !actor.user.is_admin {
+                return Err(crate::error::LificError::BadRequest(
+                    "you can only edit your own comments".into(),
+                ));
+            }
 
-        // Ownership: only the author or an admin may edit (mirrors
-        // api::comments::update_comment_handler).
-        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
-        if existing.user_id != user_id && !is_admin {
-            return Err("you can only edit your own comments".into());
-        }
-
-        // LIF-263: recompute the mention set against the parent project's
-        // visible members, resolving the project from the comment's parent.
-        let (project_id, parent, parent_identifier) =
-            self.read(|conn| resolve_comment_context(conn, &existing))?;
-        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-        let member_scoped = crate::authz::authz_enforced(&self.db).map_err(|e| e.to_string())?;
-
-        let c = self.write(|conn| {
+            let (project_id, parent, parent_identifier) =
+                resolve_comment_context(conn, &existing)?;
+            require_page_role_mcp_conn(
+                conn,
+                &Some(actor),
+                project_id,
+                models::Role::Viewer,
+            )?;
+            let member_scoped = crate::authz::authz_enforced_conn(conn)?;
             // LIF-375: shared with the REST edit path; re-derives mentions and
             // attachment links from the new body (LIF-369).
-            let c = queries::comments::update_comment_with_mentions(
+            let comment = queries::comments::update_comment_with_mentions(
                 conn,
                 input.comment_id,
                 project_id,
                 &input.content,
                 member_scoped,
             )?;
-            Ok(c)
+            Ok((comment, project_id, parent, parent_identifier))
         })?;
         // Don't echo the new content back — the agent already supplied it
         // (LIF-115). The id is the stable handle.
@@ -3566,21 +3570,26 @@ impl LificMcp {
     }
 
     fn delete_comment_inner(&self, input: DeleteCommentInput) -> Result<String, String> {
-        // Resolve the acting user the same way add_comment does.
-        let (user_id, is_admin) = self.resolve_comment_actor()?;
+        let (existing, project_id, parent, parent_identifier) = self.write(|conn| {
+            let actor = resolve_comment_actor_conn(conn)?;
+            let existing = queries::comments::get_comment(conn, input.comment_id)?;
+            if existing.user_id != actor.user.id && !actor.user.is_admin {
+                return Err(crate::error::LificError::BadRequest(
+                    "you can only delete your own comments".into(),
+                ));
+            }
 
-        // Ownership: only the author or an admin may delete (mirrors
-        // api::comments::delete_comment_handler).
-        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
-        if existing.user_id != user_id && !is_admin {
-            return Err("you can only delete your own comments".into());
-        }
-
-        let (project_id, parent, parent_identifier) =
-            self.read(|conn| resolve_comment_context(conn, &existing))?;
-        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-
-        self.write(|conn| queries::comments::delete_comment(conn, input.comment_id))?;
+            let (project_id, parent, parent_identifier) =
+                resolve_comment_context(conn, &existing)?;
+            require_page_role_mcp_conn(
+                conn,
+                &Some(actor),
+                project_id,
+                models::Role::Viewer,
+            )?;
+            queries::comments::delete_comment(conn, input.comment_id)?;
+            Ok((existing, project_id, parent, parent_identifier))
+        })?;
         if let (Some(issue_id), Some(project_id)) = (existing.issue_id, project_id) {
             self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,
@@ -8233,7 +8242,7 @@ mod tests {
     }
 
     /// Extract the "#N" comment id from an `add_comment` success string.
-    fn comment_id_from(result: &str) -> i64 {
+    pub(super) fn comment_id_from(result: &str) -> i64 {
         result
             .split('#')
             .nth(1)
@@ -9608,7 +9617,7 @@ mod tests {
 /// by default and already prove that in full.
 #[cfg(test)]
 mod authz_gating_tests {
-    use super::tests::setup_membership_mcp;
+    use super::tests::{comment_id_from, setup_membership_mcp};
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
@@ -9993,6 +10002,57 @@ mod authz_gating_tests {
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
+    }
+
+    #[test]
+    fn revoked_member_cannot_edit_or_delete_own_comment() {
+        let (m, _admin, lead, _maintainer, viewer, _non_member, project_id, _guard) =
+            setup_membership_mcp();
+        let created = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Revocation test".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let [edit_comment_id, delete_comment_id] = ["Keep this comment", "Keep this one too"]
+            .map(|content| {
+                comment_id_from(&as_user(&viewer, || {
+                    m.add_comment(Parameters(AddCommentInput {
+                        identifier: "MEM-1".into(),
+                        content: content.into(),
+                    }))
+                }))
+            });
+        m.write(|conn| queries::members::remove_member(conn, project_id, viewer.id))
+            .unwrap();
+
+        let edit = as_user(&viewer, || {
+            m.edit_comment(Parameters(EditCommentInput {
+                comment_id: edit_comment_id,
+                content: "tampered".into(),
+            }))
+        });
+        assert!(is_forbidden(&edit), "got: {edit}");
+
+        let delete = as_user(&viewer, || {
+            m.delete_comment(Parameters(DeleteCommentInput {
+                comment_id: delete_comment_id,
+            }))
+        });
+        assert!(is_forbidden(&delete), "got: {delete}");
+
+        m.read(|conn| {
+            assert_eq!(
+                queries::comments::get_comment(conn, edit_comment_id)?.content,
+                "Keep this comment"
+            );
+            assert!(queries::comments::get_comment(conn, delete_comment_id).is_ok());
+            Ok(())
+        })
+        .unwrap();
     }
 
     // ── Structure endpoints: loosened to Maintainer once enforced ──

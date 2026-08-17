@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use tracing::info;
 
 /// Migrations are applied in order and tracked in a `_migrations` table.
@@ -196,18 +196,10 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     // an IMMEDIATE transaction, two fresh connections can observe the same
     // version and both execute the next migration, racing on `_migrations`
     // (notably on Windows where test/process startup is more concurrent).
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = run_inner(conn);
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    run_inner(&transaction)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn run_inner(conn: &Connection) -> Result<(), crate::error::LificError> {

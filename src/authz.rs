@@ -113,7 +113,7 @@ fn user_of(identity: &Option<ResolvedIdentity>) -> Option<AuthUser> {
 
 // ── Instance setting read ───────────────────────────────────────
 
-fn authz_enforced_conn(conn: &Connection) -> Result<bool, LificError> {
+pub(crate) fn authz_enforced_conn(conn: &Connection) -> Result<bool, LificError> {
     Ok(queries::settings::get(conn)?.authz_enforced)
 }
 
@@ -172,7 +172,7 @@ pub(crate) fn can_view_project(
     ))
 }
 
-fn require_role_conn(
+pub(crate) fn require_role_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
     project_id: i64,
@@ -333,11 +333,18 @@ pub fn require_workspace_admin(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
 ) -> Result<(), LificError> {
-    if !authz_enforced(db)? {
+    let conn = db.read()?;
+    require_workspace_admin_conn(&conn, identity)
+}
+
+pub(crate) fn require_workspace_admin_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+) -> Result<(), LificError> {
+    if !authz_enforced_conn(conn)? {
         return Ok(());
     }
-    let conn = db.read()?;
-    let effective = effective_user(&conn, &user_of(identity));
+    let effective = effective_user(conn, &user_of(identity));
     match &effective {
         Some(u) if u.is_admin => Ok(()),
         _ => Err(LificError::Forbidden(
