@@ -6,9 +6,9 @@
 //! project-role gate. Bytes are content-addressed on disk; a row here just
 //! records the metadata and the `sha256` that points at the blob.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, named_params, params};
 
-use crate::db::models::{Attachment, AttachmentEntity};
+use crate::db::models::{Attachment, AttachmentEntity, CommentActor};
 use crate::error::LificError;
 
 /// Insert a new attachment metadata row and return it. The caller has already
@@ -171,6 +171,55 @@ fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
     Ok(exists.is_some())
 }
 
+/// Whether a caller may introduce an attachment link into `project_id`.
+/// Uploaders and administrators may place their attachment anywhere they can
+/// edit; other callers may only reuse attachments already linked in the same
+/// project.
+fn attachment_allowed_for_project(
+    conn: &Connection,
+    attachment_id: i64,
+    actor: CommentActor,
+    project_id: Option<i64>,
+) -> Result<bool, LificError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM attachments a
+             WHERE a.id = :attachment_id
+               AND (
+                   :is_admin
+                   OR a.uploader_id = :actor_id
+                   OR EXISTS (
+                       SELECT 1
+                       FROM attachment_links l
+                       LEFT JOIN issues i
+                         ON l.entity_type = 'issue' AND i.id = l.entity_id
+                       LEFT JOIN pages p
+                         ON l.entity_type = 'page' AND p.id = l.entity_id
+                       LEFT JOIN comments c
+                         ON l.entity_type = 'comment' AND c.id = l.entity_id
+                       LEFT JOIN issues ci ON ci.id = c.issue_id
+                       LEFT JOIN pages cp ON cp.id = c.page_id
+                       WHERE l.attachment_id = a.id
+                         AND :project_id IN (
+                             i.project_id,
+                             p.project_id,
+                             ci.project_id,
+                             cp.project_id
+                         )
+                   )
+               )
+         )",
+        named_params! {
+            ":attachment_id": attachment_id,
+            ":actor_id": actor.user_id,
+            ":is_admin": actor.is_admin,
+            ":project_id": project_id,
+        },
+        |row| row.get(0),
+    )?)
+}
+
 // ── Orphan GC ────────────────────────────────────────────────
 
 /// One collectable orphan: an attachment row with zero links, older than the
@@ -260,6 +309,25 @@ pub fn sync_links(
     sync_entity_links(conn, entity, entity_id, &ids)
 }
 
+/// Reconcile attachment links without allowing references to import an
+/// attachment from another project or another user's unlinked upload.
+pub fn sync_links_scoped(
+    conn: &Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+    markdown: &str,
+    actor: CommentActor,
+    project_id: Option<i64>,
+) -> Result<(), LificError> {
+    let mut allowed = Vec::new();
+    for attachment_id in parse_referenced_ids(markdown) {
+        if attachment_allowed_for_project(conn, attachment_id, actor, project_id)? {
+            allowed.push(attachment_id);
+        }
+    }
+    sync_entity_links(conn, entity, entity_id, &allowed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,22 +395,68 @@ mod tests {
     }
 
     #[test]
+    fn attachment_scope_uses_actor_identity_and_admin_status() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let uploader_id = seed_user(&conn, "uploader");
+        let attachment = create_attachment(
+            &conn,
+            "owned",
+            "owned.txt",
+            "text/plain",
+            1,
+            Some(uploader_id),
+        )
+        .unwrap();
+
+        let uploader = CommentActor {
+            user_id: uploader_id,
+            is_admin: false,
+        };
+        let stranger = CommentActor {
+            user_id: uploader_id + 1,
+            is_admin: false,
+        };
+        let admin = CommentActor {
+            user_id: uploader_id + 1,
+            is_admin: true,
+        };
+
+        assert!(attachment_allowed_for_project(&conn, attachment.id, uploader, None).unwrap());
+        assert!(!attachment_allowed_for_project(&conn, attachment.id, stranger, None).unwrap());
+        assert!(attachment_allowed_for_project(&conn, attachment.id, admin, None).unwrap());
+        assert!(!attachment_allowed_for_project(&conn, i64::MAX, admin, None).unwrap());
+    }
+
+    #[test]
     fn linking_is_idempotent_and_unlink_clears_it() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let issue = seed_issue(&conn);
         let att = create_attachment(&conn, "h1", "a.pdf", "application/pdf", 10, None).unwrap();
 
-        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
+        assert!(
+            list_for_entity(&conn, AttachmentEntity::Issue, issue)
+                .unwrap()
+                .is_empty()
+        );
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap(); // idempotent
 
         let listed = list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap();
-        assert_eq!(listed.len(), 1, "the second link must not duplicate the row");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the second link must not duplicate the row"
+        );
         assert_eq!(listed[0].id, att.id);
 
         unlink_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
-        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
+        assert!(
+            list_for_entity(&conn, AttachmentEntity::Issue, issue)
+                .unwrap()
+                .is_empty()
+        );
         // With no links left the attachment is collectable by the orphan GC.
         assert_eq!(find_orphans(&conn, -1).unwrap().len(), 1);
     }
@@ -427,11 +541,20 @@ mod tests {
         let issue = seed_issue(&conn);
         let att = create_attachment(&conn, "h", "a.png", "image/png", 1, None).unwrap();
         link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
-        assert_eq!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().len(), 1);
+        assert_eq!(
+            list_for_entity(&conn, AttachmentEntity::Issue, issue)
+                .unwrap()
+                .len(),
+            1
+        );
 
         queries::delete_issue(&conn, issue).unwrap();
         // Trigger drops the link; the attachment row itself survives (GC's job).
-        assert!(list_for_entity(&conn, AttachmentEntity::Issue, issue).unwrap().is_empty());
+        assert!(
+            list_for_entity(&conn, AttachmentEntity::Issue, issue)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             find_orphans(&conn, -1).unwrap().len(),
             1,

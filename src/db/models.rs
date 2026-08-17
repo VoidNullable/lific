@@ -625,7 +625,10 @@ impl std::str::FromStr for Role {
 
 impl rusqlite::types::FromSql for Role {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        value.as_str()?.parse().map_err(|_| rusqlite::types::FromSqlError::InvalidType)
+        value
+            .as_str()?
+            .parse()
+            .map_err(|_| rusqlite::types::FromSqlError::InvalidType)
     }
 }
 
@@ -720,6 +723,21 @@ pub struct AuthUser {
     pub username: String,
     pub display_name: String,
     pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommentActor {
+    pub user_id: i64,
+    pub is_admin: bool,
+}
+
+impl From<&AuthUser> for CommentActor {
+    fn from(user: &AuthUser) -> Self {
+        Self {
+            user_id: user.id,
+            is_admin: user.is_admin,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

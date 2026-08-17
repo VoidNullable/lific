@@ -142,7 +142,9 @@ pub(crate) fn set_stdio_user(user: Option<AuthUser>) {
 /// gates read `identity.user.is_admin`. The separate operator flag is gone:
 /// every credential that authenticates is trusted as the operator, matching
 /// REST one-for-one (no transport-specific divergence).
-pub(crate) fn current_identity(db: &crate::db::DbPool) -> Option<crate::resolve_caller::ResolvedIdentity> {
+pub(crate) fn current_identity(
+    db: &crate::db::DbPool,
+) -> Option<crate::resolve_caller::ResolvedIdentity> {
     crate::resolve_caller::resolve_caller(db, current_auth_user(), crate::actor::Transport::Mcp)
         .ok()
         .flatten()
@@ -229,26 +231,36 @@ impl LificMcp {
         f(&conn).map_err(|e| e.to_string())
     }
 
+    fn stamp_request_actor(conn: &rusqlite::Connection) {
+        let user = current_auth_user();
+        crate::actor::stamp(
+            conn,
+            &crate::actor::ActorCtx {
+                user_id: user.map(|user| user.id),
+                transport: crate::actor::Transport::Mcp,
+            },
+        );
+    }
+
     fn write<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
     {
-        let conn = self.db.write().map_err(|e| e.to_string())?;
-        // LIF-155: re-stamp the audit actor from the MCP request-user
-        // global. The task-local stamped by DbPool::write() does NOT
-        // survive rmcp's internal task spawns (verified in production:
-        // tool writes attributed to 'system'), but MCP_REQUEST_USER does
-        // — it's a global guarded by the serialization lock, so it is
-        // exactly this request's identity.
-        let user = current_auth_user();
-        crate::actor::stamp(
-            &conn,
-            &crate::actor::ActorCtx {
-                user_id: user.map(|u| u.id),
-                transport: crate::actor::Transport::Mcp,
-            },
-        );
-        f(&conn).map_err(|e| e.to_string())
+        let conn = self.db.write().map_err(|error| error.to_string())?;
+        Self::stamp_request_actor(&conn);
+        f(&conn).map_err(|error| error.to_string())
+    }
+
+    fn transaction<F, T>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
+    {
+        self.db
+            .transaction(|conn| {
+                Self::stamp_request_actor(conn);
+                f(conn)
+            })
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -492,7 +504,8 @@ mod tests {
             .unwrap();
         }
         let manager = crate::auth::create_key_manager().unwrap();
-        let unbound_key = crate::auth::create_api_key(&pool, &manager, "mcp-operator", None).unwrap();
+        let unbound_key =
+            crate::auth::create_api_key(&pool, &manager, "mcp-operator", None).unwrap();
         let project = {
             let conn = pool.write().unwrap();
             crate::db::queries::settings::update(
@@ -649,7 +662,11 @@ mod tests {
     // token the agent resolves as itself; with none, the operator (first
     // admin) fallback applies.
 
-    fn seed_user(pool: &crate::db::DbPool, username: &str, admin: bool) -> crate::db::models::AuthUser {
+    fn seed_user(
+        pool: &crate::db::DbPool,
+        username: &str,
+        admin: bool,
+    ) -> crate::db::models::AuthUser {
         let conn = pool.write().expect("write conn");
         let u = crate::db::queries::users::create_user(
             &conn,

@@ -1,6 +1,6 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
-use crate::db::models::{AttachmentEntity, Comment};
+use crate::db::models::{AttachmentEntity, Comment, CommentActor};
 use crate::error::LificError;
 
 use super::unescape_text;
@@ -11,25 +11,78 @@ use super::unescape_text;
 /// (enforced by a CHECK constraint added in migration 012). This enum mirrors
 /// that invariant in Rust so callers can't accidentally construct an
 /// orphan or dual-parent comment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentParent {
     Issue(i64),
     Page(i64),
 }
 
 impl CommentParent {
-    fn issue_id(&self) -> Option<i64> {
+    fn issue_id(self) -> Option<i64> {
         match self {
-            CommentParent::Issue(id) => Some(*id),
-            CommentParent::Page(_) => None,
+            Self::Issue(id) => Some(id),
+            Self::Page(_) => None,
         }
     }
 
-    fn page_id(&self) -> Option<i64> {
+    fn page_id(self) -> Option<i64> {
         match self {
-            CommentParent::Page(id) => Some(*id),
-            CommentParent::Issue(_) => None,
+            Self::Page(id) => Some(id),
+            Self::Issue(_) => None,
         }
+    }
+
+    pub fn project_id(self, conn: &Connection) -> Result<Option<i64>, LificError> {
+        match self {
+            Self::Issue(issue_id) => Ok(Some(super::get_issue(conn, issue_id)?.project_id)),
+            Self::Page(page_id) => Ok(super::get_page(conn, page_id)?.project_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentContext {
+    parent: CommentParent,
+    project_id: Option<i64>,
+    parent_identifier: String,
+}
+
+impl CommentContext {
+    pub fn resolve(conn: &Connection, comment: &Comment) -> Result<Self, LificError> {
+        match (comment.issue_id, comment.page_id) {
+            (Some(issue_id), None) => {
+                let issue = super::get_issue(conn, issue_id)?;
+                Ok(Self {
+                    parent: CommentParent::Issue(issue.id),
+                    project_id: Some(issue.project_id),
+                    parent_identifier: issue.identifier,
+                })
+            }
+            (None, Some(page_id)) => {
+                let page = super::get_page(conn, page_id)?;
+                Ok(Self {
+                    parent: CommentParent::Page(page.id),
+                    project_id: page.project_id,
+                    parent_identifier: page.identifier,
+                })
+            }
+            _ => Err(LificError::Internal(format!(
+                "comment {} has an invalid parent",
+                comment.id
+            ))),
+        }
+    }
+
+    pub fn parent(&self) -> CommentParent {
+        self.parent
+    }
+
+    pub fn project_id(&self) -> Option<i64> {
+        self.project_id
+    }
+
+    pub fn parent_identifier(&self) -> &str {
+        &self.parent_identifier
     }
 }
 
@@ -398,56 +451,48 @@ pub fn sync_mentions(
 }
 
 /// Create a comment and reconcile everything derived from its body in one
-/// write: the resolved `@mention` rows (LIF-263) and the attachment links its
-/// markdown references (LIF-262).
-///
-/// `member_scoped` is the live `authz_enforced` flag, resolved by the caller
-/// *before* it takes the write connection — reading it here would nest the
-/// pool's guards. `project_id` is the comment parent's project (`None` for a
-/// workspace-level page).
-///
-/// LIF-375: the single implementation behind both the REST handlers and the
-/// MCP `add_comment` tool. Both used to inline their own copy, and the MCP
-/// copies silently skipped attachment link sync (LIF-369).
+/// write: resolved mentions and attachment links.
 pub fn create_comment_with_mentions(
     conn: &Connection,
     parent: CommentParent,
     project_id: Option<i64>,
-    user_id: i64,
+    actor: CommentActor,
     content: &str,
     member_scoped: bool,
 ) -> Result<Comment, LificError> {
     let candidates = mention_candidates(conn, project_id, member_scoped)?;
-    let comment = create_comment(conn, parent, user_id, content)?;
+    let comment = create_comment(conn, parent, actor.user_id, content)?;
     sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-    super::attachments::sync_links(
+    super::attachments::sync_links_scoped(
         conn,
         AttachmentEntity::Comment,
         comment.id,
         &comment.content,
+        actor,
+        project_id,
     )?;
     Ok(comment)
 }
 
-/// Edit a comment's content and re-derive its mentions and attachment links,
-/// the update-side twin of [`create_comment_with_mentions`]. An edit that
-/// drops a mention or an attachment reference removes the corresponding row,
-/// so authorization data stays in step with the text.
+/// Edit a comment's content and re-derive its mentions and attachment links.
 pub fn update_comment_with_mentions(
     conn: &Connection,
     comment_id: i64,
     project_id: Option<i64>,
+    actor: CommentActor,
     content: &str,
     member_scoped: bool,
 ) -> Result<Comment, LificError> {
     let candidates = mention_candidates(conn, project_id, member_scoped)?;
     let comment = update_comment(conn, comment_id, content)?;
     sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-    super::attachments::sync_links(
+    super::attachments::sync_links_scoped(
         conn,
         AttachmentEntity::Comment,
         comment.id,
         &comment.content,
+        actor,
+        project_id,
     )?;
     Ok(comment)
 }
@@ -566,7 +611,8 @@ mod tests {
         let (pool, _, page_id, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let c1 = create_comment(&conn, CommentParent::Page(page_id), user_id, "Hello page").unwrap();
+        let c1 =
+            create_comment(&conn, CommentParent::Page(page_id), user_id, "Hello page").unwrap();
         assert_eq!(c1.content, "Hello page");
         assert_eq!(c1.issue_id, None);
         assert_eq!(c1.page_id, Some(page_id));
@@ -577,6 +623,100 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].content, "Hello page");
         assert_eq!(comments[1].content, "Another");
+    }
+
+    #[test]
+    fn comment_attachment_scope_is_independent_of_authz_enforcement() {
+        let (pool, issue_id, _, _) = setup();
+        let conn = pool.write().unwrap();
+        let [editor, owner] =
+            [("editor", "Editor"), ("owner", "Owner")].map(|(username, display_name)| {
+                queries::users::create_user(
+                    &conn,
+                    &CreateUser {
+                        username: username.into(),
+                        email: format!("{username}@test.com"),
+                        password: "testpassword1".into(),
+                        display_name: Some(display_name.into()),
+                        is_admin: false,
+                        is_bot: false,
+                    },
+                )
+                .unwrap()
+            });
+        let editor = CommentActor {
+            user_id: editor.id,
+            is_admin: editor.is_admin,
+        };
+        let other_project = queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Other".into(),
+                identifier: "OTH".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let other_issue = queries::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: other_project.id,
+                title: "Other issue".into(),
+                status: Status::Todo,
+                priority: Priority::Medium,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let attachment = queries::attachments::create_attachment(
+            &conn,
+            "foreign",
+            "foreign.txt",
+            "text/plain",
+            7,
+            Some(owner.id),
+        )
+        .unwrap();
+        queries::attachments::link_attachment(
+            &conn,
+            attachment.id,
+            AttachmentEntity::Issue,
+            other_issue.id,
+        )
+        .unwrap();
+
+        let project_id = queries::get_issue(&conn, issue_id).unwrap().project_id;
+        let content = format!("[foreign](/api/attachments/{})", attachment.id);
+        let comment = create_comment_with_mentions(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some(project_id),
+            editor,
+            &content,
+            true,
+        )
+        .unwrap();
+        assert!(
+            queries::attachments::list_for_entity(&conn, AttachmentEntity::Comment, comment.id,)
+                .unwrap()
+                .is_empty()
+        );
+
+        queries::attachments::link_attachment(
+            &conn,
+            attachment.id,
+            AttachmentEntity::Issue,
+            issue_id,
+        )
+        .unwrap();
+        update_comment_with_mentions(&conn, comment.id, Some(project_id), editor, &content, true)
+            .unwrap();
+        assert_eq!(
+            queries::attachments::list_for_entity(&conn, AttachmentEntity::Comment, comment.id,)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // ── Author filter + sort direction ────────────────────────
@@ -705,7 +845,9 @@ mod tests {
     fn list_comments_rejects_invalid_order() {
         let (pool, issue_id, _, _) = setup();
         let conn = pool.read().unwrap();
-        assert!(list_comments(&conn, CommentParent::Issue(issue_id), None, Some("newest")).is_err());
+        assert!(
+            list_comments(&conn, CommentParent::Issue(issue_id), None, Some("newest")).is_err()
+        );
     }
 
     #[test]
@@ -713,10 +855,17 @@ mod tests {
         let (pool, issue_id, page_id, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Issue thread").unwrap();
+        create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            "Issue thread",
+        )
+        .unwrap();
         create_comment(&conn, CommentParent::Page(page_id), user_id, "Page thread").unwrap();
 
-        let issue_comments = list_comments(&conn, CommentParent::Issue(issue_id), None, None).unwrap();
+        let issue_comments =
+            list_comments(&conn, CommentParent::Issue(issue_id), None, None).unwrap();
         let page_comments = list_comments(&conn, CommentParent::Page(page_id), None, None).unwrap();
 
         assert_eq!(issue_comments.len(), 1);
@@ -730,7 +879,8 @@ mod tests {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let created = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Hello").unwrap();
+        let created =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Hello").unwrap();
         let fetched = get_comment(&conn, created.id).unwrap();
         assert_eq!(fetched.content, "Hello");
         assert_eq!(fetched.author, "blake");
@@ -743,7 +893,8 @@ mod tests {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let created = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Original").unwrap();
+        let created =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Original").unwrap();
         let updated = update_comment(&conn, created.id, "Edited").unwrap();
         assert_eq!(updated.content, "Edited");
         assert_eq!(updated.id, created.id);
@@ -754,7 +905,8 @@ mod tests {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let created = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Delete me").unwrap();
+        let created =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Delete me").unwrap();
         delete_comment(&conn, created.id).unwrap();
 
         assert!(get_comment(&conn, created.id).is_err());
@@ -794,7 +946,13 @@ mod tests {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let c = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "Will be cascaded").unwrap();
+        let c = create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            "Will be cascaded",
+        )
+        .unwrap();
         queries::delete_issue(&conn, issue_id).unwrap();
 
         assert!(get_comment(&conn, c.id).is_err());
@@ -822,7 +980,10 @@ mod tests {
              VALUES (?1, ?2, ?3, 'bad')",
             params![issue_id, page_id, user_id],
         );
-        assert!(result.is_err(), "expected CHECK constraint to reject dual-parent row");
+        assert!(
+            result.is_err(),
+            "expected CHECK constraint to reject dual-parent row"
+        );
         let msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
             msg.contains("check") || msg.contains("constraint"),
@@ -840,7 +1001,10 @@ mod tests {
              VALUES (NULL, NULL, ?1, 'orphan')",
             params![user_id],
         );
-        assert!(result.is_err(), "expected CHECK constraint to reject parentless row");
+        assert!(
+            result.is_err(),
+            "expected CHECK constraint to reject parentless row"
+        );
         let msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
             msg.contains("check") || msg.contains("constraint"),
@@ -853,7 +1017,13 @@ mod tests {
         let (pool, issue_id, _, user_id) = setup();
         let conn = pool.write().unwrap();
 
-        let c = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "line1\\nline2").unwrap();
+        let c = create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            "line1\\nline2",
+        )
+        .unwrap();
         assert_eq!(c.content, "line1\nline2");
     }
 
@@ -996,10 +1166,7 @@ mod tests {
             vec!["ada", "blake"]
         );
         // Duplicates collapse (case-insensitively), first spelling kept.
-        assert_eq!(
-            extract_mention_usernames("@ada @Ada @ADA"),
-            vec!["ada"]
-        );
+        assert_eq!(extract_mention_usernames("@ada @Ada @ADA"), vec!["ada"]);
     }
 
     #[test]
@@ -1123,7 +1290,13 @@ mod tests {
         let conn = pool.write().unwrap();
         // The author "blake" mentions themselves.
         let cands = candidates(&[(user_id, "blake")]);
-        let c = create_comment(&conn, CommentParent::Issue(issue_id), user_id, "note to @blake").unwrap();
+        let c = create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            "note to @blake",
+        )
+        .unwrap();
         let resolved = sync_mentions(&conn, c.id, &c.content, &cands).unwrap();
         assert_eq!(resolved, vec![user_id]);
     }
@@ -1168,7 +1341,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(feed.items.iter().any(|a| a.action == "mention" && a.new_value.as_deref() == Some("ada")));
+        assert!(
+            feed.items
+                .iter()
+                .any(|a| a.action == "mention" && a.new_value.as_deref() == Some("ada"))
+        );
     }
 
     #[test]
@@ -1205,7 +1382,10 @@ mod tests {
         let names: Vec<&str> = cands.iter().map(|c| c.username.as_str()).collect();
         assert!(names.contains(&"blake"));
         assert!(names.contains(&"ada"));
-        assert!(!names.contains(&"botty"), "bots are never mention candidates");
+        assert!(
+            !names.contains(&"botty"),
+            "bots are never mention candidates"
+        );
     }
 
     #[test]
@@ -1250,7 +1430,10 @@ mod tests {
         let cands = mention_candidates(&conn, Some(project.id), true).unwrap();
         let ids: Vec<i64> = cands.iter().map(|c| c.user_id).collect();
         assert!(ids.contains(&member.id));
-        assert!(!ids.contains(&outsider.id), "non-member must not be a candidate");
+        assert!(
+            !ids.contains(&outsider.id),
+            "non-member must not be a candidate"
+        );
 
         // A workspace page (no project) member-scoped yields nothing.
         assert!(mention_candidates(&conn, None, true).unwrap().is_empty());
@@ -1274,8 +1457,20 @@ mod tests {
         )
         .unwrap();
 
-        create_comment(&conn, CommentParent::Issue(issue_id), user1_id, "Blake says hi").unwrap();
-        create_comment(&conn, CommentParent::Issue(issue_id), user2.id, "Ada responds").unwrap();
+        create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user1_id,
+            "Blake says hi",
+        )
+        .unwrap();
+        create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user2.id,
+            "Ada responds",
+        )
+        .unwrap();
 
         let comments = list_comments(&conn, CommentParent::Issue(issue_id), None, None).unwrap();
         assert_eq!(comments.len(), 2);

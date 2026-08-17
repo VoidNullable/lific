@@ -353,6 +353,18 @@ pub(crate) fn require_workspace_admin_conn(
     }
 }
 
+pub(crate) fn require_project_or_workspace_role_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+    project_id: Option<i64>,
+    minimum_role: Role,
+) -> Result<(), LificError> {
+    match project_id {
+        Some(project_id) => require_role_conn(conn, identity, project_id, minimum_role),
+        None => require_workspace_admin_conn(conn, identity),
+    }
+}
+
 // ── visible_project_ids ──────────────────────────────────────────
 
 /// The cross-project read filter for search / project listing / any
@@ -524,7 +536,10 @@ mod tests {
     fn enable_enforcement(conn: &Connection) {
         update_settings(
             conn,
-            InstanceSettingsPatch { authz_enforced: Some(true), ..Default::default() },
+            InstanceSettingsPatch {
+                authz_enforced: Some(true),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -541,7 +556,10 @@ mod tests {
 
         for min in [Role::Viewer, Role::Maintainer, Role::Lead] {
             let err = require_role_conn(&conn, &id(outsider.clone()), project, min).unwrap_err();
-            assert!(matches!(err, LificError::Forbidden(_)), "denied at {min} got {err:?}");
+            assert!(
+                matches!(err, LificError::Forbidden(_)),
+                "denied at {min} got {err:?}"
+            );
         }
     }
 
@@ -569,7 +587,9 @@ mod tests {
         upsert_member(&conn, project, maintainer.id, Role::Maintainer).unwrap();
 
         assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Viewer).is_ok());
-        assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Maintainer).is_ok());
+        assert!(
+            require_role_conn(&conn, &id(maintainer.clone()), project, Role::Maintainer).is_ok()
+        );
         assert!(require_role_conn(&conn, &id(maintainer.clone()), project, Role::Lead).is_err());
     }
 
@@ -686,7 +706,10 @@ mod tests {
         let outsider = seed_user(&conn, "outsider", false);
 
         for min in [Role::Viewer, Role::Maintainer] {
-            assert!(require_role_conn(&conn, &None, project, min).is_ok(), "None user at {min}");
+            assert!(
+                require_role_conn(&conn, &None, project, min).is_ok(),
+                "None user at {min}"
+            );
             assert!(
                 require_role_conn(&conn, &id(outsider.clone()), project, min).is_ok(),
                 "non-member at {min}"
@@ -858,7 +881,10 @@ mod tests {
             let conn = pool.write().unwrap();
             enable_enforcement(&conn);
         }
-        assert_eq!(visible_project_ids(&pool, &None).unwrap(), Some(HashSet::new()));
+        assert_eq!(
+            visible_project_ids(&pool, &None).unwrap(),
+            Some(HashSet::new())
+        );
     }
 
     // LIF-261 / LIFIC-10/14: an operator-trusted unbound key resolves (via
@@ -1116,7 +1142,10 @@ mod tests {
         // Flip it back off: legacy behavior returns immediately.
         update_settings(
             &conn,
-            InstanceSettingsPatch { authz_enforced: Some(false), ..Default::default() },
+            InstanceSettingsPatch {
+                authz_enforced: Some(false),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(require_role_conn(&conn, &id(outsider), project, Role::Viewer).is_ok());
