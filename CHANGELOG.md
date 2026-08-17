@@ -1,18 +1,19 @@
 # Changelog
 
-## Unreleased
+## v2.7.0 (unreleased)
 
-### Identifiers
+A project's blocking structure becomes something you can see and edit: the new graph view lays a project out as a dependency canvas, and dragging between two issues links them. Around it, instance admins can finally manage members without shell access, the activity feed shows real diffs instead of two walls of text, the issue list points at what moved while you were away, and the CLI's remote backend reaches parity with the local one.
 
-- **Project identifiers now resolve case-insensitively.** `lific issue list --project lif`, `get_issue("lif-42")`, and every other project, issue, or page lookup across the CLI, REST, and MCP now accept any casing, matching how modules, folders, and usernames have always behaved. As a consequence, creating a project `abc` when `ABC` exists is now rejected. Existing databases with case-colliding identifiers (only possible via raw SQL) are renamed deterministically on upgrade.
+### Dependency graph
 
-### API
-
-- **`GET /api/auth/me` now answers 403 `authentication required` when unauthenticated**, like every other endpoint. It was the one endpoint that escaped the v2.6.0 consolidation and still returned a 400.
+- **Every project has a Graph view.** Issues render as clickable cards, blocking relations as edges, laid out left to right so blockers sit left of the work they hold up. The canvas pans and zooms (drag, pinch, ctrl+wheel, arrow keys), defaults to open issues with a toggle for closed ones, and follows dark and light mode.
+- **The graph is also where you edit relations.** Drag from one card onto another and a menu asks which relation to create (blocks, blocked by, relates to, duplicate); click an edge to reverse or remove it. An Unlinked canvas collects the issues with no relations yet, ready to be wired in. Editing follows project roles, so viewers get a read-only canvas.
+- **Hovering a node previews the issue**, a card with its description clamped to a few lines, so tracing a chain does not mean opening every issue along it. On touch, press and hold does the same for graph nodes, issue rows, and pages, which previously had no path to their hover previews at all.
 
 ### Instance administration
 
 - **Manage members from the Instance settings roster.** Instance admins can now create users, promote and demote admins, and deactivate or restore accounts from the web UI, with server-side guard rails: the last remaining admin cannot be demoted or deactivated, and bot identities are not valid targets. Deactivation ends access immediately and atomically, tearing down the account's sessions, API keys, and OAuth tokens in one write, and any bots the account owns stop authenticating until their owner is restored. Five new admin-gated REST endpoints back the UI.
+- **An instance set up entirely from the browser now has an admin.** Fresh installs enforce authorization, but web signup never granted the admin role; the only grant path was `lific user promote` on the server's shell, which nothing in the UI mentions. On an instance with zero users, the first signup now becomes the instance admin, the standard self-hosted bootstrap. Any pre-existing account, CLI-created included, disables the grant.
 - **The audit log can be pruned.** A new `audit_retention_days` key in the `[backup]` section deletes audit entries older than the window during the existing backup cycle. Unset or 0 keeps everything forever, which remains the default.
 
 ### Web UI
@@ -20,16 +21,38 @@
 - **The activity feed shows real diffs.** Description and content changes render as a per-line diff, added and removed lines tinted, long unchanged stretches folded behind a divider, instead of the previous two full-value blocks.
 - **The issue list shows what moved while you were away.** Rows changed since your last visit get a small accent dot, and a toolbar chip counts them and cycles focus through them; viewing a row clears its dot. An agent closes three issues while you are at lunch, and the list points at exactly those three.
 - **The issue-list toolbar fits on phones.** Below the small breakpoint it now keeps to a single row instead of wrapping into a fourth band of chrome, with saved views, sort, and display folded into an accessible overflow panel. Chrome above the first issue drops from 173px to under 90px on a 360px screen.
+- **Bottom sheets dismiss by swiping down on their header.** The drag-handle pill on mobile sheets was decorative; it now tracks the finger, commits the dismiss past a threshold or on a downward flick, and springs back otherwise.
 
 ### CLI
 
 - **`--backend http` now renders exactly like the local backend.** Human and JSON output are shared between the two paths for every data command, and remote exports unpack into the same on-disk markdown tree local exports write instead of leaving a ZIP behind. The client validates every server-supplied path before writing, refuses archive entries that try to escape the output directory, and caps archive entry counts and expanded size.
+
+### Identifiers
+
+- **Project identifiers resolve case-insensitively.** `lific issue list --project lif`, `get_issue("lif-42")`, and every other project, issue, or page lookup across the CLI, REST, and MCP now accept any casing, matching how modules, folders, and usernames have always behaved. As a consequence, creating a project `abc` when `ABC` exists is now rejected. Existing databases with case-colliding identifiers (only possible via raw SQL) are renamed deterministically on upgrade.
+
+### Security (PR #27 by [@mjc](https://github.com/mjc))
+
+- **The CLI refuses to send an API key over plaintext HTTP to a remote host.** What used to be a warning is now an error, and the error message never echoes the key. Loopback targets still work over plain HTTP, and unauthenticated plain-HTTP connections still warn rather than fail.
+- **Jira import validates the site name before sending credentials anywhere.** The site slug becomes the hostname of every request, so a hostile value could have steered your Atlassian token to a host an attacker controls. It is now constrained to a single DNS-label-shaped slug, and the canonical slug is used consistently for both requests and imported identities.
+
+### API
+
+- **`GET /api/auth/me` now answers 403 `authentication required` when unauthenticated**, like every other endpoint. It was the one endpoint that escaped the v2.6.0 consolidation and still returned a 400.
 
 ### Fixes
 
 - Duplicate agent identities can no longer be minted by two simultaneous connects: bot uniqueness per (owner, tool) is now enforced by the database, and upgrading merges any existing duplicates into the oldest bot without losing memberships, groups, or saved views.
 - Session validation no longer takes the database's single writer lock on every request. Expired sessions are swept at login and logout instead, so authenticated traffic reads concurrently.
 - An IPv6 loopback bind (`host = "::1"`) now prints valid URLs like `http://[::1]:7777` instead of `http://::1:7777` in init output, `service status`, the doctor, and the OAuth issuer.
+- A swipe-dismissed sheet no longer flashes back into place for a frame before unmounting.
+- The test suite creates its scratch directories through `tempfile`, so an aborted run cleans up after itself instead of poisoning the next one.
+
+### Upgrading
+
+- Three migrations run automatically on first start: the bot-identity unique constraint (merging any existing duplicates), case-insensitive project identifiers, and the account active flag behind deactivation. No manual steps.
+- If a script drives `--backend http` with an API key against a remote `http://` URL, it now exits with an error instead of proceeding past a warning. Switch the target to `https://` or a loopback address.
+- Audit retention stays off unless you set `audit_retention_days`; nothing is deleted by default.
 
 ## v2.6.0 (2026-08-15)
 
