@@ -264,20 +264,111 @@ fn is_attachment_download(method: &Method, path: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// LIF-403: which kind of credential authenticated the current request.
+///
+/// Inserted into the request extensions at every success branch of
+/// [`require_api_key`], next to `Option<AuthUser>` and the resolved identity.
+/// Downstream code that needs to treat a credential *kind* differently — the
+/// OAuth deny-list below is the first such case — reads this instead of
+/// re-sniffing the `Authorization` header or the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    /// Browser session token (`lific_sess_`), from the header or the
+    /// `lific_token` cookie.
+    Session,
+    /// API key (`lific_sk`), including the unbound operator key.
+    ApiKey,
+    /// OAuth 2.1 access token (`lific_at_`) issued by the connector flow.
+    Oauth,
+    /// No credential at all — the `[auth] required = false` path (LIF-294).
+    Anonymous,
+}
+
+/// LIF-403: the REST surfaces an OAuth access token may not reach.
+///
+/// An OAuth token is the MCP connector credential: it expires, it is
+/// revocable from Connected Tools, and it is bound to a per-tool bot. Those
+/// properties are the entire point of it, and they evaporate the moment the
+/// token can mint a credential that outlives it. Until this gate existed, a
+/// bot token could `POST /api/auth/keys` (`api::auth::create_key`) and walk
+/// away with a permanent, never-expiring API key — a leash traded for a
+/// forever key.
+///
+/// OAuth tokens remain accepted on ordinary REST routes on purpose: that is
+/// parity with what the same token can already do through the MCP tools.
+/// Only credential-management and account/user administration is closed off.
+/// Returns the reason a route is on the list, or `None` when the request is
+/// allowed. Each rule is a path prefix (so `{id}` sub-routes are covered
+/// without re-implementing route matching) plus the methods it applies to.
+fn oauth_blocked_reason(method: &Method, path: &str) -> Option<&'static str> {
+    // Normalize one trailing slash so `/api/auth/keys/` can't slip past a
+    // comparison the router itself would still resolve.
+    let path = path.strip_suffix('/').unwrap_or(path);
+
+    // API keys — create / list / revoke. THE escalation this issue is about:
+    // a credential that expires must not mint one that never does. Listing is
+    // blocked too; key inventory is credential management, not app data.
+    if path == "/api/auth/keys" || path.starts_with("/api/auth/keys/") {
+        return Some("API key management is not available to OAuth-token callers");
+    }
+
+    // Connected tools (bots) — creating one mints an API key for it, and
+    // disconnect/delete revoke *other* agents' credentials. Same class of
+    // authority as the key routes above.
+    if path == "/api/auth/bots" || path.starts_with("/api/auth/bots/") {
+        return Some("connected-tool management is not available to OAuth-token callers");
+    }
+
+    // Password change and "sign every session out". A tool token acts for a
+    // bot; rewriting the human's login credential, or logging them out
+    // everywhere, is not within its remit.
+    if path == "/api/auth/me/password" || path == "/api/auth/me/sessions" {
+        return Some("account credential changes are not available to OAuth-token callers");
+    }
+
+    // Profile mutation on the caller's own account. `GET /api/auth/me` stays
+    // open — reading who you are is not an account change.
+    if path == "/api/auth/me" && method != Method::GET {
+        return Some("account changes are not available to OAuth-token callers");
+    }
+
+    // User administration — create an account, grant/revoke instance admin,
+    // deactivate/reactivate. `GET /api/users` stays open: the roster read is
+    // a plain read that drives assignee pick-lists.
+    if (path == "/api/users" && method != Method::GET) || path.starts_with("/api/users/") {
+        return Some("user administration is not available to OAuth-token callers");
+    }
+
+    // OAuth client and token administration. These live in a router merged
+    // OUTSIDE this middleware today (`oauth::router` in src/server.rs), so
+    // nothing reaches here; the rule is here so moving them behind auth later
+    // cannot hand a token authority over the flow that issued it.
+    if path == "/oauth" || path.starts_with("/oauth/") {
+        return Some("OAuth client and token administration is not available to OAuth-token callers");
+    }
+
+    None
+}
+
 /// LIFIC-8: resolve the caller's identity and stamp it into the request
 /// extension *alongside* the legacy `Option<AuthUser>`. Best-effort by design
 /// during the expand step — a resolve failure (DB fault, read-lock poisoning)
 /// is logged and degrades to `None` so auth itself never breaks. LIFIC-10
 /// will make the downstream gates read this; until then nothing consumes it.
 ///
+/// LIF-403: also inserts the [`CredentialKind`] marker, so every success
+/// branch of `require_api_key` stamps the credential kind through this one
+/// call and a new branch cannot forget it.
+///
 /// `default` is the transport the credential-type implies when the request
 /// is NOT aimed at `/mcp` (session → web, key/oauth → api).
-fn insert_resolved_identity(
+fn insert_identity_extensions(
     request: &mut Request<Body>,
     db: &DbPool,
     credential_user: Option<crate::db::models::AuthUser>,
     is_mcp_request: bool,
     default: crate::actor::Transport,
+    kind: CredentialKind,
 ) {
     let transport = if is_mcp_request {
         crate::actor::Transport::Mcp
@@ -292,6 +383,7 @@ fn insert_resolved_identity(
         }
     };
     request.extensions_mut().insert(resolved);
+    request.extensions_mut().insert(kind);
 }
 
 /// Axum middleware that validates Bearer tokens and resolves user identity.
@@ -299,6 +391,11 @@ fn insert_resolved_identity(
 /// After successful auth, inserts `Extension<Option<AuthUser>>` into the request:
 /// - `Some(user)` if the token resolves to a user (session, or API key with user_id)
 /// - `None` if the token is valid but has no user association (legacy keys, OAuth)
+///
+/// It also inserts `Extension<CredentialKind>` (LIF-403) so downstream code
+/// can tell *how* the caller authenticated, and refuses an OAuth token that
+/// is aimed at a credential-management or account-administration route (see
+/// [`oauth_blocked_reason`]) with a 403.
 pub async fn require_api_key(
     State(auth): State<AuthState>,
     mut request: Request<Body>,
@@ -377,12 +474,13 @@ pub async fn require_api_key(
                     user_id: Some(auth_user.id),
                     transport: crate::actor::Transport::Web,
                 };
-                insert_resolved_identity(
+                insert_identity_extensions(
                     &mut request,
                     &auth.db,
                     Some(auth_user.clone()),
                     false,
                     crate::actor::Transport::Web,
+                    CredentialKind::Session,
                 );
                 request.extensions_mut().insert(Some(auth_user));
                 return crate::actor::scope(actor, next.run(request)).await;
@@ -409,7 +507,14 @@ pub async fn require_api_key(
             // LIFIC-8: resolve the passwordless identity (first-admin
             // fallback). resolve_caller handles the operator bypass — no
             // separate carrier needed (LIFIC-14 deleted the last of them).
-            insert_resolved_identity(&mut request, &auth.db, None, is_mcp_request, default);
+            insert_identity_extensions(
+                &mut request,
+                &auth.db,
+                None,
+                is_mcp_request,
+                default,
+                CredentialKind::Anonymous,
+            );
             request
                 .extensions_mut()
                 .insert(Option::<crate::db::models::AuthUser>::None);
@@ -460,12 +565,13 @@ pub async fn require_api_key(
                         crate::actor::Transport::Web
                     },
                 };
-                insert_resolved_identity(
+                insert_identity_extensions(
                     &mut request,
                     &auth.db,
                     Some(auth_user.clone()),
                     is_mcp_request,
                     crate::actor::Transport::Web,
+                    CredentialKind::Session,
                 );
                 request.extensions_mut().insert(Some(auth_user));
                 return crate::actor::scope(actor, next.run(request)).await;
@@ -531,6 +637,25 @@ pub async fn require_api_key(
                     }
                 }
             };
+            // LIF-403: the credential authenticates, but it may not be
+            // pointed at credential management or account administration.
+            // Enforced here, in the middleware, rather than in the handlers:
+            // one list next to the credential check beats a gate per route
+            // that a new route can be added without.
+            if let Some(reason) = oauth_blocked_reason(request.method(), request.uri().path()) {
+                warn!(
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                    "OAuth token refused on a credential-management route"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{reason}. Authenticate with a session or API key for this endpoint."
+                    ),
+                )
+                    .into_response();
+            }
             // LIF-155: OAuth tokens are programmatic access — 'mcp' when
             // aimed at /mcp (the normal case), 'api' against REST.
             let actor = crate::actor::ActorCtx {
@@ -541,12 +666,13 @@ pub async fn require_api_key(
                     crate::actor::Transport::Api
                 },
             };
-            insert_resolved_identity(
+            insert_identity_extensions(
                 &mut request,
                 &auth.db,
                 auth_user.clone(),
                 is_mcp_request,
                 crate::actor::Transport::Api,
+                CredentialKind::Oauth,
             );
             request.extensions_mut().insert(auth_user);
             return crate::actor::scope(actor, next.run(request)).await;
@@ -611,12 +737,13 @@ pub async fn require_api_key(
             crate::actor::Transport::Api
         },
     };
-    insert_resolved_identity(
+    insert_identity_extensions(
         &mut request,
         &auth.db,
         auth_user.clone(),
         is_mcp_request,
         crate::actor::Transport::Api,
+        CredentialKind::ApiKey,
     );
     request.extensions_mut().insert(auth_user);
     crate::actor::scope(actor, next.run(request)).await
@@ -2354,5 +2481,317 @@ mod tests {
         let resolved = resolve_stdio_token(&pool, &manager).unwrap();
         unsafe { std::env::remove_var("LIFIC_TOKEN") };
         assert_eq!(resolved.unwrap().id, uid);
+    }
+
+    // ── LIF-403: OAuth tokens are barred from credential management ────────
+    //
+    // An OAuth token stays a first-class REST credential (parity with what it
+    // can do through MCP), but it may not touch the routes that mint, list or
+    // revoke credentials, nor account/user administration. Enforcement lives
+    // in this middleware, so these drive the REAL `api::router` behind the
+    // REAL `require_api_key` — the escalation being closed (POST
+    // /api/auth/keys minting a permanent key from an expiring token) is only
+    // meaningful against the actual route.
+
+    /// `api::router` with the extensions `server.rs` supplies, behind the
+    /// real auth middleware.
+    fn real_api_app(pool: &db::DbPool) -> Router {
+        let state = test_auth_state(pool);
+        let manager = std::sync::Arc::new(state.manager.clone());
+        crate::api::router(pool.clone(), &[])
+            .layer(Extension(manager))
+            .layer(Extension(crate::realtime::RealtimeHub::new()))
+            .layer(Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
+            .layer(middleware::from_fn_with_state(state, require_api_key))
+    }
+
+    async fn send(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        token: &str,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        let body = match body {
+            Some(json) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(&json).unwrap())
+            }
+            None => Body::empty(),
+        };
+        let resp = app.oneshot(builder.body(body).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn seed_user(pool: &db::DbPool, username: &str) -> i64 {
+        let conn = pool.write().unwrap();
+        crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: username.into(),
+                email: format!("{username}@test.local"),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    // THE test: the LIF-403 escalation. An expiring, revocable OAuth token
+    // must not be able to trade itself for a permanent API key.
+    #[tokio::test]
+    async fn oauth_token_cannot_mint_an_api_key() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "toolowner");
+        let token = insert_oauth_token(&pool, "mint", Some(uid));
+
+        let (status, body) = send(
+            real_api_app(&pool),
+            "POST",
+            "/api/auth/keys",
+            Some(serde_json::json!({ "name": "stolen" })),
+            &token,
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an OAuth token must not reach the key-mint route: {body}"
+        );
+        assert!(
+            body.contains("API key management"),
+            "the 403 must say why: {body}"
+        );
+        assert!(
+            list_api_keys(&pool).unwrap().is_empty(),
+            "no key may have been created"
+        );
+    }
+
+    // The rest of the credential-management and account-administration
+    // surface, through the real router.
+    #[tokio::test]
+    async fn oauth_token_is_refused_on_every_credential_management_route() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "toolowner2");
+        let token = insert_oauth_token(&pool, "surface", Some(uid));
+
+        let cases: [(&str, &str, Option<serde_json::Value>); 9] = [
+            ("GET", "/api/auth/keys", None),
+            ("DELETE", "/api/auth/keys/1", None),
+            ("GET", "/api/auth/bots", None),
+            ("POST", "/api/auth/bots", Some(serde_json::json!({}))),
+            ("POST", "/api/auth/bots/1/disconnect", None),
+            ("DELETE", "/api/auth/bots/1", None),
+            (
+                "POST",
+                "/api/auth/me/password",
+                Some(serde_json::json!({})),
+            ),
+            ("DELETE", "/api/auth/me/sessions", None),
+            ("POST", "/api/users/1/promote", None),
+        ];
+
+        for (method, uri, body) in cases {
+            let (status, resp) = send(real_api_app(&pool), method, uri, body, &token).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{method} {uri} must be closed to an OAuth token: {resp}"
+            );
+        }
+    }
+
+    // The other half of the design decision: OAuth tokens keep working on
+    // ordinary REST routes. A regression here would be a functional break for
+    // every connector that reads through REST.
+    #[tokio::test]
+    async fn oauth_token_still_works_on_ordinary_rest_routes() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "reader");
+        let token = insert_oauth_token(&pool, "reads", Some(uid));
+
+        for uri in ["/api/projects", "/api/issues", "/api/users", "/api/auth/me"] {
+            let (status, body) = send(real_api_app(&pool), "GET", uri, None, &token).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "GET {uri} must stay open to an OAuth token: {body}"
+            );
+        }
+    }
+
+    // Only the OAuth credential kind is affected: an API key on the same
+    // route still mints.
+    #[tokio::test]
+    async fn api_key_credential_can_still_mint_a_key() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "keyholder");
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "existing", Some(uid)).unwrap();
+
+        let (status, body) = send(
+            real_api_app(&pool),
+            "POST",
+            "/api/auth/keys",
+            Some(serde_json::json!({ "name": "fresh" })),
+            &key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "API key path unaffected: {body}");
+        assert!(body.contains("lific_sk"), "a key was returned: {body}");
+    }
+
+    #[tokio::test]
+    async fn session_credential_can_still_mint_a_key() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "browseruser");
+        let session = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::create_session(&conn, uid, None)
+                .unwrap()
+                .token
+        };
+
+        let (status, body) = send(
+            real_api_app(&pool),
+            "POST",
+            "/api/auth/keys",
+            Some(serde_json::json!({ "name": "from-browser" })),
+            &session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "session path unaffected: {body}");
+        assert!(body.contains("lific_sk"), "a key was returned: {body}");
+    }
+
+    // /mcp is untouched: the deny-list is a REST-route list, and the MCP
+    // endpoint is what OAuth tokens exist for.
+    #[tokio::test]
+    async fn mcp_endpoint_is_unaffected_by_the_oauth_deny_list() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "mcpbot");
+        let token = insert_oauth_token(&pool, "mcp", Some(uid));
+
+        let app = Router::new()
+            .route("/mcp", axum::routing::post(|| async { "mcp-ok" }))
+            .layer(middleware::from_fn_with_state(
+                test_auth_state(&pool),
+                require_api_key,
+            ));
+
+        let (status, body) = send(app, "POST", "/mcp", None, &token).await;
+        assert_eq!(status, StatusCode::OK, "/mcp must still accept the token");
+        assert_eq!(body, "mcp-ok");
+    }
+
+    // The audit transport (`ActorCtx`) and the resolved identity's transport
+    // must agree for an OAuth token, on both doors. They are computed in two
+    // places — the `ActorCtx` literal in the OAuth branch, and
+    // `insert_identity_extensions`, which applies the same `/mcp` conditional
+    // to the `default` it is handed — so this pins them together.
+    #[tokio::test]
+    async fn oauth_transport_matches_between_actor_and_resolved_identity() {
+        let pool = test_db();
+        let uid = seed_user(&pool, "transportuser");
+        let token = insert_oauth_token(&pool, "transport", Some(uid));
+
+        async fn probe(
+            Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+        ) -> String {
+            let actor = crate::actor::current();
+            format!(
+                "{}|{}",
+                actor.transport.as_str(),
+                identity
+                    .map(|i| i.transport.as_str().to_string())
+                    .unwrap_or_else(|| "none".into())
+            )
+        }
+
+        for (uri, expected) in [("/mcp", "mcp|mcp"), ("/echo", "api|api")] {
+            let app = Router::new()
+                .route("/mcp", axum::routing::post(probe))
+                .route("/echo", axum::routing::post(probe))
+                .layer(middleware::from_fn_with_state(
+                    test_auth_state(&pool),
+                    require_api_key,
+                ));
+            let (status, body) = send(app, "POST", uri, None, &token).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                body, expected,
+                "{uri}: audit transport and resolved-identity transport must agree"
+            );
+        }
+    }
+
+    // ── The deny-list itself ───────────────────────────────────────────────
+
+    #[test]
+    fn oauth_blocked_reason_covers_the_credential_surface() {
+        for (method, path) in [
+            (Method::GET, "/api/auth/keys"),
+            (Method::POST, "/api/auth/keys"),
+            (Method::POST, "/api/auth/keys/"),
+            (Method::DELETE, "/api/auth/keys/42"),
+            (Method::GET, "/api/auth/bots"),
+            (Method::POST, "/api/auth/bots"),
+            (Method::POST, "/api/auth/bots/7/disconnect"),
+            (Method::DELETE, "/api/auth/bots/7"),
+            (Method::POST, "/api/auth/me/password"),
+            (Method::DELETE, "/api/auth/me/sessions"),
+            (Method::PATCH, "/api/auth/me"),
+            (Method::POST, "/api/users"),
+            (Method::POST, "/api/users/3/promote"),
+            (Method::POST, "/api/users/3/demote"),
+            (Method::POST, "/api/users/3/deactivate"),
+            (Method::POST, "/api/users/3/reactivate"),
+            (Method::POST, "/oauth/token"),
+            (Method::POST, "/oauth/register"),
+        ] {
+            assert!(
+                oauth_blocked_reason(&method, path).is_some(),
+                "{method} {path} must be closed to OAuth tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_blocked_reason_leaves_ordinary_routes_open() {
+        for (method, path) in [
+            (Method::GET, "/api/auth/me"),
+            (Method::GET, "/api/users"),
+            (Method::GET, "/api/projects"),
+            (Method::POST, "/api/projects"),
+            (Method::POST, "/api/issues"),
+            (Method::PUT, "/api/issues/5"),
+            (Method::GET, "/api/search"),
+            (Method::POST, "/mcp"),
+            (Method::GET, "/api/health"),
+            // Near-misses that must not be caught by the prefix rules.
+            (Method::GET, "/api/auth/keysomething"),
+            (Method::GET, "/api/usersomething"),
+        ] {
+            assert_eq!(
+                oauth_blocked_reason(&method, path),
+                None,
+                "{method} {path} must stay open to OAuth tokens"
+            );
+        }
     }
 }

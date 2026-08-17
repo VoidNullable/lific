@@ -286,7 +286,13 @@ async fn authorization_server_metadata(
             "authorization_code",
             "urn:ietf:params:oauth:grant-type:device_code"
         ],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        // LIF-415: `none` only. Lific issues no client secrets (registration
+        // returns a client_id and nothing else) and the token endpoint never
+        // looks for one, so advertising `client_secret_post` described an
+        // authentication method that does not exist here. A client that took
+        // the metadata at its word and sent a secret would have it silently
+        // ignored, which reads as "authenticated" when it isn't.
+        "token_endpoint_auth_methods_supported": ["none"],
         "code_challenge_methods_supported": ["S256"]
     }))
 }
@@ -297,8 +303,10 @@ async fn authorization_server_metadata(
 struct RegisterRequest {
     redirect_uris: Vec<String>,
     client_name: Option<String>,
-    #[serde(default)]
-    token_endpoint_auth_method: Option<String>,
+    // LIF-415: a submitted `token_endpoint_auth_method` is deliberately not
+    // captured. Unknown fields are ignored by serde, and the registration
+    // response always reports `none` because that is the only method this
+    // server implements.
     #[serde(default)]
     grant_types: Option<Vec<String>>,
     #[serde(default)]
@@ -385,7 +393,11 @@ async fn register_client(
             "client_id": client_id,
             "client_name": client_name,
             "redirect_uris": req.redirect_uris,
-            "token_endpoint_auth_method": req.token_endpoint_auth_method.unwrap_or_else(|| "none".into()),
+            // LIF-415: RFC 7591 §3.2.1 — the response states the metadata the
+            // server actually registered, not the client's wish. Every client
+            // here is public: no secret is issued, so echoing back a requested
+            // `client_secret_post` would claim a registration we did not make.
+            "token_endpoint_auth_method": "none",
             "grant_types": req.grant_types.unwrap_or_else(|| vec!["authorization_code".into()]),
             "response_types": req.response_types.unwrap_or_else(|| vec!["code".into()])
         })),
@@ -2229,6 +2241,74 @@ mod tests {
         assert!(
             !grants.iter().any(|g| g == "refresh_token"),
             "client registration should not default to refresh_token"
+        );
+    }
+
+    // ── LIF-415: only public-client auth is advertised ──────────
+    //
+    // No client secret is ever issued (registration returns a client_id and
+    // nothing else) and `token_exchange` never looks for one, so advertising
+    // `client_secret_post` promised an authentication method that does not
+    // exist. A client that sent a secret would have it silently ignored.
+
+    #[tokio::test]
+    async fn metadata_advertises_only_public_client_auth() {
+        let (app, _) = test_oauth_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let methods = val["token_endpoint_auth_methods_supported"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            methods,
+            &vec![serde_json::Value::from("none")],
+            "only `none` is implemented, so only `none` may be advertised"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_reports_none_auth_method_even_when_a_secret_is_requested() {
+        let (app, _) = test_oauth_app();
+        let body = serde_json::json!({
+            "redirect_uris": ["http://localhost/callback"],
+            "client_name": "Test",
+            "token_endpoint_auth_method": "client_secret_post"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            val["token_endpoint_auth_method"], "none",
+            "the response states what was registered, not what was asked for"
+        );
+        assert!(
+            val.get("client_secret").is_none(),
+            "no client secret is ever issued"
         );
     }
 
