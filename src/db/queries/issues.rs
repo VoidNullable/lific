@@ -664,6 +664,52 @@ pub fn link_issues(
     Ok(())
 }
 
+/// LIF-413: swap the direction of every relation pointing from `source_id`
+/// to `target_id`, in one savepoint. The dependency graph used to reverse an
+/// edge with an unlink call followed by a link call; when the second request
+/// failed the relation was gone for good. Doing both statements here means a
+/// failure anywhere rolls back to the original edge.
+///
+/// Only the directed pair is touched: a relation that already runs
+/// `target -> source` is not a match, so reversing something that isn't there
+/// is a `NotFound` rather than a silent create. The reversed insert is
+/// `OR IGNORE` because the opposite edge may already exist for that type, in
+/// which case the reversal collapses into the existing one.
+///
+/// Returns the relation types that were reversed.
+pub fn reverse_relation(
+    conn: &Connection,
+    source_id: i64,
+    target_id: i64,
+) -> Result<Vec<String>, LificError> {
+    super::savepoint(conn, "reverse_relation", || {
+        let types: Vec<String> = conn
+            .prepare_cached(
+                "SELECT relation_type FROM issue_relations
+                 WHERE source_id = ?1 AND target_id = ?2",
+            )?
+            .query_map(params![source_id, target_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if types.is_empty() {
+            return Err(LificError::NotFound(format!(
+                "no relation from issue {source_id} to issue {target_id}"
+            )));
+        }
+        conn.execute(
+            "DELETE FROM issue_relations WHERE source_id = ?1 AND target_id = ?2",
+            params![source_id, target_id],
+        )?;
+        for relation_type in &types {
+            conn.execute(
+                "INSERT OR IGNORE INTO issue_relations (source_id, target_id, relation_type)
+                 VALUES (?1, ?2, ?3)",
+                params![target_id, source_id, relation_type],
+            )?;
+        }
+        Ok(types)
+    })
+}
+
 pub fn unlink_issues(conn: &Connection, source_id: i64, target_id: i64) -> Result<(), LificError> {
     conn.execute(
         "DELETE FROM issue_relations

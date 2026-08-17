@@ -150,6 +150,12 @@ pub(super) struct UnlinkRequest {
     target: String,
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct ReverseRequest {
+    source: String,
+    target: String,
+}
+
 pub(super) async fn link_issues(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
@@ -212,6 +218,50 @@ pub(super) async fn unlink_issues(
         issue_id: target.id,
     });
     Ok(Json(serde_json::json!({"unlinked": true})))
+}
+
+/// LIF-413: flip an existing relation's direction in a single write.
+///
+/// The dependency graph did this client-side as unlink-then-link, so a failed
+/// second call destroyed the relation outright. The swap now happens in one
+/// savepoint: on any failure the original edge is still there. Gating matches
+/// link/unlink (Maintainer on both endpoints' projects) and the emitted
+/// events are exactly what the old two-call sequence produced, so every
+/// listener invalidates the same way.
+pub(super) async fn reverse_relation(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Json(input): Json<ReverseRequest>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    let (source, target) = with_read(&db, |conn| {
+        let source_id = crate::db::queries::resolve_identifier(conn, &input.source)?;
+        let target_id = crate::db::queries::resolve_identifier(conn, &input.target)?;
+        Ok((
+            crate::db::queries::get_issue(conn, source_id)?,
+            crate::db::queries::get_issue(conn, target_id)?,
+        ))
+    })?;
+    authz::require_role(&db, &identity, source.project_id, Role::Maintainer)?;
+    authz::require_role(&db, &identity, target.project_id, Role::Maintainer)?;
+
+    with_write(&db, |conn| {
+        crate::db::queries::reverse_relation(conn, source.id, target.id)
+    })?;
+    for (project_id, issue_id) in [
+        (source.project_id, source.id),
+        (target.project_id, target.id),
+    ] {
+        realtime.send(RealtimeEvent::IssueUnlinked {
+            project_id,
+            issue_id,
+        });
+        realtime.send(RealtimeEvent::IssueLinked {
+            project_id,
+            issue_id,
+        });
+    }
+    Ok(Json(serde_json::json!({"reversed": true})))
 }
 
 #[cfg(test)]
@@ -444,6 +494,144 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let edges: serde_json::Value = parse_json(resp).await;
         assert_eq!(edges.as_array().unwrap().len(), 0);
+    }
+
+    /// LIF-413: reversing an edge swaps its direction and keeps its type,
+    /// leaving exactly one relation behind (not two, and not zero).
+    #[tokio::test]
+    async fn reverse_relation_swaps_direction() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for title in ["A", "B"] {
+            let resp = json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": title}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = json_post(
+            &app,
+            "/api/issues/link",
+            serde_json::json!({"source": "TST-1", "target": "TST-2", "relation_type": "blocks"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = json_post(
+            &app,
+            "/api/issues/reverse",
+            serde_json::json!({"source": "TST-1", "target": "TST-2"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = parse_json(resp).await;
+        assert_eq!(body["reversed"], true);
+
+        let edges: serde_json::Value =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+        let edges = edges.as_array().unwrap();
+        assert_eq!(edges.len(), 1, "reversal must not duplicate the edge");
+        assert_eq!(edges[0]["source_identifier"], "TST-2");
+        assert_eq!(edges[0]["target_identifier"], "TST-1");
+        assert_eq!(edges[0]["relation_type"], "blocks");
+    }
+
+    /// The gate matches link/unlink: Maintainer on both endpoints' projects.
+    /// A Viewer is refused, and the edge is untouched.
+    #[tokio::test]
+    async fn reverse_relation_denied_for_viewer() {
+        let (db, _admin, lead, _maintainer, viewer, _non_member, project_id) =
+            setup_membership_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        for title in ["A", "B"] {
+            let resp = json_post(
+                &lead_app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": title}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = json_post(
+            &lead_app,
+            "/api/issues/link",
+            serde_json::json!({"source": "MEM-1", "target": "MEM-2", "relation_type": "blocks"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        let resp = json_post(
+            &viewer_app,
+            "/api/issues/reverse",
+            serde_json::json!({"source": "MEM-1", "target": "MEM-2"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let edges: serde_json::Value = parse_json(
+            json_get(&lead_app, &format!("/api/projects/{project_id}/relations")).await,
+        )
+        .await;
+        let edges = edges.as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["source_identifier"], "MEM-1");
+        assert_eq!(edges[0]["target_identifier"], "MEM-2");
+    }
+
+    /// Reversing a pair with no edge from source to target is a 404, and it
+    /// must not conjure the reversed relation into existence.
+    #[tokio::test]
+    async fn reverse_missing_relation_404s_and_creates_nothing() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for title in ["A", "B"] {
+            let resp = json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({"project_id": project_id, "title": title}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let resp = json_post(
+            &app,
+            "/api/issues/reverse",
+            serde_json::json!({"source": "TST-1", "target": "TST-2"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let edges: serde_json::Value =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+        assert_eq!(edges.as_array().unwrap().len(), 0);
+
+        // An edge running the other way is not a match either: reversing
+        // TST-1 -> TST-2 when only TST-2 -> TST-1 exists is still a 404, and
+        // leaves that edge as it was.
+        let resp = json_post(
+            &app,
+            "/api/issues/link",
+            serde_json::json!({"source": "TST-2", "target": "TST-1", "relation_type": "blocks"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = json_post(
+            &app,
+            "/api/issues/reverse",
+            serde_json::json!({"source": "TST-1", "target": "TST-2"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let edges: serde_json::Value =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+        let edges = edges.as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["source_identifier"], "TST-2");
+        assert_eq!(edges[0]["target_identifier"], "TST-1");
     }
 
     /// LIF-385: `status` and `priority` are enums, so a value outside the set

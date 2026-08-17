@@ -731,6 +731,17 @@ export async function unlinkIssues(source: string, target: string) {
   });
 }
 
+/** Flip an existing relation so it runs target→source instead (LIF-413).
+ *  One server-side write: unlink-then-link from the client could lose the
+ *  relation entirely if the second call failed. 404s when no relation runs
+ *  source→target, and leaves the data untouched on any failure. */
+export async function reverseRelation(source: string, target: string) {
+  return request<{ reversed: boolean }>("/issues/reverse", {
+    method: "POST",
+    body: JSON.stringify({ source, target }),
+  });
+}
+
 // ── Modules ─────────────────────────────────────────────────
 
 export interface Module {

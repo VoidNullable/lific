@@ -692,9 +692,17 @@
     if (res.ok) navigate(`/${projectIdentifier}/pages/${res.data.id}`);
   }
 
+  // LIF-413: the local tree only moves once the server has agreed. This used
+  // to drop the folder and reparent its pages regardless of the response, so
+  // a failed delete left the sidebar showing a folder that still existed.
   async function handleDeleteFolder(id: number, e: Event) {
     e.stopPropagation();
-    await deleteFolder(id);
+    const name = folders.find((f) => f.id === id)?.name ?? "folder";
+    const res = await deleteFolder(id);
+    if (!res.ok) {
+      toast(`Couldn't delete ${name}: ${res.error}`, { kind: "error" });
+      return;
+    }
     folders = folders.filter((f) => f.id !== id && f.parent_id !== id);
     pages = pages.map((p) => p.folder_id === id ? { ...p, folder_id: null } : p);
   }

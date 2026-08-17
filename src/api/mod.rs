@@ -164,6 +164,8 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))
         .route("/api/issues/unlink", post(issues::unlink_issues))
+        // Atomic direction swap for an existing edge (LIF-413)
+        .route("/api/issues/reverse", post(issues::reverse_relation))
         // Project-wide relation edges (dependency graph — LIF-363)
         .route(
             "/api/projects/{id}/relations",

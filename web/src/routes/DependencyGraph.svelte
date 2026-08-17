@@ -27,6 +27,7 @@
     listProjectRelations,
     linkIssues,
     unlinkIssues,
+    reverseRelation as reverseRelationRequest,
     type Project,
     type Issue,
     type ProjectRelation,
@@ -300,24 +301,18 @@
     toast(`Removed the link between ${r.source_identifier} and ${r.target_identifier}.`, { kind: "success" });
   }
 
+  // LIF-413: one server-side call. This used to unlink and then link the
+  // other way around, so a failed second request deleted the relation for
+  // good. The server swaps the direction in a single write now, and a
+  // failure leaves the original edge alone.
   async function reverseRelation(r: ProjectRelation) {
     busy = true;
-    const un = await unlinkIssues(r.source_identifier, r.target_identifier);
-    if (!un.ok) {
-      busy = false;
-      menu = null;
-      toast(un.error, { kind: "error" });
-      return;
-    }
-    const re = await linkIssues(
-      r.target_identifier,
-      r.source_identifier,
-      r.relation_type as RelationType,
-    );
+    const res = await reverseRelationRequest(r.source_identifier, r.target_identifier);
     busy = false;
     menu = null;
-    if (!re.ok) {
-      toast(re.error, { kind: "error" });
+    if (!res.ok) {
+      toast(res.error, { kind: "error" });
+      return;
     }
     await reloadData();
     revision++;

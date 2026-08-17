@@ -336,6 +336,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("GET", "/api/issues/resolve/{identifier}"), Gated(Viewer)),
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),
+        (("POST", "/api/issues/reverse"), Gated(Maintainer)),
         // ── Activity / export (all read-side, Viewer) ──
         (("GET", "/api/issues/{id}/activity"), Gated(Viewer)),
         (("GET", "/api/pages/{id}/activity"), Gated(Viewer)),
