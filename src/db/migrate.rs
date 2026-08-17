@@ -196,6 +196,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "user active flag",
         include_str!("../../migrations/040_user_active.sql"),
     ),
+    (
+        41,
+        "attachment metadata",
+        include_str!("../../migrations/041_attachment_metadata.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

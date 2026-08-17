@@ -1146,6 +1146,24 @@ pub struct Attachment {
     pub size_bytes: i64,
     pub uploader_id: Option<i64>,
     pub created_at: String,
+    /// LIF-418: decoded pixel dimensions for raster images (png/jpeg/gif/webp),
+    /// recorded at upload. `None` for every other type, and for rasters that
+    /// predate migration 041.
+    #[serde(default)]
+    pub width: Option<i64>,
+    #[serde(default)]
+    pub height: Option<i64>,
+    /// LIF-418: accessibility description, set through `PATCH
+    /// /api/attachments/{id}`. `None` means undescribed.
+    #[serde(default)]
+    pub alt_text: Option<String>,
+    /// LIF-418: whether `GET /api/attachments/{id}/thumbnail` will serve
+    /// something. Derived from the mime + dimensions rather than stored, and
+    /// never read back from JSON: a thumbnail exists for any raster image
+    /// whose long edge exceeds the thumbnail edge, whether or not the file has
+    /// been generated yet (the endpoint generates lazily on first request).
+    #[serde(default, skip_deserializing)]
+    pub has_thumbnail: bool,
 }
 
 /// The kind of entity an attachment is linked to. Mirrors the

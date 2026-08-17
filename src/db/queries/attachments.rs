@@ -29,27 +29,99 @@ pub fn create_attachment(
     get_attachment(conn, conn.last_insert_rowid())
 }
 
+/// The column list every attachment read shares, in the order
+/// [`row_to_attachment`] expects. Kept in one place so adding a column is a
+/// single edit rather than a hunt through four query strings.
+const ATTACHMENT_COLUMNS: &str =
+    "id, sha256, filename, mime, size_bytes, uploader_id, created_at, width, height, alt_text";
+
 /// Fetch one attachment by id. `NotFound` when it doesn't exist.
 pub fn get_attachment(conn: &Connection, id: i64) -> Result<Attachment, LificError> {
-    conn.prepare_cached(
-        "SELECT id, sha256, filename, mime, size_bytes, uploader_id, created_at
-         FROM attachments WHERE id = ?1",
-    )?
+    conn.prepare_cached(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM attachments WHERE id = ?1"
+    ))?
     .query_row(params![id], row_to_attachment)
     .optional()?
     .ok_or_else(|| LificError::NotFound(format!("attachment {id} not found")))
 }
 
 fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<Attachment> {
+    let mime: String = row.get(3)?;
+    let width: Option<i64> = row.get(7)?;
+    let height: Option<i64> = row.get(8)?;
     Ok(Attachment {
         id: row.get(0)?,
         sha256: row.get(1)?,
         filename: row.get(2)?,
-        mime: row.get(3)?,
+        has_thumbnail: crate::storage::expects_thumbnail(&mime, width, height),
+        mime,
         size_bytes: row.get(4)?,
         uploader_id: row.get(5)?,
         created_at: row.get(6)?,
+        width,
+        height,
+        alt_text: row.get(9)?,
     })
+}
+
+/// Record the decoded pixel dimensions of a raster upload (LIF-418). Called
+/// immediately after `create_attachment`, inside the same write transaction,
+/// once the bytes have been decoded.
+pub fn set_dimensions(
+    conn: &Connection,
+    id: i64,
+    width: i64,
+    height: i64,
+) -> Result<(), LificError> {
+    conn.execute(
+        "UPDATE attachments SET width = ?2, height = ?3 WHERE id = ?1",
+        params![id, width, height],
+    )?;
+    Ok(())
+}
+
+/// Set (or clear, with `None`) an attachment's accessibility description and
+/// return the updated row.
+pub fn update_alt_text(
+    conn: &Connection,
+    id: i64,
+    alt_text: Option<&str>,
+) -> Result<Attachment, LificError> {
+    let changed = conn.execute(
+        "UPDATE attachments SET alt_text = ?2 WHERE id = ?1",
+        params![id, alt_text],
+    )?;
+    if changed == 0 {
+        return Err(LificError::NotFound(format!("attachment {id} not found")));
+    }
+    get_attachment(conn, id)
+}
+
+/// Every OTHER attachment row pointing at the same bytes. Uploading the same
+/// screenshot into two projects produces two rows over one blob, and this is
+/// how `GET /api/attachments/{id}/links` finds the twin so a caller can see
+/// the file is already in the tracker before uploading a third copy.
+pub fn duplicates_of(conn: &Connection, id: i64, sha256: &str) -> Result<Vec<Attachment>, LificError> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM attachments
+         WHERE sha256 = ?1 AND id != ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![sha256, id], row_to_attachment)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// The raw `(entity_type, entity_id)` link rows for one attachment, in a
+/// stable order.
+pub fn links_for_attachment(
+    conn: &Connection,
+    attachment_id: i64,
+) -> Result<Vec<(String, i64)>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entity_type, entity_id FROM attachment_links
+         WHERE attachment_id = ?1 ORDER BY entity_type, entity_id",
+    )?;
+    let rows = stmt.query_map(params![attachment_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Delete an attachment row by id. Its `attachment_links` rows cascade via the
@@ -112,13 +184,18 @@ pub fn list_for_entity(
     entity: AttachmentEntity,
     entity_id: i64,
 ) -> Result<Vec<Attachment>, LificError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT a.id, a.sha256, a.filename, a.mime, a.size_bytes, a.uploader_id, a.created_at
+    let columns = ATTACHMENT_COLUMNS
+        .split(", ")
+        .map(|c| format!("a.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {columns}
          FROM attachments a
          JOIN attachment_links l ON l.attachment_id = a.id
          WHERE l.entity_type = ?1 AND l.entity_id = ?2
-         ORDER BY l.created_at, a.id",
-    )?;
+         ORDER BY l.created_at, a.id"
+    ))?;
     let rows = stmt.query_map(params![entity.as_str(), entity_id], row_to_attachment)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -571,6 +648,82 @@ mod tests {
                   and bare /api/attachments/12 again and /api/attachments/99";
         let ids = parse_referenced_ids(md);
         assert_eq!(ids, vec![12, 7, 99]); // distinct, in first-seen order
+    }
+
+    // ── LIF-418 metadata ─────────────────────────────────────
+
+    #[test]
+    fn dimensions_drive_the_derived_thumbnail_flag() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let att = create_attachment(&conn, "dim", "big.png", "image/png", 1, None).unwrap();
+        assert_eq!(att.width, None);
+        assert!(
+            !att.has_thumbnail,
+            "an image with no recorded size offers no thumbnail"
+        );
+
+        set_dimensions(&conn, att.id, 1600, 900).unwrap();
+        let att = get_attachment(&conn, att.id).unwrap();
+        assert_eq!((att.width, att.height), (Some(1600), Some(900)));
+        assert!(att.has_thumbnail);
+
+        // A raster that already fits the thumbnail box needs none.
+        let small = create_attachment(&conn, "small", "s.png", "image/png", 1, None).unwrap();
+        set_dimensions(&conn, small.id, 100, 100).unwrap();
+        assert!(!get_attachment(&conn, small.id).unwrap().has_thumbnail);
+
+        // Nor does a non-raster, whatever dimensions someone recorded.
+        let pdf = create_attachment(&conn, "pdf", "a.pdf", "application/pdf", 1, None).unwrap();
+        set_dimensions(&conn, pdf.id, 2000, 2000).unwrap();
+        assert!(!get_attachment(&conn, pdf.id).unwrap().has_thumbnail);
+    }
+
+    #[test]
+    fn alt_text_round_trips_and_clears() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let att = create_attachment(&conn, "alt", "a.png", "image/png", 1, None).unwrap();
+        assert_eq!(att.alt_text, None);
+
+        let updated = update_alt_text(&conn, att.id, Some("a red square")).unwrap();
+        assert_eq!(updated.alt_text.as_deref(), Some("a red square"));
+
+        let cleared = update_alt_text(&conn, att.id, None).unwrap();
+        assert_eq!(cleared.alt_text, None);
+
+        assert!(update_alt_text(&conn, 99999, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn duplicates_are_the_other_rows_over_the_same_bytes() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let a = create_attachment(&conn, "shared", "a.png", "image/png", 1, None).unwrap();
+        let b = create_attachment(&conn, "shared", "b.png", "image/png", 1, None).unwrap();
+        let other = create_attachment(&conn, "alone", "c.png", "image/png", 1, None).unwrap();
+
+        let dupes = duplicates_of(&conn, a.id, "shared").unwrap();
+        assert_eq!(dupes.len(), 1);
+        assert_eq!(dupes[0].id, b.id);
+        assert_eq!(dupes[0].filename, "b.png");
+        assert!(duplicates_of(&conn, other.id, "alone").unwrap().is_empty());
+    }
+
+    #[test]
+    fn links_for_attachment_lists_every_referencing_entity() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let issue = seed_issue(&conn);
+        let att = create_attachment(&conn, "l", "a.png", "image/png", 1, None).unwrap();
+        assert!(links_for_attachment(&conn, att.id).unwrap().is_empty());
+
+        link_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
+        link_attachment(&conn, att.id, AttachmentEntity::Comment, 7).unwrap();
+        assert_eq!(
+            links_for_attachment(&conn, att.id).unwrap(),
+            vec![("comment".to_string(), 7), ("issue".to_string(), issue)]
+        );
     }
 
     #[test]
