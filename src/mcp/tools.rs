@@ -3527,17 +3527,23 @@ impl LificMcp {
         // stdio/local sessions.
         let (user_id, is_admin) = self.resolve_comment_actor()?;
 
-        // Ownership: only the author or an admin may edit (mirrors
-        // api::comments::update_comment_handler).
         let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
-        if existing.user_id != user_id && !is_admin {
-            return Err("you can only edit your own comments".into());
-        }
-
         // LIF-263: recompute the mention set against the parent project's
         // visible members, resolving the project from the comment's parent.
         let (project_id, parent, parent_identifier) =
             self.read(|conn| resolve_comment_context(conn, &existing))?;
+        // LIF-410: authorship alone is not enough — a comment id is a global
+        // handle, so a user removed from the project could still mutate their
+        // old comments there. Require what the comment *read* path requires
+        // (Viewer, or workspace-admin for a project-less page), mirroring
+        // `api::comments::require_comment_viewer`.
+        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+
+        // Ownership: only the author or an admin may edit (mirrors
+        // api::comments::update_comment_handler).
+        if existing.user_id != user_id && !is_admin {
+            return Err("you can only edit your own comments".into());
+        }
         let member_scoped = crate::authz::authz_enforced(&self.db).map_err(|e| e.to_string())?;
 
         let c = self.write(|conn| {
@@ -3589,15 +3595,18 @@ impl LificMcp {
         // Resolve the acting user the same way add_comment does.
         let (user_id, is_admin) = self.resolve_comment_actor()?;
 
+        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
+        let (project_id, parent, parent_identifier) =
+            self.read(|conn| resolve_comment_context(conn, &existing))?;
+        // LIF-410: same current-visibility requirement as `edit_comment` —
+        // an ex-member must not be able to delete by comment id.
+        require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+
         // Ownership: only the author or an admin may delete (mirrors
         // api::comments::delete_comment_handler).
-        let existing = self.read(|conn| queries::comments::get_comment(conn, input.comment_id))?;
         if existing.user_id != user_id && !is_admin {
             return Err("you can only delete your own comments".into());
         }
-
-        let (project_id, parent, parent_identifier) =
-            self.read(|conn| resolve_comment_context(conn, &existing))?;
 
         self.write(|conn| queries::comments::delete_comment(conn, input.comment_id))?;
         if let (Some(issue_id), Some(project_id)) = (existing.issue_id, project_id) {
@@ -9974,6 +9983,78 @@ mod authz_gating_tests {
             }))
         });
         assert!(is_forbidden(&denied), "got: {denied}");
+    }
+
+    // ── LIF-410: comment mutation follows current visibility ─────
+
+    /// A comment id is a global handle, so authorship alone let a user who had
+    /// since been removed from the project keep editing and deleting their old
+    /// comments there. Both now require what the comment read path requires.
+    #[test]
+    fn removed_member_can_no_longer_edit_or_delete_their_own_comment() {
+        let (m, _admin, lead, maintainer, _viewer, _non_member, project_id, _guard) =
+            setup_membership_mcp();
+        let created = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Discussion".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let comment_id = {
+            let conn = m.db.write().unwrap();
+            let issue_id = queries::resolve_identifier(&conn, "MEM-1").unwrap();
+            queries::comments::create_comment(
+                &conn,
+                queries::comments::CommentParent::Issue(issue_id),
+                maintainer.id,
+                "mine",
+            )
+            .unwrap()
+            .id
+        };
+
+        // While still a member, the author can edit their own comment.
+        let allowed = as_user(&maintainer, || {
+            m.edit_comment(Parameters(EditCommentInput {
+                comment_id,
+                content: "still mine".into(),
+            }))
+        });
+        assert!(!is_forbidden(&allowed), "member author edit: {allowed}");
+
+        // Membership revoked.
+        {
+            let conn = m.db.write().unwrap();
+            queries::members::remove_member(&conn, project_id, maintainer.id).unwrap();
+        }
+
+        let denied_edit = as_user(&maintainer, || {
+            m.edit_comment(Parameters(EditCommentInput {
+                comment_id,
+                content: "sneaking back in".into(),
+            }))
+        });
+        assert!(is_forbidden(&denied_edit), "ex-member edit: {denied_edit}");
+
+        let denied_delete = as_user(&maintainer, || {
+            m.delete_comment(Parameters(DeleteCommentInput { comment_id }))
+        });
+        assert!(
+            is_forbidden(&denied_delete),
+            "ex-member delete: {denied_delete}"
+        );
+
+        // Neither mutation landed.
+        let content = {
+            let conn = m.db.read().unwrap();
+            queries::comments::get_comment(&conn, comment_id)
+                .unwrap()
+                .content
+        };
+        assert_eq!(content, "still mine");
     }
 
     #[test]
