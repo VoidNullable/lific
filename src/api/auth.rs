@@ -54,6 +54,35 @@ pub(super) struct SignupRequest {
     display_name: Option<String>,
 }
 
+/// Whether this instance's signup policy accepts a signup for `email`.
+///
+/// Two rules, both DB-backed and admin-editable (never TOML): signups can be
+/// closed outright, and they can be limited to an email-domain allowlist.
+/// Factored out because LIF-412's split runs it twice: once on a read
+/// connection, to reject a closed instance before paying for Argon2, and
+/// again under the writer, so the account is created against the policy that
+/// is live at that moment.
+fn signup_policy_allows(
+    settings: &crate::db::queries::settings::InstanceSettings,
+    email: &str,
+) -> Result<(), LificError> {
+    if !settings.allow_signup {
+        return Err(LificError::BadRequest(
+            "signups are closed on this instance. Ask an admin to create your account.".into(),
+        ));
+    }
+    if !settings.signup_email_domains.is_empty() {
+        let domain = email.rsplit('@').next().unwrap_or("").trim().to_lowercase();
+        if !settings.signup_email_domains.contains(&domain) {
+            return Err(LificError::BadRequest(format!(
+                "signups on this instance are limited to: {}",
+                settings.signup_email_domains.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn auth_signup(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
@@ -83,61 +112,68 @@ pub(super) async fn auth_signup(
         )));
     }
 
-    let conn = db.write()?;
-    let settings = crate::db::queries::settings::get(&conn)?;
+    // The instance's signup policy. Read on a pooled connection so a closed
+    // instance rejects the request without ever touching the writer, and
+    // re-checked under the writer below (`signup_policy_allows`) so the
+    // decision that actually creates the account is atomic with the insert.
+    let settings = with_read(&db, crate::db::queries::settings::get)?;
+    signup_policy_allows(&settings, &input.email)?;
 
-    // Signup policy is now DB-backed (admin-editable), not TOML.
-    if !settings.allow_signup {
-        return Err(LificError::BadRequest(
-            "signups are closed on this instance. Ask an admin to create your account.".into(),
-        ));
-    }
-    // Optional email-domain allowlist for self-service signup.
-    if !settings.signup_email_domains.is_empty() {
-        let domain = input
-            .email
-            .rsplit('@')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        if !settings.signup_email_domains.contains(&domain) {
-            return Err(LificError::BadRequest(format!(
-                "signups on this instance are limited to: {}",
-                settings.signup_email_domains.join(", ")
-            )));
-        }
-    }
+    let mut new_user = CreateUser {
+        username: input.username,
+        email: input.email,
+        password: input.password,
+        display_name: input.display_name,
+        // Decided under the writer below (LIF-364).
+        is_admin: false,
+        is_bot: false,
+    };
+    crate::db::queries::users::validate_new_user(&new_user)?;
 
-    // LIF-364: the first account on a zero-user instance becomes the
-    // instance admin (the standard self-hosted bootstrap: Immich, Portainer,
-    // Grafana all do this). Without it a web-signup-only instance has NO
-    // admin and no way to mint one short of `lific user promote` on the
-    // server's shell — which is how dr.leech ended up unable to see his own
-    // agents' projects under enforced authz. LIF-209's "signup never grants
-    // admin" rationale (privilege escalation by a stranger) doesn't apply to
-    // user #1 on an empty instance: whoever reaches an open-signup empty
-    // instance first owns it in every way that matters. Any pre-existing
-    // user (CLI-created included) disables the grant, and we're inside the
-    // single write connection so the count can't race a concurrent signup.
-    let is_first_user: bool = conn.query_row("SELECT COUNT(*) = 0 FROM users", [], |r| r.get(0))?;
+    // LIF-412: Argon2 is deliberately expensive, so it runs on the blocking
+    // pool with NO database lock held. Hashing while holding the exclusive
+    // writer stalled every other write in the process for the duration of
+    // each signup, and a burst of signups stalled the whole instance.
+    let password = new_user.password.clone();
+    let password_hash = tokio::task::spawn_blocking(move || {
+        crate::db::queries::users::hash_password(&password)
+    })
+    .await
+    .map_err(|e| LificError::Internal(format!("password hashing task failed: {e}")))??;
 
-    let user = crate::db::queries::users::create_user(
-        &conn,
-        &CreateUser {
-            username: input.username,
-            email: input.email,
-            password: input.password,
-            display_name: input.display_name,
-            is_admin: is_first_user,
-            is_bot: false,
-        },
-    )?;
-    let session = crate::db::queries::users::create_session(
-        &conn,
-        user.id,
-        Some(settings.session_lifetime_days * 24),
-    )?;
+    let (user, session) = {
+        let conn = db.write()?;
+        // Authoritative re-check: the policy could have been changed by an
+        // admin between the read above and this write.
+        let settings = crate::db::queries::settings::get(&conn)?;
+        signup_policy_allows(&settings, &new_user.email)?;
+
+        // LIF-364: the first account on a zero-user instance becomes the
+        // instance admin (the standard self-hosted bootstrap: Immich,
+        // Portainer, Grafana all do this). Without it a web-signup-only
+        // instance has NO admin and no way to mint one short of `lific user
+        // promote` on the server's shell, which is how dr.leech ended up
+        // unable to see his own agents' projects under enforced authz.
+        // LIF-209's "signup never grants admin" rationale (privilege
+        // escalation by a stranger) doesn't apply to user #1 on an empty
+        // instance: whoever reaches an open-signup empty instance first owns
+        // it in every way that matters. Any pre-existing user (CLI-created
+        // included) disables the grant, and we're inside the single write
+        // connection so the count can't race a concurrent signup.
+        new_user.is_admin = conn.query_row("SELECT COUNT(*) = 0 FROM users", [], |r| r.get(0))?;
+
+        let user = crate::db::queries::users::insert_user_with_hash(
+            &conn,
+            &new_user,
+            &password_hash,
+        )?;
+        let session = crate::db::queries::users::create_session(
+            &conn,
+            user.id,
+            Some(settings.session_lifetime_days * 24),
+        )?;
+        (user, session)
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -161,6 +197,41 @@ pub(super) async fn auth_signup(
             "expires_at": session.expires_at,
         })),
     ))
+}
+
+/// Verify a login without holding a database lock across Argon2 (LIF-412).
+///
+/// The verify is the expensive part of a login: tens of milliseconds of CPU
+/// by design. Running it on the exclusive write connection, as this handler
+/// used to, serialized every writer in the process behind each attempt, so a
+/// burst of wrong-password attempts stalled unrelated API traffic. Here the
+/// lookup takes a pooled *read* connection and gives it straight back, the
+/// verify runs on the blocking pool with no lock held at all, and the writer
+/// is taken afterwards, only to mint the session.
+///
+/// Behaviour is unchanged, dummy-hash verify for an unknown user included:
+/// see [`crate::db::queries::users::PasswordChallenge`].
+async fn authenticate_off_writer(
+    db: &DbPool,
+    identity: &str,
+    password: &str,
+) -> Result<User, LificError> {
+    crate::db::queries::users::reject_oversized_password(password)?;
+
+    // The read connection is released with this binding, before the verify.
+    let challenge = with_read(db, |conn| {
+        Ok(crate::db::queries::users::password_challenge(conn, identity))
+    })?;
+
+    let password = password.to_string();
+    let hash = challenge.hash().to_string();
+    let password_ok = tokio::task::spawn_blocking(move || {
+        crate::db::queries::users::verify_password(&password, &hash).unwrap_or(false)
+    })
+    .await
+    .map_err(|e| LificError::Internal(format!("password verification task failed: {e}")))?;
+
+    challenge.finish(password_ok)
 }
 
 pub(super) async fn auth_login(
@@ -195,24 +266,25 @@ pub(super) async fn auth_login(
         )));
     }
 
-    let conn = db.write()?;
-    let user =
-        match crate::db::queries::users::authenticate(&conn, &input.identity, &input.password) {
-            Ok(u) => u,
-            Err(e) => {
-                // Record one failure against both the identity and IP buckets.
-                if let Some(Extension(ref rl)) = limiter {
-                    rl.record_failure(&id_key);
-                    rl.record_failure(&ip_key);
-                }
-                return Err(e);
+    let user = match authenticate_off_writer(&db, &input.identity, &input.password).await {
+        Ok(u) => u,
+        Err(e) => {
+            // Record one failure against both the identity and IP buckets.
+            if let Some(Extension(ref rl)) = limiter {
+                rl.record_failure(&id_key);
+                rl.record_failure(&ip_key);
             }
-        };
-    let lifetime_days = crate::db::queries::settings::get(&conn)
-        .map(|s| s.session_lifetime_days)
-        .unwrap_or(30);
-    let session =
-        crate::db::queries::users::create_session(&conn, user.id, Some(lifetime_days * 24))?;
+            return Err(e);
+        }
+    };
+
+    let session = {
+        let conn = db.write()?;
+        let lifetime_days = crate::db::queries::settings::get(&conn)
+            .map(|s| s.session_lifetime_days)
+            .unwrap_or(30);
+        crate::db::queries::users::create_session(&conn, user.id, Some(lifetime_days * 24))?
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1466,6 +1538,106 @@ mod tests {
         });
         let resp = json_post(&app, "/api/auth/login", body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── LIF-412: login verifies off the database writer ──────
+
+    fn login_app(db: crate::db::DbPool) -> axum::Router {
+        with_client_ip_test_layers(crate::api::router(db, &[]), test_peer()).layer(
+            axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }),
+        )
+    }
+
+    async fn login(app: &axum::Router, identity: &str, password: &str) -> (StatusCode, serde_json::Value) {
+        let resp = json_post(
+            app,
+            "/api/auth/login",
+            serde_json::json!({ "identity": identity, "password": password }),
+        )
+        .await;
+        let status = resp.status();
+        (status, parse_json(resp).await)
+    }
+
+    /// The whole login path now runs the Argon2 verify on the blocking pool
+    /// with no database lock held, and mints the session afterwards. Every
+    /// answer it can give has to survive that move: the right password logs
+    /// in, the wrong one and an unknown account are both refused with the
+    /// same message (no user enumeration), and an oversized password is
+    /// refused without ever reaching Argon2.
+    #[tokio::test]
+    async fn login_answers_correctly_through_the_offloaded_verify() {
+        let app = login_app(crate::db::open_memory().expect("test db"));
+        let signup = serde_json::json!({
+            "username": "offloaded",
+            "email": "offloaded@test.com",
+            "password": "securepass123",
+        });
+        assert_eq!(
+            json_post(&app, "/api/auth/signup", signup).await.status(),
+            StatusCode::OK,
+            "signup hashes off the writer too"
+        );
+
+        let (status, data) = login(&app, "offloaded", "securepass123").await;
+        assert_eq!(status, StatusCode::OK, "correct password: {data}");
+        assert_eq!(data["user"]["username"], "offloaded");
+        assert!(data["token"].as_str().unwrap().starts_with("lific_sess_"));
+
+        // Email works as the identity too.
+        let (status, data) = login(&app, "offloaded@test.com", "securepass123").await;
+        assert_eq!(status, StatusCode::OK, "login by email: {data}");
+
+        let (status, wrong) = login(&app, "offloaded", "not-the-password").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, unknown) = login(&app, "no-such-user", "not-the-password").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            wrong["error"], unknown["error"],
+            "a wrong password and an unknown account must be indistinguishable"
+        );
+
+        let (status, oversized) = login(&app, "offloaded", &"x".repeat(2000)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            oversized["error"], wrong["error"],
+            "an oversized password is refused with the same opaque message"
+        );
+    }
+
+    /// LIF-214's deactivation message is produced after the verify, so it
+    /// has to come back through the spawn_blocking path unchanged.
+    #[tokio::test]
+    async fn login_still_reports_a_deactivated_account() {
+        let db = crate::db::open_memory().expect("test db");
+        {
+            let conn = db.write().unwrap();
+            let user = crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "switched-off".into(),
+                    email: "off@test.com".into(),
+                    password: "securepass123".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            crate::db::queries::users::set_active(&conn, user.id, false).unwrap();
+        }
+        let app = login_app(db);
+
+        let (status, data) = login(&app, "switched-off", "securepass123").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            data["error"].as_str().unwrap_or("").contains("deactivated"),
+            "the deactivated-account message must survive the offload: {data}"
+        );
     }
 
     #[tokio::test]

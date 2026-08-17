@@ -32,8 +32,18 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, LificError> {
 
 // ── User CRUD ────────────────────────────────────────────────
 
-pub fn create_user(conn: &Connection, input: &CreateUser) -> Result<User, LificError> {
-    // Validate
+/// The longest password Lific will hash. Anything above this is rejected
+/// before Argon2 sees it, so an oversized body cannot buy an attacker an
+/// unbounded amount of CPU.
+pub const MAX_PASSWORD_LEN: usize = 1024;
+
+/// Validate a new account's fields without hashing its password.
+///
+/// LIF-412: signup runs Argon2 off the database writer, so the cheap checks
+/// that can reject a request have to be callable on their own, before the
+/// expensive part. [`create_user`] still runs them first, so any caller that
+/// does not care about the split behaves exactly as before.
+pub fn validate_new_user(input: &CreateUser) -> Result<(), LificError> {
     let username = input.username.trim();
     let email = input.email.trim().to_lowercase();
 
@@ -48,13 +58,32 @@ pub fn create_user(conn: &Connection, input: &CreateUser) -> Result<User, LificE
             "password must be at least 8 characters".into(),
         ));
     }
-    if input.password.len() > 1024 {
+    if input.password.len() > MAX_PASSWORD_LEN {
         return Err(LificError::BadRequest(
             "password must be 1024 characters or fewer".into(),
         ));
     }
+    Ok(())
+}
 
+pub fn create_user(conn: &Connection, input: &CreateUser) -> Result<User, LificError> {
+    validate_new_user(input)?;
     let password_hash = hash_password(&input.password)?;
+    insert_user_with_hash(conn, input, &password_hash)
+}
+
+/// Insert an already-validated account whose password has already been hashed.
+///
+/// LIF-412: the write half of [`create_user`], so a caller can hash on the
+/// blocking pool and take the exclusive writer only for the insert itself.
+/// `input.password` is ignored here; `password_hash` is what gets stored.
+pub fn insert_user_with_hash(
+    conn: &Connection,
+    input: &CreateUser,
+    password_hash: &str,
+) -> Result<User, LificError> {
+    let username = input.username.trim();
+    let email = input.email.trim().to_lowercase();
     let display_name = input
         .display_name
         .as_deref()
@@ -135,43 +164,101 @@ pub fn get_user_by_email(conn: &Connection, email: &str) -> Result<User, LificEr
 /// non-existent users take the same time as attempts with wrong passwords.
 const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-/// Look up a user by username or email and verify their password.
-/// Returns the user on success, or an error on wrong credentials.
-pub fn authenticate(conn: &Connection, identity: &str, password: &str) -> Result<User, LificError> {
-    // Reject oversized passwords early to prevent Argon2 CPU DoS
-    if password.len() > 1024 {
+/// Reject an oversized login password before Argon2 sees it, using the same
+/// opaque message a wrong password gets. Split out of [`authenticate`] so the
+/// HTTP login path (LIF-412) keeps the check while running the verify itself
+/// off the database writer.
+pub fn reject_oversized_password(password: &str) -> Result<(), LificError> {
+    if password.len() > MAX_PASSWORD_LEN {
         return Err(LificError::BadRequest(
             "invalid username/email or password".into(),
         ));
     }
+    Ok(())
+}
+
+/// One login attempt, with the database part already done and the Argon2 part
+/// still to do.
+///
+/// LIF-412: verifying a password costs tens of milliseconds of CPU, and doing
+/// it between a database lookup and a session insert used to mean holding a
+/// connection for the whole attempt. Splitting the attempt in two lets the
+/// caller take a read connection for [`password_challenge`], release it, run
+/// the verify wherever it likes, and only then come back with the answer.
+///
+/// The dummy hash for an unknown user lives on this side of the split, so a
+/// login for an account that does not exist still costs a full verify and
+/// stays indistinguishable from a wrong password.
+pub struct PasswordChallenge {
+    user: Option<User>,
+    hash: String,
+}
+
+impl PasswordChallenge {
+    /// The Argon2 hash to verify against: the user's, or the dummy one when
+    /// no such user exists.
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    /// Turn the verify's answer into the login's answer.
+    pub fn finish(self, password_ok: bool) -> Result<User, LificError> {
+        match self.user {
+            // LIF-214: a deactivated account is told so rather than being
+            // handed the generic wrong-password message. The check sits
+            // *after* the Argon2 verify on purpose: answering before it would
+            // turn the login form into an oracle for which usernames are
+            // deactivated.
+            Some(u) if password_ok && !u.is_active => Err(LificError::BadRequest(
+                "this account has been deactivated. Ask an admin to restore it.".into(),
+            )),
+            Some(u) if password_ok => Ok(u),
+            _ => Err(LificError::BadRequest(
+                "invalid username/email or password".into(),
+            )),
+        }
+    }
+}
+
+/// The database half of a login: find the account by username or email and
+/// pick the hash to verify against. Pure read, safe on a pooled read
+/// connection.
+pub fn password_challenge(conn: &Connection, identity: &str) -> PasswordChallenge {
     // Try username first, then email.
     // If the user doesn't exist, still run Argon2 against a dummy hash
     // to prevent timing side-channel enumeration of valid usernames.
-    let user = get_user_by_username(conn, identity).or_else(|_| get_user_by_email(conn, identity));
-
-    let (user, hash) = match user {
+    match get_user_by_username(conn, identity).or_else(|_| get_user_by_email(conn, identity)) {
         Ok(u) => {
-            let h = u.password_hash.clone();
-            (Some(u), h)
+            let hash = u.password_hash.clone();
+            PasswordChallenge {
+                user: Some(u),
+                hash,
+            }
         }
-        Err(_) => (None, DUMMY_HASH.to_string()),
-    };
-
-    let password_ok = verify_password(password, &hash).unwrap_or(false);
-
-    match user {
-        // LIF-214: a deactivated account is told so rather than being handed
-        // the generic wrong-password message. The check sits *after* the
-        // Argon2 verify on purpose: answering before it would turn the login
-        // form into an oracle for which usernames are deactivated.
-        Some(u) if password_ok && !u.is_active => Err(LificError::BadRequest(
-            "this account has been deactivated. Ask an admin to restore it.".into(),
-        )),
-        Some(u) if password_ok => Ok(u),
-        _ => Err(LificError::BadRequest(
-            "invalid username/email or password".into(),
-        )),
+        Err(_) => PasswordChallenge {
+            user: None,
+            hash: DUMMY_HASH.to_string(),
+        },
     }
+}
+
+/// Look up a user by username or email and verify their password, start to
+/// finish on the caller's connection. Returns the user on success, or an
+/// error on wrong credentials.
+///
+/// LIF-412: the login endpoint no longer calls this, because the Argon2
+/// verify must not run while a database connection is held. It composes
+/// [`password_challenge`] and [`PasswordChallenge::finish`] around a
+/// `spawn_blocking` instead. This synchronous composition of the same two
+/// halves is what the query-layer tests exercise, where serializing on one
+/// connection costs nothing.
+#[cfg(test)]
+pub fn authenticate(conn: &Connection, identity: &str, password: &str) -> Result<User, LificError> {
+    // Reject oversized passwords early to prevent Argon2 CPU DoS
+    reject_oversized_password(password)?;
+    let challenge = password_challenge(conn, identity);
+    let password_ok = verify_password(password, challenge.hash()).unwrap_or(false);
+    challenge.finish(password_ok)
 }
 
 /// LIF-190: update the authenticated user's profile fields. Each field is
@@ -2334,6 +2421,106 @@ mod tests {
 
         let result = authenticate(&conn, "nobody", "password12345678");
         assert!(result.is_err());
+    }
+
+    // ── LIF-412: the halves the login endpoint runs apart ────
+
+    /// An unknown identity still yields a challenge to verify, against the
+    /// dummy hash, so a login for an account that does not exist costs the
+    /// same Argon2 work as one for an account that does. This is the
+    /// enumeration defence, and splitting `authenticate` in two must not
+    /// leave it on the wrong side of the seam.
+    #[test]
+    fn password_challenge_hands_an_unknown_identity_the_dummy_hash() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        test_create_user(&conn);
+
+        let known = password_challenge(&conn, "blake");
+        assert_ne!(known.hash(), DUMMY_HASH, "a real user verifies their own hash");
+        assert!(verify_password("securepassword123", known.hash()).unwrap());
+
+        let unknown = password_challenge(&conn, "nobody");
+        assert_eq!(unknown.hash(), DUMMY_HASH);
+        let err = unknown.finish(false).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid username/email or password"),
+            "an unknown identity gets the generic message: {err}"
+        );
+    }
+
+    /// The split answers exactly what `authenticate` answers, deactivated
+    /// accounts (LIF-214) included: same user on success, same messages on
+    /// failure.
+    #[test]
+    fn the_split_matches_authenticate_including_deactivation() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+
+        let challenge = password_challenge(&conn, "blake");
+        let ok = verify_password("securepassword123", challenge.hash()).unwrap();
+        assert_eq!(challenge.finish(ok).unwrap().id, user.id);
+
+        let challenge = password_challenge(&conn, "blake");
+        let wrong = verify_password("wrongpassword123", challenge.hash()).unwrap();
+        assert_eq!(
+            challenge.finish(wrong).unwrap_err().to_string(),
+            authenticate(&conn, "blake", "wrongpassword123")
+                .unwrap_err()
+                .to_string()
+        );
+
+        conn.execute("UPDATE users SET is_active = 0 WHERE id = ?1", params![user.id])
+            .unwrap();
+        let challenge = password_challenge(&conn, "blake");
+        let ok = verify_password("securepassword123", challenge.hash()).unwrap();
+        let err = challenge.finish(ok).unwrap_err().to_string();
+        assert!(
+            err.contains("deactivated"),
+            "a deactivated account is still told so after the verify: {err}"
+        );
+    }
+
+    /// Hashing outside the writer and inserting inside it must produce the
+    /// same account `create_user` does, validation included.
+    #[test]
+    fn validate_then_insert_with_hash_matches_create_user() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+
+        let input = CreateUser {
+            username: "  spaced  ".into(),
+            email: "MixedCase@Example.com".into(),
+            password: "securepassword123".into(),
+            display_name: None,
+            is_admin: false,
+            is_bot: false,
+        };
+        validate_new_user(&input).expect("valid input");
+        let hash = hash_password(&input.password).unwrap();
+        let user = insert_user_with_hash(&conn, &input, &hash).unwrap();
+
+        assert_eq!(user.username, "spaced", "username is trimmed");
+        assert_eq!(user.email, "mixedcase@example.com", "email is lowercased");
+        assert_eq!(user.display_name, "spaced");
+        assert_eq!(
+            authenticate(&conn, "spaced", "securepassword123").unwrap().id,
+            user.id,
+            "the externally-hashed password still logs in"
+        );
+
+        let short = CreateUser {
+            password: "short".into(),
+            ..input
+        };
+        assert!(
+            validate_new_user(&short)
+                .unwrap_err()
+                .to_string()
+                .contains("at least 8 characters"),
+            "validation is the same as create_user's"
+        );
     }
 
     #[test]
