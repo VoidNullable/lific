@@ -21,7 +21,7 @@
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { MENTION_RE } from "./mentions";
-  import { MessageSquare, CornerDownLeft, Paperclip, MoreHorizontal } from "lucide-svelte";
+  import { MessageSquare, CornerDownLeft, MoreHorizontal } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import { tick, onDestroy, onMount } from "svelte";
   import {
@@ -33,6 +33,7 @@
   import { createUploadController } from "./attachments/uploads.svelte";
   import DropOverlay from "./attachments/DropOverlay.svelte";
   import PendingUploads from "./attachments/PendingUploads.svelte";
+  import AttachTrigger from "./attachments/AttachTrigger.svelte";
   import {
     canManageComment,
     commentKeyboardAction,
@@ -73,11 +74,9 @@
   let draft = $state("");
   let submitting = $state(false);
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
-  let fileInputEl = $state<HTMLInputElement | null>(null);
   let editingId = $state<number | null>(null);
   let editDraft = $state("");
   let editTextareaEl = $state<HTMLTextAreaElement | null>(null);
-  let editFileInputEl = $state<HTMLInputElement | null>(null);
   let updatingId = $state<number | null>(null);
   let deletingId = $state<number | null>(null);
   let menuId = $state<number | null>(null);
@@ -270,6 +269,9 @@
     submitting = false;
     if (created) {
       draft = "";
+      // LIF-418: the draft the alt-text chips point into is gone, so the
+      // offer goes with it rather than lingering over an empty composer.
+      uploads.destroy();
       requestAnimationFrame(resize);
     }
   }
@@ -337,6 +339,15 @@
   const uploads = createUploadController({
     link: () => attachTo,
     onInsert: insertSnippet,
+    // LIF-418: lets the post-upload alt-text chip rewrite the alt of the
+    // reference it just inserted.
+    text: {
+      read: () => draft,
+      write: (next) => {
+        draft = next;
+        requestAnimationFrame(resize);
+      },
+    },
   });
   onDestroy(() => uploads.destroy());
 
@@ -347,6 +358,13 @@
     onInsert: (snippet) => {
       if (editingId !== null) insertSnippet(snippet, true);
     },
+    text: {
+      read: () => editDraft,
+      write: (next) => {
+        editDraft = next;
+        requestAnimationFrame(resize);
+      },
+    },
   });
   onDestroy(() => editUploads.destroy());
 
@@ -354,15 +372,7 @@
     const files = filesFromClipboard(e);
     if (files.length > 0) {
       e.preventDefault();
-      (edit ? editUploads : uploads).enqueue(files);
-    }
-  }
-
-  function onFilePicked(e: Event, edit = false) {
-    const input = e.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      (edit ? editUploads : uploads).enqueue(Array.from(input.files));
-      input.value = "";
+      (edit ? editUploads : uploads).enqueue(files, "paste");
     }
   }
 
@@ -500,7 +510,7 @@
               {/if}
             </div>
             {#if editingId === comment.id}
-              <DropOverlay onFiles={(files) => editUploads.enqueue(files)}>
+              <DropOverlay onFiles={(files) => editUploads.enqueue(files, "drop")}>
                 <div class="cmt__composer cmt__editor">
                   <div class="cmt__input-wrap">
                     <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={(e) => onKeydown(e, "edit")} onclick={updateMentionContext} onpaste={(e) => onPaste(e, true)}></textarea>
@@ -514,10 +524,9 @@
                   </div>
                   <PendingUploads controller={editUploads} />
                   <div class="cmt__toolbar">
-                    <div class="cmt__toolbar-left"><button type="button" class="cmt__attach" onclick={() => editFileInputEl?.click()} disabled={editUploads.busy}><Paperclip size={13} /><span>{editUploads.busy ? "Uploading…" : "Attach"}</span></button><span class="cmt__hint">Markdown · drag, paste or attach files</span></div>
+                    <div class="cmt__toolbar-left"><AttachTrigger busy={editUploads.busy} disabled={editUploads.busy} onFiles={(files, source) => editUploads.enqueue(files, source)} /><span class="cmt__hint">Markdown · drag, paste or attach files</span></div>
                     <div class="cmt__actions"><span class="cmt__kbd" aria-hidden="true"><kbd>{isMac ? "⌘" : "Ctrl"}</kbd><kbd><CornerDownLeft size={11} /></kbd></span><button type="button" class="cmt__cancel" onclick={cancelEdit} disabled={updatingId === comment.id}>Cancel</button><button type="button" class="cmt__send" onclick={saveEdit} disabled={editDraft.trim() === "" || editUploads.busy || updatingId === comment.id}>{updatingId === comment.id ? "Saving…" : "Save"}</button></div>
                   </div>
-                  <input bind:this={editFileInputEl} type="file" class="cmt__file-input" multiple accept="image/*,application/pdf,text/plain,.log,application/zip" onchange={(e) => onFilePicked(e, true)} />
                 </div>
               </DropOverlay>
             {:else}
@@ -542,7 +551,7 @@
   {/if}
 
   {#if editable}
-    <DropOverlay onFiles={(files) => uploads.enqueue(files)}>
+    <DropOverlay onFiles={(files) => uploads.enqueue(files, "drop")}>
       <div class="cmt__composer">
         <div class="cmt__input-wrap">
         <textarea
@@ -593,17 +602,11 @@
 
         <div class="cmt__toolbar">
           <div class="cmt__toolbar-left">
-            <button
-              type="button"
-              class="cmt__attach"
-              title="Attach files"
-              aria-label="Attach files"
-              onclick={() => fileInputEl?.click()}
+            <AttachTrigger
+              busy={uploads.busy}
               disabled={uploads.busy}
-            >
-              <Paperclip size={13} />
-              <span>{uploads.busy ? "Uploading\u2026" : "Attach"}</span>
-            </button>
+              onFiles={(files, source) => uploads.enqueue(files, source)}
+            />
             <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
           </div>
           <div class="cmt__actions">
@@ -616,14 +619,6 @@
             </button>
           </div>
         </div>
-        <input
-          bind:this={fileInputEl}
-          type="file"
-          class="cmt__file-input"
-          multiple
-          accept="image/*,application/pdf,text/plain,.log,application/zip"
-          onchange={onFilePicked}
-        />
       </div>
     </DropOverlay>
   {/if}
@@ -834,38 +829,11 @@
     position: relative;
   }
 
-  .cmt__file-input {
-    display: none;
-  }
-
   .cmt__toolbar-left {
     display: flex;
     align-items: center;
     gap: 0.625rem;
     min-width: 0;
-  }
-  .cmt__attach {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3125rem;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 0.375rem;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
-    transition:
-      border-color 0.15s var(--ease-out-expo),
-      color 0.15s var(--ease-out-expo);
-  }
-  .cmt__attach:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .cmt__attach:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 
   .cmt__input {
