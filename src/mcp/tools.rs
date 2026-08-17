@@ -1375,7 +1375,7 @@ impl LificMcp {
                         Some(project_id)
                     }
                     Ok(_) if visible.is_some() => return Ok(self.empty_search_result()),
-                    Err(crate::error::LificError::NotFound(error)) if visible.is_some() => {
+                    Err(crate::error::LificError::NotFound(_error)) if visible.is_some() => {
                         return Ok(self.empty_search_result());
                     }
                     Err(crate::error::LificError::NotFound(error)) => {

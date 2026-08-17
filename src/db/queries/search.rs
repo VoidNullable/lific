@@ -270,7 +270,7 @@ fn search_literal_unbounded(
     rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.id.cmp(&a.1.id)));
 
     let offset = usize::try_from(offset).expect("search offset is clamped");
-    let fetch = usize::try_from(super::over_fetch(limit)).expect("search limit is clamped");
+    let fetch = usize::try_from(limit).expect("search limit is clamped");
     Ok(rows
         .into_iter()
         .map(|(_, r)| r)
