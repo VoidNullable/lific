@@ -14,6 +14,7 @@
 
   import { formatBytes } from "../api";
   import { FileText, RotateCw, X, AlertCircle } from "lucide-svelte";
+  import AltTextInput from "./AltTextInput.svelte";
   import type { UploadController } from "./uploads.svelte";
 
   let { controller }: { controller: UploadController } = $props();
@@ -22,7 +23,11 @@
 {#if controller.items.length > 0}
   <ul class="pu" aria-label="Pending uploads">
     {#each controller.items as item (item.id)}
-      <li class="pu__chip" class:pu__chip--error={item.status === "error"}>
+      <li
+        class="pu__chip"
+        class:pu__chip--error={item.status === "error"}
+        class:pu__chip--alt={item.status === "alt"}
+      >
         <span class="pu__lead">
           {#if item.previewUrl}
             <img class="pu__thumb" src={item.previewUrl} alt={item.filename} />
@@ -31,43 +36,52 @@
           {/if}
           {#if item.status === "uploading"}
             <span class="pu__spinner" aria-label="Uploading"></span>
-          {:else}
+          {:else if item.status === "error"}
             <span class="pu__badge" aria-hidden="true"><AlertCircle size={12} /></span>
           {/if}
         </span>
 
-        <span class="pu__body">
-          <span class="pu__name" title={item.filename}>{item.filename}</span>
-          {#if item.status === "error"}
-            <span class="pu__err" title={item.error ?? "Upload failed"}>
-              {item.error ?? "Upload failed"}
-            </span>
-          {:else}
-            <span class="pu__size">{formatBytes(item.size)}</span>
-          {/if}
-        </span>
-
-        {#if item.status === "error"}
-          <span class="pu__actions">
-            <button
-              type="button"
-              class="pu__act"
-              title="Retry upload"
-              aria-label="Retry upload"
-              onclick={() => controller.retry(item.id)}
-            >
-              <RotateCw size={13} />
-            </button>
-            <button
-              type="button"
-              class="pu__act"
-              title="Dismiss"
-              aria-label="Dismiss"
-              onclick={() => controller.dismiss(item.id)}
-            >
-              <X size={13} />
-            </button>
+        <!-- LIF-418: a settled image swaps its metadata line for the alt-text
+             offer. Same chip, same position, so nothing jumps. -->
+        {#if item.status === "alt"}
+          <AltTextInput
+            onApply={(alt) => controller.applyAlt(item.id, alt)}
+            onSkip={() => controller.dismiss(item.id)}
+          />
+        {:else}
+          <span class="pu__body">
+            <span class="pu__name" title={item.filename}>{item.filename}</span>
+            {#if item.status === "error"}
+              <span class="pu__err" title={item.error ?? "Upload failed"}>
+                {item.error ?? "Upload failed"}
+              </span>
+            {:else}
+              <span class="pu__size">{formatBytes(item.size)}</span>
+            {/if}
           </span>
+
+          {#if item.status === "error"}
+            <span class="pu__actions">
+              <button
+                type="button"
+                class="pu__act"
+                title="Retry upload"
+                aria-label="Retry upload"
+                onclick={() => controller.retry(item.id)}
+              >
+                <RotateCw size={13} />
+              </button>
+              <button
+                type="button"
+                class="pu__act"
+                title="Dismiss"
+                aria-label="Dismiss"
+                onclick={() => controller.dismiss(item.id)}
+              >
+                <X size={13} />
+              </button>
+            </span>
+          {/if}
         {/if}
       </li>
     {/each}
@@ -103,6 +117,12 @@
   .pu__chip--error {
     border-color: color-mix(in srgb, var(--error) 55%, var(--border));
     background: var(--error-bg);
+  }
+  /* The alt-text chip is wider than a status chip because it holds an input,
+     and it is the only chip that should look inviting rather than transient. */
+  .pu__chip--alt {
+    max-width: 22rem;
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   }
 
   /* Leading slot stacks the thumbnail/icon with a small status glyph. */
