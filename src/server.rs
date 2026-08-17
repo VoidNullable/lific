@@ -71,11 +71,17 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
             .into_response();
     }
 
-    // SPA fallback: serve index.html for all unmatched routes
+    // SPA fallback: serve index.html for all unmatched routes. Same
+    // no-cache as the exact-file branch above: this IS index.html, so a
+    // cached copy pins the browser to the previous build's asset URLs and a
+    // redeploy is invisible until a hard refresh.
     match WebAssets::get("index.html") {
         Some(file) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/html".to_string())],
+            [
+                (header::CONTENT_TYPE, "text/html".to_string()),
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
             file.data.to_vec(),
         )
             .into_response(),
@@ -84,6 +90,113 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
             "Frontend not built. Run: cd web && bun run build",
         )
             .into_response(),
+    }
+}
+
+/// How far this instance can be reached from, as configured.
+///
+/// LIF-406: the guard rails around login-free mode and single-user web
+/// auto-login used to ask only about the bind host. A loopback bind sitting
+/// behind a public reverse proxy (Tailscale Funnel, nginx, Cloudflare) passed
+/// that check while being reachable from the open internet, which is exactly
+/// the deployment the guard rails exist for. The bind host and the advertised
+/// `public_url` are both part of the answer, so both live here and every
+/// caller asks the same question of the same type.
+///
+/// Layered as an axum extension by [`build_app`] so the runtime settings
+/// update can re-run the startup guard before it persists anything.
+#[derive(Debug, Clone)]
+pub struct Reachability {
+    /// `[server] host`: the address the listener binds.
+    pub host: String,
+    /// `[server] public_url`: the address the instance advertises, if any.
+    pub public_url: Option<String>,
+}
+
+impl Reachability {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            host: cfg.server.host.clone(),
+            public_url: cfg.server.public_url.clone(),
+        }
+    }
+
+    /// Why this instance is reachable from beyond the local machine, or
+    /// `None` when it genuinely is not: a loopback bind whose `public_url` is
+    /// absent, loopback, or on a private network.
+    ///
+    /// The string is a clause ("[server] host (0.0.0.0) is not loopback"), so
+    /// each caller can wrap it in the refusal that fits its surface.
+    ///
+    /// Conservative in both directions: an unparseable `public_url`, or one
+    /// whose host cannot be positively classified as local, counts as
+    /// publicly reachable. Guessing wrong in the other direction hands an
+    /// admin session to the internet.
+    pub fn public_exposure(&self) -> Option<String> {
+        if !config::is_localhost_host(&self.host) {
+            return Some(format!("[server] host ({}) is not loopback", self.host));
+        }
+        let url = self
+            .public_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())?;
+        match public_url_host(url) {
+            Some(host) if is_private_host(&host) => None,
+            Some(host) => Some(format!(
+                "[server] public_url ({url}) points at {host}, which is not a \
+                 loopback or private-network address"
+            )),
+            None => Some(format!(
+                "[server] public_url ({url}) has no host that can be read as \
+                 loopback or private"
+            )),
+        }
+    }
+}
+
+/// The host component of a configured `public_url`, if it has one. A value
+/// with no authority (`example.com`, `/lific`) yields `None`, which callers
+/// treat as "cannot be assumed local".
+fn public_url_host(url: &str) -> Option<String> {
+    let uri = url.parse::<axum::http::Uri>().ok()?;
+    uri.authority().map(|a| a.host().to_string())
+}
+
+/// Whether a hostname names something only reachable from this machine or
+/// from a private network.
+///
+/// Positive identification only: loopback and the RFC 1918 / ULA /
+/// link-local ranges, plus the hostname suffixes reserved for local naming
+/// (`localhost`, mDNS `.local`, `.internal`, `.home.arpa`, `.lan`). Anything
+/// else, a public DNS name or a routable address, is not private. Note that
+/// a tailnet name such as `magi.tailb93ac8.ts.net` is a public DNS name and
+/// is treated as such: it is precisely the Funnel case LIF-406 is about.
+fn is_private_host(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if config::is_localhost_host(host) {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_private_ip(ip);
+    }
+    let lower = host.to_ascii_lowercase();
+    [".localhost", ".local", ".internal", ".home.arpa", ".lan"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                // Unique local addresses, fc00::/7.
+                || (first & 0xfe00) == 0xfc00
+                // Link-local unicast, fe80::/10.
+                || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -214,6 +327,9 @@ pub fn build_app(
             &cfg.auth,
             cfg.server.public_url.as_deref(),
         )))
+        // LIF-406: the settings update path re-runs the startup reachability
+        // guard before it may turn web auto-login on.
+        .layer(axum::Extension(Reachability::from_config(cfg)))
         .layer(axum::Extension(manager_ext))
         .layer(middleware::from_fn_with_state(
             auth_state,
@@ -350,13 +466,17 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     // LIF-294: guard rails for auth-optional mode. Refuse outright
     // when the instance says it's publicly reachable; shout otherwise
     // (the default bind is 0.0.0.0 — the whole LAN can reach it).
+    //
+    // LIF-406: "publicly reachable" is [`Reachability`]'s question, not a
+    // bind-host string comparison, so a loopback bind behind a public reverse
+    // proxy is refused here too rather than sailing through.
+    let reachability = Reachability::from_config(cfg);
     if !cfg.auth.required {
-        if !config::is_localhost_host(&cfg.server.host) {
+        if let Some(exposure) = reachability.public_exposure() {
             return Err(format!(
                 "refusing to start: [auth] required = false (login-free mode) while \
-                 [server] host ({}) is not loopback — anyone who can reach that bind \
-                 can administer the instance. Re-enable auth or bind to 127.0.0.1.",
-                cfg.server.host
+                 {exposure}. Anyone who can reach this instance can administer it. \
+                 Re-enable auth, bind to 127.0.0.1, or remove the public URL."
             )
             .into());
         }
@@ -380,21 +500,20 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // LIF-215: single-user web auto-login hands an admin session to
         // anyone who can load the page. It shares login-free mode's
         // threat model, so it gets the same guard rail (PR #23 review):
-        // refuse outright on a non-loopback bind — the [auth] required
-        // check above doesn't see this DB flag, and a stale or toggled
-        // flag must not turn a public bind into passwordless admin.
-        // Behind a loopback bind with an https public_url (reverse
-        // proxy), keep the loud warning.
+        // refuse outright when the instance is publicly reachable — the
+        // [auth] required check above doesn't see this DB flag, and a
+        // stale or toggled flag must not turn a reachable instance into
+        // passwordless admin. On a genuinely local instance with an https
+        // public_url on a private network, keep the loud warning.
         let auto_login = db::queries::settings::get(&conn)
             .map(|s| s.web_auto_login)
             .unwrap_or(false);
-        if auto_login && !config::is_localhost_host(&cfg.server.host) {
+        if auto_login && let Some(exposure) = reachability.public_exposure() {
             return Err(format!(
                 "refusing to start: single-user web auto-login is enabled while \
-                 [server] host ({}) is not loopback — anyone who can reach that bind \
-                 gets an admin session without a password. Disable web auto-login \
-                 in the instance settings or bind to 127.0.0.1.",
-                cfg.server.host
+                 {exposure}. Anyone who can reach this instance gets an admin \
+                 session without a password. Disable web auto-login in the \
+                 instance settings, bind to 127.0.0.1, or remove the public URL."
             )
             .into());
         }
@@ -649,6 +768,91 @@ async fn shutdown_signal(pool: db::DbPool) {
     info!("shutdown signal received, checkpointing WAL...");
     backup::checkpoint_wal(&pool);
     info!("shutdown complete");
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    fn reach(host: &str, public_url: Option<&str>) -> Reachability {
+        Reachability {
+            host: host.to_string(),
+            public_url: public_url.map(str::to_string),
+        }
+    }
+
+    /// The setups LIF-406 must keep working: a genuinely local instance,
+    /// with no public URL or one that names the same machine or a private
+    /// network. These are the login-free installs the guard rails exist to
+    /// permit.
+    #[test]
+    fn a_local_instance_is_not_exposed() {
+        for (host, url) in [
+            ("127.0.0.1", None),
+            ("localhost", None),
+            ("::1", None),
+            ("127.0.0.1", Some("http://127.0.0.1:3456")),
+            ("127.0.0.1", Some("http://localhost:3456")),
+            ("127.0.0.1", Some("http://[::1]:3456")),
+            ("127.0.0.1", Some("https://10.0.0.5")),
+            ("127.0.0.1", Some("https://192.168.1.20:3456")),
+            ("127.0.0.1", Some("https://nas.local")),
+            ("127.0.0.1", Some("https://lific.home.arpa")),
+            ("127.0.0.1", Some("   ")),
+        ] {
+            assert_eq!(
+                reach(host, url).public_exposure(),
+                None,
+                "host={host} public_url={url:?} should count as local"
+            );
+        }
+    }
+
+    /// The bind-host half of the guard, unchanged from LIF-294.
+    #[test]
+    fn a_non_loopback_bind_is_exposed() {
+        for host in ["0.0.0.0", "::", "192.168.1.10", "not-an-address"] {
+            let exposure = reach(host, None).public_exposure().unwrap_or_default();
+            assert!(
+                exposure.contains("[server] host"),
+                "host={host} should be refused on the bind: {exposure:?}"
+            );
+        }
+    }
+
+    /// The hole LIF-406 closes: production binds loopback and is published to
+    /// the internet by Tailscale Funnel, which the old bind-host-only check
+    /// waved through.
+    #[test]
+    fn a_loopback_bind_behind_a_public_url_is_exposed() {
+        for url in [
+            "https://magi.tailb93ac8.ts.net",
+            "https://lific.example.com/lific",
+            "http://203.0.113.10:3456",
+            "https://[2606:4700:4700::1111]",
+            // No authority to read, so it cannot be assumed local.
+            "lific.example.com",
+        ] {
+            let exposure = reach("127.0.0.1", Some(url))
+                .public_exposure()
+                .unwrap_or_default();
+            assert!(
+                exposure.contains("public_url"),
+                "public_url={url} should be refused: {exposure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_config_reads_both_halves() {
+        let mut cfg = Config::default();
+        cfg.server.host = "127.0.0.1".into();
+        cfg.server.public_url = Some("https://lific.example.com".into());
+        let r = Reachability::from_config(&cfg);
+        assert_eq!(r.host, "127.0.0.1");
+        assert_eq!(r.public_url.as_deref(), Some("https://lific.example.com"));
+        assert!(r.public_exposure().is_some());
+    }
 }
 
 #[cfg(test)]
