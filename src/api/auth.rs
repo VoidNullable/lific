@@ -262,13 +262,13 @@ pub(super) async fn auth_login(
         "login_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
     );
-    if let Some(Extension(ref rl)) = limiter {
-        if !rl.peek(&ip_key) || !rl.peek(&id_key) {
-            let retry = rl.retry_after(&id_key).max(rl.retry_after(&ip_key));
-            return Err(LificError::BadRequest(format!(
-                "too many login attempts — try again in {retry} seconds"
-            )));
-        }
+    if let Some(Extension(ref rl)) = limiter
+        && (!rl.peek(&ip_key) || !rl.peek(&id_key))
+    {
+        let retry = rl.retry_after(&id_key).max(rl.retry_after(&ip_key));
+        return Err(LificError::BadRequest(format!(
+            "too many login attempts — try again in {retry} seconds"
+        )));
     }
 
     let user = match authenticate_off_writer(&db, &input.identity, &input.password).await {
