@@ -47,6 +47,7 @@
     History,
     TrendingUp,
     Waypoints,
+    Paperclip,
   } from "lucide-svelte";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
@@ -340,6 +341,7 @@
     { slug: "graph", label: "Graph", icon: Waypoints },
     { slug: "modules", label: "Modules", icon: Layers },
     { slug: "pages", label: "Pages", icon: FileText },
+    { slug: "files", label: "Files", icon: Paperclip },
     { slug: "plans", label: "Plans", icon: ListChecks },
     { slug: "activity", label: "Activity", icon: History },
     { slug: "insights", label: "Insights", icon: TrendingUp },

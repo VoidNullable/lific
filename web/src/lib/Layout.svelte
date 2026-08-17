@@ -29,7 +29,7 @@
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
   import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
-  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints } from "lucide-svelte";
+  import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
   import { onDestroy, setContext } from "svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
@@ -722,6 +722,7 @@
       board: "Board",
       modules: "Modules",
       pages: "Pages",
+      files: "Files",
       plans: "Plans",
       activity: "Activity",
       insights: "Insights",
@@ -936,6 +937,7 @@
                 {#if isProjectActive && activeRecentSection === "pages"}
                   {@render recentItems("pages", project)}
                 {/if}
+                {@render subItem(`/${project.identifier}/files`, "Files", Paperclip)}
                 {@render subItem(`/${project.identifier}/plans`, "Plans", ListChecks)}
                 {#if isProjectActive && activeRecentSection === "plans"}
                   {@render recentItems("plans", project)}
