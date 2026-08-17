@@ -416,6 +416,13 @@ pub fn add_step(
     description: &str,
     issue_id: Option<i64>,
 ) -> Result<i64, LificError> {
+    // LIF-407: a parent from another plan would insert this step into that
+    // plan's tree while the row claims `plan_id` — a cross-plan write the
+    // caller was never authorized for. The single choke point for every
+    // caller (REST `add_step`, MCP `update_plan_step`) is here.
+    if let Some(parent) = parent_step_id {
+        assert_step_in_plan(conn, plan_id, parent)?;
+    }
     let next_pos: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM plan_steps

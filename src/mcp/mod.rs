@@ -218,22 +218,22 @@ impl LificMcp {
     /// checkout per resolver. Reads never block each other, so holding it
     /// across the authz gates that follow costs nothing.
     pub(crate) fn read_conn(&self) -> Result<crate::db::ReadConn, String> {
-        self.db.read().map_err(|e| e.to_string())
+        self.db.read().map_err(sanitize_error)
     }
 
     fn read<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
     {
-        let conn = self.db.read().map_err(|e| e.to_string())?;
-        f(&conn).map_err(|e| e.to_string())
+        let conn = self.db.read().map_err(sanitize_error)?;
+        f(&conn).map_err(sanitize_error)
     }
 
     fn write<F, T>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
     {
-        let conn = self.db.write().map_err(|e| e.to_string())?;
+        let conn = self.db.write().map_err(sanitize_error)?;
         // LIF-155: re-stamp the audit actor from the MCP request-user
         // global. The task-local stamped by DbPool::write() does NOT
         // survive rmcp's internal task spawns (verified in production:
@@ -248,7 +248,29 @@ impl LificMcp {
                 transport: crate::actor::Transport::Mcp,
             },
         );
-        f(&conn).map_err(|e| e.to_string())
+        f(&conn).map_err(sanitize_error)
+    }
+}
+
+/// LIF-411: the MCP twin of REST's [`LificError::into_response`] sanitization
+/// (`error.rs`). `Database` and `Internal` carry raw SQLite/driver text —
+/// table and column names, constraint bodies, file paths — which REST has
+/// never returned to a client and MCP was handing straight to the agent (and
+/// therefore to whoever reads its transcript). Log the detail server-side,
+/// return the same generic message REST does. Every other variant is a
+/// caller-facing message and passes through unchanged.
+pub(crate) fn sanitize_error(error: crate::error::LificError) -> String {
+    use crate::error::LificError;
+    match &error {
+        LificError::Database(inner) => {
+            tracing::error!(error = %inner, "database error");
+            "internal server error".to_string()
+        }
+        LificError::Internal(message) => {
+            tracing::error!(error = %message, "internal error");
+            "internal server error".to_string()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -335,6 +357,46 @@ mod tests {
     // it back via `current_auth_user()`. This test reproduces that exact
     // wiring (minus the rmcp transport itself) to prove an OAuth-token-backed
     // MCP session resolves to the correct, real user rather than None.
+
+    /// LIF-411: `Database` and `Internal` carry driver/schema detail REST has
+    /// always withheld from clients; every other variant is a message written
+    /// for the caller and must survive intact.
+    #[test]
+    fn sanitize_error_hides_only_database_and_internal_detail() {
+        use crate::error::LificError;
+
+        assert_eq!(
+            sanitize_error(LificError::Database(
+                rusqlite::Error::InvalidColumnName("secret_column".into())
+            )),
+            "internal server error"
+        );
+        assert_eq!(
+            sanitize_error(LificError::Internal("/srv/lific/lific.db is locked".into())),
+            "internal server error"
+        );
+
+        for (error, expected) in [
+            (
+                LificError::NotFound("issue LIF-1 not found".into()),
+                "Not found: issue LIF-1 not found",
+            ),
+            (
+                LificError::BadRequest("invalid status 'nope'".into()),
+                "Bad request: invalid status 'nope'",
+            ),
+            (
+                LificError::Forbidden("requires at least 'maintainer' access to this project".into()),
+                "Forbidden: requires at least 'maintainer' access to this project",
+            ),
+            (
+                LificError::Conflict("identifier already exists".into()),
+                "Conflict: identifier already exists",
+            ),
+        ] {
+            assert_eq!(sanitize_error(error), expected);
+        }
+    }
 
     fn insert_oauth_token(pool: &DbPool, suffix: &str, user_id: Option<i64>) -> String {
         let token = format!("lific_at_test-{suffix}");

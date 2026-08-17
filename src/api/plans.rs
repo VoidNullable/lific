@@ -11,6 +11,44 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{filter_visible, with_read, with_write};
 
+/// LIF-407: a step's (or plan's) linked issue can live in a *different*
+/// project than the plan that references it. Authorizing only the plan's
+/// project would let a Maintainer on plan-project A attach and close an issue
+/// in project B they have no rights to. MCP already applies this both-sides
+/// check (`require_issue_ident_role_mcp` / `require_step_issue_role_mcp`,
+/// mirroring `link_issues`); this is the REST half of the same gate.
+fn require_issue_project_role(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    issue_id: i64,
+) -> Result<(), LificError> {
+    let project_id = with_read(db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
+    authz::require_role(db, identity, project_id, Role::Maintainer)
+}
+
+/// LIF-407: the same gate for every issue a `CreatePlan` payload references,
+/// anchor and (nested) steps alike — attaching an issue to a brand-new plan
+/// is still an attach.
+fn require_create_plan_issue_roles(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    input: &CreatePlan,
+) -> Result<(), LificError> {
+    fn collect(steps: &[CreatePlanStep], out: &mut Vec<i64>) {
+        for step in steps {
+            out.extend(step.issue_id);
+            collect(&step.steps, out);
+        }
+    }
+    let mut issue_ids: Vec<i64> = input.issue_id.into_iter().collect();
+    collect(&input.steps, &mut issue_ids);
+    issue_ids.sort_unstable();
+    issue_ids.dedup();
+    issue_ids
+        .into_iter()
+        .try_for_each(|issue_id| require_issue_project_role(db, identity, issue_id))
+}
+
 pub(super) async fn list_plans(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
@@ -56,6 +94,7 @@ pub(super) async fn create_plan(
     Json(input): Json<CreatePlan>,
 ) -> Result<Json<Plan>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
+    require_create_plan_issue_roles(&db, &identity, &input)?;
     let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id: plan.project_id });
     Ok(Json(plan))
@@ -70,6 +109,11 @@ pub(super) async fn update_plan(
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
+    // LIF-407: re-anchoring to an issue in another project needs Maintainer
+    // on that project too.
+    if let Some(Some(issue_id)) = input.issue_id {
+        require_issue_project_role(&db, &identity, issue_id)?;
+    }
     let plan = with_write(&db, |conn| plans::update_plan(conn, id, &input))?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(plan))
@@ -106,7 +150,13 @@ pub(super) async fn add_step(
 ) -> Result<Json<Plan>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
+    if let Some(issue_id) = input.issue_id {
+        require_issue_project_role(&db, &identity, issue_id)?;
+    }
     let plan = with_write(&db, |conn| {
+        // LIF-407: `plans::add_step` rejects a `parent_step_id` belonging to
+        // another plan; without it a step could be grafted under a foreign
+        // (possibly invisible) plan's subtree.
         plans::add_step(
             conn,
             plan_id,
@@ -152,6 +202,22 @@ pub(super) async fn update_step(
 ) -> Result<Json<StepUpdateResponse>, LificError> {
     let project_id = with_read(&db, |conn| plans::get_plan(conn, plan_id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
+    // LIF-407: both sides of a cross-project step↔issue edge are gated,
+    // matching MCP's `update_plan_step`. Attaching an issue needs Maintainer
+    // on the issue's project, and so does completing a step that already
+    // references one — `set_step_done` closes that issue.
+    if let Some(Some(issue_id)) = input.issue_id {
+        require_issue_project_role(&db, &identity, issue_id)?;
+    }
+    if input.done == Some(true) {
+        let linked = with_read(&db, |conn| {
+            plans::assert_step_in_plan(conn, plan_id, step_id)?;
+            plans::step_issue_id(conn, step_id)
+        })?;
+        if let Some(issue_id) = linked {
+            require_issue_project_role(&db, &identity, issue_id)?;
+        }
+    }
     let (resp, issue_event) = with_write(&db, |conn| {
         plans::assert_step_in_plan(conn, plan_id, step_id)?;
         if let Some(ref t) = input.title {
@@ -445,6 +511,222 @@ mod tests {
         assert_eq!(issue_event["type"], "issue.updated");
         assert_eq!(issue_event["project_id"], issue_project_id);
         assert_eq!(issue_event["issue_id"], issue_id);
+    }
+
+    /// LIF-407: the plan's own project was the only thing gating a step's
+    /// `done` toggle, but the toggle closes the *linked issue*, which can
+    /// live anywhere. A maintainer on the plan's project with no role on the
+    /// issue's project must be refused, and the issue must stay open — this
+    /// is the check MCP has had since LIF-198 and REST did not.
+    #[tokio::test]
+    async fn completing_a_step_linked_to_a_foreign_projects_issue_is_forbidden() {
+        let (db, _admin, _lead, maintainer, _viewer, _non_member, plan_project_id) =
+            setup_membership_test();
+
+        let (plan_id, step_id, foreign_issue_id) = {
+            let conn = db.write().unwrap();
+            let foreign = crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "Foreign".into(),
+                    identifier: "FGN".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id: foreign.id,
+                    title: "Not yours".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let plan = crate::db::queries::plans::create_plan(
+                &conn,
+                &crate::db::models::CreatePlan {
+                    project_id: plan_project_id,
+                    title: "Reaches across".into(),
+                    issue_id: None,
+                    steps: vec![crate::db::models::CreatePlanStep {
+                        title: "mirror".into(),
+                        description: String::new(),
+                        issue_id: Some(issue.id),
+                        done: false,
+                        steps: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+            (plan.id, plan.steps[0].id, issue.id)
+        };
+
+        let app = app_as_user(db.clone(), &maintainer);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/plans/{plan_id}/steps/{step_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({"done": true})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "completing a step that closes another project's issue must be refused"
+        );
+
+        let status = {
+            let conn = db.read().unwrap();
+            crate::db::queries::get_issue(&conn, foreign_issue_id)
+                .unwrap()
+                .status
+        };
+        assert_ne!(
+            status.as_str(),
+            "done",
+            "the foreign issue must not have been closed"
+        );
+    }
+
+    /// LIF-407: the attach side of the same edge — linking a step to an issue
+    /// in a project the caller has no role on is refused too.
+    #[tokio::test]
+    async fn attaching_a_foreign_projects_issue_to_a_step_is_forbidden() {
+        let (db, _admin, _lead, maintainer, _viewer, _non_member, plan_project_id) =
+            setup_membership_test();
+
+        let (plan_id, step_id, foreign_issue_id) = {
+            let conn = db.write().unwrap();
+            let foreign = crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "Foreign".into(),
+                    identifier: "FGN".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id: foreign.id,
+                    title: "Not yours".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let plan = crate::db::queries::plans::create_plan(
+                &conn,
+                &crate::db::models::CreatePlan {
+                    project_id: plan_project_id,
+                    title: "Attach target".into(),
+                    issue_id: None,
+                    steps: vec![crate::db::models::CreatePlanStep {
+                        title: "step".into(),
+                        description: String::new(),
+                        issue_id: None,
+                        done: false,
+                        steps: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+            (plan.id, plan.steps[0].id, issue.id)
+        };
+
+        let app = app_as_user(db.clone(), &maintainer);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/plans/{plan_id}/steps/{step_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({"issue_id": foreign_issue_id}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let linked = {
+            let conn = db.read().unwrap();
+            crate::db::queries::plans::step_issue_id(&conn, step_id).unwrap()
+        };
+        assert_eq!(linked, None, "the step must not have been linked");
+    }
+
+    /// LIF-407: `parent_step_id` was inserted verbatim, so a step id from a
+    /// different plan grafted the new step into that plan's tree.
+    #[tokio::test]
+    async fn add_step_rejects_a_parent_step_from_another_plan() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+
+        let mut plans = Vec::new();
+        for title in ["Plan A", "Plan B"] {
+            let plan = body_json(
+                json_post(
+                    &app,
+                    "/api/plans",
+                    serde_json::json!({
+                        "project_id": project_id,
+                        "title": title,
+                        "steps": [{"title": "root"}]
+                    }),
+                )
+                .await,
+            )
+            .await;
+            plans.push((
+                plan["id"].as_i64().unwrap(),
+                plan["steps"][0]["id"].as_i64().unwrap(),
+            ));
+        }
+        let (plan_a, _a_step) = plans[0];
+        let (plan_b, b_step) = plans[1];
+
+        let resp = json_post(
+            &app,
+            &format!("/api/plans/{plan_a}/steps"),
+            serde_json::json!({"title": "smuggled", "parent_step_id": b_step}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a parent step from another plan must be rejected"
+        );
+
+        // Plan B's tree is untouched.
+        let plan_b_after = body_json(json_get(&app, &format!("/api/plans/{plan_b}")).await).await;
+        assert_eq!(plan_b_after["steps"].as_array().unwrap().len(), 1);
+        assert!(
+            plan_b_after["steps"][0]["steps"]
+                .as_array()
+                .is_none_or(|children| children.is_empty()),
+            "nothing may have been grafted under the foreign step: {plan_b_after}"
+        );
+
+        // The same call with the plan's own step still works.
+        let resp = json_post(
+            &app,
+            &format!("/api/plans/{plan_a}/steps"),
+            serde_json::json!({"title": "legit", "parent_step_id": plans[0].1}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
