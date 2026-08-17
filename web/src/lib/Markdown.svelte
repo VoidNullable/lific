@@ -1,5 +1,6 @@
 <script lang="ts">
   import { marked } from "marked";
+  import { mount, unmount } from "svelte";
   import DOMPurify from "dompurify";
   import IssueHoverCard from "./IssueHoverCard.svelte";
   import { IDENTIFIER_RE, PROJECT_CODE_RE, refKind, routeFor, projectCodeOf } from "./references";
@@ -7,7 +8,8 @@
   import { openContextMenu } from "./contextMenuState.svelte"; // LIF-248
   import { PanelRight, ExternalLink } from "lucide-svelte";
   import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
-  import { downloadAttachment } from "./api"; // LIF-262
+  import { attachmentThumbnailUrl } from "./api"; // LIF-418
+  import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
 
   let {
     content,
@@ -446,12 +448,18 @@
     if (!root) return;
 
     // Inline images that point at an attachment: add the lightbox affordance.
+    // LIF-418: the displayed src becomes the server-generated thumbnail, so a
+    // body full of screenshots does not pull megabytes of originals to render
+    // 32rem-wide previews. The thumbnail endpoint 404s when there is none (or
+    // when the backend predates it), and the error handler puts the full asset
+    // back. The lightbox always opens the original either way.
     const imgs = root.querySelectorAll<HTMLImageElement>(
       "img:not([data-attachment-decorated])",
     );
     for (const img of Array.from(imgs)) {
       const src = img.getAttribute("src") ?? "";
-      if (!ATTACHMENT_SRC_RE.test(src)) continue;
+      const match = src.match(ATTACHMENT_SRC_RE);
+      if (!match) continue;
       img.dataset.attachmentDecorated = "true";
       img.classList.add("attachment-image");
       img.loading = "lazy";
@@ -460,12 +468,21 @@
         lightboxSrc = src;
         lightboxAlt = img.getAttribute("alt") ?? "";
       });
+      img.addEventListener("error", () => {
+        if (img.dataset.attachmentFullSrc === "true") return;
+        img.dataset.attachmentFullSrc = "true";
+        img.src = src;
+      });
+      img.src = attachmentThumbnailUrl(Number(match[1]));
     }
 
-    // Non-image chips: [file.pdf](/api/attachments/N) rewritten by
-    // decorateAttachmentLinks into <a class="attachment-chip" download>. Give
-    // them a leading file icon + trailing download glyph, and route the click
-    // through the auth'd download helper (so the bearer token is sent).
+    // LIF-418: attachment links become real viewers. decorateAttachmentLinks
+    // already narrowed the markup to `<a class="attachment-chip">` anchors
+    // whose href is exactly an attachments path; each one is replaced in place
+    // by a mounted AttachmentView, which picks the right viewer from the
+    // filename (the markdown link carries no mime) and degrades to the same
+    // download chip the anchor was going to render.
+    const pending: { host: HTMLElement; id: number; filename: string }[] = [];
     const chips = root.querySelectorAll<HTMLAnchorElement>(
       "a.attachment-chip:not([data-chip-decorated])",
     );
@@ -473,35 +490,42 @@
       chip.dataset.chipDecorated = "true";
       const href = chip.getAttribute("href") ?? "";
       const m = href.match(ATTACHMENT_SRC_RE);
-      const label = chip.textContent ?? "file";
-      chip.textContent = "";
-      // Leading file icon.
-      const icon = document.createElement("span");
-      icon.className = "attachment-chip__icon";
-      icon.innerHTML = FILE_SVG;
-      chip.appendChild(icon);
-      const name = document.createElement("span");
-      name.className = "attachment-chip__name";
-      name.textContent = label;
-      chip.appendChild(name);
-      const dl = document.createElement("span");
-      dl.className = "attachment-chip__dl";
-      dl.innerHTML = DOWNLOAD_SVG;
-      chip.appendChild(dl);
-      if (m) {
-        const id = Number(m[1]);
-        chip.addEventListener("click", (e) => {
-          e.preventDefault();
-          void downloadAttachment(id, label);
-        });
-      }
+      if (!m) continue;
+      const label = chip.textContent?.trim() || "file";
+      const host = document.createElement("span");
+      host.className = "attachment-view-host";
+      // Swap the anchor for the host synchronously so there is no frame where
+      // both the old chip and the new viewer are on screen.
+      chip.replaceWith(host);
+      pending.push({ host, id: Number(m[1]), filename: label });
     }
-  });
 
-  const FILE_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>';
-  const DOWNLOAD_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
+    // The mounts themselves are deferred one microtask, out of this effect's
+    // synchronous run: `mount()` called while an effect is active parents the
+    // new component root under that effect, which entangles its lifetime with
+    // ours. Mounting from a microtask keeps each viewer a genuine root that
+    // only the teardown below disposes of.
+    const mounted: ReturnType<typeof mount>[] = [];
+    let disposed = false;
+    if (pending.length > 0) {
+      queueMicrotask(() => {
+        if (disposed) return;
+        for (const item of pending) {
+          mounted.push(
+            mount(AttachmentView, {
+              target: item.host,
+              props: { id: item.id, filename: item.filename },
+            }),
+          );
+        }
+      });
+    }
+
+    return () => {
+      disposed = true;
+      for (const component of mounted) void unmount(component);
+    };
+  });
 </script>
 
 <div class="prose {className}" bind:this={containerEl}>
@@ -599,6 +623,13 @@
   }
   :global(.prose a.attachment-chip:hover .attachment-chip__dl) {
     color: var(--accent);
+  }
+
+  /* LIF-418: the span an AttachmentView is mounted into. Block-level so a
+     viewer card is not squeezed into the inline flow of the paragraph the
+     link happened to sit in. */
+  :global(.prose .attachment-view-host) {
+    display: block;
   }
 
   /* Lightbox overlay for inline images. */

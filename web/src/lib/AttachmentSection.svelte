@@ -16,6 +16,7 @@
     downloadAttachment,
     deleteAttachment,
     getAttachmentLinks,
+    attachmentThumbnailUrl,
     formatBytes,
     me,
     type Attachment,
@@ -24,7 +25,8 @@
   import { canDeleteAttachment, deleteConfirmMessage } from "./files/files";
   import { projectRole } from "./projectRole.svelte";
   import { toast } from "./toast/toast.svelte";
-  import { FileText, Download, Paperclip, Trash2 } from "lucide-svelte";
+  import { Paperclip, Trash2 } from "lucide-svelte";
+  import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
 
   let {
     entityType,
@@ -120,6 +122,22 @@
     toast(`Deleted ${a.filename}.`, { kind: "success" });
     await load();
   }
+
+  // LIF-418: images keep the tile-and-lightbox treatment they have always had
+  // (a wrapping row of thumbnails reads better here than a stack of cards);
+  // everything else goes through the shared dispatcher, which turns a log, a
+  // patch, a CSV, a zip or a screen recording into a real inline viewer and
+  // falls back to the same download chip for anything it does not know.
+  let images = $derived(attachments.filter(isImage));
+  let others = $derived(attachments.filter((a) => !isImage(a)));
+
+  /** Thumbnail src for a tile, with the full asset as the error fallback. */
+  function onThumbError(event: Event, a: Attachment) {
+    const img = event.currentTarget as HTMLImageElement;
+    if (img.dataset.fullSrc === "true") return;
+    img.dataset.fullSrc = "true";
+    img.src = urlFor(a.id);
+  }
 </script>
 
 {#if loaded && attachments.length > 0}
@@ -130,53 +148,72 @@
       <span class="att__count">{attachments.length}</span>
     </header>
 
-    <div class="att__grid">
-      {#each attachments as a (a.id)}
-        <div class="att__item">
-          {#if isImage(a)}
+    {#if images.length > 0}
+      <div class="att__grid">
+        {#each images as a (a.id)}
+          <div class="att__item">
             <button
               type="button"
               class="att__thumb"
               title={a.filename}
               onclick={() => {
                 lightboxSrc = urlFor(a.id);
-                lightboxAlt = a.filename;
+                lightboxAlt = a.alt_text ?? a.filename;
               }}
             >
-              <img src={urlFor(a.id)} alt={a.filename} loading="lazy" />
+              <img
+                src={attachmentThumbnailUrl(a.id)}
+                alt={a.alt_text ?? a.filename}
+                loading="lazy"
+                onerror={(e) => onThumbError(e, a)}
+              />
               <span class="att__thumb-name">{a.filename}</span>
             </button>
-          {:else}
-            <button
-              type="button"
-              class="att__chip"
-              title="Download {a.filename}"
-              onclick={() => void downloadAttachment(a.id, a.filename)}
-            >
-              <span class="att__chip-icon"><FileText size={16} /></span>
-              <span class="att__chip-body">
-                <span class="att__chip-name">{a.filename}</span>
-                <span class="att__chip-size">{formatBytes(a.size_bytes)}</span>
-              </span>
-              <span class="att__chip-dl"><Download size={14} /></span>
-            </button>
-          {/if}
+            {#if mayDelete(a)}
+              <button
+                type="button"
+                class="att__delete"
+                title="Delete {a.filename}"
+                aria-label="Delete {a.filename}"
+                disabled={deletingId === a.id}
+                onclick={() => void startDelete(a)}
+              >
+                <Trash2 size={13} />
+              </button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
 
-          {#if mayDelete(a)}
-            <button
-              type="button"
-              class="att__delete"
-              title="Delete {a.filename}"
-              aria-label="Delete {a.filename}"
-              disabled={deletingId === a.id}
-              onclick={() => void startDelete(a)}
-            >
-              <Trash2 size={13} />
-            </button>
-          {/if}
-        </div>
-      {/each}
-    </div>
+    {#if others.length > 0}
+      <div class="att__stack">
+        {#each others as a (a.id)}
+          <div class="att__item">
+            <AttachmentView
+              id={a.id}
+              filename={a.filename}
+              mime={a.mime}
+              sizeBytes={a.size_bytes}
+              altText={a.alt_text ?? null}
+              hasThumbnail={a.has_thumbnail ?? false}
+            />
+            {#if mayDelete(a)}
+              <button
+                type="button"
+                class="att__delete"
+                title="Delete {a.filename}"
+                aria-label="Delete {a.filename}"
+                disabled={deletingId === a.id}
+                onclick={() => void startDelete(a)}
+              >
+                <Trash2 size={13} />
+              </button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
 
     <!-- Inline confirm (never a modal): it sits under the grid, next to the
          file it is about to remove, and names the blast radius. -->
@@ -339,6 +376,25 @@
     background: var(--bg-subtle);
   }
 
+  /* Non-image attachments render as full-width viewer cards, so they stack
+     rather than share the image row's wrapping flow. */
+  .att__stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .att__stack:first-child {
+    margin-top: 0;
+  }
+  .att__stack .att__item {
+    width: 100%;
+  }
+  .att__stack .att__item > :global(*:first-child) {
+    flex: 1;
+    min-width: 0;
+  }
+
   /* Image thumbnail tile. */
   .att__thumb {
     display: flex;
@@ -372,56 +428,6 @@
     text-align: left;
   }
 
-  /* Non-image download chip. */
-  .att__chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    max-width: 16rem;
-    padding: 0.5rem 0.625rem;
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    background: var(--surface);
-    text-align: left;
-    transition:
-      border-color 0.15s var(--ease-out-expo),
-      background 0.15s var(--ease-out-expo);
-  }
-  .att__chip:hover {
-    border-color: var(--accent);
-    background: var(--bg-subtle);
-  }
-  .att__chip-icon {
-    display: inline-flex;
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
-  .att__chip-body {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-  .att__chip-name {
-    font-size: 0.8125rem;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .att__chip-size {
-    font-size: 0.6875rem;
-    color: var(--text-faint);
-    font-variant-numeric: tabular-nums;
-  }
-  .att__chip-dl {
-    display: inline-flex;
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
-  .att__chip:hover .att__chip-dl {
-    color: var(--accent);
-  }
-
   .att__lightbox {
     position: fixed;
     inset: 0;
@@ -441,8 +447,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .att__thumb,
-    .att__chip {
+    .att__thumb {
       transition: none;
     }
   }
