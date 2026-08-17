@@ -251,6 +251,32 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
                 "delete gated at uploader, Maintainer on any linked project, or admin — dynamic, see api::attachments::authorize_delete (LIF-262)",
             ),
         ),
+        // LIF-418. Alt text is metadata on the file, so it reuses the delete
+        // gate verbatim; the three derived reads reuse the download gate.
+        (
+            ("PATCH", "/api/attachments/{id}"),
+            Exempt(
+                "alt-text edit gated identically to delete (uploader, Maintainer on any linked project, or admin): dynamic, see api::attachments::authorize_delete (LIF-418)",
+            ),
+        ),
+        (
+            ("GET", "/api/attachments/{id}/thumbnail"),
+            Exempt(
+                "same dynamic read gate as the download it derives from. See api::attachments::authorize_read (LIF-418)",
+            ),
+        ),
+        (
+            ("GET", "/api/attachments/{id}/links"),
+            Exempt(
+                "read gate on the attachment, then each linked entity is filtered by Viewer on its own project so the where-used list never leaks titles from invisible projects. See api::attachments::visible_links (LIF-418)",
+            ),
+        ),
+        (
+            ("GET", "/api/attachments/{id}/preview"),
+            Exempt(
+                "same dynamic read gate as the download it derives from. See api::attachments::authorize_read (LIF-418)",
+            ),
+        ),
         // ── Projects ──
         (("GET", "/api/projects"), Filtered),
         (

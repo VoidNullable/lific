@@ -308,7 +308,23 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         )
         .route(
             "/api/attachments/{id}",
-            get(attachments::download_attachment).delete(attachments::delete_attachment),
+            get(attachments::download_attachment)
+                .patch(attachments::update_attachment)
+                .delete(attachments::delete_attachment),
+        )
+        // LIF-418: derived views of one attachment. All three read the same
+        // bytes the download route does and carry the same authorization.
+        .route(
+            "/api/attachments/{id}/thumbnail",
+            get(attachments::attachment_thumbnail),
+        )
+        .route(
+            "/api/attachments/{id}/links",
+            get(attachments::attachment_links),
+        )
+        .route(
+            "/api/attachments/{id}/preview",
+            get(attachments::attachment_preview),
         )
         // Health
         .route("/api/health", get(health))

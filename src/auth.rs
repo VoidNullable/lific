@@ -253,6 +253,12 @@ fn session_cookie_token(headers: &HeaderMap) -> Option<String> {
 /// `<img src>` subresource path. The list route `/api/attachments` (no id) and
 /// any deeper path like `/api/attachments/5/extra` are excluded, so the
 /// fallback never widens beyond a single read-only download.
+///
+/// LIF-418 adds one sibling, `/api/attachments/{id}/thumbnail`. It is the same
+/// read of the same blob, downscaled, and it is consumed the same way: an
+/// `<img src>` cannot set an Authorization header, so without the fallback
+/// every thumbnail in the UI would 401. Nothing else under `{id}/` is
+/// eligible, so `/links` and `/preview` still require a real credential.
 fn is_attachment_download(method: &Method, path: &str) -> bool {
     if method != Method::GET {
         return false;
@@ -260,7 +266,8 @@ fn is_attachment_download(method: &Method, path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/api/attachments/") else {
         return false;
     };
-    let id = rest.strip_suffix('/').unwrap_or(rest);
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let id = rest.strip_suffix("/thumbnail").unwrap_or(rest);
     !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -2125,6 +2132,37 @@ mod tests {
         assert!(!is_attachment_download(
             &Method::GET,
             "/api/attachments/5x"
+        ));
+    }
+
+    /// LIF-418: a thumbnail is loaded by an `<img>` exactly like the full
+    /// image, so it needs the same cookie fallback. The other two derived
+    /// routes are XHR-only and must not get it.
+    #[test]
+    fn is_attachment_download_includes_the_thumbnail_variant() {
+        assert!(is_attachment_download(
+            &Method::GET,
+            "/api/attachments/5/thumbnail"
+        ));
+        assert!(is_attachment_download(
+            &Method::GET,
+            "/api/attachments/5/thumbnail/"
+        ));
+        assert!(!is_attachment_download(
+            &Method::GET,
+            "/api/attachments/5/links"
+        ));
+        assert!(!is_attachment_download(
+            &Method::GET,
+            "/api/attachments/5/preview"
+        ));
+        assert!(!is_attachment_download(
+            &Method::GET,
+            "/api/attachments/abc/thumbnail"
+        ));
+        assert!(!is_attachment_download(
+            &Method::POST,
+            "/api/attachments/5/thumbnail"
         ));
     }
 
