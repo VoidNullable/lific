@@ -1271,6 +1271,20 @@ impl LificMcp {
         }
     }
 
+    /// LIF-411: the one string `search` returns for every empty outcome — no
+    /// matches, a project filtered out as invisible, or (for a restricted
+    /// caller) a project identifier that didn't resolve. Routing all three
+    /// through one place is what makes "hidden" and "nonexistent"
+    /// indistinguishable.
+    ///
+    /// LIF-257: the nudge still wins when the DB genuinely has zero projects,
+    /// which can never be the hidden-project case (that requires one to
+    /// exist).
+    fn empty_search_result(&self) -> String {
+        self.no_projects_nudge()
+            .unwrap_or_else(|| "No results found.".into())
+    }
+
     /// Gate for comment read/create: Viewer (or Maintainer, for edges that
     /// need it) on the comment parent's project, falling back to
     /// workspace-admin for a page with no project. Mirrors
@@ -1370,8 +1384,24 @@ impl LificMcp {
     }
 
     fn search_inner(&self, input: SearchInput) -> Result<String, String> {
+        // Cross-project read (LIF-198 scope item 2): non-visible projects'
+        // hits are silently absent, never a 403 — even when `project` narrows
+        // the search to one project a non-member can't see, mirroring the
+        // REST /api/search handler.
+        let visible = visible_project_ids_mcp(&self.db)?;
+        // LIF-411: for a *restricted* caller, resolving `project` first made a
+        // hidden-but-existing project distinguishable from a nonexistent one
+        // ("project 'X' not found" vs. an empty result). Both now produce the
+        // same empty result. An unrestricted caller (admin, or enforcement
+        // off) has nothing hidden from them, so they keep the helpful
+        // resolution error.
         let project_id = match &input.project {
-            Some(p) => Some(resolve_project(&*self.read_conn()?, p)?),
+            Some(p) => match resolve_project(&*self.read_conn()?, p) {
+                Ok(pid) if visible.as_ref().is_none_or(|ids| ids.contains(&pid)) => Some(pid),
+                Ok(_) => return Ok(self.empty_search_result()),
+                Err(_) if visible.is_some() => return Ok(self.empty_search_result()),
+                Err(error) => return Err(error),
+            },
             None => None,
         };
         // The query owns the default (20) and the cap; clamping here too gives
@@ -1382,11 +1412,6 @@ impl LificMcp {
             queries::DEFAULT_SEARCH_LIMIT,
             queries::MAX_PAGE_LIMIT,
         );
-        // Cross-project read (LIF-198 scope item 2): non-visible projects'
-        // hits are silently absent, never a 403 — even when `project` narrows
-        // the search to one project a non-member can't see, mirroring the
-        // REST /api/search handler.
-        let visible = visible_project_ids_mcp(&self.db)?;
         let hits = self.read(|conn| {
             queries::search_page(
                 conn,
@@ -1404,14 +1429,7 @@ impl LificMcp {
         let has_more = hits.has_more;
         let results = filter_visible(hits.items, &visible, |r| r.project_id);
         if results.is_empty() {
-            // LIF-257: nudge only when the search itself came up
-            // empty AND the DB has no projects — checked after the
-            // query so workspace-level pages (which can exist with
-            // zero projects) are never hidden by the nudge.
-            if let Some(nudge) = self.no_projects_nudge() {
-                return Ok(nudge);
-            }
-            return Ok("No results found.".into());
+            return Ok(self.empty_search_result());
         }
         let link_context = current_issue_link_context();
         Ok(render_response(|output| {
@@ -2062,39 +2080,46 @@ impl LificMcp {
         // Cap the selection like get_board does; bulk changes over 500 issues
         // in a single call are out of scope for this tool.
         const BULK_CAP: i64 = 500;
+        // LIF-411: selection + every per-issue update run inside one
+        // savepoint. Without it each `update_issue` autocommitted on its own,
+        // so a failure partway through (a bad value, a constraint, a locked
+        // row) left the batch half-applied with no way for the agent to tell
+        // which half — and the tool still reported an error. All-or-nothing.
         let events = self.write(|conn| {
-            let issues = queries::list_issues(
-                conn,
-                &models::ListIssuesQuery {
-                    project_id: Some(pid),
-                    status: models::Status::parse_opt(input.filter_status.as_deref())
-                        .map_err(crate::error::LificError::BadRequest)?,
-                    priority: models::Priority::parse_opt(input.filter_priority.as_deref())
-                        .map_err(crate::error::LificError::BadRequest)?,
-                    module_id: filter_module_id,
-                    label: input.filter_label.clone(),
-                    limit: Some(BULK_CAP),
-                    ..Default::default()
-                },
-            )?;
-            issues
-                .iter()
-                .map(|issue| {
-                    queries::update_issue(
-                        conn,
-                        issue.id,
-                        &models::UpdateIssue {
-                            status: models::Status::parse_opt(input.set_status.as_deref())
-                                .map_err(crate::error::LificError::BadRequest)?,
-                            priority: models::Priority::parse_opt(input.set_priority.as_deref())
-                                .map_err(crate::error::LificError::BadRequest)?,
-                            module_id: set_module_id.map(Some),
-                            ..Default::default()
-                        },
-                    )
-                    .map(|issue| (issue.project_id, issue.id))
-                })
-                .collect::<Result<Vec<_>, _>>()
+            queries::savepoint(conn, "mcp_bulk_update", || {
+                let issues = queries::list_issues(
+                    conn,
+                    &models::ListIssuesQuery {
+                        project_id: Some(pid),
+                        status: models::Status::parse_opt(input.filter_status.as_deref())
+                            .map_err(crate::error::LificError::BadRequest)?,
+                        priority: models::Priority::parse_opt(input.filter_priority.as_deref())
+                            .map_err(crate::error::LificError::BadRequest)?,
+                        module_id: filter_module_id,
+                        label: input.filter_label.clone(),
+                        limit: Some(BULK_CAP),
+                        ..Default::default()
+                    },
+                )?;
+                issues
+                    .iter()
+                    .map(|issue| {
+                        queries::update_issue(
+                            conn,
+                            issue.id,
+                            &models::UpdateIssue {
+                                status: models::Status::parse_opt(input.set_status.as_deref())
+                                    .map_err(crate::error::LificError::BadRequest)?,
+                                priority: models::Priority::parse_opt(input.set_priority.as_deref())
+                                    .map_err(crate::error::LificError::BadRequest)?,
+                                module_id: set_module_id.map(Some),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|issue| (issue.project_id, issue.id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
         })?;
         for (project_id, issue_id) in &events {
             self.emit(crate::realtime::RealtimeEvent::IssueUpdated {
@@ -4847,6 +4872,93 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// LIF-411: the batch is all-or-nothing. Each per-issue `update_issue`
+    /// used to autocommit on its own, so a failure partway through left the
+    /// selection half-applied while the tool still reported an error — the
+    /// agent had no way to know which half landed.
+    #[test]
+    fn bulk_update_rolls_back_every_issue_when_one_update_fails() {
+        let (m, mut rx, _guard) = mcp_with_realtime();
+        seed_project(&m, "Atomic", "ATM");
+        seed_issue(&m, "ATM", "keep");
+        seed_issue(&m, "ATM", "boom");
+        let keep_id = issue_id_for(&m, "ATM-1");
+        let boom_id = issue_id_for(&m, "ATM-2");
+        drain_realtime(&mut rx);
+
+        // Fail on the *second* issue of the batch, after the first has
+        // already been written.
+        {
+            let conn = m.db.write().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER bulk_update_boom BEFORE UPDATE ON issues
+                 WHEN NEW.title = 'boom'
+                 BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+            )
+            .unwrap();
+        }
+
+        let result = m.bulk_update(Parameters(BulkUpdateInput {
+            project: "ATM".into(),
+            set_status: Some("done".into()),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Error:"), "got: {result}");
+
+        for (id, label) in [(keep_id, "ATM-1"), (boom_id, "ATM-2")] {
+            let status = m
+                .read(|conn| queries::get_issue(conn, id))
+                .expect("issue still readable")
+                .status;
+            assert_ne!(
+                status.as_str(),
+                "done",
+                "{label} must have been rolled back with the rest of the batch"
+            );
+        }
+        assert!(
+            realtime_events(&mut rx).is_empty(),
+            "a failed batch must not announce updates that were rolled back"
+        );
+    }
+
+    /// LIF-411: REST has never returned raw SQLite text to a client
+    /// (`error.rs` logs it and answers "internal server error"); MCP handed it
+    /// straight to the agent, leaking schema details into whatever transcript
+    /// the agent writes. The detail now goes to the log only.
+    #[test]
+    fn database_errors_reach_the_agent_as_a_generic_message() {
+        let (m, _guard) = mcp();
+        let _ag = first_admin_guard();
+        seed_project(&m, "Opaque", "OPQ");
+        {
+            let conn = m.db.write().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER leaky_detail BEFORE INSERT ON issues
+                 BEGIN SELECT RAISE(ABORT, 'secret_table.secret_column constraint'); END",
+            )
+            .unwrap();
+        }
+
+        let result = m.create_issue(Parameters(CreateIssueInput {
+            project: "OPQ".into(),
+            title: "Doomed".into(),
+            ..Default::default()
+        }));
+        assert_eq!(result, "Error: internal server error", "got: {result}");
+        assert!(
+            !result.contains("secret_table"),
+            "the raw driver text must not reach the client: {result}"
+        );
+
+        // Caller-facing variants still say what went wrong.
+        let not_found = m.get_issue(Parameters(GetIssueInput {
+            identifier: "OPQ-999".into(),
+            ..Default::default()
+        }));
+        assert!(not_found.contains("not found"), "got: {not_found}");
     }
 
     #[test]
@@ -10055,6 +10167,67 @@ mod authz_gating_tests {
                 .content
         };
         assert_eq!(content, "still mine");
+    }
+
+    // ── LIF-411: hidden and nonexistent projects look the same ───
+
+    /// Resolving `project` before the permission filter made "exists but you
+    /// can't see it" answer differently from "doesn't exist", which is a
+    /// project-name oracle. Both answers are now byte-identical.
+    #[test]
+    fn search_cannot_distinguish_a_hidden_project_from_a_nonexistent_one() {
+        let (m, admin, lead, _maintainer, _viewer, non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        let created = as_user(&lead, || {
+            m.create_issue(Parameters(CreateIssueInput {
+                project: "MEM".into(),
+                title: "Findable".into(),
+                ..Default::default()
+            }))
+        });
+        assert!(created.starts_with("Created"), "got: {created}");
+
+        let hidden = as_user(&non_member, || {
+            m.search(Parameters(SearchInput {
+                query: "Findable".into(),
+                project: Some("MEM".into()),
+                ..Default::default()
+            }))
+        });
+        let nonexistent = as_user(&non_member, || {
+            m.search(Parameters(SearchInput {
+                query: "Findable".into(),
+                project: Some("NOPE".into()),
+                ..Default::default()
+            }))
+        });
+        assert_eq!(
+            hidden, nonexistent,
+            "a hidden project must be indistinguishable from a missing one"
+        );
+        assert_eq!(hidden, "No results found.", "got: {hidden}");
+
+        // A member still gets real results for the same query.
+        let visible = as_user(&lead, || {
+            m.search(Parameters(SearchInput {
+                query: "Findable".into(),
+                project: Some("MEM".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(visible.contains("Findable"), "got: {visible}");
+        // And an unrestricted caller keeps the helpful resolution error.
+        let admin_miss = as_user(&admin, || {
+            m.search(Parameters(SearchInput {
+                query: "Findable".into(),
+                project: Some("NOPE".into()),
+                ..Default::default()
+            }))
+        });
+        assert!(
+            admin_miss.contains("not found"),
+            "unrestricted caller keeps the resolution error: {admin_miss}"
+        );
     }
 
     #[test]
