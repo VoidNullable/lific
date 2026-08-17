@@ -10291,6 +10291,95 @@ mod authz_gating_tests {
         assert!(one_visible.starts_with("1 projects"), "got: {one_visible}");
     }
 
+    #[test]
+    fn search_filters_hidden_hits_before_paging_hint() {
+        let (m, admin, _lead, _maintainer, viewer, _non_member, visible_project_id, _guard) =
+            setup_membership_mcp();
+        {
+            let conn = m.db.write().unwrap();
+            queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: visible_project_id,
+                    title: "oracle visible canary".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let hidden_project = queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Hidden Search".into(),
+                    identifier: "HID".into(),
+                    lead_user_id: Some(admin.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for number in 0..3 {
+                queries::create_issue(
+                    &conn,
+                    &models::CreateIssue {
+                        project_id: hidden_project.id,
+                        title: format!("oracle hidden {number}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let result = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                mode: Some("literal".into()),
+                limit: Some(1),
+                ..Default::default()
+            }))
+        });
+
+        assert!(result.contains("MEM-1"), "got: {result}");
+        assert!(!result.contains("HID-"), "got: {result}");
+        assert!(!result.contains("more results available"), "got: {result}");
+    }
+
+    #[test]
+    fn search_hides_unknown_and_inaccessible_projects_identically() {
+        let (m, admin, _lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        {
+            let conn = m.db.write().unwrap();
+            queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Hidden Search".into(),
+                    identifier: "HID".into(),
+                    lead_user_id: Some(admin.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let hidden = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                project: Some("HID".into()),
+                ..Default::default()
+            }))
+        });
+        let unknown = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                project: Some("MISSING".into()),
+                ..Default::default()
+            }))
+        });
+
+        assert_eq!(hidden, "No results found.");
+        assert_eq!(unknown, hidden);
+    }
+
     /// LIF-257: the onboarding nudge fires only on a genuinely empty DB. A
     /// user who can see no projects (but projects DO exist) must keep the
     /// current "0 projects" / "No results" output — nudging would leak that

@@ -1267,6 +1267,20 @@ mod tests {
     }
 
     #[test]
+    fn literal_rejects_unbounded_query_text() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let query = SearchQuery {
+            query: "x".repeat(257),
+            mode: Some("literal".into()),
+            ..Default::default()
+        };
+
+        let error = search(&conn, &query).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
     fn literal_respects_result_type_filter() {
         let pool = test_db();
         let conn = pool.write().unwrap();
