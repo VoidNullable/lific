@@ -194,10 +194,11 @@ pub async fn serve_socket(
     loop {
         let progress_deadline = client.progress_deadline();
         let input = tokio::select! {
+            biased;
+            _ = time::sleep_until(progress_deadline) => SocketInput::ProgressDeadline,
             _ = revalidate.tick() => SocketInput::Revalidate,
             event = rx.recv() => SocketInput::Event(event),
             message = socket.recv() => SocketInput::Message(message),
-            _ = time::sleep_until(progress_deadline) => SocketInput::ProgressDeadline,
         };
         let flow = match input {
             SocketInput::Revalidate => {
