@@ -49,6 +49,16 @@ impl Drop for ReadConn {
 }
 
 impl DbPool {
+    /// The database file this pool was opened from. Callers that need to
+    /// place sidecar data next to the database (attachments, backups) resolve
+    /// it from here rather than re-reading the config, so every consumer of a
+    /// given pool agrees on the same data directory. For an in-memory test
+    /// pool this is the `file:...?mode=memory` URI, which has no parent
+    /// directory.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Acquire a read-only connection from the pool.
     pub fn read(&self) -> Result<ReadConn, LificError> {
         match self.readers.pop() {

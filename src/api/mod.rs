@@ -1,5 +1,8 @@
 mod activity;
-mod attachments;
+/// LIF-418: the MCP attachment tools reuse this module's authorization gates
+/// and filename hygiene verbatim rather than growing a second copy, so the
+/// module is crate-visible even though its handlers stay `pub(super)`.
+pub(crate) mod attachments;
 mod auth;
 mod comments;
 mod export;

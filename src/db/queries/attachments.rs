@@ -123,6 +123,53 @@ pub fn list_for_entity(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Every entity an attachment is linked to, in link order. Unknown
+/// `entity_type` values (impossible under the table's CHECK, but cheap to be
+/// defensive about) are skipped rather than erroring.
+pub fn links_for(
+    conn: &Connection,
+    attachment_id: i64,
+) -> Result<Vec<(AttachmentEntity, i64)>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT entity_type, entity_id FROM attachment_links
+         WHERE attachment_id = ?1
+         ORDER BY created_at, entity_id",
+    )?;
+    let rows = stmt.query_map(params![attachment_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut links = Vec::new();
+    for row in rows {
+        let (entity_type, entity_id) = row?;
+        if let Ok(entity) = entity_type.parse::<AttachmentEntity>() {
+            links.push((entity, entity_id));
+        }
+    }
+    Ok(links)
+}
+
+/// Every attachment linked to any entity owned by `project_id`, deduplicated
+/// (one attachment can be linked into several entities in the same project).
+/// Comment links resolve through the comment's parent issue or page, matching
+/// how `attachment_allowed_for_project` scopes an attachment to a project.
+pub fn list_for_project(conn: &Connection, project_id: i64) -> Result<Vec<Attachment>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT a.id, a.sha256, a.filename, a.mime, a.size_bytes, a.uploader_id,
+                a.created_at
+         FROM attachments a
+         JOIN attachment_links l ON l.attachment_id = a.id
+         LEFT JOIN issues i ON l.entity_type = 'issue' AND i.id = l.entity_id
+         LEFT JOIN pages p ON l.entity_type = 'page' AND p.id = l.entity_id
+         LEFT JOIN comments c ON l.entity_type = 'comment' AND c.id = l.entity_id
+         LEFT JOIN issues ci ON ci.id = c.issue_id
+         LEFT JOIN pages cp ON cp.id = c.page_id
+         WHERE ?1 IN (i.project_id, p.project_id, ci.project_id, cp.project_id)
+         ORDER BY a.id",
+    )?;
+    let rows = stmt.query_map(params![project_id], row_to_attachment)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 /// Replace an entity's link set to exactly the given attachment ids. Adds
 /// missing links, removes ones no longer referenced. Called after an
 /// issue/page description or a comment is saved, with the ids parsed out of the

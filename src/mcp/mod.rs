@@ -16,6 +16,7 @@ use crate::db::DbPool;
 use crate::db::models::AuthUser;
 use crate::links::IssueLinkContext;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
+use crate::storage::AttachmentStore;
 
 /// Serialization lock for MCP request handling.
 /// Ensures only one MCP request processes at a time, preventing the race
@@ -195,6 +196,11 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
 pub struct LificMcp {
     db: Arc<DbPool>,
     realtime: RealtimeHub,
+    /// LIF-418: where `upload_attachment` writes bytes and `get_attachment`
+    /// reads them. Derived from the pool's database path, which is the same
+    /// resolution `server.rs` uses for REST's store, so both transports hit
+    /// one content-addressed directory.
+    store: AttachmentStore,
     tool_router: ToolRouter<Self>,
 }
 
@@ -204,11 +210,23 @@ impl LificMcp {
     }
 
     pub fn with_realtime(db: DbPool, realtime: RealtimeHub) -> Self {
+        let store = AttachmentStore::from_db_path(db.path());
         Self {
             db: Arc::new(db),
             realtime,
+            store,
             tool_router: Self::create_tool_router(),
         }
+    }
+
+    /// Point the attachment tools at an explicit store. An in-memory pool has
+    /// no real database file to derive a directory from, so tests that upload
+    /// bytes hand in a scratch directory instead of writing into the process's
+    /// working directory.
+    #[cfg(test)]
+    pub(crate) fn with_attachment_store(mut self, store: AttachmentStore) -> Self {
+        self.store = store;
+        self
     }
 
     fn emit(&self, event: RealtimeEvent) {
