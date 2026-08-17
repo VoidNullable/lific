@@ -16,7 +16,7 @@ This guide covers upgrades from Lific 2.0 through 2.6. It assumes an existing 2.
 
    The archive includes a consistent database snapshot, attachments, and `manifest.json`.
 3. Record how clients connect: browser URL, API-key users, OAuth clients, and MCP configuration files. Keep one known-good operator key available for recovery.
-4. If the instance is behind a reverse proxy, review `server.trusted_proxies` before starting 2.2. Add only proxy networks you operate; the default trusts loopback proxies.
+4. If the instance is behind a reverse proxy, review `server.trusted_proxies` before starting 2.2. Add only isolated proxy networks you operate; the default trusts no proxies.
 5. Confirm that `lific.toml` parses before rolling out 2.6. From 2.6 a config file that exists but cannot be read or parsed stops startup instead of falling back to defaults, and unknown keys are rejected. Run `lific doctor`, which reports the configuration as one check and continues through the rest.
 
 Stop the background service before replacing the binary or restoring a backup. Keep the same `lific.toml`, database path, attachments directory, and public URL unless you are intentionally relocating the instance.

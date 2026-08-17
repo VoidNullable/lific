@@ -147,10 +147,10 @@ host = "127.0.0.1"
 port = 3456
 public_url = "https://lific.example.com"
 cors_origins = ["https://lific.example.com"]
-trusted_proxies = ["127.0.0.0/8", "::1/128"]
+trusted_proxies = []
 ```
 
-When a proxy supplies client IP headers, add only that proxy's addresses or CIDR ranges to `server.trusted_proxies`. Lific validates this configuration at startup. The default trusts loopback proxy addresses only.
+When a proxy supplies client IP headers, add only isolated proxy addresses or CIDR ranges to `server.trusted_proxies`. Lific validates this configuration at startup. The default trusts no proxy addresses.
 
 The proxy must forward `/api/events/ws` as a WebSocket connection, including the `Upgrade` and `Connection` headers, and must allow an idle timeout long enough for the session to remain connected. If ordinary page actions and REST requests work but changes in other tabs or agent writes do not appear live, test the WebSocket Upgrade path and proxy timeout before debugging the application.
 

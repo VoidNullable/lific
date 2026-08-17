@@ -48,7 +48,7 @@ This is the built-in default configuration. Optional server keys are omitted bec
 host = "0.0.0.0"
 port = 3456
 cors_origins = []
-trusted_proxies = ["127.0.0.0/8", "::1/128"]
+trusted_proxies = []
 
 [database]
 path = "lific.db"
@@ -75,7 +75,7 @@ required = true
 | `port` | unsigned 16-bit integer | `3456` | TCP port used by `lific start`. |
 | `public_url` | optional string | unset | Public base URL. Lific uses it as the OAuth issuer. `lific connect` uses it to derive the remote MCP URL. |
 | `cors_origins` | array of strings | `[]` | Allowed browser CORS origins. An empty array allows any origin. |
-| `trusted_proxies` | array of strings | `["127.0.0.0/8", "::1/128"]` | IP addresses or CIDR ranges trusted to supply client IP proxy headers. Invalid values stop server startup. |
+| `trusted_proxies` | array of strings | `[]` | Isolated IP addresses or CIDR ranges trusted to supply client IP proxy headers. Invalid values stop server startup. |
 | `mcp_path_token` | optional string | unset | Enables an unauthenticated MCP endpoint at `/mcp/<token>`. The path token is the credential. |
 | `mcp_path_user` | optional string | unset | Selects the username attributed to requests through `mcp_path_token`. When unset, Lific uses the first administrator if one exists. |
 
@@ -145,7 +145,7 @@ host = "127.0.0.1"
 port = 3456
 public_url = "https://lific.example.com"
 cors_origins = ["https://lific.example.com"]
-trusted_proxies = ["127.0.0.0/8", "::1/128"]
+trusted_proxies = []
 
 [database]
 path = "/var/lib/lific/lific.db"

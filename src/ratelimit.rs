@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 
-/// Maximum number of keys before a forced full sweep is triggered.
+/// Maximum number of live keys retained by one limiter.
 const MAX_KEYS: usize = 10_000;
+const MAX_KEY_BYTES: usize = 1024;
 
 /// A validated IP address or CIDR range trusted to supply client-IP headers.
 ///
@@ -157,18 +158,26 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted_proxies: &[IpNetwork
 /// Expired keys are evicted periodically to prevent unbounded memory growth.
 #[derive(Debug)]
 pub struct RateLimiter {
-    /// (key -> list of attempt timestamps)
-    attempts: Mutex<HashMap<String, Vec<Instant>>>,
+    state: Mutex<RateLimitState>,
     /// Maximum attempts allowed within the window.
     max_attempts: usize,
     /// Window duration.
     window: Duration,
 }
 
+#[derive(Debug)]
+struct RateLimitState {
+    attempts: HashMap<String, Vec<Instant>>,
+    last_sweep: Instant,
+}
+
 impl RateLimiter {
     pub fn new(max_attempts: usize, window: Duration) -> Self {
         Self {
-            attempts: Mutex::new(HashMap::new()),
+            state: Mutex::new(RateLimitState {
+                attempts: HashMap::new(),
+                last_sweep: Instant::now(),
+            }),
             max_attempts,
             window,
         }
@@ -183,34 +192,32 @@ impl RateLimiter {
     }
 
     /// Keep the bounded table available to new identities. Expired entries are
-    /// removed first; if an attacker has filled the table with live keys, evict
-    /// the least-recently-active key based on its newest attempt. This preserves
-    /// identities that are still actively making attempts.
-    fn make_room(map: &mut HashMap<String, Vec<Instant>>, now: Instant, window: Duration) {
-        Self::sweep(map, now, window);
-        if map.len() < MAX_KEYS {
-            return;
+    /// removed periodically; live entries are never evicted, so saturation
+    /// cannot reset another identity's security state.
+    fn make_room(state: &mut RateLimitState, now: Instant, window: Duration) -> bool {
+        if now.saturating_duration_since(state.last_sweep) >= window {
+            Self::sweep(&mut state.attempts, now, window);
+            state.last_sweep = now;
         }
-        if let Some(least_recently_active_key) = map
-            .iter()
-            .min_by_key(|(_, entries)| entries.last().copied().unwrap_or(now))
-            .map(|(key, _)| key.clone())
-        {
-            map.remove(&least_recently_active_key);
-        }
+        state.attempts.len() < MAX_KEYS
     }
 
     /// Record an attempt for the given key.
     /// Returns `true` if the attempt is allowed, `false` if rate-limited.
     pub fn check(&self, key: &str) -> bool {
+        if key.len() > MAX_KEY_BYTES {
+            return false;
+        }
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
-        if !map.contains_key(key) && map.len() >= MAX_KEYS {
-            Self::make_room(&mut map, now, self.window);
+        if !state.attempts.contains_key(key)
+            && !Self::make_room(&mut state, now, self.window)
+        {
+            return false;
         }
 
-        let entry = map.entry(key.to_string()).or_default();
+        let entry = state.attempts.entry(key.to_string()).or_default();
 
         // Prune expired entries for this key
         entry.retain(|t| now.saturating_duration_since(*t) < self.window);
@@ -232,9 +239,12 @@ impl RateLimiter {
     /// halved the effective limit (LIF-75). Login now `peek()`s, then
     /// records exactly one failure via `record_failure()` on auth failure.
     pub fn peek(&self, key: &str) -> bool {
+        if key.len() > MAX_KEY_BYTES {
+            return false;
+        }
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get_mut(key) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.attempts.get_mut(key) {
             Some(entry) => {
                 entry.retain(|t| now.duration_since(*t) < self.window);
                 entry.len() < self.max_attempts
@@ -245,14 +255,19 @@ impl RateLimiter {
 
     /// Record a failed attempt without checking first (for tracking after auth failure).
     pub fn record_failure(&self, key: &str) {
+        if key.len() > MAX_KEY_BYTES {
+            return;
+        }
         let now = Instant::now();
-        let mut map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
-        if !map.contains_key(key) && map.len() >= MAX_KEYS {
-            Self::make_room(&mut map, now, self.window);
+        if !state.attempts.contains_key(key)
+            && !Self::make_room(&mut state, now, self.window)
+        {
+            return;
         }
 
-        let entry = map.entry(key.to_string()).or_default();
+        let entry = state.attempts.entry(key.to_string()).or_default();
         entry.retain(|t| now.saturating_duration_since(*t) < self.window);
         entry.push(now);
     }
@@ -260,8 +275,8 @@ impl RateLimiter {
     /// How many seconds until the oldest attempt in the window expires.
     pub fn retry_after(&self, key: &str) -> u64 {
         let now = Instant::now();
-        let map = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(key) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.attempts.get(key) {
             Some(entries) if !entries.is_empty() => {
                 let oldest = entries[0];
                 let elapsed = now.duration_since(oldest);
@@ -273,6 +288,15 @@ impl RateLimiter {
             }
             _ => 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attempts
+            .contains_key(key)
     }
 }
 
@@ -327,45 +351,38 @@ mod tests {
     }
 
     #[test]
-    fn full_table_evicts_old_identity_for_new_key() {
+    fn full_table_rejects_new_identity_without_evicting_existing_state() {
         let rl = RateLimiter::new(1, Duration::from_secs(60));
         for index in 0..MAX_KEYS {
             assert!(rl.check(&format!("identity-{index}")));
         }
-        assert!(rl.check("new-identity"));
+        assert!(!rl.check("new-identity"));
+        assert!(!rl.check("identity-0"));
     }
 
     #[test]
-    fn full_table_evicts_least_recently_active_key() {
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
-        let mut map = HashMap::new();
+    fn expired_keys_are_swept_before_admitting_new_identity() {
+        let rl = RateLimiter::new(1, Duration::ZERO);
+        assert!(rl.check("expired"));
+        assert!(rl.check("new"));
+    }
 
-        // This identity has the oldest attempt, but its newest attempt is
-        // recent and should keep it in the bounded table.
-        map.insert(
-            "high-rate".to_string(),
-            vec![
-                now.checked_sub(Duration::from_secs(30)).unwrap(),
-                now.checked_sub(Duration::from_secs(1)).unwrap(),
-            ],
-        );
-        map.insert(
-            "least-active".to_string(),
-            vec![now.checked_sub(Duration::from_secs(5)).unwrap()],
-        );
-        for index in 0..(MAX_KEYS - 2) {
-            map.insert(
-                format!("active-{index}"),
-                vec![now.checked_sub(Duration::from_secs(2)).unwrap()],
-            );
-        }
+    #[test]
+    fn oversized_keys_are_rejected_without_allocation() {
+        let rl = RateLimiter::new(1, Duration::from_secs(60));
+        let oversized = "x".repeat(MAX_KEY_BYTES + 1);
+        assert!(!rl.check(&oversized));
+        assert!(!rl.peek(&oversized));
+        rl.record_failure(&oversized);
+        assert_eq!(rl.retry_after(&oversized), 0);
+    }
 
-        RateLimiter::make_room(&mut map, now, window);
-
-        assert!(map.contains_key("high-rate"));
-        assert!(!map.contains_key("least-active"));
-        assert_eq!(map.len(), MAX_KEYS - 1);
+    #[test]
+    fn default_proxy_configuration_does_not_trust_loopback_headers() {
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.9".parse().unwrap());
+        assert_eq!(client_ip(peer, &headers, &[]), "127.0.0.1");
     }
 
     // ── LIF-75: peek() is non-recording ──────────────────────

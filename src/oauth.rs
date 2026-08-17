@@ -1871,9 +1871,8 @@ mod tests {
 
     fn default_trusted_proxies() -> Arc<[crate::ratelimit::IpNetwork]> {
         Arc::<[crate::ratelimit::IpNetwork]>::from(
-            crate::config::ServerConfig::default()
-                .trusted_proxy_ranges()
-                .expect("default trusted proxy ranges must parse"),
+            crate::ratelimit::parse_trusted_proxies(&["127.0.0.0/8".into()])
+                .expect("test trusted proxy range must parse"),
         )
     }
 
