@@ -982,6 +982,14 @@ export interface Attachment {
   size_bytes: number;
   uploader_id: number | null;
   created_at: string;
+  /** LIF-418: intrinsic pixel dimensions for images and video, when the
+   *  server could determine them. Optional so the UI still works against an
+   *  older backend that does not send them. */
+  width?: number | null;
+  height?: number | null;
+  alt_text?: string | null;
+  /** True when `/api/attachments/{id}/thumbnail` will serve a webp. */
+  has_thumbnail?: boolean;
 }
 
 export interface UploadResponse {
@@ -1050,6 +1058,73 @@ export async function deleteAttachment(id: number) {
   return request<{ deleted: boolean }>(`/attachments/${id}`, {
     method: "DELETE",
   });
+}
+
+// ── Attachment viewers (LIF-418) ─────────────────────────────
+
+/** Raw bytes URL. Safe to use directly as an `<img>`/`<video>`/`<audio>` src:
+ *  this exact path shape accepts the `lific_token` session cookie, which is
+ *  how the browser authenticates subresource loads that cannot carry an
+ *  Authorization header (see src/auth.rs, LIF-267). */
+export function attachmentUrl(id: number): string {
+  return `${BASE}/attachments/${id}`;
+}
+
+/** Server-generated webp preview. 404s when the attachment has none, so every
+ *  consumer must have an onerror path back to the full asset. */
+export function attachmentThumbnailUrl(id: number): string {
+  return `${BASE}/attachments/${id}/thumbnail`;
+}
+
+export interface ZipPreviewEntry {
+  name: string;
+  size: number;
+  compressed: number;
+}
+
+export interface SqlitePreviewTable {
+  name: string;
+  rows: number;
+}
+
+/** Structured peek inside a container attachment. `kind: "none"` means the
+ *  server looked and had nothing to say, which is not an error. */
+export type AttachmentPreview =
+  | {
+      kind: "zip";
+      entries: ZipPreviewEntry[];
+      total_entries: number;
+      truncated: boolean;
+    }
+  | { kind: "sqlite"; tables: SqlitePreviewTable[] }
+  | { kind: "none" };
+
+/** Fetch the structured preview. A 404 (older backend, or an attachment with
+ *  no preview) surfaces as a normal `ok: false` so callers fall back to the
+ *  plain download chip instead of showing an error. */
+export async function getAttachmentPreview(id: number) {
+  return request<AttachmentPreview>(`/attachments/${id}/preview`);
+}
+
+/** Fetch an attachment's bytes as text, for the inline text/diff/data viewers.
+ *  Uses the bearer token like every other authenticated read; the cookie
+ *  fallback exists for subresource loads, not for fetches. */
+export async function fetchAttachmentText(
+  id: number,
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const token = localStorage.getItem("lific_token");
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  try {
+    const res = await fetch(`${BASE}/attachments/${id}`, { headers });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true, text: await res.text() };
+  } catch {
+    return {
+      ok: false,
+      error: "Couldn't reach the server. Check your connection and try again.",
+    };
+  }
 }
 
 /** Human-readable byte size (e.g. "1.4 MB"). Small standalone helper so the
