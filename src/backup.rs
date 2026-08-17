@@ -23,8 +23,9 @@ pub fn start_backup_task(
         config.dir.clone()
     };
 
-    let interval = Duration::from_secs(config.interval_minutes * 60);
-    let retain = config.retain;
+    let interval_minutes = checked_interval_minutes(config.interval_minutes);
+    let interval = Duration::from_secs(interval_minutes * 60);
+    let retain = checked_retain(config.retain);
     let audit_retention_days = config.audit_retention_days;
 
     tokio::spawn(async move {
@@ -35,7 +36,7 @@ pub fn start_backup_task(
 
         info!(
             dir = %backup_dir.display(),
-            interval_min = config.interval_minutes,
+            interval_min = interval_minutes,
             retain = retain,
             audit_retention_days = audit_retention_days.unwrap_or(0),
             "backup task started"
@@ -53,6 +54,48 @@ pub fn start_backup_task(
             run_backup(&pool, &db_path, &backup_dir, retain, audit_retention_days);
         }
     })
+}
+
+/// The configured backup interval, or the default when the config says `0`
+/// (LIF-415).
+///
+/// Zero is never a schedule anyone wants: `tokio::time::interval` panics on a
+/// zero period, and because the timer is built inside the spawned task the
+/// panic kills backups silently while the server keeps serving. Falling back
+/// to the default with a warning keeps the instance backed up and tells the
+/// operator their value was ignored, which matches how the rest of the config
+/// treats a value it cannot honor.
+fn checked_interval_minutes(configured: u64) -> u64 {
+    if configured == 0 {
+        let fallback = BackupConfig::default().interval_minutes;
+        warn!(
+            fallback_minutes = fallback,
+            "[backup] interval_minutes = 0 is not a valid schedule; using the default instead"
+        );
+        return fallback;
+    }
+    configured
+}
+
+/// The configured retention count, or the default when the config says `0`
+/// (LIF-415).
+///
+/// `retain = 0` reads like "keep no old backups" but means "keep nothing at
+/// all": rotation runs right after each archive is written, so every
+/// successful backup is deleted seconds after it lands and the instance ends
+/// up with no backups while reporting healthy ones. An operator who genuinely
+/// wants no backups sets `enabled = false`.
+fn checked_retain(configured: usize) -> usize {
+    if configured == 0 {
+        let fallback = BackupConfig::default().retain;
+        warn!(
+            fallback_retain = fallback,
+            "[backup] retain = 0 would delete every backup as soon as it is written; using \
+             the default instead (set [backup] enabled = false to turn backups off)"
+        );
+        return fallback;
+    }
+    configured
 }
 
 /// Whether we've already logged the one-time hint about the legacy mirrored
@@ -476,6 +519,50 @@ mod tests {
             !names.iter().any(|n| n.ends_with(".tmp")),
             "in-progress .tmp writes must not be archived: {names:?}"
         );
+    }
+
+    // ── LIF-415: backup config validation ─────────────────────────────────
+
+    /// `interval_minutes = 0` builds a zero-period `tokio::time::interval`,
+    /// which panics inside the spawned task and takes backups down without
+    /// stopping the server. The value is replaced instead.
+    #[test]
+    fn zero_interval_falls_back_to_the_default_schedule() {
+        assert_eq!(
+            checked_interval_minutes(0),
+            BackupConfig::default().interval_minutes
+        );
+        // Real values pass through untouched.
+        assert_eq!(checked_interval_minutes(1), 1);
+        assert_eq!(checked_interval_minutes(30), 30);
+    }
+
+    /// `retain = 0` means "delete every archive right after writing it", not
+    /// "keep no history": rotation runs at the end of each cycle.
+    #[test]
+    fn zero_retain_falls_back_to_the_default_count() {
+        assert_eq!(checked_retain(0), BackupConfig::default().retain);
+        assert_eq!(checked_retain(1), 1);
+        assert_eq!(checked_retain(48), 48);
+    }
+
+    /// What the clamp prevents: rotation with `retain = 0` removes the
+    /// archive the same cycle just produced.
+    #[test]
+    fn rotate_with_zero_retain_would_delete_everything() {
+        let tmp = make_temp_dir();
+        let dir = tmp.path();
+        fs::write(dir.join("lific_20260101_120000.tar.gz"), "fake").unwrap();
+        fs::write(dir.join("lific_20260102_120000.tar.gz"), "fake").unwrap();
+
+        rotate_backups(dir, "lific", 0);
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0);
+
+        // With the clamped value the same directory keeps its archives.
+        fs::write(dir.join("lific_20260101_120000.tar.gz"), "fake").unwrap();
+        fs::write(dir.join("lific_20260102_120000.tar.gz"), "fake").unwrap();
+        rotate_backups(dir, "lific", checked_retain(0));
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 2);
     }
 
     // ── LIF-158: audit log retention ──────────────────────────────────────
