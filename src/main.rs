@@ -87,6 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.server.public_url.as_deref(),
             &cfg,
         );
+        // LIF-408: `--api-key`/`LIFIC_API_KEY` still wins, then the stored
+        // credential for `url`. `credentials::load` will only hand back a
+        // `LIFIC_TOKEN` when `LIFIC_URL` names the same origin as `url`, so a
+        // cwd `lific.toml` (or a `--url`) pointing at another server cannot
+        // make us send the env token there.
         let api_key = cli::resolve_http_credential(
             cli.api_key.as_deref(),
             || cli::credentials::load(&url),
