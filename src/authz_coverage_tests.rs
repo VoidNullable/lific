@@ -129,7 +129,6 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
     use Gate::*;
 
     const NOT_PROJECT_SCOPED: &str = "global account/instance surface, not project-scoped — gated (or intentionally open) independent of authz.rs";
-    const OWNERSHIP: &str = "author-or-admin ownership check (ownership, not project role)";
     const PUBLIC: &str = "unauthenticated by design (auth screen / health check)";
 
     HashMap::from([
@@ -216,8 +215,15 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/issues/{issue_id}/comments"), Gated(Viewer)),
         (("GET", "/api/pages/{page_id}/comments"), Gated(Viewer)),
         (("POST", "/api/pages/{page_id}/comments"), Gated(Viewer)),
-        (("PUT", "/api/comments/{id}"), Exempt(OWNERSHIP)),
-        (("DELETE", "/api/comments/{id}"), Exempt(OWNERSHIP)),
+        // LIF-410: mutating a comment takes the same Viewer gate reading one
+        // does, checked *before* the author-or-admin ownership test on top of
+        // it — authorship alone used to be enough, so an ex-member could keep
+        // editing and deleting comments in a project they'd been removed
+        // from. Gated(Viewer) is the project-role floor; ownership is the
+        // additional check the Gate enum has no vocabulary for (same shape as
+        // the saved-views entries above).
+        (("PUT", "/api/comments/{id}"), Gated(Viewer)),
+        (("DELETE", "/api/comments/{id}"), Gated(Viewer)),
         // ── Attachments (LIF-262) ──
         // The list endpoint gates on the owning entity's project at Viewer.
         (("GET", "/api/attachments"), Gated(Viewer)),
