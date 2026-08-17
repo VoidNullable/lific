@@ -192,17 +192,59 @@ pub fn latest_version() -> i64 {
 
 /// Ensure the migrations table exists and apply any pending migrations.
 pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
+    let current_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM _migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let needs_fk_rebuild = MIGRATIONS.iter().any(|(version, name, _)| {
+        *version > current_version && *name == "project identifier nocase"
+    });
+
+    // SQLite ignores PRAGMA foreign_keys changes inside a transaction. Keep
+    // the migration lock, but configure the connection before beginning it
+    // when an upgrade includes the table-rebuild migration from master.
+    if needs_fk_rebuild {
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;",
+        )?;
+    }
+
     // Serialize migration discovery and application across processes. Without
     // an IMMEDIATE transaction, two fresh connections can observe the same
     // version and both execute the next migration, racing on the migrations
     // table (notably on Windows where test/process startup is more concurrent).
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    match run_inner(conn) {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
+    let transaction_result: Result<(), crate::error::LificError> =
+        match conn.execute_batch("BEGIN IMMEDIATE") {
+            Ok(()) => match run_inner(conn) {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            },
+            Err(error) => Err(error.into()),
+        };
+
+    if needs_fk_rebuild {
+        let restore_result = conn
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA legacy_alter_table = OFF;",
+            )
+            .map_err(Into::into);
+        match transaction_result {
+            Ok(()) => restore_result,
+            Err(error) => {
+                let _ = restore_result;
+                Err(error)
+            }
         }
+    } else {
+        transaction_result
     }
 }
 
