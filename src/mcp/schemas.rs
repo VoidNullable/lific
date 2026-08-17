@@ -463,6 +463,40 @@ pub struct UpdatePlanStepInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct UploadAttachmentInput {
+    #[schemars(description = "File name, e.g. crash-log.txt or screenshot.png")]
+    pub filename: String,
+    #[schemars(description = "File bytes, base64 encoded (max 10 MiB decoded)")]
+    pub content_base64: String,
+    #[schemars(
+        description = "Link the upload to this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages)"
+    )]
+    pub entity: Option<String>,
+    #[schemars(description = "Link the upload to this comment id instead of an issue or page")]
+    pub comment_id: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetAttachmentInput {
+    #[schemars(description = "Attachment id, e.g. 12 for /api/attachments/12")]
+    pub attachment_id: i64,
+    #[schemars(description = "Text only: zero-indexed first line to return")]
+    pub offset: Option<i64>,
+    #[schemars(description = "Text only: max lines to return (default 200, cap 500)")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ListAttachmentsInput {
+    #[schemars(
+        description = "List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages)"
+    )]
+    pub entity: Option<String>,
+    #[schemars(description = "List every attachment in this project (e.g. LIF) instead")]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ExportInput {
     #[schemars(
         description = "What to export: an issue ID (PRO-42), a page ID (PRO-DOC-3), or a bare project ID (PRO) for the whole project"
