@@ -9,12 +9,14 @@
     type Module,
     type Label,
   } from "../lib/api";
-  import { ArrowLeft } from "lucide-svelte";
+  import { ArrowLeft, Paperclip } from "lucide-svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
-  import { getContext } from "svelte";
+  import AttachComposer from "../lib/attachments/AttachComposer.svelte";
+  import { createComposerAttachments } from "../lib/attachments/composer.svelte";
+  import { getContext, onDestroy } from "svelte";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
 
   // LIF-234: issue creation is maintainer-gated. A viewer who lands here
@@ -73,6 +75,31 @@
   // Auto-resize
   let descriptionEl = $state<HTMLTextAreaElement | null>(null);
 
+  // LIF-418: the new-issue form had no attachment support at all - no drop, no
+  // paste, no Attach button - so the only way to put a screenshot on a fresh
+  // issue was to create it empty and then edit it. It now runs the same shared
+  // composer wiring as the body editor and the comment boxes.
+  //
+  // Uploads start immediately and stay unlinked (there is no issue id yet).
+  // The markdown reference lands in the description, and the server binds the
+  // attachment on create via sync_links; anything never referenced is swept
+  // after 24h. Navigating away aborts whatever is still in flight.
+  const attach = createComposerAttachments({
+    el: () => descriptionEl,
+    text: () => description,
+    apply: (text, caret) => {
+      description = text;
+      requestAnimationFrame(() => {
+        const el = descriptionEl;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+        autoResize();
+      });
+    },
+  });
+  onDestroy(() => attach.destroy());
+
   const STATUSES = [
     { value: "backlog", label: "Backlog" },
     { value: "todo", label: "Todo" },
@@ -127,7 +154,9 @@
     labelsOpen = false;
   }
 
-  let canSave = $derived(title.trim().length > 0);
+  // Creating while an upload is still running would drop the reference the
+  // upload is about to insert, so Create waits for the strip to clear.
+  let canSave = $derived(title.trim().length > 0 && !attach.uploads.pending);
 
   async function save() {
     if (!project || !canSave) return;
@@ -153,7 +182,16 @@
   }
 
   function discard() {
+    // Leave nothing running behind us: in-flight transfers are aborted and
+    // their chips (and object URLs) go with them.
+    attach.destroy();
     navigate(`/${projectIdentifier}/issues`);
+  }
+
+  // The composer gets first refusal on Enter and Escape so the big-paste
+  // offer can answer them. Everything else falls through to the textarea.
+  function onDescriptionKeydown(e: KeyboardEvent) {
+    attach.handleKeydown(e);
   }
 
   function autoResize() {
@@ -250,17 +288,23 @@
             autofocus
           />
 
-          <!-- Description -->
+          <!-- Description. Wrapped in the shared attach composer so drag,
+               paste and the Attach button behave exactly as they do on the
+               issue detail page. -->
           <section class="mb-8">
-            <textarea
-              bind:value={description}
-              bind:this={descriptionEl}
-              class="w-full text-body leading-[1.7] text-[var(--text)]
-                     bg-transparent border-none outline-none resize-none
-                     p-0 m-0 font-[var(--font-body)] min-h-[120px]"
-              placeholder="Add a description... (markdown supported)"
-              oninput={autoResize}
-            ></textarea>
+            <AttachComposer composer={attach} radius="0.375rem" footer={descriptionFooter}>
+              <textarea
+                bind:value={description}
+                bind:this={descriptionEl}
+                class="w-full text-body leading-[1.7] text-[var(--text)]
+                       bg-transparent border-none outline-none resize-none
+                       p-0 m-0 font-[var(--font-body)] min-h-[120px]"
+                placeholder="Add a description... (markdown supported)"
+                oninput={autoResize}
+                onkeydown={onDescriptionKeydown}
+                onpaste={(e) => attach.handlePaste(e)}
+              ></textarea>
+            </AttachComposer>
           </section>
         </div>
 
@@ -483,6 +527,27 @@
         {saving ? "Creating..." : "Create issue"}
       </button>
     </div>
+  </div>
+{/snippet}
+
+{#snippet descriptionFooter()}
+  <div class="flex items-center gap-2 mt-3 pt-3 border-t border-[var(--border)]">
+    <button
+      type="button"
+      class="inline-flex items-center gap-1.5 text-caption text-[var(--text-muted)]
+             px-2 py-1 rounded-md border border-[var(--border)]
+             hover:border-[var(--accent)] hover:text-[var(--accent)]
+             transition-colors"
+      title="Attach files"
+      aria-label="Attach files"
+      onclick={() => attach.openFilePicker()}
+    >
+      <Paperclip size={13} />
+      {attach.uploads.busy ? "Uploading…" : "Attach"}
+    </button>
+    <span class="text-caption text-[var(--text-faint)]">
+      Markdown · drag, paste or attach files
+    </span>
   </div>
 {/snippet}
 
