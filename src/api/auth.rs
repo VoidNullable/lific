@@ -490,9 +490,27 @@ pub(super) async fn instance_settings_patch(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    reachability: Option<Extension<crate::server::Reachability>>,
     Json(input): Json<InstanceSettingsPatchReq>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     require_admin(&identity)?;
+
+    // LIF-406: `lific start` refuses to boot with web auto-login enabled on a
+    // publicly reachable instance, but that check only ever ran at startup,
+    // so an admin could switch the flag on afterwards and hand an admin
+    // session to anyone who could load the page. Same guard, same question,
+    // asked again here before anything is persisted.
+    if input.web_auto_login == Some(true)
+        && let Some(Extension(reach)) = reachability.as_ref()
+        && let Some(exposure) = reach.public_exposure()
+    {
+        return Err(LificError::BadRequest(format!(
+            "single-user web auto-login cannot be enabled while {exposure}. Anyone \
+             who can reach this instance would get an admin session without a \
+             password. Bind to 127.0.0.1 and remove the public URL first."
+        )));
+    }
+
     let patch = crate::db::queries::settings::InstanceSettingsPatch {
         allow_signup: input.allow_signup,
         instance_name: input.instance_name,
@@ -1436,6 +1454,94 @@ mod tests {
         );
         assert_eq!(data["user"]["is_admin"], true);
         assert_eq!(data["user"]["username"], "test-admin");
+    }
+
+    // ── LIF-406: the reachability guard runs on the settings update too ──
+
+    /// An admin app whose instance reports the given bind host and public
+    /// URL, the way `build_app` layers it in production.
+    fn app_with_reachability(host: &str, public_url: Option<&str>) -> axum::Router {
+        test_app().layer(axum::Extension(crate::server::Reachability {
+            host: host.to_string(),
+            public_url: public_url.map(str::to_string),
+        }))
+    }
+
+    /// The runtime hole: `lific start` refuses to boot a publicly reachable
+    /// instance with web auto-login on, but nothing stopped an admin turning
+    /// it on afterwards, which hands an admin session to anyone who can load
+    /// the page. The refusal must also persist nothing.
+    #[tokio::test]
+    async fn enabling_auto_login_is_refused_on_a_publicly_reachable_instance() {
+        let app = app_with_reachability("127.0.0.1", Some("https://magi.tailb93ac8.ts.net"));
+
+        let resp = json_patch(
+            &app,
+            "/api/instance/settings",
+            serde_json::json!({ "web_auto_login": true }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let data = parse_json(resp).await;
+        assert!(
+            data["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("web auto-login cannot be enabled"),
+            "the refusal must say why: {data}"
+        );
+
+        let stored = parse_json(json_get(&app, "/api/instance/settings").await).await;
+        assert_eq!(
+            stored["web_auto_login"], false,
+            "a refused patch must persist nothing: {stored}"
+        );
+        let public = parse_json(json_get(&app, "/api/instance").await).await;
+        assert_eq!(public["web_auto_login"], false);
+    }
+
+    /// The same PATCH on a genuinely local instance is exactly as allowed as
+    /// it has always been. This is the single-user install the feature is
+    /// for, and LIF-406 must not break it.
+    #[tokio::test]
+    async fn enabling_auto_login_still_works_on_a_loopback_instance() {
+        let app = app_with_reachability("127.0.0.1", Some("http://127.0.0.1:3456"));
+
+        let resp = json_patch(
+            &app,
+            "/api/instance/settings",
+            serde_json::json!({ "web_auto_login": true }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(parse_json(resp).await["web_auto_login"], true);
+
+        let stored = parse_json(json_get(&app, "/api/instance/settings").await).await;
+        assert_eq!(stored["web_auto_login"], true, "persisted: {stored}");
+
+        // And auto-login itself now works, so the guard gates the flag
+        // rather than the feature.
+        let resp = json_post(&app, "/api/auth/auto-login", serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// The guard is about one flag. Every other setting still patches on a
+    /// publicly reachable instance, and turning auto-login OFF is never
+    /// refused (that would strand an instance in the unsafe state).
+    #[tokio::test]
+    async fn the_reachability_guard_only_blocks_turning_auto_login_on() {
+        let app = app_with_reachability("0.0.0.0", None);
+
+        let resp = json_patch(
+            &app,
+            "/api/instance/settings",
+            serde_json::json!({ "instance_name": "Acme Eng", "web_auto_login": false }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = parse_json(resp).await;
+        assert_eq!(data["instance_name"], "Acme Eng");
+        assert_eq!(data["web_auto_login"], false);
     }
 
     #[tokio::test]
