@@ -110,6 +110,7 @@ tempfile = "3"
 libc = "0.2"
 
 [dev-dependencies]
+futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Scratch directories for tests. Replaces hand-rolled
@@ -119,6 +120,8 @@ http-body-util = "0.1"
 # directory for the next run that drew the same pid. `TempDir` is unique per
 # call and removes itself on Drop, including during unwind.
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+tokio-tungstenite = "0.28"
 
 # Argon2 password hashing is memory-hard by design; in unoptimized debug
 # builds each hash/verify costs ~0.4s of CPU, and the test suite performs
