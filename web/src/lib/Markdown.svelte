@@ -374,7 +374,17 @@
           block.innerHTML = svg;
           block.dataset.rendered = "true";
         } catch (err) {
-          block.innerHTML = `<pre style="color:var(--error);white-space:pre-wrap;margin:0;">Mermaid error: ${String(err)}</pre>`;
+          // LIF-402: the error message echoes the offending diagram source,
+          // which is attacker-controlled content that already passed through
+          // DOMPurify as inert text. Interpolating it into an HTML string
+          // here would hand it back a parser and re-open stored XSS, so the
+          // node is built directly and the message set as text.
+          const pre = document.createElement("pre");
+          pre.style.color = "var(--error)";
+          pre.style.whiteSpace = "pre-wrap";
+          pre.style.margin = "0";
+          pre.textContent = `Mermaid error: ${String(err)}`;
+          block.replaceChildren(pre);
           block.dataset.rendered = "error";
         }
       }
