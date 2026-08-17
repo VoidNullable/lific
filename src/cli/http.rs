@@ -2047,11 +2047,16 @@ mod tests {
             reported,
             json!([
                 output_dir
-                    .join("TST/issues/tst-1-first.md")
+                    .join("TST")
+                    .join("issues")
+                    .join("tst-1-first.md")
                     .display()
                     .to_string(),
                 output_dir
-                    .join("TST/pages/design-notes/tst-doc-1-filed.md")
+                    .join("TST")
+                    .join("pages")
+                    .join("design-notes")
+                    .join("tst-doc-1-filed.md")
                     .display()
                     .to_string(),
             ])
