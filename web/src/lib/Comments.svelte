@@ -29,10 +29,8 @@
     routeWithCommentTarget,
     splitResourcePath,
   } from "./commentLinks";
-  import { filesFromClipboard, insertAtCaret } from "./attachments/compose";
-  import { createUploadController } from "./attachments/uploads.svelte";
-  import DropOverlay from "./attachments/DropOverlay.svelte";
-  import PendingUploads from "./attachments/PendingUploads.svelte";
+  import { createComposerAttachments } from "./attachments/composer.svelte";
+  import AttachComposer from "./attachments/AttachComposer.svelte";
   import {
     canManageComment,
     commentKeyboardAction,
@@ -73,17 +71,13 @@
   let draft = $state("");
   let submitting = $state(false);
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
-  let fileInputEl = $state<HTMLInputElement | null>(null);
   let editingId = $state<number | null>(null);
   let editDraft = $state("");
   let editTextareaEl = $state<HTMLTextAreaElement | null>(null);
-  let editFileInputEl = $state<HTMLInputElement | null>(null);
   let updatingId = $state<number | null>(null);
   let deletingId = $state<number | null>(null);
   let menuId = $state<number | null>(null);
   let confirmDeleteId = $state<number | null>(null);
-
-  let canSend = $derived(draft.trim().length > 0 && !submitting);
 
   let pendingCommentTarget = $state(commentTargetFromHash(window.location.hash));
   let scrollingTarget: string | null = null;
@@ -275,6 +269,9 @@
   }
 
   function onKeydown(e: KeyboardEvent, context: Exclude<CommentKeyboardContext, "menu">) {
+    // The big-paste offer owns Enter and Escape while it is up, ahead of both
+    // the mention popover and submit/cancel.
+    if ((context === "edit" ? editAttach : attach).handleKeydown(e)) return;
     // The mention popover consumes ↑/↓/Enter/Tab/Esc while open.
     if (onMentionKeydown(e)) return;
     const action = commentKeyboardAction(context, e.key, e.metaKey || e.ctrlKey);
@@ -311,60 +308,53 @@
     el.style.height = `${el.scrollHeight}px`;
   }
 
-  // ── LIF-262: attachment uploads ──────────────────────────
+  // ── LIF-262 / LIF-418: attachment uploads ────────────────
+  //
+  // Both composers (new comment, and the in-place editor) run the same shared
+  // wiring as the description editor and the new-issue form: drag, paste, the
+  // Attach button, parallel uploads with progress, and the big-paste offer.
 
-  function insertSnippet(snippet: string, edit = false) {
-    const el = edit ? editTextareaEl : textareaEl;
-    const activeDraft = edit ? editDraft : draft;
-    if (!el) {
-      const next = activeDraft + (activeDraft.endsWith("\n") || activeDraft === "" ? "" : "\n") + snippet + "\n";
-      if (edit) editDraft = next;
-      else draft = next;
-      return;
-    }
-    const { text, caret } = insertAtCaret(el, activeDraft, snippet);
-    if (edit) editDraft = text;
-    else draft = text;
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(caret, caret);
-      resize();
-    });
-  }
-
-  // Shared pending-upload controller (LIF-268): the same state model drives the
-  // strip of chips in both this composer and the description/page editor.
-  const uploads = createUploadController({
+  const attach = createComposerAttachments({
+    el: () => textareaEl,
+    text: () => draft,
+    apply: (text, caret) => {
+      draft = text;
+      requestAnimationFrame(() => {
+        const el = textareaEl;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+        resize();
+      });
+    },
     link: () => attachTo,
-    onInsert: insertSnippet,
   });
-  onDestroy(() => uploads.destroy());
+  onDestroy(() => attach.destroy());
 
-  const editUploads = createUploadController({
+  // Posting while an upload is still running would drop the markdown
+  // reference the upload is about to insert, so the send button waits for it.
+  let canSend = $derived(
+    draft.trim().length > 0 && !submitting && !attach.uploads.pending,
+  );
+
+  const editAttach = createComposerAttachments({
+    el: () => editTextareaEl,
+    text: () => editDraft,
+    apply: (text, caret) => {
+      editDraft = text;
+      requestAnimationFrame(() => {
+        const el = editTextareaEl;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+        resize();
+      });
+    },
     // Link only after a successful PUT re-scans the saved Markdown. This
     // keeps Cancel and editor switches free of attachment side effects.
     link: () => null,
-    onInsert: (snippet) => {
-      if (editingId !== null) insertSnippet(snippet, true);
-    },
   });
-  onDestroy(() => editUploads.destroy());
-
-  function onPaste(e: ClipboardEvent, edit = false) {
-    const files = filesFromClipboard(e);
-    if (files.length > 0) {
-      e.preventDefault();
-      (edit ? editUploads : uploads).enqueue(files);
-    }
-  }
-
-  function onFilePicked(e: Event, edit = false) {
-    const input = e.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      (edit ? editUploads : uploads).enqueue(Array.from(input.files));
-      input.value = "";
-    }
-  }
+  onDestroy(() => editAttach.destroy());
 
   function initials(name: string): string {
     return name
@@ -375,7 +365,7 @@
   }
 
   function startEdit(comment: Comment) {
-    editUploads.destroy();
+    editAttach.destroy();
     editingId = comment.id;
     editDraft = comment.content;
     menuId = null;
@@ -388,14 +378,14 @@
 
   function cancelEdit() {
     if (updatingId !== null) return;
-    editUploads.destroy();
+    editAttach.destroy();
     editingId = null;
     editDraft = "";
     mentionOpen = false;
   }
 
   async function saveEdit() {
-    if (editingId === null || updatingId !== null || editUploads.busy || editDraft.trim() === "" || !onUpdate) return;
+    if (editingId === null || updatingId !== null || editAttach.uploads.pending || editDraft.trim() === "" || !onUpdate) return;
     const id = editingId;
     updatingId = id;
     const updated = await onUpdate(id, editDraft.trim());
@@ -500,10 +490,10 @@
               {/if}
             </div>
             {#if editingId === comment.id}
-              <DropOverlay onFiles={(files) => editUploads.enqueue(files)}>
-                <div class="cmt__composer cmt__editor">
+              <div class="cmt__composer cmt__editor">
+                <AttachComposer composer={editAttach} footer={editFooter}>
                   <div class="cmt__input-wrap">
-                    <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={(e) => onKeydown(e, "edit")} onclick={updateMentionContext} onpaste={(e) => onPaste(e, true)}></textarea>
+                    <textarea bind:this={editTextareaEl} bind:value={editDraft} class="cmt__input" oninput={onInput} onkeydown={(e) => onKeydown(e, "edit")} onclick={updateMentionContext} onpaste={(e) => editAttach.handlePaste(e)}></textarea>
                     {#if mentionOpen && mentionMatches.length > 0}
                       <ul class="mention-pop" role="listbox" aria-label="Mention a user">
                         {#each mentionMatches as cand, i (cand.user_id)}
@@ -512,14 +502,8 @@
                       </ul>
                     {/if}
                   </div>
-                  <PendingUploads controller={editUploads} />
-                  <div class="cmt__toolbar">
-                    <div class="cmt__toolbar-left"><button type="button" class="cmt__attach" onclick={() => editFileInputEl?.click()} disabled={editUploads.busy}><Paperclip size={13} /><span>{editUploads.busy ? "Uploading…" : "Attach"}</span></button><span class="cmt__hint">Markdown · drag, paste or attach files</span></div>
-                    <div class="cmt__actions"><span class="cmt__kbd" aria-hidden="true"><kbd>{isMac ? "⌘" : "Ctrl"}</kbd><kbd><CornerDownLeft size={11} /></kbd></span><button type="button" class="cmt__cancel" onclick={cancelEdit} disabled={updatingId === comment.id}>Cancel</button><button type="button" class="cmt__send" onclick={saveEdit} disabled={editDraft.trim() === "" || editUploads.busy || updatingId === comment.id}>{updatingId === comment.id ? "Saving…" : "Save"}</button></div>
-                  </div>
-                  <input bind:this={editFileInputEl} type="file" class="cmt__file-input" multiple accept="image/*,application/pdf,text/plain,.log,application/zip" onchange={(e) => onFilePicked(e, true)} />
-                </div>
-              </DropOverlay>
+                </AttachComposer>
+              </div>
             {:else}
               <div class="cmt__md">
                 <Markdown content={comment.content} mentions={candidates} class="text-sm" />
@@ -542,8 +526,8 @@
   {/if}
 
   {#if editable}
-    <DropOverlay onFiles={(files) => uploads.enqueue(files)}>
-      <div class="cmt__composer">
+    <div class="cmt__composer">
+      <AttachComposer composer={attach} footer={newFooter}>
         <div class="cmt__input-wrap">
         <textarea
           bind:this={textareaEl}
@@ -553,7 +537,7 @@
           oninput={onInput}
           onkeydown={(e) => onKeydown(e, "new")}
           onclick={updateMentionContext}
-          onpaste={onPaste}
+          onpaste={(e) => attach.handlePaste(e)}
           onblur={() => setTimeout(() => (mentionOpen = false), 120)}
         ></textarea>
 
@@ -588,46 +572,75 @@
           <div class="mention-pop mention-pop--empty">No people match</div>
         {/if}
         </div>
-
-        <PendingUploads controller={uploads} />
-
-        <div class="cmt__toolbar">
-          <div class="cmt__toolbar-left">
-            <button
-              type="button"
-              class="cmt__attach"
-              title="Attach files"
-              aria-label="Attach files"
-              onclick={() => fileInputEl?.click()}
-              disabled={uploads.busy}
-            >
-              <Paperclip size={13} />
-              <span>{uploads.busy ? "Uploading\u2026" : "Attach"}</span>
-            </button>
-            <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
-          </div>
-          <div class="cmt__actions">
-            <span class="cmt__kbd" aria-hidden="true">
-              <kbd>{isMac ? "\u2318" : "Ctrl"}</kbd>
-              <kbd><CornerDownLeft size={11} /></kbd>
-            </span>
-            <button class="cmt__send" disabled={!canSend} onclick={submit}>
-              {submitting ? "Posting\u2026" : "Comment"}
-            </button>
-          </div>
-        </div>
-        <input
-          bind:this={fileInputEl}
-          type="file"
-          class="cmt__file-input"
-          multiple
-          accept="image/*,application/pdf,text/plain,.log,application/zip"
-          onchange={onFilePicked}
-        />
-      </div>
-    </DropOverlay>
+      </AttachComposer>
+    </div>
   {/if}
 </section>
+
+{#snippet newFooter()}
+  <div class="cmt__toolbar">
+    <div class="cmt__toolbar-left">
+      <button
+        type="button"
+        class="cmt__attach"
+        title="Attach files"
+        aria-label="Attach files"
+        onclick={() => attach.openFilePicker()}
+      >
+        <Paperclip size={13} />
+        <span>{attach.uploads.busy ? "Uploading\u2026" : "Attach"}</span>
+      </button>
+      <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
+    </div>
+    <div class="cmt__actions">
+      <span class="cmt__kbd" aria-hidden="true">
+        <kbd>{isMac ? "\u2318" : "Ctrl"}</kbd>
+        <kbd><CornerDownLeft size={11} /></kbd>
+      </span>
+      <button class="cmt__send" disabled={!canSend} onclick={submit}>
+        {submitting ? "Posting\u2026" : "Comment"}
+      </button>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet editFooter()}
+  <div class="cmt__toolbar">
+    <div class="cmt__toolbar-left">
+      <button
+        type="button"
+        class="cmt__attach"
+        onclick={() => editAttach.openFilePicker()}
+      >
+        <Paperclip size={13} />
+        <span>{editAttach.uploads.busy ? "Uploading\u2026" : "Attach"}</span>
+      </button>
+      <span class="cmt__hint">Markdown · drag, paste or attach files</span>
+    </div>
+    <div class="cmt__actions">
+      <span class="cmt__kbd" aria-hidden="true">
+        <kbd>{isMac ? "⌘" : "Ctrl"}</kbd>
+        <kbd><CornerDownLeft size={11} /></kbd>
+      </span>
+      <button
+        type="button"
+        class="cmt__cancel"
+        onclick={cancelEdit}
+        disabled={updatingId === editingId}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        class="cmt__send"
+        onclick={saveEdit}
+        disabled={editDraft.trim() === "" || editAttach.uploads.pending || updatingId === editingId}
+      >
+        {updatingId === editingId ? "Saving…" : "Save"}
+      </button>
+    </div>
+  </div>
+{/snippet}
 
 <style>
   /* Clear break from the description above. A real rule + a display-weight
@@ -832,10 +845,6 @@
   }
   .cmt__composer {
     position: relative;
-  }
-
-  .cmt__file-input {
-    display: none;
   }
 
   .cmt__toolbar-left {

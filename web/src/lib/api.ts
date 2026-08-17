@@ -1038,6 +1038,116 @@ export async function uploadAttachment(
   }
 }
 
+export interface UploadProgress {
+  /** Bytes handed to the socket so far. */
+  loaded: number;
+  /** Total bytes to send, or 0 while the length is still unknown. */
+  total: number;
+}
+
+export type UploadOutcome =
+  | { ok: true; data: UploadResponse }
+  | { ok: false; error: string; status: number | null; canceled: boolean };
+
+export interface UploadHandle {
+  /** Settles once, with the server's answer or the reason it never came. */
+  result: Promise<UploadOutcome>;
+  /** Stop the transfer. The promise settles with `canceled: true`. */
+  abort: () => void;
+}
+
+/** LIF-418: upload one file with byte-level progress.
+ *
+ *  This is `uploadAttachment` over XMLHttpRequest rather than fetch, for the
+ *  single reason that fetch still has no upload-progress event (request
+ *  streaming is Chrome-only and HTTP/2-only). A determinate progress bar on a
+ *  20 MB screenshot is worth the older API. Returns a handle so the caller can
+ *  cancel a queued or in-flight transfer. */
+export function uploadAttachmentWithProgress(
+  file: File,
+  opts: {
+    link?: { entity_type: AttachmentEntity; entity_id: number } | null;
+    onProgress?: (p: UploadProgress) => void;
+  } = {},
+): UploadHandle {
+  const token = localStorage.getItem("lific_token");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  if (opts.link) {
+    form.append("entity_type", opts.link.entity_type);
+    form.append("entity_id", String(opts.link.entity_id));
+  }
+
+  const xhr = new XMLHttpRequest();
+  let settled = false;
+
+  const result = new Promise<UploadOutcome>((resolve) => {
+    const finish = (outcome: UploadOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+
+    xhr.open("POST", `${BASE}/attachments`);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+
+    xhr.upload.onprogress = (e) => {
+      opts.onProgress?.({
+        loaded: e.loaded,
+        total: e.lengthComputable ? e.total : file.size,
+      });
+    };
+    // The last progress event fires before the server answers; snap to 100%
+    // so a chip never sits at 99% waiting on the response.
+    xhr.upload.onload = () => {
+      opts.onProgress?.({ loaded: file.size, total: file.size });
+    };
+
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        body = null;
+      }
+      const errorField =
+        body && typeof body === "object" && "error" in body
+          ? String((body as { error: unknown }).error)
+          : null;
+      if (xhr.status >= 200 && xhr.status < 300 && body) {
+        finish({ ok: true, data: body as UploadResponse });
+        return;
+      }
+      finish({
+        ok: false,
+        error: errorField || `HTTP ${xhr.status}`,
+        status: xhr.status,
+        canceled: false,
+      });
+    };
+    xhr.onerror = () =>
+      finish({
+        ok: false,
+        error: "Couldn't reach the server. Check your connection and try again.",
+        status: null,
+        canceled: false,
+      });
+    xhr.ontimeout = () =>
+      finish({ ok: false, error: "Upload timed out.", status: null, canceled: false });
+    xhr.onabort = () =>
+      finish({ ok: false, error: "Upload canceled.", status: null, canceled: true });
+
+    xhr.send(form);
+  });
+
+  return {
+    result,
+    abort: () => {
+      if (!settled) xhr.abort();
+    },
+  };
+}
+
 /** List the attachments linked to one entity (detail-view section). */
 export async function listEntityAttachments(
   entityType: AttachmentEntity,
