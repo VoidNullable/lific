@@ -212,11 +212,25 @@ pub async fn serve_socket(
         },
         event = rx.recv() => forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await,
         revoked = revocations.recv() => {
-            let flow = revocation_flow(revoked, auth_user.id);
-            if flow == SocketFlow::Close {
-                let _ = socket.send(Message::Close(None)).await;
+            match revocation_flow(revoked, auth_user.id) {
+                RevocationFlow::Ignore => SocketFlow::Open,
+                RevocationFlow::Revalidate => {
+                    let flow = revalidate_session(
+                        &mut socket,
+                        &db,
+                        &session_token,
+                        &mut auth_user,
+                    ).await;
+                    if flow == SocketFlow::Open {
+                        visible_projects = visible_projects_for(&db, &auth_user);
+                    }
+                    flow
+                }
+                RevocationFlow::Close => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    SocketFlow::Close
+                }
             }
-            flow
         },
         message = socket.recv() => {
             handle_client_message(&mut socket, &db, &auth_user, message).await
@@ -224,10 +238,18 @@ pub async fn serve_socket(
     } {}
 }
 
-fn revocation_flow(revoked: Result<i64, RecvError>, user_id: i64) -> SocketFlow {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevocationFlow {
+    Ignore,
+    Revalidate,
+    Close,
+}
+
+fn revocation_flow(revoked: Result<i64, RecvError>, user_id: i64) -> RevocationFlow {
     match revoked {
-        Ok(id) if id != user_id => SocketFlow::Open,
-        Ok(_) | Err(RecvError::Lagged(_)) | Err(RecvError::Closed) => SocketFlow::Close,
+        Ok(id) if id != user_id => RevocationFlow::Ignore,
+        Ok(_) | Err(RecvError::Closed) => RevocationFlow::Close,
+        Err(RecvError::Lagged(_)) => RevocationFlow::Revalidate,
     }
 }
 
@@ -606,17 +628,17 @@ mod tests {
     }
 
     #[test]
-    fn revocation_receiver_errors_fail_closed() {
+    fn revocation_receiver_lag_revalidates_and_closure_fails_closed() {
         assert_eq!(
             revocation_flow(Err(RecvError::Lagged(1)), 42),
-            SocketFlow::Close
+            RevocationFlow::Revalidate
         );
         assert_eq!(
             revocation_flow(Err(RecvError::Closed), 42),
-            SocketFlow::Close
+            RevocationFlow::Close
         );
-        assert_eq!(revocation_flow(Ok(7), 42), SocketFlow::Open);
-        assert_eq!(revocation_flow(Ok(42), 42), SocketFlow::Close);
+        assert_eq!(revocation_flow(Ok(7), 42), RevocationFlow::Ignore);
+        assert_eq!(revocation_flow(Ok(42), 42), RevocationFlow::Close);
     }
 
     #[test]

@@ -686,10 +686,10 @@ pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificE
     Ok(())
 }
 
-/// Revoke every durable credential owned by a user as part of compromised
-/// account recovery: the user's API keys, keys for connected-tool bots they
-/// own, and user-bound OAuth access tokens. This is intentionally separate
-/// from ordinary logout so callers can make the lockdown semantics explicit.
+/// Revoke every durable credential owned by a user during a lockdown action:
+/// the user's API keys, keys for connected-tool bots they own, and user-bound
+/// OAuth access tokens. Password changes and sign-out-all call this together
+/// with session deletion so the recovery state is committed atomically.
 pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result<(), LificError> {
     crate::db::queries::savepoint(conn, "revoke_durable_credentials", || {
         let mut api_keys = conn.prepare(

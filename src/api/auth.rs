@@ -594,11 +594,11 @@ pub(super) struct ChangePasswordRequest {
 /// POST /api/auth/me/password — change password after verifying the current
 /// one. LIF-190.
 ///
-/// LIF-205: a password change invalidates **all** of the user's sessions
-/// (the "I've been compromised, lock it down" expectation), then mints a
-/// fresh session for the current browser so the legitimate caller stays
-/// logged in instead of being bounced to /login. Any stolen `lific_sess_`
-/// token is dead the moment this returns.
+/// LIF-205: a password change invalidates **all** of the user's sessions and
+/// durable credentials (the "I've been compromised, lock it down" expectation),
+/// then mints a fresh session for the current browser so the legitimate caller
+/// stays logged in instead of being bounced to /login. Any stolen
+/// `lific_sess_` token is dead when this returns.
 pub(super) async fn change_password(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
@@ -647,8 +647,9 @@ pub(super) async fn change_password(
     ))
 }
 
-/// DELETE /api/auth/me/sessions — sign out of every session (this one too).
-/// Clears the cookie so the current browser drops to logged-out. LIF-190.
+/// DELETE /api/auth/me/sessions — sign out of every session and revoke the
+/// account's durable credentials. Clears the cookie so the current browser
+/// drops to logged-out. LIF-190.
 pub(super) async fn revoke_all_sessions(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
