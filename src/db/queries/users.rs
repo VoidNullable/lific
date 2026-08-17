@@ -657,6 +657,20 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
     Ok(user)
 }
 
+/// Whether a session was created within the recent-authentication window.
+pub fn session_is_recent(conn: &Connection, token: &str) -> Result<bool, LificError> {
+    let token_hash = hash_session_token(token);
+    Ok(conn
+        .query_row(
+            "SELECT created_at >= datetime('now', '-15 minutes')
+             FROM sessions WHERE token = ?1",
+            params![token_hash],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
 /// Delete a session (logout). Hashes the plaintext token before lookup.
 pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> {
     let token_hash = hash_session_token(token);
@@ -2805,11 +2819,27 @@ mod tests {
     }
 
     #[test]
+    fn recent_session_window_rejects_old_sessions() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let session = create_session(&conn, user.id, None).unwrap();
+
+        assert!(session_is_recent(&conn, &session.token).unwrap());
+        conn.execute(
+            "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+            [],
+        )
+        .unwrap();
+        assert!(!session_is_recent(&conn, &session.token).unwrap());
+    }
+
+    #[test]
     fn compromised_recovery_revokes_user_bot_and_oauth_credentials() {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let user = test_create_user(&conn);
-        let bot = create_bot_user(&conn, user.id, "bot", "Bot").unwrap();
+        let bot = create_bot_user(&conn, user.id, "bot", "Bot", Some("bot")).unwrap();
         conn.execute(
             "INSERT INTO api_keys (name, key_hash, user_id) VALUES
              ('human-recovery-key', 'hash-human', ?1),

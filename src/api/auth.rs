@@ -690,13 +690,38 @@ pub(super) struct CreateKeyRequest {
     name: String,
 }
 
+fn require_recent_session(db: &DbPool, headers: &HeaderMap) -> Result<(), LificError> {
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| token.starts_with("lific_sess_"))
+    else {
+        return Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ));
+    };
+
+    let conn = db.read()?;
+    if crate::db::queries::users::session_is_recent(&conn, token)? {
+        Ok(())
+    } else {
+        Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ))
+    }
+}
+
 pub(super) async fn create_key(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    headers: HeaderMap,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
+    require_recent_session(&db, &headers)?;
 
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -750,9 +775,11 @@ pub(super) async fn create_bot(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    headers: HeaderMap,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
+    require_recent_session(&db, &headers)?;
 
     let tool = input.tool.trim().to_lowercase();
     let display_name = match tool.as_str() {
@@ -995,7 +1022,43 @@ pub(super) async fn reactivate_user(
 #[cfg(test)]
 mod tests {
     use crate::api::test_helpers::*;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, StatusCode};
+
+    #[test]
+    fn durable_credential_creation_requires_recent_session() {
+        let db = crate::db::open_memory().unwrap();
+        let session = {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES ('recent', 'recent@test', 'x')",
+                [],
+            )
+            .unwrap();
+            let user_id = conn.last_insert_rowid();
+            crate::db::queries::users::create_session(&conn, user_id, None).unwrap()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", session.token).parse().unwrap(),
+        );
+
+        assert!(super::require_recent_session(&db, &headers).is_ok());
+
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(super::require_recent_session(&db, &headers).is_err());
+
+        let mut api_headers = HeaderMap::new();
+        api_headers.insert("authorization", "Bearer lific_sk_test".parse().unwrap());
+        assert!(super::require_recent_session(&db, &api_headers).is_err());
+    }
 
     // LIF-207: the Secure attribute is gated; everything else stays constant.
     #[test]
