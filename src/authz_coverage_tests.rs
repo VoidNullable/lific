@@ -227,7 +227,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (
             ("POST", "/api/attachments"),
             Exempt(
-                "any authenticated user may upload; per-user rate-limited; linked-to-project visibility happens on entity save — LIF-262",
+                "any authenticated user may upload the blob itself (per-user rate-limited; it stays invisible until linked) — but the optional entity_type/entity_id link is gated dynamically against the target's project: Maintainer for an issue/page, Viewer for a comment, workspace-admin for a project-less page. See api::attachments::authorize_link (LIF-262, LIF-405)",
             ),
         ),
         // Download/delete authorize dynamically against EVERY project the
