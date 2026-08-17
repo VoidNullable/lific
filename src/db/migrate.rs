@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 /// Migrations are applied in order and tracked in a `_migrations` table.
@@ -228,15 +229,49 @@ pub fn latest_version() -> i64 {
     MIGRATIONS.iter().map(|(v, _, _)| *v).max().unwrap_or(0)
 }
 
+/// Integrity digest of a migration's SQL, as stored in `_migrations.checksum`.
+///
+/// SHA-256 over the migration text with `\r\n` folded to `\n`. The
+/// normalization matters because `include_str!` embeds the file's bytes
+/// verbatim: a checkout with CRLF line endings (Windows, or `core.autocrlf`)
+/// would otherwise produce a different digest for byte-identical SQL and make
+/// the same database fail verification depending on which machine built the
+/// binary. This is an integrity check against accidentally edited history, not
+/// a defense against an attacker who already controls the database file.
+fn checksum(sql: &str) -> String {
+    let normalized = sql.replace("\r\n", "\n");
+    format!("{:x}", Sha256::digest(normalized.as_bytes()))
+}
+
+/// Short form used in operator-facing messages; the full 64 hex characters
+/// carry no extra meaning for a human comparing two values.
+fn short(digest: &str) -> &str {
+    &digest[..digest.len().min(12)]
+}
+
 /// Ensure the migrations table exists and apply any pending migrations.
 pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             version    INTEGER PRIMARY KEY,
             name       TEXT NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+            checksum   TEXT
         );",
     )?;
+
+    // `checksum` post-dates the table, so a database created by an older
+    // Lific has the three-column shape and `CREATE TABLE IF NOT EXISTS` above
+    // was a no-op for it. Add the column in place; rows keep NULL until the
+    // backfill below stamps them.
+    let has_checksum: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('_migrations') WHERE name = 'checksum'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_checksum == 0 {
+        conn.execute_batch("ALTER TABLE _migrations ADD COLUMN checksum TEXT;")?;
+    }
 
     let current_version: i64 = conn
         .query_row(
@@ -262,6 +297,8 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
         )));
     }
 
+    verify_checksums(conn)?;
+
     for &(version, name, sql) in MIGRATIONS {
         if version > current_version {
             info!(version, name, "applying migration");
@@ -285,8 +322,8 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
                     }
                 }
                 conn.execute(
-                    "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
-                    rusqlite::params![version, name],
+                    "INSERT INTO _migrations (version, name, checksum) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![version, name, checksum(sql)],
                 )?;
                 Ok(())
             });
@@ -319,6 +356,66 @@ pub fn run(conn: &Connection) -> Result<(), crate::error::LificError> {
         if applied > 0 {
             info!(applied, "new migrations applied");
         }
+    }
+
+    Ok(())
+}
+
+/// Check every already-applied migration against the SQL compiled into this
+/// binary (LIF-415).
+///
+/// Migration files are history: once applied, their text describes what a
+/// database actually went through. Editing one after the fact used to be
+/// invisible, because the version is stamped, so the runner skips it and the
+/// database quietly diverges from what the source tree claims it is. Storing a
+/// digest turns that into a startup failure instead.
+///
+/// Rows whose checksum is NULL (every row in a database created before the
+/// column existed) are backfilled with the current hash rather than treated as
+/// a mismatch: there is nothing to compare against, and failing every existing
+/// deployment on upgrade would be worse than starting the guarantee from here.
+/// Rows for versions this binary doesn't carry are left alone; the
+/// downgrade guard in `run` has already rejected the case that matters.
+fn verify_checksums(conn: &Connection) -> Result<(), crate::error::LificError> {
+    let applied: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = conn.prepare("SELECT version, name, checksum FROM _migrations")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut backfilled = 0usize;
+    for (version, name, stored) in applied {
+        let Some(&(_, _, sql)) = MIGRATIONS.iter().find(|(v, _, _)| *v == version) else {
+            continue;
+        };
+        let expected = checksum(sql);
+        match stored {
+            None => {
+                conn.execute(
+                    "UPDATE _migrations SET checksum = ?1 WHERE version = ?2",
+                    rusqlite::params![expected, version],
+                )?;
+                backfilled += 1;
+            }
+            Some(stored) if stored != expected => {
+                return Err(crate::error::LificError::Internal(format!(
+                    "migration {version} ({name}) has changed since it was applied to this \
+                     database: recorded checksum {}, this binary's copy hashes to {}. Applied \
+                     migrations are history and must not be edited. Add a new migration \
+                     instead, or restore the original file.",
+                    short(&stored),
+                    short(&expected),
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
+    if backfilled > 0 {
+        info!(
+            backfilled,
+            "recorded checksums for migrations applied before checksums existed"
+        );
     }
 
     Ok(())
@@ -367,6 +464,15 @@ mod tests {
         conn
     }
 
+    fn stored_checksum(conn: &Connection, version: i64) -> Option<String> {
+        conn.query_row(
+            "SELECT checksum FROM _migrations WHERE version = ?1",
+            rusqlite::params![version],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
     // ── LIF-404: downgrade guard ──────────────────────────────────────────
 
     /// Deploys swap the binary in place, so rolling back to an older release
@@ -378,7 +484,7 @@ mod tests {
         let conn = fully_migrated();
         let newer = latest_version() + 1;
         conn.execute(
-            "INSERT INTO _migrations (version, name) VALUES (?1, 'from the future')",
+            "INSERT INTO _migrations (version, name, checksum) VALUES (?1, 'from the future', 'x')",
             rusqlite::params![newer],
         )
         .unwrap();
@@ -405,6 +511,116 @@ mod tests {
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(max, latest_version());
+    }
+
+    // ── LIF-415: migration checksums ──────────────────────────────────────
+
+    #[test]
+    fn every_applied_migration_records_a_checksum() {
+        let conn = fully_migrated();
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _migrations WHERE checksum IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing, 0, "every applied migration must be stamped");
+        assert_eq!(
+            stored_checksum(&conn, 1).as_deref(),
+            Some(checksum(MIGRATIONS[0].2).as_str()),
+            "the stamp must be the hash of the SQL that ran"
+        );
+    }
+
+    /// Databases created before the column existed carry the three-column
+    /// `_migrations` table and NULL checksums. Upgrading must add the column
+    /// and backfill, not fail every existing deployment.
+    #[test]
+    fn legacy_databases_gain_the_column_and_get_backfilled() {
+        let conn = fully_migrated();
+        // Rebuild `_migrations` in its pre-checksum, three-column shape with
+        // every migration stamped, which is what a live instance looks like
+        // just before this upgrade.
+        conn.execute_batch(
+            "DROP TABLE _migrations;
+             CREATE TABLE _migrations (
+                 version    INTEGER PRIMARY KEY,
+                 name       TEXT NOT NULL,
+                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+        for &(version, name, _) in MIGRATIONS {
+            conn.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                rusqlite::params![version, name],
+            )
+            .unwrap();
+        }
+
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('_migrations') WHERE name = 'checksum'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 0, "fixture must start on the pre-checksum shape");
+
+        run(&conn).expect("a legacy database must upgrade cleanly");
+
+        let missing: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _migrations WHERE checksum IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing, 0, "NULL checksums must be backfilled");
+        assert_eq!(
+            stored_checksum(&conn, 1).as_deref(),
+            Some(checksum(MIGRATIONS[0].2).as_str())
+        );
+        // And the backfilled stamps hold on the next boot.
+        run(&conn).expect("backfilled checksums must verify");
+    }
+
+    /// Editing an already-applied migration file is invisible without this:
+    /// the version is stamped, so the runner skips it and the database
+    /// silently disagrees with the source tree.
+    #[test]
+    fn run_fails_when_an_applied_migrations_sql_has_changed() {
+        let conn = fully_migrated();
+        // Stand in for an edited file by recording a different hash than the
+        // compiled-in SQL produces.
+        conn.execute(
+            "UPDATE _migrations SET checksum = ?1 WHERE version = 17",
+            rusqlite::params![checksum("-- someone edited this later")],
+        )
+        .unwrap();
+
+        let err = run(&conn).expect_err("an edited migration must stop startup");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("migration 17 (issue activity triggers)"),
+            "the error must name the migration: {msg}"
+        );
+        assert!(
+            msg.contains("has changed since it was applied"),
+            "the error must say what went wrong: {msg}"
+        );
+    }
+
+    /// Line endings are a checkout detail, not a change to the SQL: a CRLF
+    /// working copy must not make a database built on LF fail verification.
+    #[test]
+    fn checksum_ignores_line_ending_style() {
+        assert_eq!(
+            checksum("CREATE TABLE t (a);\nCREATE INDEX i ON t (a);\n"),
+            checksum("CREATE TABLE t (a);\r\nCREATE INDEX i ON t (a);\r\n")
+        );
+        assert_ne!(checksum("SELECT 1;"), checksum("SELECT 2;"));
     }
 
     fn identifiers(conn: &Connection) -> Vec<(i64, String)> {
