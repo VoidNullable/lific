@@ -697,12 +697,24 @@ fn require_recent_session(db: &DbPool, headers: &HeaderMap) -> Result<(), LificE
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
-        .filter(|token| token.starts_with("lific_sess_"))
     else {
         return Err(LificError::Forbidden(
             "recent authentication required".into(),
         ));
     };
+
+    // API keys already passed the authentication middleware, which preserves
+    // their existing credential-management permissions. OAuth tokens are
+    // denied on these routes by that middleware; reject every other bearer
+    // shape here as defense in depth.
+    if token.starts_with("lific_sk") {
+        return Ok(());
+    }
+    if !token.starts_with("lific_sess_") {
+        return Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ));
+    }
 
     let conn = db.read()?;
     if crate::db::queries::users::session_is_recent(&conn, token)? {
@@ -1058,7 +1070,7 @@ mod tests {
 
         let mut api_headers = HeaderMap::new();
         api_headers.insert("authorization", "Bearer lific_sk_test".parse().unwrap());
-        assert!(super::require_recent_session(&db, &api_headers).is_err());
+        assert!(super::require_recent_session(&db, &api_headers).is_ok());
     }
 
     // LIF-207: the Secure attribute is gated; everything else stays constant.
