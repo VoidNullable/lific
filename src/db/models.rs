@@ -1180,6 +1180,112 @@ impl std::str::FromStr for AttachmentEntity {
     }
 }
 
+// ── Project files manager (LIF-418) ──────────────────────────
+//
+// The per-project "Files" view reads every attachment linked to any entity in
+// one project, plus the uploads by that project's members that are sitting
+// unlinked and waiting for the orphan sweeper. Both shapes are read-only
+// projections assembled by `db::queries::attachments`, never stored.
+
+/// One entity that references an attachment, resolved far enough for the UI to
+/// render a chip and navigate to it. `identifier` is `None` only for a
+/// workspace-level page (no project, hence no `PRJ-DOC-n` form).
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkedEntity {
+    /// issue | page | comment
+    pub entity_type: String,
+    /// The linked row's id. For a comment this is the comment id; the
+    /// identifier and title describe the comment's parent, which is where a
+    /// click should land.
+    pub entity_id: i64,
+    pub identifier: Option<String>,
+    pub title: String,
+    /// The page this link lands on, when it lands on one (a page link, or a
+    /// comment on a page). Pages are routed by numeric id in the web UI, so
+    /// the identifier alone is not enough to build the link.
+    pub page_id: Option<i64>,
+}
+
+/// One row of the project files listing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectAttachment {
+    pub id: i64,
+    pub filename: String,
+    pub mime: String,
+    /// Coarse bucket the UI filters and iconifies by: image | video | audio |
+    /// text | pdf | archive | other. Computed server-side so the filter chips
+    /// and the row icons can never disagree with what the filter matched.
+    pub mime_class: String,
+    pub size_bytes: i64,
+    pub uploader_id: Option<i64>,
+    /// Username of the uploader, or `None` when the account is gone (the FK is
+    /// `ON DELETE SET NULL`).
+    pub uploader: Option<String>,
+    pub uploader_display_name: Option<String>,
+    pub created_at: String,
+    /// The entities *in this project* that reference the file. Deliberately
+    /// project-scoped: an attachment can also be linked from a project the
+    /// caller cannot see, and listing those titles here would leak them.
+    pub entities: Vec<LinkedEntity>,
+}
+
+/// `GET /api/projects/{id}/attachments` envelope: one page of rows plus the
+/// aggregate header (count + bytes) for the *whole* filtered set, not just the
+/// page.
+#[derive(Debug, Serialize)]
+pub struct ProjectAttachmentPage {
+    pub items: Vec<ProjectAttachment>,
+    pub has_more: bool,
+    pub total_count: i64,
+    pub total_bytes: i64,
+}
+
+/// Query parameters for the project files listing.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectAttachmentQuery {
+    /// image | video | audio | text | pdf | archive | other
+    pub mime_class: Option<String>,
+    /// Uploader username (case-insensitive exact match).
+    pub uploader: Option<String>,
+    /// Restrict to attachments linked via this kind of entity: issue | page |
+    /// comment.
+    pub entity_type: Option<String>,
+    /// created_at (default) | size | filename
+    pub sort: Option<String>,
+    /// asc | desc. Defaults to desc for created_at/size and asc for filename.
+    pub order: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// One unlinked upload awaiting the orphan sweeper, as shown in the Files
+/// view's "Pending cleanup" section.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingOrphan {
+    pub id: i64,
+    pub filename: String,
+    pub mime: String,
+    pub size_bytes: i64,
+    pub uploader_id: Option<i64>,
+    pub uploader: Option<String>,
+    pub uploaded_at: String,
+    /// Seconds since the upload.
+    pub age_seconds: i64,
+    /// Seconds left before the sweeper may collect it. `0` means it is already
+    /// past the grace window and goes on the next sweep.
+    pub seconds_until_sweep: i64,
+}
+
+/// `GET /api/projects/{id}/attachments/orphans` envelope.
+#[derive(Debug, Serialize)]
+pub struct PendingOrphanList {
+    pub items: Vec<PendingOrphan>,
+    /// The grace window the server applies, so the UI can explain the
+    /// countdown without hardcoding 24h.
+    pub grace_seconds: i64,
+    pub total_bytes: i64,
+}
+
 /// Deserializes a JSON field as Option<Option<T>>:
 /// - absent key → None (don't change)
 /// - "field": null → Some(None) (set to null)

@@ -4,11 +4,13 @@ use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SearchInput {
-    #[schemars(description = "Text to search for across issues, pages, and comments")]
+    #[schemars(
+        description = "Text to search for across issues, pages, comments, and attachment filenames/contents"
+    )]
     pub query: String,
     #[schemars(description = "Filter to a specific project (e.g. LIF)")]
     pub project: Option<String>,
-    #[schemars(description = "Restrict results to one type: issue, page, or comment")]
+    #[schemars(description = "Restrict results to one type: issue, page, comment, or attachment")]
     pub result_type: Option<String>,
     #[schemars(
         description = "Sort mode: relevance (default, best match first) or recent (most recently updated first)"

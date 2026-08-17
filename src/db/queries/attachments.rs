@@ -8,7 +8,10 @@
 
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 
-use crate::db::models::{Attachment, AttachmentEntity, CommentActor};
+use crate::db::models::{
+    Attachment, AttachmentEntity, CommentActor, LinkedEntity, PendingOrphan, ProjectAttachment,
+    ProjectAttachmentPage, ProjectAttachmentQuery,
+};
 use crate::error::LificError;
 
 /// Insert a new attachment metadata row and return it. The caller has already
@@ -261,6 +264,527 @@ pub fn find_orphans(
             id: row.get(0)?,
             sha256: row.get(1)?,
         })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+// ── Project files manager (LIF-418) ──────────────────────────
+//
+// The per-project Files view answers two questions the detail-view section
+// can't: "what is attached anywhere in this project?" and "what did we upload
+// that is about to be swept?". Both are pure reads assembled here; the API
+// layer owns the Viewer gate.
+
+/// Coarse MIME buckets the files manager filters and iconifies by.
+///
+/// One SQL expression is the single source of truth: the same CASE both
+/// filters rows and labels them in the response, so a filter chip can never
+/// select a class the returned rows disagree with.
+const MIME_CLASS_SQL: &str = "CASE
+        WHEN a.mime LIKE 'image/%' THEN 'image'
+        WHEN a.mime LIKE 'video/%' THEN 'video'
+        WHEN a.mime LIKE 'audio/%' THEN 'audio'
+        WHEN a.mime LIKE 'text/%' THEN 'text'
+        WHEN a.mime = 'application/pdf' THEN 'pdf'
+        WHEN a.mime IN (
+            'application/zip', 'application/gzip', 'application/x-tar',
+            'application/x-7z-compressed', 'application/x-bzip2',
+            'application/vnd.rar', 'application/x-rar-compressed'
+        ) THEN 'archive'
+        ELSE 'other'
+    END";
+
+/// The accepted `mime_class` filter values, in the order the UI shows them.
+pub const MIME_CLASSES: &[&str] = &["image", "video", "audio", "text", "pdf", "archive", "other"];
+
+/// `EXISTS` fragment: does `a` (an `attachments` row) have at least one link
+/// reaching `:project_id`? A comment link resolves through the comment's
+/// parent issue/page, mirroring `attachment_allowed_for_project`.
+fn project_link_exists(filter_entity_type: bool) -> String {
+    let entity_clause = if filter_entity_type {
+        "AND l.entity_type = :entity_type"
+    } else {
+        ""
+    };
+    format!(
+        "EXISTS (
+             SELECT 1
+             FROM attachment_links l
+             LEFT JOIN issues   i   ON l.entity_type = 'issue'   AND i.id   = l.entity_id
+             LEFT JOIN pages    pg  ON l.entity_type = 'page'    AND pg.id  = l.entity_id
+             LEFT JOIN comments c   ON l.entity_type = 'comment' AND c.id   = l.entity_id
+             LEFT JOIN issues   ci  ON ci.id  = c.issue_id
+             LEFT JOIN pages    cpg ON cpg.id = c.page_id
+             WHERE l.attachment_id = a.id
+               {entity_clause}
+               AND :project_id IN (i.project_id, pg.project_id, ci.project_id, cpg.project_id)
+         )"
+    )
+}
+
+/// `ORDER BY` fragment for the listing. Fixed strings only — never
+/// interpolated user input.
+fn listing_order_clause(sort: Option<&str>, order: Option<&str>) -> Result<String, LificError> {
+    let (column, default_desc) = match sort {
+        None | Some("created_at") => ("a.created_at", true),
+        Some("size") => ("a.size_bytes", true),
+        Some("filename") => ("a.filename COLLATE NOCASE", false),
+        Some(other) => {
+            return Err(LificError::BadRequest(format!(
+                "invalid sort '{other}'. Use created_at, size, or filename."
+            )));
+        }
+    };
+    let descending = match order {
+        None => default_desc,
+        Some("desc") => true,
+        Some("asc") => false,
+        Some(other) => {
+            return Err(LificError::BadRequest(format!(
+                "invalid order '{other}'. Use asc or desc."
+            )));
+        }
+    };
+    // `a.id` is the stable tiebreak so paging can't repeat or skip a row when
+    // two files share a timestamp, size, or name.
+    Ok(format!(
+        "ORDER BY {column} {}, a.id DESC",
+        if descending { "DESC" } else { "ASC" }
+    ))
+}
+
+type NamedParams = Vec<(&'static str, Box<dyn rusqlite::ToSql>)>;
+
+/// Bind a `NamedParams` for one `query_map` call.
+fn bind(params: &NamedParams) -> Vec<(&str, &dyn rusqlite::ToSql)> {
+    params.iter().map(|(k, v)| (*k, v.as_ref())).collect()
+}
+
+/// Every attachment linked to any entity in `project_id`, one page at a time,
+/// with the aggregate count + byte total for the whole filtered set.
+pub fn list_project_attachments(
+    conn: &Connection,
+    project_id: i64,
+    query: &ProjectAttachmentQuery,
+) -> Result<ProjectAttachmentPage, LificError> {
+    // Validate the enum-ish filters up front so a typo errors instead of
+    // silently widening the result set.
+    if let Some(class) = query.mime_class.as_deref()
+        && !MIME_CLASSES.contains(&class)
+    {
+        return Err(LificError::BadRequest(format!(
+            "invalid mime_class '{class}'. Use one of: {}.",
+            MIME_CLASSES.join(", ")
+        )));
+    }
+    if let Some(entity_type) = query.entity_type.as_deref() {
+        entity_type
+            .parse::<AttachmentEntity>()
+            .map_err(LificError::BadRequest)?;
+    }
+    let order_clause = listing_order_clause(query.sort.as_deref(), query.order.as_deref())?;
+
+    let (limit, offset) = super::page(query.limit, query.offset);
+    let fetch = super::over_fetch(limit);
+
+    let mut conditions = vec![project_link_exists(query.entity_type.is_some())];
+    if query.mime_class.is_some() {
+        conditions.push(format!("({MIME_CLASS_SQL}) = :mime_class"));
+    }
+    if query.uploader.is_some() {
+        conditions.push("lower(u.username) = lower(:uploader)".to_string());
+    }
+    let where_clause = conditions.join(" AND ");
+
+    let base_params = || -> NamedParams {
+        let mut params: NamedParams = vec![(":project_id", Box::new(project_id))];
+        if let Some(entity_type) = query.entity_type.clone() {
+            params.push((":entity_type", Box::new(entity_type)));
+        }
+        if let Some(class) = query.mime_class.clone() {
+            params.push((":mime_class", Box::new(class)));
+        }
+        if let Some(uploader) = query.uploader.clone() {
+            params.push((":uploader", Box::new(uploader)));
+        }
+        params
+    };
+
+    let sql = format!(
+        "SELECT a.id, a.filename, a.mime, ({MIME_CLASS_SQL}) AS mime_class, a.size_bytes,
+                a.uploader_id, u.username, u.display_name, a.created_at
+         FROM attachments a
+         LEFT JOIN users u ON u.id = a.uploader_id
+         WHERE {where_clause}
+         {order_clause}
+         LIMIT :limit OFFSET :offset"
+    );
+    let mut params = base_params();
+    params.push((":limit", Box::new(fetch)));
+    params.push((":offset", Box::new(offset)));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(bind(&params).as_slice(), |row| {
+        Ok(ProjectAttachment {
+            id: row.get(0)?,
+            filename: row.get(1)?,
+            mime: row.get(2)?,
+            mime_class: row.get(3)?,
+            size_bytes: row.get(4)?,
+            uploader_id: row.get(5)?,
+            uploader: row.get(6)?,
+            uploader_display_name: row.get(7)?,
+            created_at: row.get(8)?,
+            entities: Vec::new(),
+        })
+    })?;
+    let page = super::Page::from_over_fetch(rows.collect::<Result<Vec<_>, _>>()?, limit);
+    let mut items = page.items;
+
+    // Aggregate header: the whole filtered set, not this page.
+    let totals_sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(a.size_bytes), 0)
+         FROM attachments a
+         LEFT JOIN users u ON u.id = a.uploader_id
+         WHERE {where_clause}"
+    );
+    let totals_params = base_params();
+    let (total_count, total_bytes): (i64, i64) = conn.query_row(
+        &totals_sql,
+        bind(&totals_params).as_slice(),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let ids: Vec<i64> = items.iter().map(|item| item.id).collect();
+    let mut entities = linked_entities_in_project(conn, project_id, &ids)?;
+    for item in &mut items {
+        item.entities = entities.remove(&item.id).unwrap_or_default();
+    }
+
+    Ok(ProjectAttachmentPage {
+        items,
+        has_more: page.has_more,
+        total_count,
+        total_bytes,
+    })
+}
+
+/// Resolve, per attachment id, the entities *in this project* that reference
+/// it — identifier and title included, so a row can render navigable chips
+/// without a second round trip.
+pub fn linked_entities_in_project(
+    conn: &Connection,
+    project_id: i64,
+    attachment_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<LinkedEntity>>, LificError> {
+    let mut out: std::collections::HashMap<i64, Vec<LinkedEntity>> =
+        std::collections::HashMap::new();
+    if attachment_ids.is_empty() {
+        return Ok(out);
+    }
+    // Interpolating the ids is safe: they are i64s we just read out of the
+    // database, never caller-supplied text.
+    let id_list = attachment_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "        SELECT l.attachment_id, l.entity_type, l.entity_id,
+                pi.identifier,  i.sequence,   i.title,
+                pp.identifier,  pg.sequence,  pg.title,
+                c.issue_id, c.page_id,
+                cip.identifier, ci.sequence,  ci.title,
+                cpp.identifier, cpg.sequence, cpg.title,
+                pg.id, cpg.id
+         FROM attachment_links l
+         LEFT JOIN issues   i   ON l.entity_type = 'issue'   AND i.id   = l.entity_id
+         LEFT JOIN projects pi  ON pi.id  = i.project_id
+         LEFT JOIN pages    pg  ON l.entity_type = 'page'    AND pg.id  = l.entity_id
+         LEFT JOIN projects pp  ON pp.id  = pg.project_id
+         LEFT JOIN comments c   ON l.entity_type = 'comment' AND c.id   = l.entity_id
+         LEFT JOIN issues   ci  ON ci.id  = c.issue_id
+         LEFT JOIN projects cip ON cip.id = ci.project_id
+         LEFT JOIN pages    cpg ON cpg.id = c.page_id
+         LEFT JOIN projects cpp ON cpp.id = cpg.project_id
+         WHERE l.attachment_id IN ({id_list})
+           AND ?1 IN (i.project_id, pg.project_id, ci.project_id, cpg.project_id)
+         ORDER BY l.attachment_id, l.entity_type, l.entity_id"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        let attachment_id: i64 = row.get(0)?;
+        let entity_type: String = row.get(1)?;
+        let entity_id: i64 = row.get(2)?;
+        let issue_project: Option<String> = row.get(3)?;
+        let issue_sequence: Option<i64> = row.get(4)?;
+        let issue_title: Option<String> = row.get(5)?;
+        let page_project: Option<String> = row.get(6)?;
+        let page_sequence: Option<i64> = row.get(7)?;
+        let page_title: Option<String> = row.get(8)?;
+        let comment_issue_id: Option<i64> = row.get(9)?;
+        let comment_page_id: Option<i64> = row.get(10)?;
+        let comment_issue_project: Option<String> = row.get(11)?;
+        let comment_issue_sequence: Option<i64> = row.get(12)?;
+        let comment_issue_title: Option<String> = row.get(13)?;
+        let comment_page_project: Option<String> = row.get(14)?;
+        let comment_page_sequence: Option<i64> = row.get(15)?;
+        let comment_page_title: Option<String> = row.get(16)?;
+        let page_row_id: Option<i64> = row.get(17)?;
+        let comment_page_row_id: Option<i64> = row.get(18)?;
+
+        // A comment carries no identifier or title of its own; it renders as a
+        // reference to the issue/page the thread lives on, which is where a
+        // click should land.
+        let (identifier, title, page) = match entity_type.as_str() {
+            "issue" => (
+                issue_identifier(issue_project.as_deref(), issue_sequence),
+                issue_title.unwrap_or_default(),
+                None,
+            ),
+            "page" => (
+                page_identifier(page_project.as_deref(), page_sequence),
+                page_title.unwrap_or_default(),
+                page_row_id,
+            ),
+            "comment" if comment_issue_id.is_some() => (
+                issue_identifier(comment_issue_project.as_deref(), comment_issue_sequence),
+                comment_issue_title.unwrap_or_default(),
+                None,
+            ),
+            "comment" if comment_page_id.is_some() => (
+                page_identifier(comment_page_project.as_deref(), comment_page_sequence),
+                comment_page_title.unwrap_or_default(),
+                comment_page_row_id,
+            ),
+            _ => (None, String::new(), None),
+        };
+        Ok((
+            attachment_id,
+            LinkedEntity {
+                entity_type,
+                entity_id,
+                identifier,
+                title,
+                page_id: page,
+            },
+        ))
+    })?;
+
+    for row in rows {
+        let (attachment_id, entity) = row?;
+        out.entry(attachment_id).or_default().push(entity);
+    }
+    Ok(out)
+}
+
+/// `PRJ-42`, or `None` when either half is missing.
+pub(crate) fn issue_identifier(project: Option<&str>, sequence: Option<i64>) -> Option<String> {
+    match (project, sequence) {
+        (Some(project), Some(sequence)) => Some(format!("{project}-{sequence}")),
+        _ => None,
+    }
+}
+
+/// `PRJ-DOC-7`, or the workspace-level `DOC-7` when the page has no project.
+pub(crate) fn page_identifier(project: Option<&str>, sequence: Option<i64>) -> Option<String> {
+    match (project, sequence) {
+        (Some(project), Some(sequence)) => Some(format!("{project}-DOC-{sequence}")),
+        (None, Some(sequence)) => Some(format!("DOC-{sequence}")),
+        _ => None,
+    }
+}
+
+/// Uploads by this project's members that carry no links at all and are
+/// therefore queued for the orphan sweeper.
+///
+/// "Orphan" is exactly [`find_orphans`]'s definition (an `attachments` row with
+/// no `attachment_links`), minus the grace-window cutoff: the point of this
+/// listing is to show the files *before* they vanish, with the countdown, so
+/// it deliberately includes rows still inside the window and reports how long
+/// each has left. A row with `seconds_until_sweep = 0` is one the sweeper would
+/// take on its next pass.
+///
+/// Scoped by uploader membership because an unlinked attachment belongs to no
+/// project yet — the uploader is the only association it has.
+pub fn list_project_orphans(
+    conn: &Connection,
+    project_id: i64,
+    grace_seconds: i64,
+) -> Result<Vec<PendingOrphan>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT a.id, a.filename, a.mime, a.size_bytes, a.uploader_id, u.username, a.created_at,
+                MAX(
+                    CAST(strftime('%s', 'now') AS INTEGER)
+                        - CAST(strftime('%s', a.created_at) AS INTEGER),
+                    0
+                ) AS age_seconds
+         FROM attachments a
+         JOIN project_members m ON m.user_id = a.uploader_id AND m.project_id = ?1
+         LEFT JOIN users u ON u.id = a.uploader_id
+         LEFT JOIN attachment_links l ON l.attachment_id = a.id
+         WHERE l.attachment_id IS NULL
+         ORDER BY a.created_at ASC, a.id ASC",
+    )?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        let age_seconds: i64 = row.get(7)?;
+        Ok(PendingOrphan {
+            id: row.get(0)?,
+            filename: row.get(1)?,
+            mime: row.get(2)?,
+            size_bytes: row.get(3)?,
+            uploader_id: row.get(4)?,
+            uploader: row.get(5)?,
+            uploaded_at: row.get(6)?,
+            age_seconds,
+            seconds_until_sweep: (grace_seconds - age_seconds).max(0),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Where a search hit on an attachment should send the caller: the project it
+/// belongs to and the entity that references it.
+#[derive(Debug, Clone)]
+pub struct AttachmentLinkTarget {
+    pub project_id: Option<i64>,
+    pub identifier: Option<String>,
+    /// Set when the link resolves to a page (directly or through a page
+    /// comment), so a renderer can build a page link rather than an issue one.
+    pub page_id: Option<i64>,
+}
+
+/// The single entity a search hit should point at, preferring a link inside
+/// `prefer_project` when the attachment is used in several places. `None` for
+/// an attachment with no links at all — those never surface in search, since
+/// there is no project to authorize them against.
+pub fn primary_link(
+    conn: &Connection,
+    attachment_id: i64,
+    prefer_project: Option<i64>,
+) -> Result<Option<AttachmentLinkTarget>, LificError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT COALESCE(i.project_id, pg.project_id, ci.project_id, cpg.project_id) AS project_id,
+                l.entity_type,
+                pi.identifier,  i.sequence,
+                pp.identifier,  pg.sequence,  pg.id,
+                c.issue_id, c.page_id,
+                cip.identifier, ci.sequence,
+                cpp.identifier, cpg.sequence, cpg.id
+         FROM attachment_links l
+         LEFT JOIN issues   i   ON l.entity_type = 'issue'   AND i.id   = l.entity_id
+         LEFT JOIN projects pi  ON pi.id  = i.project_id
+         LEFT JOIN pages    pg  ON l.entity_type = 'page'    AND pg.id  = l.entity_id
+         LEFT JOIN projects pp  ON pp.id  = pg.project_id
+         LEFT JOIN comments c   ON l.entity_type = 'comment' AND c.id   = l.entity_id
+         LEFT JOIN issues   ci  ON ci.id  = c.issue_id
+         LEFT JOIN projects cip ON cip.id = ci.project_id
+         LEFT JOIN pages    cpg ON cpg.id = c.page_id
+         LEFT JOIN projects cpp ON cpp.id = cpg.project_id
+         WHERE l.attachment_id = ?1
+         ORDER BY
+             CASE
+                 WHEN COALESCE(i.project_id, pg.project_id, ci.project_id, cpg.project_id) = ?2
+                 THEN 0 ELSE 1
+             END,
+             l.entity_type, l.entity_id
+         LIMIT 1",
+    )?;
+    let target = stmt
+        .query_row(params![attachment_id, prefer_project], |row| {
+            let project_id: Option<i64> = row.get(0)?;
+            let entity_type: String = row.get(1)?;
+            let issue_project: Option<String> = row.get(2)?;
+            let issue_sequence: Option<i64> = row.get(3)?;
+            let page_project: Option<String> = row.get(4)?;
+            let page_sequence: Option<i64> = row.get(5)?;
+            let page_id: Option<i64> = row.get(6)?;
+            let comment_issue_id: Option<i64> = row.get(7)?;
+            let comment_page_id: Option<i64> = row.get(8)?;
+            let comment_issue_project: Option<String> = row.get(9)?;
+            let comment_issue_sequence: Option<i64> = row.get(10)?;
+            let comment_page_project: Option<String> = row.get(11)?;
+            let comment_page_sequence: Option<i64> = row.get(12)?;
+            let comment_page_row_id: Option<i64> = row.get(13)?;
+
+            let (identifier, page) = match entity_type.as_str() {
+                "issue" => (
+                    issue_identifier(issue_project.as_deref(), issue_sequence),
+                    None,
+                ),
+                "page" => (
+                    page_identifier(page_project.as_deref(), page_sequence),
+                    page_id,
+                ),
+                "comment" if comment_issue_id.is_some() => (
+                    issue_identifier(comment_issue_project.as_deref(), comment_issue_sequence),
+                    None,
+                ),
+                "comment" if comment_page_id.is_some() => (
+                    page_identifier(comment_page_project.as_deref(), comment_page_sequence),
+                    comment_page_row_id,
+                ),
+                _ => (None, None),
+            };
+            Ok(AttachmentLinkTarget {
+                project_id,
+                identifier,
+                page_id: page,
+            })
+        })
+        .optional()?;
+    Ok(target)
+}
+
+// ── Attachment search index (LIF-418, migration 042) ─────────
+
+/// Upper bound on the text we pull into the search index for one attachment.
+/// Filenames are always indexed; contents only for `text/*` uploads at or
+/// under this size, so a 40 MB log can't bloat the FTS table.
+pub const MAX_EXTRACT_BYTES: i64 = 512 * 1024;
+
+/// Whether an upload's contents should be extracted into `attachments_fts`.
+pub fn is_extractable(mime: &str, size_bytes: i64) -> bool {
+    mime.starts_with("text/") && size_bytes <= MAX_EXTRACT_BYTES
+}
+
+/// Store an attachment's extracted text in the FTS index. The row itself is
+/// created by migration 042's insert trigger, so this only fills the column
+/// in; a missing row (an attachment deleted mid-flight) is a silent no-op.
+pub fn set_extracted_text(
+    conn: &Connection,
+    attachment_id: i64,
+    text: &str,
+) -> Result<(), LificError> {
+    conn.execute(
+        "UPDATE attachments_fts SET extracted_text = ?1 WHERE attachment_id = ?2",
+        params![text, attachment_id],
+    )?;
+    Ok(())
+}
+
+/// Text attachments whose contents are not in the index yet: uploads that
+/// predate migration 042, or ones whose extraction failed. Returns
+/// `(id, sha256)` so the caller can read the blob and index it.
+///
+/// Cheap by construction: bounded by the number of `text/*` rows, and the
+/// `NOT EXISTS` short-circuits on the first indexed row per attachment.
+pub fn unindexed_text_attachments(conn: &Connection) -> Result<Vec<(i64, String)>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.sha256
+         FROM attachments a
+         WHERE a.mime LIKE 'text/%'
+           AND a.size_bytes <= ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM attachments_fts f
+               WHERE f.attachment_id = a.id AND f.extracted_text <> ''
+           )
+         ORDER BY a.id",
+    )?;
+    let rows = stmt.query_map(params![MAX_EXTRACT_BYTES], |row| {
+        Ok((row.get(0)?, row.get(1)?))
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -561,6 +1085,406 @@ mod tests {
             "the now-unlinked attachment is collectable"
         );
         assert!(get_attachment(&conn, att.id).is_ok());
+    }
+
+    // ── Project files manager (LIF-418) ──────────────────────
+
+    fn seed_named_project(conn: &Connection, ident: &str) -> i64 {
+        queries::create_project(
+            conn,
+            &CreateProject {
+                name: format!("Project {ident}"),
+                identifier: ident.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn seed_issue_in(conn: &Connection, project_id: i64, title: &str) -> i64 {
+        queries::create_issue(
+            conn,
+            &crate::db::models::CreateIssue {
+                project_id,
+                title: title.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    /// Attach `filename` (of `mime`) to an issue in `project_id`, returning the
+    /// attachment id.
+    fn attach_to_issue(
+        conn: &Connection,
+        issue_id: i64,
+        sha: &str,
+        filename: &str,
+        mime: &str,
+        size: i64,
+        uploader: Option<i64>,
+    ) -> i64 {
+        let att = create_attachment(conn, sha, filename, mime, size, uploader).unwrap();
+        link_attachment(conn, att.id, AttachmentEntity::Issue, issue_id).unwrap();
+        att.id
+    }
+
+    #[test]
+    fn project_listing_returns_linked_files_with_aggregate_totals() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "FIL");
+        let issue = seed_issue_in(&conn, project, "Bug with a screenshot");
+        let uploader = seed_user(&conn, "uploader");
+        attach_to_issue(&conn, issue, "s1", "shot.png", "image/png", 100, Some(uploader));
+        attach_to_issue(&conn, issue, "s2", "trace.log", "text/plain", 250, Some(uploader));
+        // An unlinked upload is NOT part of the project listing.
+        create_attachment(&conn, "s3", "stray.png", "image/png", 999, Some(uploader)).unwrap();
+
+        let page =
+            list_project_attachments(&conn, project, &ProjectAttachmentQuery::default()).unwrap();
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.total_bytes, 350, "bytes cover the filtered set");
+        assert!(!page.has_more);
+        assert_eq!(page.items.len(), 2);
+
+        let names: Vec<&str> = page.items.iter().map(|a| a.filename.as_str()).collect();
+        assert!(names.contains(&"shot.png") && names.contains(&"trace.log"));
+        let shot = page
+            .items
+            .iter()
+            .find(|a| a.filename == "shot.png")
+            .unwrap();
+        assert_eq!(shot.mime_class, "image");
+        assert_eq!(shot.uploader.as_deref(), Some("uploader"));
+        assert_eq!(shot.entities.len(), 1);
+        assert_eq!(shot.entities[0].entity_type, "issue");
+        assert_eq!(shot.entities[0].identifier.as_deref(), Some("FIL-1"));
+        assert_eq!(shot.entities[0].title, "Bug with a screenshot");
+    }
+
+    #[test]
+    fn project_listing_hides_files_from_other_projects() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let mine = seed_named_project(&conn, "MIN");
+        let theirs = seed_named_project(&conn, "THR");
+        let my_issue = seed_issue_in(&conn, mine, "mine");
+        let their_issue = seed_issue_in(&conn, theirs, "theirs");
+        attach_to_issue(&conn, my_issue, "a", "mine.png", "image/png", 1, None);
+        attach_to_issue(&conn, their_issue, "b", "theirs.png", "image/png", 1, None);
+
+        let page =
+            list_project_attachments(&conn, mine, &ProjectAttachmentQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].filename, "mine.png");
+    }
+
+    #[test]
+    fn project_listing_filters_by_mime_class_uploader_and_entity_type() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "FLT");
+        let issue = seed_issue_in(&conn, project, "target");
+        let alice = seed_user(&conn, "alice");
+        let bob = seed_user(&conn, "bob");
+        attach_to_issue(&conn, issue, "a", "a.png", "image/png", 10, Some(alice));
+        attach_to_issue(&conn, issue, "b", "b.pdf", "application/pdf", 20, Some(bob));
+
+        // A page-linked file, so the entity_type filter has something to
+        // exclude.
+        let page_row = queries::pages::create_page(
+            &conn,
+            &crate::db::models::CreatePage {
+                project_id: Some(project),
+                title: "Design".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let on_page = create_attachment(&conn, "c", "c.zip", "application/zip", 30, Some(alice))
+            .unwrap();
+        link_attachment(&conn, on_page.id, AttachmentEntity::Page, page_row.id).unwrap();
+
+        let by_class = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                mime_class: Some("image".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_class.total_count, 1);
+        assert_eq!(by_class.items[0].filename, "a.png");
+
+        let by_uploader = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                // Case-insensitive on purpose: the chip shows the username as
+                // stored, the URL may not.
+                uploader: Some("ALICE".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_uploader.total_count, 2);
+
+        let by_entity = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                entity_type: Some("page".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_entity.total_count, 1);
+        assert_eq!(by_entity.items[0].filename, "c.zip");
+        assert_eq!(by_entity.items[0].mime_class, "archive");
+        assert_eq!(
+            by_entity.items[0].entities[0].identifier.as_deref(),
+            Some("FLT-DOC-1")
+        );
+        assert_eq!(
+            by_entity.items[0].entities[0].page_id,
+            Some(page_row.id),
+            "a page link carries the numeric id the web route needs"
+        );
+    }
+
+    #[test]
+    fn project_listing_sorts_and_pages() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "SRT");
+        let issue = seed_issue_in(&conn, project, "target");
+        attach_to_issue(&conn, issue, "a", "big.bin", "application/octet-stream", 900, None);
+        attach_to_issue(&conn, issue, "b", "mid.png", "image/png", 500, None);
+        attach_to_issue(&conn, issue, "c", "small.txt", "text/plain", 10, None);
+
+        let by_size = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                sort: Some("size".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let sizes: Vec<i64> = by_size.items.iter().map(|a| a.size_bytes).collect();
+        assert_eq!(sizes, vec![900, 500, 10], "size sorts largest first");
+        assert_eq!(by_size.items[0].mime_class, "other");
+
+        let by_name = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                sort: Some("filename".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let names: Vec<&str> = by_name.items.iter().map(|a| a.filename.as_str()).collect();
+        assert_eq!(names, vec!["big.bin", "mid.png", "small.txt"]);
+
+        // Paging: the aggregate header still describes the whole set.
+        let first = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                sort: Some("size".into()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert!(first.has_more);
+        assert_eq!(first.total_count, 3);
+        assert_eq!(first.total_bytes, 1410);
+
+        let second = list_project_attachments(
+            &conn,
+            project,
+            &ProjectAttachmentQuery {
+                sort: Some("size".into()),
+                limit: Some(2),
+                offset: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert!(!second.has_more);
+        assert_eq!(second.items[0].filename, "small.txt");
+    }
+
+    #[test]
+    fn project_listing_rejects_unknown_filters() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "BAD");
+
+        for query in [
+            ProjectAttachmentQuery {
+                mime_class: Some("hologram".into()),
+                ..Default::default()
+            },
+            ProjectAttachmentQuery {
+                entity_type: Some("widget".into()),
+                ..Default::default()
+            },
+            ProjectAttachmentQuery {
+                sort: Some("colour".into()),
+                ..Default::default()
+            },
+            ProjectAttachmentQuery {
+                order: Some("sideways".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                list_project_attachments(&conn, project, &query).is_err(),
+                "unknown filter value must error: {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_linked_file_resolves_to_its_parent_entity() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "CMT");
+        let issue = seed_issue_in(&conn, project, "Thread parent");
+        let author = seed_user(&conn, "author");
+        let comment = queries::comments::create_comment(
+            &conn,
+            queries::comments::CommentParent::Issue(issue),
+            author,
+            "see the log",
+        )
+        .unwrap();
+        let att = create_attachment(&conn, "z", "log.txt", "text/plain", 5, Some(author)).unwrap();
+        link_attachment(&conn, att.id, AttachmentEntity::Comment, comment.id).unwrap();
+
+        let page =
+            list_project_attachments(&conn, project, &ProjectAttachmentQuery::default()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let entity = &page.items[0].entities[0];
+        assert_eq!(entity.entity_type, "comment");
+        assert_eq!(entity.entity_id, comment.id);
+        assert_eq!(
+            entity.identifier.as_deref(),
+            Some("CMT-1"),
+            "a comment link points at the issue the thread lives on"
+        );
+        assert_eq!(entity.title, "Thread parent");
+
+        // The same resolution drives search hits.
+        let target = primary_link(&conn, att.id, Some(project)).unwrap().unwrap();
+        assert_eq!(target.project_id, Some(project));
+        assert_eq!(target.identifier.as_deref(), Some("CMT-1"));
+        assert_eq!(target.page_id, None);
+    }
+
+    #[test]
+    fn primary_link_prefers_the_searched_project() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let first = seed_named_project(&conn, "ONE");
+        let second = seed_named_project(&conn, "TWO");
+        let first_issue = seed_issue_in(&conn, first, "one");
+        let second_issue = seed_issue_in(&conn, second, "two");
+        let att = create_attachment(&conn, "s", "shared.png", "image/png", 1, None).unwrap();
+        link_attachment(&conn, att.id, AttachmentEntity::Issue, first_issue).unwrap();
+        link_attachment(&conn, att.id, AttachmentEntity::Issue, second_issue).unwrap();
+
+        assert_eq!(
+            primary_link(&conn, att.id, Some(second))
+                .unwrap()
+                .unwrap()
+                .identifier
+                .as_deref(),
+            Some("TWO-1")
+        );
+        // No link at all: nothing to point at.
+        let unlinked = create_attachment(&conn, "u", "u.png", "image/png", 1, None).unwrap();
+        assert!(primary_link(&conn, unlinked.id, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn project_orphans_list_members_uploads_with_a_countdown() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let project = seed_named_project(&conn, "ORP");
+        let issue = seed_issue_in(&conn, project, "target");
+        let member = seed_user(&conn, "member");
+        let stranger = seed_user(&conn, "stranger");
+        queries::members::upsert_member(
+            &conn,
+            project,
+            member,
+            crate::db::models::Role::Maintainer,
+        )
+        .unwrap();
+
+        // Linked: never an orphan.
+        attach_to_issue(&conn, issue, "a", "used.png", "image/png", 10, Some(member));
+        // Unlinked, by a member: the row this endpoint exists for.
+        let pending =
+            create_attachment(&conn, "b", "draft.png", "image/png", 20, Some(member)).unwrap();
+        // Unlinked, by a non-member: not this project's business.
+        create_attachment(&conn, "c", "other.png", "image/png", 30, Some(stranger)).unwrap();
+
+        let orphans = list_project_orphans(&conn, project, 24 * 60 * 60).unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].id, pending.id);
+        assert_eq!(orphans[0].filename, "draft.png");
+        assert_eq!(orphans[0].uploader.as_deref(), Some("member"));
+        assert!(
+            orphans[0].seconds_until_sweep > 23 * 60 * 60,
+            "a fresh upload has nearly the whole grace window left, got {}",
+            orphans[0].seconds_until_sweep
+        );
+
+        // Past the window the countdown floors at zero rather than going
+        // negative: the sweeper takes it on its next pass.
+        let due = list_project_orphans(&conn, project, 0).unwrap();
+        assert_eq!(due[0].seconds_until_sweep, 0);
+    }
+
+    // ── Attachment text extraction (LIF-418) ─────────────────
+
+    #[test]
+    fn only_small_text_uploads_are_extractable() {
+        assert!(is_extractable("text/plain", 1024));
+        assert!(is_extractable("text/plain", MAX_EXTRACT_BYTES));
+        assert!(!is_extractable("text/plain", MAX_EXTRACT_BYTES + 1));
+        assert!(!is_extractable("image/png", 10));
+        assert!(!is_extractable("application/pdf", 10));
+    }
+
+    #[test]
+    fn extracted_text_is_indexed_once_and_not_reoffered() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let text = create_attachment(&conn, "t1", "notes.txt", "text/plain", 12, None).unwrap();
+        create_attachment(&conn, "i1", "shot.png", "image/png", 12, None).unwrap();
+
+        // The insert trigger indexed the filename but no contents yet, so the
+        // text row is the only backfill candidate.
+        let pending = unindexed_text_attachments(&conn).unwrap();
+        assert_eq!(pending, vec![(text.id, "t1".to_string())]);
+
+        set_extracted_text(&conn, text.id, "the quokka migration notes").unwrap();
+        assert!(
+            unindexed_text_attachments(&conn).unwrap().is_empty(),
+            "a second backfill pass must find nothing to do"
+        );
     }
 
     // ── parse_referenced_ids ─────────────────────────────────

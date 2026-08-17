@@ -310,6 +310,17 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/attachments/{id}",
             get(attachments::download_attachment).delete(attachments::delete_attachment),
         )
+        // Project files manager (LIF-418) — Viewer-gated listing of every
+        // attachment linked anywhere in the project, plus the unlinked uploads
+        // waiting on the orphan sweeper.
+        .route(
+            "/api/projects/{id}/attachments",
+            get(attachments::list_project_attachments),
+        )
+        .route(
+            "/api/projects/{id}/attachments/orphans",
+            get(attachments::list_project_orphans),
+        )
         // Health
         .route("/api/health", get(health))
         .layer(

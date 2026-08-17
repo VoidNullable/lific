@@ -35,9 +35,10 @@ pub fn search_page(
         && rt != "issue"
         && rt != "page"
         && rt != "comment"
+        && rt != "attachment"
     {
         return Err(LificError::BadRequest(format!(
-            "invalid result_type '{rt}'. Use issue, page, or comment."
+            "invalid result_type '{rt}'. Use issue, page, comment, or attachment."
         )));
     }
 
@@ -55,8 +56,166 @@ pub fn search_page(
     Ok(super::Page::from_over_fetch(hits, limit))
 }
 
-/// FTS5 full-text path (the original `search` body).
+/// FTS5 full-text path.
+///
+/// LIF-418: two indexes feed this now — `search_index` (issues, pages,
+/// comments) and `attachments_fts` (filenames + extracted text of small text
+/// uploads). BM25 scores are not comparable across two separate FTS tables, so
+/// rather than pretending to interleave them by relevance, attachment hits are
+/// appended after the entity hits and the combined list is paged in Rust. When
+/// `result_type` selects one side only, that side is paged in SQL exactly as
+/// before.
 fn search_fts(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SearchResult>, LificError> {
+    let want_entities = q.result_type.as_deref().is_none_or(|rt| rt != "attachment");
+    let want_attachments = q.result_type.as_deref().is_none_or(|rt| rt == "attachment");
+
+    match (want_entities, want_attachments) {
+        (true, false) => search_entities_fts(conn, q, limit, offset),
+        (false, true) => search_attachments_fts(conn, q, limit, offset),
+        _ => {
+            // Both sides: take everything up to the end of the requested page
+            // from each index, concatenate, then apply the offset here so
+            // `has_more` still means what the caller thinks it means.
+            let window = limit.saturating_add(offset);
+            let mut rows = search_entities_fts(conn, q, window, 0)?;
+            rows.extend(search_attachments_fts(conn, q, window, 0)?);
+            Ok(rows
+                .into_iter()
+                .skip(offset.max(0) as usize)
+                .take(limit.max(0) as usize)
+                .collect())
+        }
+    }
+}
+
+/// Attachment hits: a match on the filename or on the extracted text of a text
+/// upload, resolved to the entity that references the file so the caller can
+/// jump to where it is used.
+///
+/// Unlinked attachments are excluded on purpose. They belong to no project
+/// yet, so there is nothing for the caller's `visible_project_ids` filter to
+/// authorize them against, and a freshly uploaded blob is nobody's search
+/// result.
+fn search_attachments_fts(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SearchResult>, LificError> {
+    let order_clause = match q.sort.as_deref() {
+        None | Some("relevance") => "ORDER BY rank",
+        Some("recent") => "ORDER BY a.created_at DESC, rank",
+        Some(other) => {
+            return Err(LificError::BadRequest(format!(
+                "invalid sort '{other}'. Use relevance or recent."
+            )));
+        }
+    };
+    let Some(fts_query) = fts_expression(&q.query) else {
+        return Ok(Vec::new());
+    };
+
+    // The project filter has to run in SQL, before LIMIT, or a page could come
+    // back empty while matches exist further down.
+    let project_clause = match q.project_id {
+        Some(_) => {
+            "AND EXISTS (
+                 SELECT 1
+                 FROM attachment_links l
+                 LEFT JOIN issues   i   ON l.entity_type = 'issue'   AND i.id   = l.entity_id
+                 LEFT JOIN pages    pg  ON l.entity_type = 'page'    AND pg.id  = l.entity_id
+                 LEFT JOIN comments c   ON l.entity_type = 'comment' AND c.id   = l.entity_id
+                 LEFT JOIN issues   ci  ON ci.id  = c.issue_id
+                 LEFT JOIN pages    cpg ON cpg.id = c.page_id
+                 WHERE l.attachment_id = a.id
+                   AND ?4 IN (i.project_id, pg.project_id, ci.project_id, cpg.project_id)
+             )"
+        }
+        None => "AND EXISTS (SELECT 1 FROM attachment_links l WHERE l.attachment_id = a.id AND ?4 IS NULL)",
+    };
+
+    let sql = format!(
+        "SELECT attachments_fts.attachment_id, a.filename,
+                CASE WHEN attachments_fts.extracted_text = ''
+                     THEN snippet(attachments_fts, 0, '**', '**', '...', 32)
+                     ELSE snippet(attachments_fts, 1, '**', '**', '...', 32)
+                END
+         FROM attachments_fts
+         JOIN attachments a ON a.id = attachments_fts.attachment_id
+         WHERE attachments_fts MATCH ?1
+         {project_clause}
+         {order_clause}
+         LIMIT ?2 OFFSET ?3"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![fts_query, limit, offset, q.project_id],
+        |row| {
+            let id: i64 = row.get(0)?;
+            let filename: String = row.get(1)?;
+            let snippet: String = row.get(2)?;
+            Ok((id, filename, snippet))
+        },
+    )?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let (id, filename, snippet) = row?;
+        if let Some(result) = attachment_result(conn, id, filename, snippet, q.project_id)? {
+            results.push(result);
+        }
+    }
+    Ok(results)
+}
+
+/// Assemble one attachment [`SearchResult`], resolving the entity it should
+/// link to. Returns `None` when the attachment lost its last link between the
+/// index read and this lookup.
+fn attachment_result(
+    conn: &Connection,
+    id: i64,
+    filename: String,
+    snippet: String,
+    project_id: Option<i64>,
+) -> Result<Option<SearchResult>, LificError> {
+    let Some(target) = super::attachments::primary_link(conn, id, project_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(SearchResult {
+        result_type: "attachment".into(),
+        id,
+        identifier: target.identifier,
+        title: filename,
+        snippet,
+        project_id: target.project_id,
+        parent_page_id: target.page_id,
+    }))
+}
+
+/// Turn a user query into the prefix-matching FTS5 expression both indexes are
+/// searched with. `None` for an empty or whitespace-only query: `MATCH ''` is
+/// an fts5 syntax error, so the caller returns no results instead (LIF-133).
+fn fts_expression(query: &str) -> Option<String> {
+    let expression: String = query
+        .split_whitespace()
+        .map(|word| {
+            let escaped = word.replace('"', "\"\"");
+            format!("\"{escaped}\"*")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!expression.is_empty()).then_some(expression)
+}
+
+/// Issue / page / comment hits from `search_index` (the original `search_fts`
+/// body).
+fn search_entities_fts(
     conn: &Connection,
     q: &SearchQuery,
     limit: i64,
@@ -77,22 +236,12 @@ fn search_fts(
         }
     };
 
-    let fts_query: String = q
-        .query
-        .split_whitespace()
-        .map(|word| {
-            let escaped = word.replace('"', "\"\"");
-            format!("\"{escaped}\"*")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
     // LIF-133: an empty or whitespace-only query tokenizes to an empty FTS
     // expression, and `MATCH ''` is an fts5 syntax error. Return no results
     // instead of surfacing a database error.
-    if fts_query.is_empty() {
+    let Some(fts_query) = fts_expression(&q.query) else {
         return Ok(Vec::new());
-    }
+    };
 
     // Comment hits (LIF-146) carry no title of their own; they link back to a
     // parent issue or page. `c` is the comment row; `ci`/`cpg` are its parent
@@ -383,7 +532,38 @@ fn search_literal(
         }
     }
 
-    // Project filter: applied uniformly across all three entity kinds after
+    // LIF-418: attachments join the literal scan too, so a punctuation-heavy
+    // needle (`core:sodom`, a stack frame, a config key) finds the log file it
+    // appears in, not just the issue that discusses it. Filenames are always
+    // scanned; contents only exist for indexed text uploads.
+    if want("attachment") {
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.filename, a.created_at, COALESCE(f.extracted_text, '')
+             FROM attachments a
+             LEFT JOIN attachments_fts f ON f.attachment_id = a.id
+             WHERE (instr(lower(a.filename), lower(?1)) > 0
+                    OR instr(lower(COALESCE(f.extracted_text, '')), lower(?1)) > 0)
+               AND EXISTS (SELECT 1 FROM attachment_links l WHERE l.attachment_id = a.id)",
+        )?;
+        let mapped = stmt.query_map([&needle], |row| {
+            let id: i64 = row.get(0)?;
+            let filename: String = row.get(1)?;
+            let created_at: String = row.get(2)?;
+            let text: String = row.get(3)?;
+            Ok((id, filename, created_at, text))
+        })?;
+        for row in mapped {
+            let (id, filename, created_at, text) = row?;
+            let snippet = literal_snippet(&filename, &text, &needle);
+            if let Some(result) =
+                attachment_result(conn, id, filename, snippet, q.project_id)?
+            {
+                rows.push((created_at, result));
+            }
+        }
+    }
+
+    // Project filter: applied uniformly across all entity kinds after
     // collection (a comment's project_id is its parent's, resolved above). A
     // workspace page has project_id = None and is only kept when the caller
     // didn't scope to a project.
@@ -1149,6 +1329,262 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].result_type, "comment");
         assert_eq!(results[0].identifier, Some("TST-1".into()));
+    }
+
+    // ── Attachment hits (LIF-418) ─────────────────────────────
+
+    /// Attach a file to `issue_id`, optionally with extracted text in the FTS
+    /// index (as the upload path does for small `text/*` uploads).
+    fn seed_attachment(
+        conn: &rusqlite::Connection,
+        issue_id: Option<i64>,
+        filename: &str,
+        mime: &str,
+        text: Option<&str>,
+    ) -> i64 {
+        use crate::db::queries::attachments as att;
+        let attachment =
+            att::create_attachment(conn, filename, filename, mime, 42, None).unwrap();
+        if let Some(issue_id) = issue_id {
+            att::link_attachment(conn, attachment.id, AttachmentEntity::Issue, issue_id).unwrap();
+        }
+        if let Some(text) = text {
+            att::set_extracted_text(conn, attachment.id, text).unwrap();
+        }
+        attachment.id
+    }
+
+    #[test]
+    fn search_finds_attachment_by_filename_and_links_to_its_entity() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Crash report");
+        let attachment = seed_attachment(&conn, Some(iid), "heapdump.log", "text/plain", None);
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "heapdump".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hit = results
+            .iter()
+            .find(|r| r.result_type == "attachment")
+            .expect("the file must be findable by name");
+        assert_eq!(hit.id, attachment);
+        assert_eq!(hit.title, "heapdump.log");
+        assert_eq!(
+            hit.identifier.as_deref(),
+            Some("TST-1"),
+            "a file hit carries the entity it is attached to"
+        );
+        assert_eq!(hit.project_id, Some(pid));
+    }
+
+    #[test]
+    fn search_finds_attachment_by_extracted_text() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Nothing to see in the title");
+        seed_attachment(
+            &conn,
+            Some(iid),
+            "server.log",
+            "text/plain",
+            Some("panicked at gribblenaut::render line 12"),
+        );
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "gribblenaut".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, "attachment");
+        assert!(
+            results[0].snippet.contains("gribblenaut"),
+            "the snippet comes from the file's contents, got: {}",
+            results[0].snippet
+        );
+    }
+
+    #[test]
+    fn search_excludes_unlinked_attachments() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        seed_project(&conn, "TST");
+        // Uploaded but never referenced: it belongs to no project, so there is
+        // nothing to authorize it against and it must not surface.
+        seed_attachment(&conn, None, "snorfblat.log", "text/plain", None);
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "snorfblat".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(results.is_empty(), "got: {results:?}");
+    }
+
+    #[test]
+    fn search_respects_project_filter_for_attachments() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let p1 = seed_project(&conn, "AAA");
+        let p2 = seed_project(&conn, "BBB");
+        let i1 = seed_issue(&conn, p1, "alpha");
+        let i2 = seed_issue(&conn, p2, "beta");
+        seed_attachment(&conn, Some(i1), "shared-report.log", "text/plain", None);
+        seed_attachment(&conn, Some(i2), "shared-report.log", "text/plain", None);
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "shared-report".into(),
+                project_id: Some(p1),
+                result_type: Some("attachment".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].identifier.as_deref(), Some("AAA-1"));
+    }
+
+    #[test]
+    fn search_filters_by_attachment_result_type() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        // An issue and a file that both match "overlap".
+        let iid = seed_issue(&conn, pid, "overlap in the issue title");
+        seed_attachment(&conn, Some(iid), "overlap.log", "text/plain", None);
+
+        let files_only = search(
+            &conn,
+            &SearchQuery {
+                query: "overlap".into(),
+                result_type: Some("attachment".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(files_only.len(), 1);
+        assert_eq!(files_only[0].result_type, "attachment");
+
+        let issues_only = search(
+            &conn,
+            &SearchQuery {
+                query: "overlap".into(),
+                result_type: Some("issue".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(issues_only.len(), 1);
+        assert_eq!(issues_only[0].result_type, "issue");
+
+        // Unfiltered sees both.
+        let both = search(
+            &conn,
+            &SearchQuery {
+                query: "overlap".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn search_drops_attachment_from_the_index_on_delete() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "parent");
+        let attachment = seed_attachment(&conn, Some(iid), "zorblatt.log", "text/plain", None);
+
+        crate::db::queries::attachments::delete_attachment(&conn, attachment).unwrap();
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                query: "zorblatt".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            results.is_empty(),
+            "a deleted attachment must leave the index"
+        );
+    }
+
+    #[test]
+    fn attachment_hits_page_alongside_entity_hits() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "quokka in the title");
+        seed_attachment(&conn, Some(iid), "quokka.log", "text/plain", None);
+
+        let first = search(
+            &conn,
+            &SearchQuery {
+                query: "quokka".into(),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let second = search(
+            &conn,
+            &SearchQuery {
+                query: "quokka".into(),
+                limit: Some(1),
+                offset: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].result_type, "issue", "entity hits come first");
+        assert_eq!(second[0].result_type, "attachment");
+    }
+
+    #[test]
+    fn literal_mode_finds_attachments_too() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "parent issue");
+        seed_attachment(
+            &conn,
+            Some(iid),
+            "trace.log",
+            "text/plain",
+            Some("thread panicked at core:sodom::run"),
+        );
+
+        let hits = search(&conn, &lit("core:sodom")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].result_type, "attachment");
+        assert_eq!(hits[0].title, "trace.log");
+        assert!(
+            hits[0].snippet.contains("**core:sodom**"),
+            "got: {}",
+            hits[0].snippet
+        );
     }
 
     // ── literal mode (LIF-304) ────────────────────────────────

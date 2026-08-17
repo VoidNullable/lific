@@ -165,6 +165,17 @@ pub(super) async fn upload_attachment(
 
     let (attachment, event) = with_write(&db, |conn| {
         let att = q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
+        // LIF-418: index a small text upload's contents so search can find the
+        // file by what's inside it, not just by its name. Migration 042's
+        // insert trigger has already put the filename in `attachments_fts`;
+        // this fills in the text column. Non-UTF-8 bytes can't reach here for
+        // a `text/*` mime (the sniffer requires valid UTF-8), but the check
+        // keeps this honest if the allowlist ever widens.
+        if q::is_extractable(&mime, size)
+            && let Ok(text) = std::str::from_utf8(&bytes)
+        {
+            q::set_extracted_text(conn, att.id, text)?;
+        }
         // If the caller asked to link immediately, do it here in the same txn.
         let event = if let (Some(entity), Some(eid)) = (link_entity, link_entity_id) {
             q::link_attachment(conn, att.id, entity, eid)?;
@@ -242,6 +253,52 @@ fn resolve_entity_project(
             }
         }
     })
+}
+
+/// `GET /api/projects/{id}/attachments` — the project files manager listing
+/// (LIF-418): every attachment linked to any issue, page, or comment in the
+/// project, paginated, filterable by `mime_class` / `uploader` /
+/// `entity_type`, sortable by `created_at` (default, newest first) / `size` /
+/// `filename`, with a `total_count` + `total_bytes` header for the whole
+/// filtered set.
+///
+/// Viewer-gated. The gate runs *before* anything touches the project row, so a
+/// non-member gets the same 403 whether or not the project exists — they can't
+/// probe for it through a 404-vs-403 side channel (the same reasoning
+/// `/api/search` applies to hidden projects).
+pub(super) async fn list_project_attachments(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Path(project_id): Path<i64>,
+    Query(query): Query<ProjectAttachmentQuery>,
+) -> Result<axum::Json<ProjectAttachmentPage>, LificError> {
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    with_read(&db, |conn| {
+        q::list_project_attachments(conn, project_id, &query)
+    })
+    .map(axum::Json)
+}
+
+/// `GET /api/projects/{id}/attachments/orphans` — uploads by this project's
+/// members that have no links and are queued for the orphan sweeper, with the
+/// time each has left before collection.
+///
+/// Same Viewer gate, same reasoning, as the listing above.
+pub(super) async fn list_project_orphans(
+    State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Path(project_id): Path<i64>,
+) -> Result<axum::Json<PendingOrphanList>, LificError> {
+    authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let items = with_read(&db, |conn| {
+        q::list_project_orphans(conn, project_id, storage::ORPHAN_GRACE_SECONDS)
+    })?;
+    let total_bytes = items.iter().map(|orphan| orphan.size_bytes).sum();
+    Ok(axum::Json(PendingOrphanList {
+        items,
+        grace_seconds: storage::ORPHAN_GRACE_SECONDS,
+        total_bytes,
+    }))
 }
 
 /// `GET /api/attachments/{id}` — stream the bytes with the correct
@@ -1289,6 +1346,256 @@ mod api_tests {
         );
 
         std::fs::remove_dir_all(store.dir()).ok();
+    }
+
+    // ── Project files manager (LIF-418) ──────────────────────
+
+    /// Seed a project with one issue and return `(project_id, issue_id)`.
+    async fn seed_project_with_issue(app: &axum::Router) -> (i64, i64) {
+        let (project_id, _) = seed_project(app).await;
+        let issue = parse_json(
+            json_post(
+                app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": "Files target" }),
+            )
+            .await,
+        )
+        .await;
+        (project_id, issue["id"].as_i64().unwrap())
+    }
+
+    #[tokio::test]
+    async fn project_files_listing_returns_linked_uploads_with_totals() {
+        let app = test_app();
+        let (project_id, issue_id) = seed_project_with_issue(&app).await;
+        upload(
+            &app,
+            "shot.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        upload(
+            &app,
+            "notes.txt",
+            "text/plain",
+            b"a plain text upload\n",
+            Some(("issue", issue_id)),
+        )
+        .await;
+        // Unlinked: belongs to no project, so it stays out of the listing.
+        upload(&app, "stray.txt", "text/plain", b"nowhere\n", None).await;
+
+        let body = parse_json(json_get(&app, &format!("/api/projects/{project_id}/attachments")).await)
+            .await;
+        assert_eq!(body["total_count"], 2);
+        assert_eq!(body["has_more"], false);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let total_bytes: i64 = items
+            .iter()
+            .map(|item| item["size_bytes"].as_i64().unwrap())
+            .sum();
+        assert_eq!(body["total_bytes"].as_i64().unwrap(), total_bytes);
+
+        let png = items
+            .iter()
+            .find(|item| item["filename"] == "shot.png")
+            .expect("the linked image is listed");
+        assert_eq!(png["mime_class"], "image");
+        assert_eq!(png["uploader"], "test-admin");
+        let entities = png["entities"].as_array().unwrap();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0]["entity_type"], "issue");
+        assert_eq!(entities[0]["entity_id"].as_i64().unwrap(), issue_id);
+        assert_eq!(entities[0]["identifier"], "TST-1");
+        assert_eq!(entities[0]["title"], "Files target");
+    }
+
+    #[tokio::test]
+    async fn project_files_listing_filters_sorts_and_pages() {
+        let app = test_app();
+        let (project_id, issue_id) = seed_project_with_issue(&app).await;
+        upload(
+            &app,
+            "shot.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        upload(
+            &app,
+            "notes.txt",
+            "text/plain",
+            b"a plain text upload\n",
+            Some(("issue", issue_id)),
+        )
+        .await;
+
+        let text_only = parse_json(
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/attachments?mime_class=text"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(text_only["total_count"], 1);
+        assert_eq!(text_only["items"][0]["filename"], "notes.txt");
+
+        let by_uploader = parse_json(
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/attachments?uploader=test-admin"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(by_uploader["total_count"], 2);
+
+        let paged = parse_json(
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/attachments?limit=1&sort=filename"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(paged["items"].as_array().unwrap().len(), 1);
+        assert_eq!(paged["has_more"], true);
+        assert_eq!(
+            paged["items"][0]["filename"], "notes.txt",
+            "filename sorts A to Z by default"
+        );
+
+        // A filter value that isn't a known class is a 400, not a silently
+        // wider result set.
+        let bad = json_get(
+            &app,
+            &format!("/api/projects/{project_id}/attachments?mime_class=hologram"),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn project_orphans_lists_unlinked_uploads_with_a_countdown() {
+        let app = test_app();
+        let (project_id, issue_id) = seed_project_with_issue(&app).await;
+        upload(
+            &app,
+            "kept.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        upload(&app, "abandoned.txt", "text/plain", b"draft that never landed\n", None).await;
+
+        let body = parse_json(
+            json_get(
+                &app,
+                &format!("/api/projects/{project_id}/attachments/orphans"),
+            )
+            .await,
+        )
+        .await;
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "only the unlinked upload is pending sweep");
+        assert_eq!(items[0]["filename"], "abandoned.txt");
+        assert_eq!(items[0]["uploader"], "test-admin");
+        assert_eq!(
+            body["grace_seconds"].as_i64().unwrap(),
+            crate::storage::ORPHAN_GRACE_SECONDS
+        );
+        assert!(
+            items[0]["seconds_until_sweep"].as_i64().unwrap() > 23 * 60 * 60,
+            "a fresh upload has most of the grace window left"
+        );
+        assert_eq!(
+            body["total_bytes"].as_i64().unwrap(),
+            items[0]["size_bytes"].as_i64().unwrap()
+        );
+    }
+
+    /// A non-member must not be able to tell an existing project from a
+    /// nonexistent one: both answer 403, never 404 and never an empty 200.
+    #[tokio::test]
+    async fn project_files_endpoints_hide_the_project_from_non_members() {
+        let (db, _admin, _lead, _maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+
+        let stranger = app_as_user(db.clone(), &non_member);
+        for uri in [
+            format!("/api/projects/{project_id}/attachments"),
+            format!("/api/projects/{project_id}/attachments/orphans"),
+        ] {
+            assert_eq!(
+                json_get(&stranger, &uri).await.status(),
+                StatusCode::FORBIDDEN,
+                "{uri} must be forbidden for a non-member"
+            );
+        }
+        // The same answer for a project id that doesn't exist at all.
+        assert_eq!(
+            json_get(&stranger, "/api/projects/999999/attachments")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_get(&stranger, "/api/projects/999999/attachments/orphans")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // A viewer on the project reads it fine.
+        let member = app_as_user(db, &viewer);
+        assert_eq!(
+            json_get(&member, &format!("/api/projects/{project_id}/attachments"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    /// End to end: a text upload's contents reach the FTS index and come back
+    /// out of `/api/search` as an attachment hit pointing at the issue it is
+    /// attached to.
+    #[tokio::test]
+    async fn uploaded_text_is_searchable_by_its_contents() {
+        let app = test_app();
+        let (_project_id, issue_id) = seed_project_with_issue(&app).await;
+        upload(
+            &app,
+            "server.log",
+            "text/plain",
+            b"thread panicked at gribblenaut::render\n",
+            Some(("issue", issue_id)),
+        )
+        .await;
+
+        let results = parse_json(json_get(&app, "/api/search?query=gribblenaut").await).await;
+        let hits = results.as_array().unwrap();
+        assert_eq!(hits.len(), 1, "got: {results}");
+        assert_eq!(hits[0]["result_type"], "attachment");
+        assert_eq!(hits[0]["title"], "server.log");
+        assert_eq!(hits[0]["identifier"], "TST-1");
+
+        // The filename is indexed too, without any extraction.
+        let by_name = parse_json(json_get(&app, "/api/search?query=server").await).await;
+        assert!(
+            by_name
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["result_type"] == "attachment"),
+            "got: {by_name}"
+        );
     }
 }
 
