@@ -18,11 +18,17 @@
 //   * an image that is enormous, or close to the instance's byte cap, pauses
 //     on the chip and offers a resize first (see downscale.ts).
 //
-// One upload moves through: (offer) -> queued -> uploading -> success (chip
-// drops, markdown lands at the caret) or error (chip turns red with the server
-// reason plus Retry / Dismiss). Image files carry a `previewUrl` object URL
-// that is revoked the moment the chip leaves, so a long-lived composer never
-// leaks blob URLs.
+// One upload moves through: (annotate) -> (offer) -> queued -> uploading ->
+// success (chip drops, or lingers to ask for alt text) or error (chip turns
+// red with the server reason plus Retry / Dismiss). Image files carry a
+// `previewUrl` object URL that is revoked the moment the chip leaves, so a
+// long-lived composer never leaks blob URLs.
+//
+// Two of those steps come from the capture work. Annotation runs *before*
+// anything enters the queue, because drawing on a screenshot changes its bytes
+// and the resize question can only be asked about the bytes we will really
+// send. Alt text runs *after* a successful image upload, on a chip that is
+// already settled: nothing is in flight, and ignoring it costs nothing.
 //
 // Because it uses runes it lives in a `.svelte.ts` module.
 
@@ -33,6 +39,8 @@ import {
 } from "../api";
 import { markdownFor } from "./compose";
 import { createConcurrencyQueue } from "./queue";
+import { maybeAnnotate, type UploadSource } from "./annotateFlow";
+import { applyAltText } from "./altText";
 import {
   decideDownscale,
   downscaleImage,
@@ -47,7 +55,27 @@ import {
  *  meaningless. */
 export const MAX_IN_FLIGHT = 3;
 
-export type UploadStatus = "offer" | "queued" | "uploading" | "error";
+export type { UploadSource };
+
+/** `alt` is a settled, *successful* upload whose chip lingers only to offer a
+ *  one-line description for the image's alt text. It is neither busy nor
+ *  pending: nothing is in flight and nothing is waiting on the user. */
+export type UploadStatus = "offer" | "queued" | "uploading" | "error" | "alt";
+
+/**
+ * Read/write access to the draft a composer owns.
+ *
+ * The one accessor pair every layer shares: `createComposerAttachments` takes
+ * it from the host component, splices markdown through it, and hands the same
+ * object to the controller so the alt-text prompt can rewrite the reference it
+ * just inserted. `caret` is optional on purpose - an edit the user asked for
+ * at the caret passes one, while a background rewrite (alt text) omits it and
+ * leaves the selection exactly where it was.
+ */
+export interface ComposerText {
+  read: () => string;
+  write: (next: string, caret?: number) => void;
+}
 
 export interface PendingUpload {
   /** Stable client id - chips key on this so retry/cancel target one row. */
@@ -69,6 +97,9 @@ export interface PendingUpload {
   total: number;
   /** Present only in the `offer` state: the resize we are proposing. */
   offer: DownscaleOffer | null;
+  /** The markdown that was inserted on success, kept so the alt-text prompt
+   *  can find its own reference again in the composer's draft. */
+  snippet: string | null;
 }
 
 export type DownscaleChoice = "resize" | "original";
@@ -157,6 +188,13 @@ export interface UploadControllerOptions {
   link?: () => { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
   /** Insert the finished markdown reference at the caret. */
   onInsert: (snippet: string) => void;
+  /**
+   * The composer's draft. Supplying it turns on the alt-text prompt: after an
+   * image lands, its chip stays put with a one-line input, and what gets typed
+   * is spliced into the alt slot of the reference that was just inserted. Omit
+   * it and image uploads behave as before (chip disappears on success).
+   */
+  text?: ComposerText;
 }
 
 export interface UploadController {
@@ -166,12 +204,17 @@ export interface UploadController {
   readonly busy: boolean;
   /** True while anything is still going to happen, including a chip waiting
    *  on the user's resize answer. Save buttons gate on this. Failed chips do
-   *  NOT count: a permanent rejection must never wedge the Save button. */
+   *  NOT count: a permanent rejection must never wedge the Save button, and
+   *  neither does an alt-text offer on an upload that already succeeded. */
   readonly pending: boolean;
-  /** Queue files for upload; images get a preview thumbnail immediately. */
-  enqueue: (files: File[]) => void;
+  /** Queue files for upload; images get a preview thumbnail immediately.
+   *  `source` decides whether the annotate prompt is offered first. */
+  enqueue: (files: File[], source?: UploadSource) => void;
   /** Re-attempt a failed upload in place. */
   retry: (id: number) => void;
+  /** Write `alt` into the alt slot of this upload's inserted reference, then
+   *  drop the chip. Empty input is treated as a skip. */
+  applyAlt: (id: number, alt: string) => void;
   /** Abort a queued or in-flight upload and drop its chip. */
   cancel: (id: number) => void;
   /** Drop a chip (typically a failed one) and revoke its preview URL. */
@@ -250,7 +293,16 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
       if (!settled) return;
 
       if (outcome.ok) {
-        opts.onInsert(markdownFor(outcome.data));
+        const snippet = markdownFor(outcome.data);
+        opts.onInsert(snippet);
+        if (outcome.data.mime.startsWith("image/") && opts.text) {
+          // Hold the chip open for a description instead of vanishing. The
+          // upload is already done and linked; this is purely an offer.
+          settled.status = "alt";
+          settled.snippet = snippet;
+          settled.offer = null;
+          return;
+        }
         remove(id);
         return;
       }
@@ -314,8 +366,18 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
     waiting.status = "offer";
   }
 
-  function enqueue(files: File[]) {
-    for (const file of files) {
+  function enqueue(files: File[], source: UploadSource = "picker") {
+    void begin(files, source);
+  }
+
+  // Split out because annotation is async, and it has to happen before a file
+  // enters the queue: drawing on a screenshot changes its bytes, so measuring
+  // it for the resize offer any earlier would measure the wrong image. A
+  // pasted screenshot may sit in the annotator for a while; nothing is in
+  // flight during that window, so no chip is shown for it either.
+  async function begin(files: File[], source: UploadSource) {
+    const prepared = await maybeAnnotate(files, source);
+    for (const file of prepared) {
       const isImage = file.type.startsWith("image/");
       const id = ++seq;
       items.push({
@@ -330,9 +392,27 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
         loaded: 0,
         total: file.size,
         offer: null,
+        snippet: null,
       });
       void prepare(id);
     }
+  }
+
+  function applyAlt(id: number, alt: string) {
+    const item = get(id);
+    const text = opts.text;
+    if (item && text && item.snippet) {
+      const current = text.read();
+      // Locate the reference we inserted; if the draft moved on and it is gone,
+      // fall back to a whole-document search from zero rather than rewriting
+      // whatever happens to sit at the old offset.
+      const offset = current.indexOf(item.snippet);
+      const next = applyAltText(current, offset === -1 ? 0 : offset, alt);
+      // No caret: the user is typing somewhere else in the composer and this
+      // rewrite must not yank the selection out from under them.
+      if (next !== current) text.write(next);
+    }
+    remove(id);
   }
 
   function retry(id: number) {
@@ -384,10 +464,11 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
       return items.some((it) => it.status === "queued" || it.status === "uploading");
     },
     get pending() {
-      return items.some((it) => it.status !== "error");
+      return items.some((it) => it.status !== "error" && it.status !== "alt");
     },
     enqueue,
     retry,
+    applyAlt,
     cancel,
     dismiss: remove,
     acceptDownscale,

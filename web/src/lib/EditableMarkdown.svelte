@@ -35,7 +35,6 @@
   import {
     Search,
     CornerDownLeft,
-    Paperclip,
     Bold,
     Italic,
     Heading,
@@ -67,6 +66,7 @@
   import type { AttachmentEntity } from "./api";
   import { createComposerAttachments } from "./attachments/composer.svelte";
   import AttachComposer from "./attachments/AttachComposer.svelte";
+  import AttachTrigger from "./attachments/AttachTrigger.svelte";
   import { onDestroy } from "svelte";
 
   let {
@@ -359,22 +359,29 @@
 
   // ── LIF-262 / LIF-418: attachment uploads ────────────────
   //
-  // One shared composer wiring drives drag, paste, the Attach button, the
-  // pending strip and the big-paste offer. Identical code path to the comment
-  // boxes and the new-issue form; only the layout differs.
+  // One shared composer wiring drives drag, paste, capture, the Attach
+  // trigger, the pending strip, the big-paste offer and the alt-text prompt.
+  // Identical code path to the comment boxes and the new-issue form; only the
+  // layout differs.
 
   const attach = createComposerAttachments({
     el: () => textareaEl,
-    text: () => draft,
-    apply: (text, caret) => {
-      draft = text;
-      requestAnimationFrame(() => {
-        const el = textareaEl;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(caret, caret);
-        autoResize();
-      });
+    text: {
+      read: () => draft,
+      write: (next, caret) => {
+        draft = next;
+        requestAnimationFrame(() => {
+          const el = textareaEl;
+          if (!el) return;
+          // No caret means a background rewrite (the alt-text prompt): resize
+          // for the new text, but leave focus and selection where they are.
+          if (caret != null) {
+            el.focus();
+            el.setSelectionRange(caret, caret);
+          }
+          autoResize();
+        });
+      },
     },
     link: () => attachTo,
   });
@@ -782,17 +789,14 @@
     <button class="em-cancel" onclick={cancelEdit} disabled={saving}>
       Cancel
     </button>
-    <button
-      type="button"
-      class="em-attach"
-      onclick={() => attach.openFilePicker()}
+    <!-- The trigger owns its own inputs: a picker on desktop with a mic beside
+         it, and a Files / Camera / Voice menu on a touch device. -->
+    <AttachTrigger
+      variant="plain"
+      busy={attach.uploads.busy}
       disabled={saving}
-      title="Attach files"
-      aria-label="Attach files"
-    >
-      <Paperclip size={13} />
-      {attach.uploads.busy ? "Uploading…" : "Attach"}
-    </button>
+      onFiles={(files, source) => attach.enqueue(files, source)}
+    />
     <span class="em-hint">Markdown · drag/paste to upload · ⌘S to save</span>
   </div>
 {/snippet}
@@ -971,29 +975,6 @@
     color: var(--text-faint);
   }
 
-  .em-attach {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3125rem;
-    font-size: 0.8125rem;
-    color: var(--text-muted);
-    background: transparent;
-    padding: 0.375rem 0.625rem;
-    border-radius: 0.375rem;
-    border: 0;
-    transition:
-      background 0.15s var(--ease-out-expo),
-      color 0.15s var(--ease-out-expo);
-  }
-  .em-attach:hover:not(:disabled) {
-    background: var(--bg-subtle);
-    color: var(--accent);
-  }
-  .em-attach:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .em-footer {
     display: flex;
     align-items: center;
@@ -1042,7 +1023,6 @@
     .em-empty-cta,
     .em-save,
     .em-cancel,
-    .em-attach,
     .em-tool {
       transition-duration: 0.001s;
     }

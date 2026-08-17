@@ -7,25 +7,32 @@
 // handler, file input and controller, which is exactly how IssueNew ended up
 // with no attachment support at all.
 //
-// A composer hands over three accessors to its textarea (the element, its
-// current text, and how to write text plus caret back) and gets the whole
-// behaviour set: drag, paste, the Attach button, the pending strip, and the
-// big-paste offer. Layout stays with the caller, matching the layout-prop
-// composition the rest of the codebase uses; `AttachComposer.svelte` renders
-// the shared chrome around whatever markup the caller passes.
+// A composer hands over two accessors to its textarea (the element, and a
+// read/write pair for its draft) and gets the whole behaviour set: drag,
+// paste, capture, the Attach button, the pending strip, the big-paste offer
+// and the alt-text prompt. Layout stays with the caller, matching the
+// layout-prop composition the rest of the codebase uses; `AttachComposer.svelte`
+// renders the shared chrome around whatever markup the caller passes.
 
 import type { AttachmentEntity } from "../api";
-import { createUploadController, type UploadController } from "./uploads.svelte";
+import {
+  createUploadController,
+  type ComposerText,
+  type UploadController,
+  type UploadSource,
+} from "./uploads.svelte";
 import { filesFromClipboard, insertSnippetAt } from "./compose";
 import { describePaste, isBigPaste, pasteFileFrom } from "./bigPaste";
+
+export type { ComposerText, UploadSource };
 
 export interface ComposerAttachmentsOptions {
   /** The live textarea, or null before mount / while the editor is closed. */
   el: () => HTMLTextAreaElement | null;
-  /** The composer's current text. */
-  text: () => string;
-  /** Write new text back, and where the caret should land. */
-  apply: (text: string, caret: number) => void;
+  /** Read and write the composer's draft. The same object is handed to the
+   *  upload controller, so the alt-text prompt rewrites the very reference
+   *  this module inserted. */
+  text: ComposerText;
   /** Entity to link finished uploads to, when it already exists. */
   link?: () => { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
 }
@@ -41,7 +48,10 @@ export interface ComposerAttachments {
   readonly uploads: UploadController;
   /** Non-null while a big paste is waiting on Enter (attach) or Esc (inline). */
   readonly pendingPaste: PendingPaste | null;
-  enqueue: (files: File[]) => void;
+  /** Queue files for upload. `source` decides whether the annotate prompt is
+   *  offered first, so drops, pastes and camera shots all say where they came
+   *  from. */
+  enqueue: (files: File[], source?: UploadSource) => void;
   /** `onpaste` handler. Consumes file pastes and big text pastes. */
   handlePaste: (e: ClipboardEvent) => void;
   /** `onkeydown` handler. Returns true when it consumed the key, so the host
@@ -71,39 +81,40 @@ export function createComposerAttachments(
    *  spacing). Used by the inline branch of the big-paste offer. */
   function spliceAtCaret(insert: string) {
     const el = opts.el();
-    const current = opts.text();
+    const current = opts.text.read();
     const start = el?.selectionStart ?? current.length;
     const end = el?.selectionEnd ?? start;
     const next = current.slice(0, start) + insert + current.slice(end);
-    opts.apply(next, start + insert.length);
+    opts.text.write(next, start + insert.length);
   }
 
   function insertMarkdown(snippet: string) {
     const el = opts.el();
-    const current = opts.text();
+    const current = opts.text.read();
     const { text, caret } = insertSnippetAt(
       current,
       el?.selectionStart ?? current.length,
       el?.selectionEnd ?? current.length,
       snippet,
     );
-    opts.apply(text, caret);
+    opts.text.write(text, caret);
   }
 
   const uploads = createUploadController({
     link: opts.link,
     onInsert: insertMarkdown,
+    text: opts.text,
   });
 
-  function enqueue(files: File[]) {
-    if (files.length > 0) uploads.enqueue(files);
+  function enqueue(files: File[], source: UploadSource = "picker") {
+    if (files.length > 0) uploads.enqueue(files, source);
   }
 
   function handlePaste(e: ClipboardEvent) {
     const files = filesFromClipboard(e);
     if (files.length > 0) {
       e.preventDefault();
-      uploads.enqueue(files);
+      uploads.enqueue(files, "paste");
       return;
     }
     const text = e.clipboardData?.getData("text/plain") ?? "";
@@ -119,7 +130,9 @@ export function createComposerAttachments(
     const held = pendingPaste;
     if (!held) return;
     pendingPaste = null;
-    uploads.enqueue([pasteFileFrom(held.text)]);
+    // Plain text, so the annotate prompt passes it straight through; the
+    // source is still honest about where the bytes came from.
+    uploads.enqueue([pasteFileFrom(held.text)], "paste");
     opts.el()?.focus();
   }
 
@@ -159,7 +172,7 @@ export function createComposerAttachments(
   function handleFilePicked(e: Event) {
     const input = e.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      uploads.enqueue(Array.from(input.files));
+      uploads.enqueue(Array.from(input.files), "picker");
       input.value = "";
     }
   }

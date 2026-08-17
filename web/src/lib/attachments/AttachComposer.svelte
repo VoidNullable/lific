@@ -42,7 +42,7 @@
   });
 </script>
 
-<DropOverlay {radius} label={dropLabel} onFiles={(files) => composer.enqueue(files)}>
+<DropOverlay {radius} label={dropLabel} onFiles={(files) => composer.enqueue(files, "drop")}>
   {@render children()}
 
   <PendingUploads controller={composer.uploads} />

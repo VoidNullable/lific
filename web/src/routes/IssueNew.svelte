@@ -9,12 +9,13 @@
     type Module,
     type Label,
   } from "../lib/api";
-  import { ArrowLeft, Paperclip } from "lucide-svelte";
+  import { ArrowLeft } from "lucide-svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon from "../lib/StatusIcon.svelte";
   import ErrorState from "../lib/ErrorState.svelte";
   import AttachComposer from "../lib/attachments/AttachComposer.svelte";
+  import AttachTrigger from "../lib/attachments/AttachTrigger.svelte";
   import { createComposerAttachments } from "../lib/attachments/composer.svelte";
   import { getContext, onDestroy } from "svelte";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
@@ -86,16 +87,22 @@
   // after 24h. Navigating away aborts whatever is still in flight.
   const attach = createComposerAttachments({
     el: () => descriptionEl,
-    text: () => description,
-    apply: (text, caret) => {
-      description = text;
-      requestAnimationFrame(() => {
-        const el = descriptionEl;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(caret, caret);
-        autoResize();
-      });
+    text: {
+      read: () => description,
+      write: (next, caret) => {
+        description = next;
+        requestAnimationFrame(() => {
+          const el = descriptionEl;
+          if (!el) return;
+          // No caret means a background rewrite (the alt-text prompt): resize
+          // for the new text, but leave focus and selection where they are.
+          if (caret != null) {
+            el.focus();
+            el.setSelectionRange(caret, caret);
+          }
+          autoResize();
+        });
+      },
     },
   });
   onDestroy(() => attach.destroy());
@@ -532,19 +539,12 @@
 
 {#snippet descriptionFooter()}
   <div class="flex items-center gap-2 mt-3 pt-3 border-t border-[var(--border)]">
-    <button
-      type="button"
-      class="inline-flex items-center gap-1.5 text-caption text-[var(--text-muted)]
-             px-2 py-1 rounded-md border border-[var(--border)]
-             hover:border-[var(--accent)] hover:text-[var(--accent)]
-             transition-colors"
-      title="Attach files"
-      aria-label="Attach files"
-      onclick={() => attach.openFilePicker()}
-    >
-      <Paperclip size={13} />
-      {attach.uploads.busy ? "Uploading…" : "Attach"}
-    </button>
+    <!-- The trigger owns its own inputs: a picker on desktop with a mic beside
+         it, and a Files / Camera / Voice menu on a touch device. -->
+    <AttachTrigger
+      busy={attach.uploads.busy}
+      onFiles={(files, source) => attach.enqueue(files, source)}
+    />
     <span class="text-caption text-[var(--text-faint)]">
       Markdown · drag, paste or attach files
     </span>

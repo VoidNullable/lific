@@ -21,7 +21,7 @@
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
   import { MENTION_RE } from "./mentions";
-  import { MessageSquare, CornerDownLeft, Paperclip, MoreHorizontal } from "lucide-svelte";
+  import { MessageSquare, CornerDownLeft, MoreHorizontal } from "lucide-svelte";
   import { fly } from "svelte/transition";
   import { tick, onDestroy, onMount } from "svelte";
   import {
@@ -31,6 +31,7 @@
   } from "./commentLinks";
   import { createComposerAttachments } from "./attachments/composer.svelte";
   import AttachComposer from "./attachments/AttachComposer.svelte";
+  import AttachTrigger from "./attachments/AttachTrigger.svelte";
   import {
     canManageComment,
     commentKeyboardAction,
@@ -264,6 +265,9 @@
     submitting = false;
     if (created) {
       draft = "";
+      // The draft the alt-text chips point into is gone, so the offer goes
+      // with it rather than lingering over an empty composer.
+      attach.destroy();
       requestAnimationFrame(resize);
     }
   }
@@ -311,21 +315,28 @@
   // ── LIF-262 / LIF-418: attachment uploads ────────────────
   //
   // Both composers (new comment, and the in-place editor) run the same shared
-  // wiring as the description editor and the new-issue form: drag, paste, the
-  // Attach button, parallel uploads with progress, and the big-paste offer.
+  // wiring as the description editor and the new-issue form: drag, paste,
+  // capture, parallel uploads with progress, the big-paste offer and the
+  // alt-text prompt.
 
   const attach = createComposerAttachments({
     el: () => textareaEl,
-    text: () => draft,
-    apply: (text, caret) => {
-      draft = text;
-      requestAnimationFrame(() => {
-        const el = textareaEl;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(caret, caret);
-        resize();
-      });
+    text: {
+      read: () => draft,
+      write: (next, caret) => {
+        draft = next;
+        requestAnimationFrame(() => {
+          const el = textareaEl;
+          if (!el) return;
+          // No caret means a background rewrite (the alt-text prompt): resize
+          // for the new text, but leave focus and selection where they are.
+          if (caret != null) {
+            el.focus();
+            el.setSelectionRange(caret, caret);
+          }
+          resize();
+        });
+      },
     },
     link: () => attachTo,
   });
@@ -339,16 +350,20 @@
 
   const editAttach = createComposerAttachments({
     el: () => editTextareaEl,
-    text: () => editDraft,
-    apply: (text, caret) => {
-      editDraft = text;
-      requestAnimationFrame(() => {
-        const el = editTextareaEl;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(caret, caret);
-        resize();
-      });
+    text: {
+      read: () => editDraft,
+      write: (next, caret) => {
+        editDraft = next;
+        requestAnimationFrame(() => {
+          const el = editTextareaEl;
+          if (!el) return;
+          if (caret != null) {
+            el.focus();
+            el.setSelectionRange(caret, caret);
+          }
+          resize();
+        });
+      },
     },
     // Link only after a successful PUT re-scans the saved Markdown. This
     // keeps Cancel and editor switches free of attachment side effects.
@@ -580,16 +595,12 @@
 {#snippet newFooter()}
   <div class="cmt__toolbar">
     <div class="cmt__toolbar-left">
-      <button
-        type="button"
-        class="cmt__attach"
-        title="Attach files"
-        aria-label="Attach files"
-        onclick={() => attach.openFilePicker()}
-      >
-        <Paperclip size={13} />
-        <span>{attach.uploads.busy ? "Uploading\u2026" : "Attach"}</span>
-      </button>
+      <!-- The trigger owns its own inputs: a picker on desktop with a mic
+           beside it, and a Files / Camera / Voice menu on a touch device. -->
+      <AttachTrigger
+        busy={attach.uploads.busy}
+        onFiles={(files, source) => attach.enqueue(files, source)}
+      />
       <span class="cmt__hint">Markdown \u00b7 drag, paste or attach files</span>
     </div>
     <div class="cmt__actions">
@@ -607,14 +618,10 @@
 {#snippet editFooter()}
   <div class="cmt__toolbar">
     <div class="cmt__toolbar-left">
-      <button
-        type="button"
-        class="cmt__attach"
-        onclick={() => editAttach.openFilePicker()}
-      >
-        <Paperclip size={13} />
-        <span>{editAttach.uploads.busy ? "Uploading\u2026" : "Attach"}</span>
-      </button>
+      <AttachTrigger
+        busy={editAttach.uploads.busy}
+        onFiles={(files, source) => editAttach.enqueue(files, source)}
+      />
       <span class="cmt__hint">Markdown · drag, paste or attach files</span>
     </div>
     <div class="cmt__actions">
@@ -853,30 +860,6 @@
     gap: 0.625rem;
     min-width: 0;
   }
-  .cmt__attach {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3125rem;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 0.375rem;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
-    transition:
-      border-color 0.15s var(--ease-out-expo),
-      color 0.15s var(--ease-out-expo);
-  }
-  .cmt__attach:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .cmt__attach:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
   .cmt__input {
     display: block;
     width: 100%;

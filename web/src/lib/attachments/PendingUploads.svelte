@@ -9,15 +9,19 @@
   // removes the item and inserts the markdown reference at the caret, so a
   // resolved chip simply disappears.
   //
-  // A fourth state, `offer`, is the LIF-418 resize question: an image that is
-  // enormous or close to the instance's byte cap pauses here and asks before
-  // spending the bandwidth. Answering it once settles it for the session.
+  // Two states bracket the transfer. `offer` is the resize question: an image
+  // that is enormous or close to the instance's byte cap pauses here and asks
+  // before spending the bandwidth. Answering it once settles it for the
+  // session. `alt` is the opposite end - a settled, successful image upload
+  // whose chip lingers only to offer a one-line description, in the same slot
+  // so nothing jumps.
   //
   // Purely presentational: all state and actions come from the shared
   // UploadController the parent composer owns.
 
   import { formatBytes } from "../api";
   import { FileText, RotateCw, X, AlertCircle, Scaling } from "lucide-svelte";
+  import AltTextInput from "./AltTextInput.svelte";
   import type { PendingUpload, UploadController } from "./uploads.svelte";
 
   let { controller }: { controller: UploadController } = $props();
@@ -50,6 +54,7 @@
         class="pu__chip"
         class:pu__chip--error={item.status === "error"}
         class:pu__chip--offer={item.status === "offer"}
+        class:pu__chip--alt={item.status === "alt"}
       >
         <div class="pu__row">
           <span class="pu__lead">
@@ -64,60 +69,69 @@
               <span class="pu__badge pu__badge--offer" aria-hidden="true">
                 <Scaling size={12} />
               </span>
-            {:else}
+            {:else if item.status !== "alt"}
               <span class="pu__spinner" aria-label="Uploading"></span>
             {/if}
           </span>
 
-          <span class="pu__body">
-            <span class="pu__name" title={item.filename}>{item.filename}</span>
-            {#if item.status === "error"}
-              <span class="pu__err" title={item.error ?? "Upload failed"}>
-                {item.error ?? "Upload failed"}
-              </span>
-            {:else if item.status === "offer"}
-              <span class="pu__size">{offerReason(item)}</span>
-            {:else if item.status === "queued"}
-              <span class="pu__size">Queued · {formatBytes(item.size)}</span>
-            {:else}
-              <span class="pu__size">
-                {formatBytes(item.loaded)} of {formatBytes(item.total)}
-              </span>
-            {/if}
-          </span>
+          <!-- A settled image swaps its metadata line for the alt-text offer.
+               Same chip, same position, so nothing jumps. -->
+          {#if item.status === "alt"}
+            <AltTextInput
+              onApply={(alt) => controller.applyAlt(item.id, alt)}
+              onSkip={() => controller.dismiss(item.id)}
+            />
+          {:else}
+            <span class="pu__body">
+              <span class="pu__name" title={item.filename}>{item.filename}</span>
+              {#if item.status === "error"}
+                <span class="pu__err" title={item.error ?? "Upload failed"}>
+                  {item.error ?? "Upload failed"}
+                </span>
+              {:else if item.status === "offer"}
+                <span class="pu__size">{offerReason(item)}</span>
+              {:else if item.status === "queued"}
+                <span class="pu__size">Queued · {formatBytes(item.size)}</span>
+              {:else}
+                <span class="pu__size">
+                  {formatBytes(item.loaded)} of {formatBytes(item.total)}
+                </span>
+              {/if}
+            </span>
 
-          <span class="pu__actions">
-            {#if item.status === "error"}
-              <button
-                type="button"
-                class="pu__act"
-                title="Retry upload"
-                aria-label="Retry upload"
-                onclick={() => controller.retry(item.id)}
-              >
-                <RotateCw size={13} />
-              </button>
-              <button
-                type="button"
-                class="pu__act"
-                title="Dismiss"
-                aria-label="Dismiss"
-                onclick={() => controller.dismiss(item.id)}
-              >
-                <X size={13} />
-              </button>
-            {:else if item.status !== "offer"}
-              <button
-                type="button"
-                class="pu__act"
-                title="Cancel upload"
-                aria-label={`Cancel upload of ${item.filename}`}
-                onclick={() => controller.cancel(item.id)}
-              >
-                <X size={13} />
-              </button>
-            {/if}
-          </span>
+            <span class="pu__actions">
+              {#if item.status === "error"}
+                <button
+                  type="button"
+                  class="pu__act"
+                  title="Retry upload"
+                  aria-label="Retry upload"
+                  onclick={() => controller.retry(item.id)}
+                >
+                  <RotateCw size={13} />
+                </button>
+                <button
+                  type="button"
+                  class="pu__act"
+                  title="Dismiss"
+                  aria-label="Dismiss"
+                  onclick={() => controller.dismiss(item.id)}
+                >
+                  <X size={13} />
+                </button>
+              {:else if item.status !== "offer"}
+                <button
+                  type="button"
+                  class="pu__act"
+                  title="Cancel upload"
+                  aria-label={`Cancel upload of ${item.filename}`}
+                  onclick={() => controller.cancel(item.id)}
+                >
+                  <X size={13} />
+                </button>
+              {/if}
+            </span>
+          {/if}
         </div>
 
         {#if item.status === "queued" || item.status === "uploading"}
@@ -200,6 +214,12 @@
   .pu__chip--offer {
     max-width: 22rem;
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  /* The alt-text chip is wider than a status chip because it holds an input,
+     and it is the only chip that should look inviting rather than transient. */
+  .pu__chip--alt {
+    max-width: 22rem;
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   }
 
   .pu__row {
