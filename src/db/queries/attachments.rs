@@ -6,7 +6,9 @@
 //! project-role gate. Bytes are content-addressed on disk; a row here just
 //! records the metadata and the `sha256` that points at the blob.
 
-use rusqlite::{Connection, OptionalExtension, named_params, params};
+use std::collections::HashSet;
+
+use rusqlite::{Connection, OptionalExtension, named_params, params, types::Value};
 
 use crate::db::models::{
     Attachment, AttachmentEntity, CommentActor, LinkedEntity, PendingOrphan, ProjectAttachment,
@@ -788,6 +790,65 @@ pub struct AttachmentLinkTarget {
     pub page_id: Option<i64>,
 }
 
+/// The project an `attachment_links` row resolves to, in terms of the alias
+/// set both [`primary_link`] and [`visible_link_scope_sql`] join with. Shared
+/// so the "does a visible link exist" test and the "which link do we render"
+/// choice can never disagree about what a link's project is.
+pub const LINK_PROJECT: &str =
+    "COALESCE(i.project_id, pg.project_id, ci.project_id, cpg.project_id)";
+
+/// The joins that resolve an `attachment_links` row (`l`) to its entity, and
+/// through that to `LINK_PROJECT`.
+const LINK_ENTITY_JOINS: &str =
+    "LEFT JOIN issues   i   ON l.entity_type = 'issue'   AND i.id   = l.entity_id
+         LEFT JOIN pages    pg  ON l.entity_type = 'page'    AND pg.id  = l.entity_id
+         LEFT JOIN comments c   ON l.entity_type = 'comment' AND c.id   = l.entity_id
+         LEFT JOIN issues   ci  ON ci.id  = c.issue_id
+         LEFT JOIN pages    cpg ON cpg.id = c.page_id";
+
+/// The scope test for one link row: inside `project_id` when the caller
+/// narrowed to a project, and inside `visible` when the caller is restricted.
+fn link_scope_predicate(
+    project_id: Option<i64>,
+    visible: Option<&HashSet<i64>>,
+) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut params = Vec::new();
+    if let Some(project_id) = project_id {
+        clauses.push(format!("{LINK_PROJECT} = ?"));
+        params.push(Value::Integer(project_id));
+    }
+    let (visibility, ids) = super::project_visibility_sql(LINK_PROJECT, visible);
+    clauses.push(visibility);
+    params.extend(ids.into_iter().map(Value::Integer));
+    (clauses.join(" AND "), params)
+}
+
+/// `EXISTS (…)` SQL asserting that the attachment identified by
+/// `attachment_column` in the enclosing query has at least one link the caller
+/// is allowed to see, plus the values to bind.
+///
+/// Search splices this into its `WHERE` clause so scope and visibility are
+/// settled before `LIMIT`. An attachment with no qualifying link is not a hit
+/// at all, which also keeps never-linked uploads out of results.
+pub fn visible_link_scope_sql(
+    attachment_column: &str,
+    project_id: Option<i64>,
+    visible: Option<&HashSet<i64>>,
+) -> (String, Vec<Value>) {
+    let (predicate, params) = link_scope_predicate(project_id, visible);
+    let sql = format!(
+        "EXISTS (
+             SELECT 1
+             FROM attachment_links l
+             {LINK_ENTITY_JOINS}
+             WHERE l.attachment_id = {attachment_column}
+               AND {predicate}
+         )"
+    );
+    (sql, params)
+}
+
 /// The single entity a search hit should point at, preferring a link inside
 /// `prefer_project` when the attachment is used in several places. `None` for
 /// an attachment with no links at all — those never surface in search, since
@@ -797,8 +858,44 @@ pub fn primary_link(
     attachment_id: i64,
     prefer_project: Option<i64>,
 ) -> Result<Option<AttachmentLinkTarget>, LificError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT COALESCE(i.project_id, pg.project_id, ci.project_id, cpg.project_id) AS project_id,
+    select_link(conn, attachment_id, prefer_project, "1=1", Vec::new())
+}
+
+/// [`primary_link`] restricted to links the caller may see.
+///
+/// The difference matters for a file shared between a visible and a hidden
+/// project: preferring a visible link is not enough, because the fallback
+/// would render the hidden project's identifier and leak both the entity's
+/// existence and its title. Here `project_id` and `visible` are hard filters
+/// on the candidate set, so an out-of-scope link can never be chosen — it can
+/// only make the hit disappear, which is what the same filters already did in
+/// SQL when the row was selected.
+pub fn visible_primary_link(
+    conn: &Connection,
+    attachment_id: i64,
+    project_id: Option<i64>,
+    visible: Option<&HashSet<i64>>,
+) -> Result<Option<AttachmentLinkTarget>, LificError> {
+    if visible.is_none() {
+        // Nothing is hidden from this caller, so there is nothing to filter
+        // out: the plain preference resolution already lands on a
+        // `project_id` link when one exists, and the row would not have been
+        // selected unless one did.
+        return primary_link(conn, attachment_id, project_id);
+    }
+    let (predicate, params) = link_scope_predicate(project_id, visible);
+    select_link(conn, attachment_id, project_id, &predicate, params)
+}
+
+fn select_link(
+    conn: &Connection,
+    attachment_id: i64,
+    prefer_project: Option<i64>,
+    predicate: &str,
+    predicate_params: Vec<Value>,
+) -> Result<Option<AttachmentLinkTarget>, LificError> {
+    let sql = format!(
+        "SELECT {LINK_PROJECT} AS project_id,
                 l.entity_type,
                 pi.identifier,  i.sequence,
                 pp.identifier,  pg.sequence,  pg.id,
@@ -815,17 +912,22 @@ pub fn primary_link(
          LEFT JOIN projects cip ON cip.id = ci.project_id
          LEFT JOIN pages    cpg ON cpg.id = c.page_id
          LEFT JOIN projects cpp ON cpp.id = cpg.project_id
-         WHERE l.attachment_id = ?1
+         WHERE l.attachment_id = ?
+           AND {predicate}
          ORDER BY
-             CASE
-                 WHEN COALESCE(i.project_id, pg.project_id, ci.project_id, cpg.project_id) = ?2
-                 THEN 0 ELSE 1
-             END,
+             CASE WHEN {LINK_PROJECT} = ? THEN 0 ELSE 1 END,
              l.entity_type, l.entity_id
-         LIMIT 1",
-    )?;
+         LIMIT 1"
+    );
+    // Every placeholder is positional and bound in SQL text order: the
+    // attachment, then the scope predicate's ids, then the preferred project.
+    let mut values = vec![Value::Integer(attachment_id)];
+    values.extend(predicate_params);
+    values.push(prefer_project.map_or(Value::Null, Value::Integer));
+
+    let mut stmt = conn.prepare_cached(&sql)?;
     let target = stmt
-        .query_row(params![attachment_id, prefer_project], |row| {
+        .query_row(rusqlite::params_from_iter(values), |row| {
             let project_id: Option<i64> = row.get(0)?;
             let entity_type: String = row.get(1)?;
             let issue_project: Option<String> = row.get(2)?;
