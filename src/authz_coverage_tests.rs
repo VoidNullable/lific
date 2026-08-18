@@ -184,7 +184,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (
             ("GET", "/api/users"),
             Exempt(
-                "global user directory for UI dropdowns; auth-required only, via the outer auth_middleware_wrapper",
+                "global user directory for UI dropdowns; auth-required only, via the outer auth_middleware_wrapper plus a handler-level require_user backstop (PR #29 report)",
             ),
         ),
         // LIF-214: the instance-admin axis. Orthogonal to project roles:

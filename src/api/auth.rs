@@ -849,7 +849,15 @@ impl From<User> for UserListItem {
 
 pub(super) async fn list_users(
     State(db): State<DbPool>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<UserListItem>>, LificError> {
+    // Defense in depth (PR #29 report): the auth middleware already rejects
+    // unauthenticated requests to this route, but the roster is the kind of
+    // endpoint a future routing change could accidentally expose, so the
+    // handler refuses to serve without a resolved user of its own accord.
+    // Any authenticated member may read it (project leads need the roster
+    // for the member picker); mutations stay admin-gated below.
+    require_user(&identity)?;
     with_read(&db, |conn| {
         let users = crate::db::queries::users::list_users(conn)?;
         Ok(users
@@ -1042,6 +1050,19 @@ mod tests {
             required: false,
             secure_cookies: false,
         }))
+    }
+
+    /// PR #29 report: the roster route is already auth-gated by the outer
+    /// middleware, but the handler now refuses on its own too, so a future
+    /// routing change cannot silently expose every username on the instance.
+    /// This exercises the handler directly with a resolved identity of None.
+    #[tokio::test]
+    async fn user_roster_handler_refuses_without_an_identity() {
+        let app = zero_user_app(crate::db::open_memory().expect("test db")).layer(
+            axum::Extension(None::<crate::resolve_caller::ResolvedIdentity>),
+        );
+        let resp = json_get(&app, "/api/users").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// LIF-364: the first signup on a zero-user instance bootstraps as
