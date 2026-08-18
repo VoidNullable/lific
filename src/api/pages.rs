@@ -27,6 +27,17 @@ fn require_page_role(
     }
 }
 
+/// [`require_page_role`] against a caller-supplied connection, for gates that
+/// must be decided inside the transaction that writes.
+fn require_page_role_conn(
+    conn: &rusqlite::Connection,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    project_id: Option<i64>,
+    min: Role,
+) -> Result<(), LificError> {
+    authz::require_project_or_workspace_role_conn(conn, identity, project_id, min)
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct PageQuery {
     project_id: Option<i64>,
@@ -121,8 +132,13 @@ pub(super) async fn create_page(
 ) -> Result<Json<Page>, LificError> {
     require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let page = with_write(&db, |conn| {
+    let page = db.transaction(|conn| {
         let page = crate::db::queries::create_page(conn, &input)?;
+        // The gate above ran on a read connection before this write began.
+        // Re-run it on the connection that writes the links, in one immediate
+        // transaction, so the authorization deciding which references may be
+        // linked cannot go stale between the check and the insert.
+        require_page_role_conn(conn, &identity, page.project_id, Role::Maintainer)?;
         // LIF-262: link any attachments the content references.
         super::attachments::sync_links_scoped(
             conn,
@@ -150,8 +166,11 @@ pub(super) async fn update_page(
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
     require_page_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let page = with_write(&db, |conn| {
+    let page = db.transaction(|conn| {
         let page = crate::db::queries::update_page(conn, id, &input)?;
+        // Same recheck as the create path, against the page's project as it
+        // stands inside this transaction rather than as it read a moment ago.
+        require_page_role_conn(conn, &identity, page.project_id, Role::Maintainer)?;
         // LIF-262: re-scan the (possibly edited) content and reconcile links.
         super::attachments::sync_links_scoped(
             conn,

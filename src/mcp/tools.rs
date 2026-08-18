@@ -1260,6 +1260,28 @@ fn resolve_comment_actor_conn(
     })
 }
 
+/// Resolve the calling actor and re-assert `min` on the entity's project
+/// against the connection that is about to write, inside the caller's
+/// transaction. The authorization that decides which newly-referenced
+/// attachments may be linked is then read on the same connection that writes
+/// the link rows, so a revocation or an entity move cannot land between the
+/// two. REST's `require_role_conn` recheck in `api::issues` / `api::pages` is
+/// the same shape.
+fn sync_link_actor_conn(
+    conn: &rusqlite::Connection,
+    project_id: Option<i64>,
+    min: models::Role,
+) -> Result<(i64, bool), crate::error::LificError> {
+    let actor = resolve_comment_actor_conn(conn)?;
+    crate::authz::require_project_or_workspace_role_conn(
+        conn,
+        &Some(actor.clone()),
+        project_id,
+        min,
+    )?;
+    Ok((actor.user.id, actor.user.is_admin))
+}
+
 fn visible_project_ids_mcp(
     db: &Arc<DbPool>,
 ) -> Result<Option<std::collections::HashSet<i64>>, String> {
@@ -1305,11 +1327,6 @@ impl LificMcp {
     ) -> Result<(), String> {
         let project_id = self.read(|conn| parent.project_id(conn))?;
         require_page_role_mcp(&self.db, project_id, minimum_role)
-    }
-
-    fn resolve_mcp_actor(&self) -> Result<(i64, bool), String> {
-        self.read(resolve_comment_actor_conn)
-            .map(|identity| (identity.user.id, identity.user.is_admin))
     }
 
     /// LIF-198: if `step_id` has a linked issue, require `min` role on that
@@ -1912,9 +1929,8 @@ impl LificMcp {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
             None => None,
         };
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         drop(conn);
-        let issue = self.write(|conn| {
+        let issue = self.transaction(|conn| {
             let issue = queries::create_issue(
                 conn,
                 &models::CreateIssue {
@@ -1936,6 +1952,8 @@ impl LificMcp {
             )?;
             // LIF-369: link attachments the description references, same as
             // the REST create path.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Issue,
@@ -1977,8 +1995,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
-        let (issue, cascade_action, cascaded_steps) = self.write(|conn| {
+        let (issue, cascade_action, cascaded_steps) = self.transaction(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
             // Keep an audit checkpoint before the direct issue update so the
@@ -2023,6 +2040,8 @@ impl LificMcp {
             )?;
             // LIF-369: re-scan the (possibly edited) description and
             // reconcile links, same as the REST update path.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Issue,
@@ -2168,8 +2187,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
-        let issue = self.write(|conn| {
+        let issue = self.transaction(|conn| {
             let issue = queries::get_issue(conn, id)?;
 
             let field = input.field.as_deref().unwrap_or("description");
@@ -2210,6 +2228,8 @@ impl LificMcp {
 
             let issue = queries::update_issue(conn, id, &patch)?;
             // LIF-369: an edit can add or drop an attachment reference.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Issue,
@@ -2529,14 +2549,13 @@ impl LificMcp {
             None => None,
         };
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
         let folder_id = match (&input.folder, project_id) {
             (Some(name), Some(pid)) => Some(resolve_folder(&conn, pid, name)?),
             (Some(_), None) => return Err("folder requires a project".into()),
             _ => None,
         };
         drop(conn);
-        let page = self.write(|conn| {
+        let page = self.transaction(|conn| {
             let page = queries::create_page(
                 conn,
                 &models::CreatePage {
@@ -2550,6 +2569,8 @@ impl LificMcp {
             )?;
             // LIF-369: link attachments the content references, same as the
             // REST create path.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Page,
@@ -2587,8 +2608,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
-        let page = self.write(|conn| {
+        let page = self.transaction(|conn| {
             // LIF-145 sentinel: field omitted (None) = skip, empty string = clear
             // (move page to root), non-empty = resolve folder + set.
             let folder_id = match &input.folder {
@@ -2619,6 +2639,8 @@ impl LificMcp {
             )?;
             // LIF-369: re-scan the (possibly edited) content and reconcile
             // links, same as the REST update path.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Page,
@@ -2658,8 +2680,7 @@ impl LificMcp {
             Ok((id, project_id))
         })?;
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (actor_id, actor_is_admin) = self.resolve_mcp_actor()?;
-        let page = self.write(|conn| {
+        let page = self.transaction(|conn| {
             let page = queries::get_page(conn, id)?;
 
             let field = input.field.as_deref().unwrap_or("content");
@@ -2699,6 +2720,8 @@ impl LificMcp {
 
             let page = queries::update_page(conn, id, &patch)?;
             // LIF-369: an edit can add or drop an attachment reference.
+            let (actor_id, actor_is_admin) =
+                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
             queries::attachments::sync_links(
                 conn,
                 models::AttachmentEntity::Page,
@@ -4092,14 +4115,10 @@ impl LificMcp {
             (None, Some(comment_id)) => Some((models::AttachmentEntity::Comment, comment_id)),
             (None, None) => None,
         };
+        let identity = super::current_identity(&self.db);
         if let Some((entity, entity_id)) = link {
-            crate::api::attachments::authorize_link(
-                &self.db,
-                &super::current_identity(&self.db),
-                entity,
-                entity_id,
-            )
-            .map_err(sanitize_error)?;
+            crate::api::attachments::authorize_link(&self.db, &identity, entity, entity_id)
+                .map_err(sanitize_error)?;
         }
 
         let size = bytes.len() as i64;
@@ -4116,6 +4135,13 @@ impl LificMcp {
             )?;
             let event = match link {
                 Some((entity, entity_id)) => {
+                    // The gate above ran on a read connection before the blob
+                    // was stored. Re-run it here, on the connection that
+                    // inserts the link and inside this transaction, so the
+                    // decision and the row it authorizes commit together.
+                    crate::api::attachments::authorize_link_conn(
+                        conn, &identity, entity, entity_id,
+                    )?;
                     queries::attachments::link_attachment(conn, attachment.id, entity, entity_id)?;
                     crate::api::attachments::linked_entity_event(conn, entity, entity_id)?
                 }
@@ -6993,6 +7019,13 @@ mod tests {
     #[test]
     fn create_issue_links_attachments_referenced_in_description() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATI");
         let att = seed_attachment(&m, "shot.png");
 
@@ -7011,6 +7044,13 @@ mod tests {
     #[test]
     fn update_issue_reconciles_attachment_links() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATU");
         let old = seed_attachment(&m, "old.png");
         let new = seed_attachment(&m, "new.png");
@@ -7038,6 +7078,13 @@ mod tests {
     #[test]
     fn edit_issue_links_attachments_added_by_the_edit() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATE");
         let att = seed_attachment(&m, "edit.png");
 
@@ -7068,6 +7115,13 @@ mod tests {
     #[test]
     fn create_page_links_attachments_referenced_in_content() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATP");
         let att = seed_attachment(&m, "page.png");
 
@@ -7086,6 +7140,13 @@ mod tests {
     #[test]
     fn update_page_reconciles_attachment_links() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATQ");
         let old = seed_attachment(&m, "old-page.png");
         let new = seed_attachment(&m, "new-page.png");
@@ -7113,6 +7174,13 @@ mod tests {
     #[test]
     fn edit_page_links_attachments_added_by_the_edit() {
         let (m, _guard) = mcp();
+        // Pin the caller to the operator (first admin) and serialize against
+        // every other writer of the process-wide MCP_REQUEST_USER: which
+        // attachment references may be linked now depends on who the caller
+        // is, so a stale identity from a concurrent `act_as`/`seed_user` test
+        // silently filters the link this test is asserting. Same reasoning as
+        // `mcp_with_attachments`.
+        let _identity = first_admin_guard();
         seed_project(&m, "Attach", "ATR");
         let att = seed_attachment(&m, "page-edit.png");
 
@@ -10558,6 +10626,43 @@ mod tests {
         assert!(
             listed.contains(&format!("| ATT-1#c{comment_id}")),
             "comment links render against their parent: {listed}"
+        );
+    }
+
+    /// The MCP twin of REST's `upload_link_and_its_authorization_share_one
+    /// _transaction`: the metadata row, the link, and the gate that authorized
+    /// the link are one transaction, so a failing link cannot leave a
+    /// committed attachment behind. The trigger is a deterministic stand-in
+    /// for the race (a revocation landing between the gate and the insert).
+    #[test]
+    fn upload_attachment_link_failure_rolls_back_the_attachment_row() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        seed_project(&m, "Attach", "ATX");
+        seed_issue(&m, "ATX", "Target");
+        {
+            let conn = m.db.write().unwrap();
+            conn.execute_batch(
+                "CREATE TEMP TRIGGER fail_attachment_link BEFORE INSERT ON attachment_links
+                 BEGIN SELECT RAISE(ABORT, 'link insert forced to fail'); END;",
+            )
+            .unwrap();
+        }
+
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "doomed.txt".into(),
+            content_base64: text_base64("nope"),
+            entity: Some("ATX-1".into()),
+            comment_id: None,
+        }));
+        assert!(receipt.starts_with("Error"), "got: {receipt}");
+
+        let conn = m.db.read().unwrap();
+        let attachments: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attachments, 0,
+            "the attachment row must roll back with the link it was gated for"
         );
     }
 

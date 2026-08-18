@@ -58,8 +58,13 @@ pub(super) async fn create_issue(
 ) -> Result<Json<Issue>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let issue = with_write(&db, |conn| {
+    let issue = db.transaction(|conn| {
         let issue = crate::db::queries::create_issue(conn, &input)?;
+        // The gate above ran on a read connection before this write began.
+        // Re-run it here so the role that decides which attachment references
+        // may be linked is read on the connection that writes those links,
+        // inside one immediate transaction: no revocation can slip between.
+        authz::require_role_conn(conn, &identity, issue.project_id, Role::Maintainer)?;
         // LIF-262: link any attachments the description references.
         super::attachments::sync_links_scoped(
             conn,
@@ -88,8 +93,11 @@ pub(super) async fn update_issue(
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
-    let issue = with_write(&db, |conn| {
+    let issue = db.transaction(|conn| {
         let issue = crate::db::queries::update_issue(conn, id, &input)?;
+        // Same recheck as the create path, against the issue's project as it
+        // stands inside this transaction rather than as it read a moment ago.
+        authz::require_role_conn(conn, &identity, issue.project_id, Role::Maintainer)?;
         // LIF-262: re-scan the (possibly edited) description and reconcile links.
         super::attachments::sync_links_scoped(
             conn,

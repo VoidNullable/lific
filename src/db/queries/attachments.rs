@@ -1406,6 +1406,81 @@ mod tests {
         );
     }
 
+    /// A reference set can be part authorized and part not, and the two
+    /// outcomes are decided one attachment at a time. Committed, that is the
+    /// documented filtering: the allowed reference links, the unauthorized one
+    /// is dropped in silence. Aborted, it is all or nothing — the caller must
+    /// never be able to observe the allowed half of a save whose gate went on
+    /// to deny, which is why the filter and the link writes run on the
+    /// connection that owns the transaction rather than one of their own.
+    #[test]
+    fn a_partly_authorized_reference_set_commits_or_rolls_back_whole() {
+        let pool = test_db();
+        let (issue, project_id, editor, mine, theirs) = {
+            let conn = pool.write().unwrap();
+            let owner = seed_user(&conn, "owner");
+            let editor = seed_user(&conn, "editor");
+            let issue = seed_issue(&conn);
+            let project_id = queries::get_issue(&conn, issue).unwrap().project_id;
+            let mine =
+                create_attachment(&conn, "mine", "m.png", "image/png", 1, Some(editor)).unwrap();
+            let theirs =
+                create_attachment(&conn, "theirs", "t.png", "image/png", 1, Some(owner)).unwrap();
+            (issue, project_id, editor, mine.id, theirs.id)
+        };
+
+        // Abort after the set is reconciled, standing in for the in-transaction
+        // gate denying: nothing at all is left behind, not even the half that
+        // was allowed.
+        let denied: Result<(), LificError> = pool.transaction(|conn| {
+            sync_entity_links(
+                conn,
+                AttachmentEntity::Issue,
+                issue,
+                &[mine, theirs],
+                editor,
+                false,
+                Some(project_id),
+            )?;
+            Err(LificError::Forbidden("revoked mid-save".into()))
+        });
+        assert!(matches!(denied, Err(LificError::Forbidden(_))));
+        {
+            let conn = pool.read().unwrap();
+            assert!(
+                list_for_entity(&conn, AttachmentEntity::Issue, issue)
+                    .unwrap()
+                    .is_empty(),
+                "a denied save must not commit the references it had already allowed"
+            );
+        }
+
+        // The same set, committed: filtering semantics are unchanged.
+        pool.transaction(|conn| {
+            sync_entity_links(
+                conn,
+                AttachmentEntity::Issue,
+                issue,
+                &[mine, theirs],
+                editor,
+                false,
+                Some(project_id),
+            )
+        })
+        .unwrap();
+        let conn = pool.read().unwrap();
+        let linked: Vec<i64> = list_for_entity(&conn, AttachmentEntity::Issue, issue)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            linked,
+            vec![mine],
+            "the uploader's own reference links; another user's unlinked upload does not"
+        );
+    }
+
     #[test]
     fn find_orphans_respects_grace_window() {
         let pool = test_db();

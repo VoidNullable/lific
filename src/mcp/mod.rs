@@ -773,12 +773,30 @@ mod tests {
         }
     }
 
+    /// Clears the process-wide MCP identity again on scope exit, panic or not.
+    /// `set_stdio_user` writes a global with no request scope to unwind it, so
+    /// a test that installs an agent and walks away leaves *every* later MCP
+    /// test in the process resolving as that agent instead of the operator.
+    /// That is invisible while the tools only gate on roles (legacy mode lets
+    /// Maintainer through regardless), and very visible once one of them
+    /// decides an attachment link by uploader identity: whichever test the
+    /// runner happened to schedule next fails, and only sometimes.
+    struct StdioUserReset;
+    impl Drop for StdioUserReset {
+        fn drop(&mut self) {
+            set_stdio_user(None);
+        }
+    }
+
     #[test]
     fn stdio_session_with_agent_identity_resolves_as_that_agent() {
         // Serialize against the whole MCP suite: `set_stdio_user` mutates the
         // process-wide MCP_REQUEST_USER global, which concurrent tool tests
         // also read. Holding the shared test guard prevents a cross-test race.
         let _sguard = crate::mcp::tools::acquire_test_guard();
+        // Declared after the serialization guard so it resets the global
+        // *before* the guard lets the next test in (reverse drop order).
+        let _reset = StdioUserReset;
         // A first admin exists as the operator fallback, but the bound session
         // must resolve to the agent, NOT the admin.
         let pool = crate::db::open_memory().expect("test db");
@@ -803,6 +821,7 @@ mod tests {
         // Serialize against the whole MCP suite for the same process-global
         // reason as above (set_stdio_user writes MCP_REQUEST_USER).
         let _sguard = crate::mcp::tools::acquire_test_guard();
+        let _reset = StdioUserReset;
         // No LIFIC_TOKEN / unbound → `set_stdio_user(None)` → the operator
         // (first admin) fallback, the same pre-LIFIC-18 behavior.
         let pool = crate::db::open_memory().expect("test db");

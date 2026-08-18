@@ -144,9 +144,24 @@ pub(super) async fn upload_attachment(
         }
     }
 
+    // A link target is either fully specified or absent. Half of one is a
+    // malformed request, not an unlinked upload: silently dropping the link
+    // would hand the caller a success for something it did not get.
+    let link = match (link_entity, link_entity_id) {
+        (Some(entity), Some(entity_id)) => Some((entity, entity_id)),
+        (None, None) => None,
+        _ => {
+            return Err(LificError::BadRequest(
+                "entity_type and entity_id must be provided together".into(),
+            ));
+        }
+    };
+
     // LIF-405: authorize the requested link target BEFORE any bytes hit the
     // store or any row is written, so a rejected link leaves nothing behind.
-    if let (Some(entity), Some(entity_id)) = (link_entity, link_entity_id) {
+    // This is the cheap pre-flight; the authoritative gate runs again inside
+    // the write transaction below (see `authorize_link_conn`).
+    if let Some((entity, entity_id)) = link {
         authorize_link(&db, &identity, entity, entity_id)?;
     }
 
@@ -163,17 +178,6 @@ pub(super) async fn upload_attachment(
         return Err(LificError::BadRequest(format!(
             "rejected: '{mime}' is not an allowed file type"
         )));
-    }
-
-    // An upload may link immediately only when the caller can mutate the
-    // target entity. Do this before writing the blob/metadata so a denied
-    // cross-project target cannot leave an orphaned upload behind.
-    if let (Some(entity), Some(entity_id)) = (link_entity, link_entity_id) {
-        authorize_link_target(&db, &identity, entity, entity_id)?;
-    } else if link_entity.is_some() || link_entity_id.is_some() {
-        return Err(LificError::BadRequest(
-            "entity_type and entity_id must be provided together".into(),
-        ));
     }
 
     let size = bytes.len() as i64;
@@ -194,7 +198,11 @@ pub(super) async fn upload_attachment(
         cache_thumbnail(&store, &sha, &bytes);
     }
 
-    let (attachment, event) = with_write(&db, |conn| {
+    // One immediate transaction for the metadata row, the link, and the link's
+    // authorization. `with_write` would have let a role revocation or an
+    // entity move land between the gate above and the insert below, and left
+    // the attachment row behind when the link write failed.
+    let (attachment, event) = db.transaction(|conn| {
         let mut att = q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
         if let Some((w, h)) = dimensions {
             q::set_dimensions(conn, att.id, i64::from(w), i64::from(h))?;
@@ -211,12 +219,18 @@ pub(super) async fn upload_attachment(
         {
             q::set_extracted_text(conn, att.id, text)?;
         }
-        // If the caller asked to link immediately, do it here in the same txn.
-        let event = if let (Some(entity), Some(eid)) = (link_entity, link_entity_id) {
-            q::link_attachment(conn, att.id, entity, eid)?;
-            linked_entity_event(conn, entity, eid)?
-        } else {
-            None
+        // If the caller asked to link immediately, do it here in the same txn,
+        // re-authorized on this very connection: the pre-flight gate above ran
+        // on a read connection before the blob was stored, so the decision it
+        // made is stale by the time we get here. Denial rolls the attachment
+        // row back with it.
+        let event = match link {
+            Some((entity, eid)) => {
+                authorize_link_conn(conn, &identity, entity, eid)?;
+                q::link_attachment(conn, att.id, entity, eid)?;
+                linked_entity_event(conn, entity, eid)?
+            }
+            None => None,
         };
         Ok((att, event))
     })?;
@@ -236,38 +250,6 @@ pub(super) async fn upload_attachment(
         has_thumbnail: attachment.has_thumbnail,
     };
     Ok((StatusCode::OK, axum::Json(resp)).into_response())
-}
-
-fn authorize_link_target(
-    db: &DbPool,
-    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
-    entity: AttachmentEntity,
-    entity_id: i64,
-) -> Result<(), LificError> {
-    match entity {
-        AttachmentEntity::Issue => {
-            let project_id = with_read(db, |conn| {
-                Ok(queries::get_issue(conn, entity_id)?.project_id)
-            })?;
-            authz::require_role(db, identity, project_id, Role::Maintainer)
-        }
-        AttachmentEntity::Page => {
-            let project_id = with_read(db, |conn| {
-                queries::get_page(conn, entity_id).map(|p| p.project_id)
-            })?;
-            match project_id {
-                Some(pid) => authz::require_role(db, identity, pid, Role::Maintainer),
-                None => authz::require_workspace_admin(db, identity),
-            }
-        }
-        AttachmentEntity::Comment => {
-            let project_id = resolve_entity_project(db, entity, entity_id)?;
-            match project_id {
-                Some(pid) => authz::require_role(db, identity, pid, Role::Viewer),
-                None => authz::require_workspace_admin(db, identity),
-            }
-        }
-    }
 }
 
 /// Query params for `GET /api/attachments?entity_type=&entity_id=` — lists the
@@ -310,7 +292,20 @@ pub(crate) fn resolve_entity_project(
     entity: AttachmentEntity,
     entity_id: i64,
 ) -> Result<Option<i64>, LificError> {
-    with_read(db, |conn| match entity {
+    with_read(db, |conn| {
+        resolve_entity_project_conn(conn, entity, entity_id)
+    })
+}
+
+/// [`resolve_entity_project`] against a caller-supplied connection, so a gate
+/// can resolve the target's project on the same connection (and inside the
+/// same transaction) that will write the link.
+pub(crate) fn resolve_entity_project_conn(
+    conn: &rusqlite::Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+) -> Result<Option<i64>, LificError> {
+    match entity {
         AttachmentEntity::Issue => queries::get_issue(conn, entity_id).map(|i| Some(i.project_id)),
         AttachmentEntity::Page => queries::get_page(conn, entity_id).map(|p| p.project_id),
         AttachmentEntity::Comment => {
@@ -323,7 +318,7 @@ pub(crate) fn resolve_entity_project(
                 Ok(None)
             }
         }
-    })
+    }
 }
 
 /// `GET /api/projects/{id}/attachments` — the project files manager listing
@@ -1073,21 +1068,36 @@ fn owning_project_ids(
 /// A workspace-level page (no project) falls back to workspace-admin, the
 /// same fallback `list_entity_attachments` uses on the read side. A link to a
 /// nonexistent entity is `NotFound`, via `resolve_entity_project`.
+///
+/// This is the only implementation of the link gate: REST upload, MCP
+/// `upload_attachment`, and the in-transaction recheck all route through it or
+/// through [`authorize_link_conn`], so the three can never drift.
 pub(crate) fn authorize_link(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     entity: AttachmentEntity,
     entity_id: i64,
 ) -> Result<(), LificError> {
-    let project_id = resolve_entity_project(db, entity, entity_id)?;
+    let conn = db.read()?;
+    authorize_link_conn(&conn, identity, entity, entity_id)
+}
+
+/// [`authorize_link`] against a caller-supplied connection. Call sites that
+/// write the link run this inside the same immediate transaction as the
+/// insert, so nothing (a membership revocation, an entity moved to another
+/// project, a source link removed) can land between the decision and the row.
+pub(crate) fn authorize_link_conn(
+    conn: &rusqlite::Connection,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    entity: AttachmentEntity,
+    entity_id: i64,
+) -> Result<(), LificError> {
+    let project_id = resolve_entity_project_conn(conn, entity, entity_id)?;
     let min = match entity {
         AttachmentEntity::Issue | AttachmentEntity::Page => Role::Maintainer,
         AttachmentEntity::Comment => Role::Viewer,
     };
-    match project_id {
-        Some(pid) => authz::require_role(db, identity, pid, min),
-        None => authz::require_workspace_admin(db, identity),
-    }
+    authz::require_project_or_workspace_role_conn(conn, identity, project_id, min)
 }
 
 /// Read gate: Viewer on any owning project, or uploader/admin for an unlinked
@@ -1763,6 +1773,125 @@ mod api_tests {
         let arr = list.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"].as_i64().unwrap(), att_id);
+    }
+
+    /// Make the next `attachment_links` insert fail, wherever it comes from.
+    /// A trigger raising ABORT is the deterministic stand-in for the failure a
+    /// race produces: the authorization decision goes one way, the insert it
+    /// authorized goes another. What we assert is that the two cannot be
+    /// observed to disagree, because they are one transaction.
+    fn break_link_inserts(db: &crate::db::DbPool) {
+        let conn = db.write().unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_attachment_link BEFORE INSERT ON attachment_links
+             BEGIN SELECT RAISE(ABORT, 'link insert forced to fail'); END;",
+        )
+        .unwrap();
+    }
+
+    /// The upload's metadata row and the link it was authorized for are one
+    /// unit. Before this was a transaction, a failing link left the attachment
+    /// row committed behind it — a row the caller was told it never got, and
+    /// which the orphan sweeper then had to clean up.
+    #[tokio::test]
+    async fn upload_link_and_its_authorization_share_one_transaction() {
+        let (db, _admin, lead, _maintainer, _viewer, _non_member, project_id) =
+            setup_membership_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        let issue = parse_json(
+            json_post(
+                &lead_app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": "target" }),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
+
+        break_link_inserts(&db);
+
+        let resp = upload(
+            &lead_app,
+            "doomed.png",
+            "image/png",
+            &png_bytes(),
+            Some(("issue", issue_id)),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "a failed link must fail the upload"
+        );
+
+        let conn = db.read().unwrap();
+        let attachments: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attachments, 0,
+            "the attachment row must roll back with the link it was gated for"
+        );
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachment_links", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(links, 0);
+    }
+
+    /// LIF-262's re-scan on save carries the same guarantee: the text that
+    /// introduces a reference and the link row that reference produces commit
+    /// together. A save whose link write fails must not leave the description
+    /// claiming an attachment the link table never got.
+    #[tokio::test]
+    async fn issue_save_and_its_link_reconciliation_share_one_transaction() {
+        let (db, _admin, lead, _maintainer, _viewer, _non_member, project_id) =
+            setup_membership_test();
+        let lead_app = app_as_user(db.clone(), &lead);
+        let issue = parse_json(
+            json_post(
+                &lead_app,
+                "/api/issues",
+                serde_json::json!({
+                    "project_id": project_id,
+                    "title": "reconciled",
+                    "description": "before",
+                }),
+            )
+            .await,
+        )
+        .await;
+        let issue_id = issue["id"].as_i64().unwrap();
+
+        // The lead uploads it, so introducing the reference is authorized:
+        // the link write is reached, and only then forced to fail.
+        let uploaded = upload(&lead_app, "shot.png", "image/png", &png_bytes(), None).await;
+        let att_id = parse_json(uploaded).await["id"].as_i64().unwrap();
+
+        break_link_inserts(&db);
+
+        let resp = json_put(
+            &lead_app,
+            &format!("/api/issues/{issue_id}"),
+            serde_json::json!({ "description": format!("see /api/attachments/{att_id}") }),
+        )
+        .await;
+        assert_ne!(resp.status(), StatusCode::OK);
+
+        let conn = db.read().unwrap();
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM issues WHERE id = ?1",
+                [issue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            description, "before",
+            "the description must roll back with the link it introduced"
+        );
     }
 
     /// A plain unlinked upload is still open to any authenticated user —
