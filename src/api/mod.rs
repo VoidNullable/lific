@@ -613,8 +613,10 @@ async fn search(
     // shouldn't be able to probe its existence via a 403 vs. empty-results
     // side channel here.
     let visible = crate::authz::visible_project_ids(&db, &identity)?;
-    let results = with_read(&db, |conn| queries::search(conn, &q))?;
-    Ok(Json(filter_visible(results, &visible, |r| r.project_id)))
+    let results = with_read(&db, |conn| {
+        queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
+    })?;
+    Ok(Json(results))
 }
 
 // ── Shared test helpers ──────────────────────────────────────
@@ -1396,6 +1398,53 @@ mod authz_gating_tests {
             parse_json(resp).await.as_array().unwrap().is_empty(),
             "non-member must not see search hits from a project they can't see"
         );
+    }
+
+    #[tokio::test]
+    async fn search_filters_hidden_hits_before_limiting() {
+        let (db, admin, _lead, _maintainer, viewer, _non_member, visible_project_id) =
+            setup_membership_test();
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id: visible_project_id,
+                    title: "oracle visible canary".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let hidden_project = crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "Hidden Search".into(),
+                    identifier: "HID".into(),
+                    lead_user_id: Some(admin.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for number in 0..3 {
+                crate::db::queries::create_issue(
+                    &conn,
+                    &crate::db::models::CreateIssue {
+                        project_id: hidden_project.id,
+                        title: format!("oracle hidden {number}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let app = app_as_user(db, &viewer);
+        let response = json_get(&app, "/api/search?query=oracle&mode=literal&limit=1").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let results = parse_json(response).await;
+        let results = results.as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["identifier"], "MEM-1");
     }
 
     #[tokio::test]

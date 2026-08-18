@@ -121,6 +121,28 @@ pub fn over_fetch(limit: i64) -> i64 {
     }
 }
 
+/// SQL predicate restricting `column` (a project id, or an expression that
+/// resolves to one) to the projects the caller may see, plus the ids to bind.
+///
+/// `None` means the caller is unrestricted; an empty set means they may see
+/// nothing at all, which is a real state (a user who belongs to no project)
+/// and must match no row rather than every row. Callers splice this into the
+/// `WHERE` clause so scoping happens before `ORDER BY`/`LIMIT` — filtering
+/// hits out in transport, after the page was cut, silently shortens pages.
+pub(crate) fn project_visibility_sql(
+    column: &str,
+    visible: Option<&std::collections::HashSet<i64>>,
+) -> (String, Vec<i64>) {
+    match visible {
+        None => ("1=1".into(), Vec::new()),
+        Some(ids) if ids.is_empty() => ("1=0".into(), Vec::new()),
+        Some(ids) => (
+            format!("{column} IN ({})", vec!["?"; ids.len()].join(", ")),
+            ids.iter().copied().collect(),
+        ),
+    }
+}
+
 /// Run a closure inside a SQLite SAVEPOINT so that multi-statement writes are atomic.
 /// On success the savepoint is released; on error it is rolled back.
 pub(crate) fn savepoint<F, T>(

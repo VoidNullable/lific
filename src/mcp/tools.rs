@@ -1365,34 +1365,42 @@ impl LificMcp {
     }
 
     fn search_inner(&self, input: SearchInput) -> Result<String, String> {
-        // Cross-project read (LIF-198 scope item 2): non-visible projects'
-        // hits are silently absent, never a 403 — even when `project` narrows
-        // the search to one project a non-member can't see, mirroring the
-        // REST /api/search handler.
         let visible = visible_project_ids_mcp(&self.db)?;
-        // LIF-411: for a *restricted* caller, resolving `project` first made a
-        // hidden-but-existing project distinguishable from a nonexistent one
-        // ("project 'X' not found" vs. an empty result). Both now produce the
-        // same empty result. An unrestricted caller (admin, or enforcement
-        // off) has nothing hidden from them, so they keep the helpful
-        // resolution error.
         let project_id = match &input.project {
-            Some(p) => match resolve_project(&*self.read_conn()?, p) {
-                Ok(pid) if visible.as_ref().is_none_or(|ids| ids.contains(&pid)) => Some(pid),
-                Ok(_) => return Ok(self.empty_search_result()),
-                Err(_) if visible.is_some() => return Ok(self.empty_search_result()),
-                Err(error) => return Err(error),
-            },
+            Some(p) => {
+                let conn = self.read_conn()?;
+                match queries::resolve_project_identifier(&conn, p) {
+                    Ok(project_id)
+                        if visible.as_ref().is_none_or(|ids| ids.contains(&project_id)) =>
+                    {
+                        Some(project_id)
+                    }
+                    Ok(_) if visible.is_some() => return Ok(self.empty_search_result()),
+                    Err(crate::error::LificError::NotFound(_error)) if visible.is_some() => {
+                        return Ok(self.empty_search_result());
+                    }
+                    Err(crate::error::LificError::NotFound(error)) => {
+                        return Err(error.to_string());
+                    }
+                    Ok(_) => {
+                        return Ok(self.empty_search_result());
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             None => None,
         };
         // The query owns the default (20) and the cap; clamping here too gives
-        // the paging hint below the same numbers the query paged by.
-        let (limit, offset) = queries::page_with(
+        // the paging hint below the same numbers the query paged by — offset
+        // included, or the hint would advertise a page the query refuses to
+        // scan past `MAX_SEARCH_OFFSET`.
+        let (limit, raw_offset) = queries::page_with(
             input.limit,
             input.offset,
             queries::DEFAULT_SEARCH_LIMIT,
             queries::MAX_PAGE_LIMIT,
         );
+        let offset = raw_offset.min(queries::MAX_SEARCH_OFFSET);
         let hits = self.read(|conn| {
             queries::search_page(
                 conn,
@@ -1405,11 +1413,15 @@ impl LificMcp {
                     limit: Some(limit),
                     offset: Some(offset),
                 },
+                visible.as_ref(),
             )
         })?;
         let has_more = hits.has_more;
-        let results = filter_visible(hits.items, &visible, |r| r.project_id);
+        let results = hits.items;
         if results.is_empty() {
+            if let Some(nudge) = self.no_projects_nudge() {
+                return Ok(nudge);
+            }
             return Ok(self.empty_search_result());
         }
         let link_context = current_issue_link_context();
@@ -1472,7 +1484,7 @@ impl LificMcp {
                     )
                 }
             })?;
-            append_pagination_hint(output, has_more, offset + limit)
+            append_pagination_hint(output, has_more, offset.saturating_add(limit))
         }))
     }
 
@@ -6220,6 +6232,32 @@ mod tests {
         assert!(result.contains("1 results"), "got: {result}");
         assert!(result.contains("SRC-1"), "got: {result}");
         assert!(result.contains("**core:sodom**"), "got: {result}");
+    }
+
+    /// The tool clamps `offset` to the same ceiling the query paginates by, so
+    /// its continuation hint counts from a page the query would actually scan
+    /// to, and the hint arithmetic cannot overflow on a runaway offset.
+    #[test]
+    fn mcp_search_clamps_a_runaway_offset() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Test", "SRC");
+        seed_issue(&m, "SRC", "quokka one");
+        seed_issue(&m, "SRC", "quokka two");
+
+        let paged = m.search(Parameters(SearchInput {
+            query: "quokka".into(),
+            limit: Some(1),
+            ..Default::default()
+        }));
+        assert!(paged.contains("call again with offset=1"), "got: {paged}");
+
+        let runaway = m.search(Parameters(SearchInput {
+            query: "quokka".into(),
+            limit: Some(1),
+            offset: Some(i64::MAX),
+            ..Default::default()
+        }));
+        assert_eq!(runaway, "No results found.");
     }
 
     #[test]
@@ -11244,6 +11282,95 @@ mod authz_gating_tests {
             }))
         });
         assert!(one_visible.starts_with("1 projects"), "got: {one_visible}");
+    }
+
+    #[test]
+    fn search_filters_hidden_hits_before_paging_hint() {
+        let (m, admin, _lead, _maintainer, viewer, _non_member, visible_project_id, _guard) =
+            setup_membership_mcp();
+        {
+            let conn = m.db.write().unwrap();
+            queries::create_issue(
+                &conn,
+                &models::CreateIssue {
+                    project_id: visible_project_id,
+                    title: "oracle visible canary".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let hidden_project = queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Hidden Search".into(),
+                    identifier: "HID".into(),
+                    lead_user_id: Some(admin.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for number in 0..3 {
+                queries::create_issue(
+                    &conn,
+                    &models::CreateIssue {
+                        project_id: hidden_project.id,
+                        title: format!("oracle hidden {number}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let result = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                mode: Some("literal".into()),
+                limit: Some(1),
+                ..Default::default()
+            }))
+        });
+
+        assert!(result.contains("MEM-1"), "got: {result}");
+        assert!(!result.contains("HID-"), "got: {result}");
+        assert!(!result.contains("more results available"), "got: {result}");
+    }
+
+    #[test]
+    fn search_hides_unknown_and_inaccessible_projects_identically() {
+        let (m, admin, _lead, _maintainer, viewer, _non_member, _project_id, _guard) =
+            setup_membership_mcp();
+        {
+            let conn = m.db.write().unwrap();
+            queries::create_project(
+                &conn,
+                &models::CreateProject {
+                    name: "Hidden Search".into(),
+                    identifier: "HID".into(),
+                    lead_user_id: Some(admin.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let hidden = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                project: Some("HID".into()),
+                ..Default::default()
+            }))
+        });
+        let unknown = as_user(&viewer, || {
+            m.search(Parameters(SearchInput {
+                query: "oracle".into(),
+                project: Some("MISSING".into()),
+                ..Default::default()
+            }))
+        });
+
+        assert_eq!(hidden, "No results found.");
+        assert_eq!(unknown, hidden);
     }
 
     /// LIF-257: the onboarding nudge fires only on a genuinely empty DB. A
