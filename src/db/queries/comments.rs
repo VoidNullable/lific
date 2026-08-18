@@ -107,8 +107,8 @@ pub fn create_comment(
     user_id: i64,
     content: &str,
 ) -> Result<Comment, LificError> {
-    validate_comment_content(content)?;
     let content = unescape_text(content);
+    validate_comment_content(&content)?;
 
     // Verify the parent exists. We do this explicitly (vs. relying on the FK)
     // so the error message names the missing entity rather than surfacing a
@@ -293,8 +293,8 @@ pub fn list_comments_page(
 
 /// Update a comment's content. Parent-agnostic.
 pub fn update_comment(conn: &Connection, id: i64, content: &str) -> Result<Comment, LificError> {
-    validate_comment_content(content)?;
     let content = unescape_text(content);
+    validate_comment_content(&content)?;
 
     let changed = conn.execute(
         "UPDATE comments SET content = ?1, updated_at = datetime('now') WHERE id = ?2",
@@ -609,6 +609,16 @@ mod tests {
         let comment = create_comment(&conn, CommentParent::Issue(issue_id), user_id, &boundary)
             .expect("the maximum comment body is allowed");
         assert_eq!(comment.content.len(), MAX_COMMENT_BYTES);
+
+        let escaped_boundary = format!("{}\\n", "x".repeat(MAX_COMMENT_BYTES - 1));
+        let normalized = create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            &escaped_boundary,
+        )
+        .expect("the limit applies to normalized content");
+        assert_eq!(normalized.content.len(), MAX_COMMENT_BYTES);
 
         let oversized = format!("{boundary}x");
         assert!(matches!(

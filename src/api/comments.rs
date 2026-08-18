@@ -11,17 +11,6 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_user, with_read};
 
-pub(crate) const MAX_COMMENT_BYTES: usize = 256 * 1024;
-
-pub(crate) fn validate_comment_content(content: &str) -> Result<(), LificError> {
-    if content.len() > MAX_COMMENT_BYTES {
-        return Err(LificError::BadRequest(format!(
-            "comment is too large (max {MAX_COMMENT_BYTES} bytes)"
-        )));
-    }
-    Ok(())
-}
-
 /// Comments are gated at `Viewer` — anyone who can see a project
 /// can read and post comments on its issues/pages (the actual auth-required
 /// check for *who* the comment is attributed to is separate, below).
