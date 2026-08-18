@@ -18,6 +18,18 @@ const ACTIVITY_BASELINE_CACHE_TTL: Duration = Duration::from_secs(60);
 const CLIENT_MESSAGE_WINDOW: Duration = Duration::from_secs(10);
 pub(crate) const MAX_CLIENT_MESSAGES_PER_WINDOW: usize = 64;
 const CLIENT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often the server sends a WebSocket ping. Every conforming client answers
+/// pings automatically at the protocol layer, so this keeps liveness detection
+/// entirely inside the WebSocket spec: a passive client that never sends an
+/// application message still proves it is alive, and only a peer that answers
+/// nothing at all trips `CLIENT_PROGRESS_TIMEOUT`. Four pings fit inside the
+/// timeout, so a single lost pong cannot disconnect a healthy client.
+const SERVER_PING_INTERVAL: Duration = Duration::from_secs(30);
+/// Bound on a single outbound send. `send().await` on a peer that has stopped
+/// reading blocks once the kernel and TLS buffers fill, which would pin the
+/// socket's task and its `SocketPermit` for as long as the peer cares to stall.
+/// On timeout the socket is dropped instead, releasing both.
+const SOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 // Kept short so a revoked session stops receiving events within a minute;
 // each tick is one indexed SQLite lookup per open socket, which is cheap at
 // this instance's scale.
@@ -26,11 +38,29 @@ const SESSION_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 /// but stops one authenticated client from accumulating unbounded server
 /// tasks + broadcast receivers.
 pub(crate) const MAX_SOCKETS_PER_USER: usize = 16;
+/// Instance-wide cap on concurrent event sockets. The per-user cap alone only
+/// bounds a single account, so `accounts * MAX_SOCKETS_PER_USER` sockets can
+/// still exhaust file descriptors and task slots. This bounds the total.
+/// Generous enough that a real instance never reaches it: 1024 sockets is 64
+/// fully saturated users.
+pub(crate) const MAX_SOCKETS_TOTAL: usize = 1024;
+/// The instance cap must leave room for at least one fully saturated user, and
+/// the socket-cap tests fill the instance budget a whole user at a time.
+const _: () = assert!(
+    MAX_SOCKETS_TOTAL >= MAX_SOCKETS_PER_USER
+        && MAX_SOCKETS_TOTAL.is_multiple_of(MAX_SOCKETS_PER_USER)
+);
+
+#[derive(Debug, Default)]
+struct SocketCounts {
+    per_user: HashMap<i64, usize>,
+    total: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct RealtimeHub {
     tx: broadcast::Sender<RealtimeMessage>,
-    connections: Arc<Mutex<HashMap<i64, usize>>>,
+    connections: Arc<Mutex<SocketCounts>>,
 }
 
 impl RealtimeHub {
@@ -38,24 +68,29 @@ impl RealtimeHub {
         Self::with_capacity(EVENT_BUFFER)
     }
 
-    fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self {
             tx,
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(Mutex::new(SocketCounts::default())),
         }
     }
 
     /// Claim a connection slot for `user_id`, or `None` when the user already
-    /// has `MAX_SOCKETS_PER_USER` live sockets. The returned permit releases
-    /// the slot on drop, so a slot can never leak past its socket task.
+    /// has `MAX_SOCKETS_PER_USER` live sockets or the instance already has
+    /// `MAX_SOCKETS_TOTAL`. The returned permit releases the slot on drop, so a
+    /// slot can never leak past its socket task.
     pub(crate) fn try_acquire_socket(&self, user_id: i64) -> Option<SocketPermit> {
         let mut connections = self.connections.lock().expect("connections lock poisoned");
-        let count = connections.entry(user_id).or_insert(0);
+        if connections.total >= MAX_SOCKETS_TOTAL {
+            return None;
+        }
+        let count = connections.per_user.entry(user_id).or_insert(0);
         if *count >= MAX_SOCKETS_PER_USER {
             return None;
         }
         *count += 1;
+        connections.total += 1;
         Some(SocketPermit {
             connections: Arc::clone(&self.connections),
             user_id,
@@ -94,21 +129,23 @@ impl RealtimeHub {
     }
 }
 
-/// RAII guard for one live socket's slot in the per-user connection count.
+/// RAII guard for one live socket's slot in the per-user and instance-wide
+/// connection counts.
 #[must_use = "dropping the permit releases the socket slot"]
 pub(crate) struct SocketPermit {
-    connections: Arc<Mutex<HashMap<i64, usize>>>,
+    connections: Arc<Mutex<SocketCounts>>,
     user_id: i64,
 }
 
 impl Drop for SocketPermit {
     fn drop(&mut self) {
         let mut connections = self.connections.lock().expect("connections lock poisoned");
-        if let Some(count) = connections.get_mut(&self.user_id) {
+        if let Some(count) = connections.per_user.get_mut(&self.user_id) {
             *count -= 1;
             if *count == 0 {
-                connections.remove(&self.user_id);
+                connections.per_user.remove(&self.user_id);
             }
+            connections.total = connections.total.saturating_sub(1);
         }
     }
 }
@@ -190,6 +227,8 @@ pub async fn serve_socket(
         SESSION_REVALIDATE_INTERVAL,
     );
     revalidate.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut ping = time::interval_at(connected_at + SERVER_PING_INTERVAL, SERVER_PING_INTERVAL);
+    ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
     loop {
         let progress_deadline = client.progress_deadline();
@@ -197,6 +236,7 @@ pub async fn serve_socket(
             biased;
             _ = time::sleep_until(progress_deadline) => SocketInput::ProgressDeadline,
             _ = revalidate.tick() => SocketInput::Revalidate,
+            _ = ping.tick() => SocketInput::Ping,
             event = rx.recv() => SocketInput::Event(event),
             message = socket.recv() => SocketInput::Message(message),
         };
@@ -210,8 +250,17 @@ pub async fn serve_socket(
                 }
                 flow
             }
+            SocketInput::Ping => send_bounded(&mut socket, Message::Ping(Vec::new().into())).await,
             SocketInput::Event(event) => {
-                forward_event(&mut socket, &db, &auth_user, &mut visible_projects, event).await
+                forward_event(
+                    &mut socket,
+                    &db,
+                    &auth_user,
+                    &mut visible_projects,
+                    &mut client,
+                    event,
+                )
+                .await
             }
             SocketInput::Message(message) => {
                 handle_client_message(&mut socket, &db, &auth_user, &mut client, message).await
@@ -226,6 +275,7 @@ pub async fn serve_socket(
 
 enum SocketInput {
     Revalidate,
+    Ping,
     Event(Result<RealtimeMessage, RecvError>),
     Message(Option<Result<Message, axum::Error>>),
     ProgressDeadline,
@@ -328,14 +378,17 @@ enum ClientAction {
     Send(Message),
     ActivityBaseline,
     Heartbeat,
-    Ignore,
+    /// A reply to one of the server's own pings. Every conforming WebSocket
+    /// client sends these without any application-level cooperation, which is
+    /// what lets a passive client stay connected past `CLIENT_PROGRESS_TIMEOUT`.
+    Pong,
     Close,
 }
 
 fn client_action(message: Message) -> ClientAction {
     match message {
         Message::Ping(payload) => ClientAction::Send(Message::Pong(payload)),
-        Message::Pong(_) => ClientAction::Ignore,
+        Message::Pong(_) => ClientAction::Pong,
         Message::Text(text) => match serde_json::from_str::<RealtimeRequest>(&text) {
             Ok(RealtimeRequest::ActivityBaselineRequest) => ClientAction::ActivityBaseline,
             Ok(RealtimeRequest::Heartbeat) => ClientAction::Heartbeat,
@@ -352,6 +405,33 @@ impl SocketFlow {
             Err(_) => Self::Close,
         }
     }
+}
+
+/// Send one message under `SOCKET_SEND_TIMEOUT`. Returning `Close` on timeout
+/// makes `serve_socket` break its loop, which drops the socket and the
+/// `SocketPermit` with it.
+async fn send_bounded(socket: &mut WebSocket, message: Message) -> SocketFlow {
+    bounded_send(socket.send(message)).await
+}
+
+async fn bounded_send<F>(send: F) -> SocketFlow
+where
+    F: std::future::Future<Output = Result<(), axum::Error>>,
+{
+    match time::timeout(SOCKET_SEND_TIMEOUT, send).await {
+        Ok(result) => SocketFlow::from_send(result),
+        Err(_) => {
+            warn!("realtime websocket send timed out; dropping the socket");
+            SocketFlow::Close
+        }
+    }
+}
+
+/// Best-effort courtesy close frame. Bounded for the same reason as every other
+/// send: the socket is going away regardless, and a stalled peer must not be
+/// able to delay that.
+async fn send_close_frame(socket: &mut WebSocket) {
+    let _ = time::timeout(SOCKET_SEND_TIMEOUT, socket.send(Message::Close(None))).await;
 }
 
 async fn revalidate_session(
@@ -375,12 +455,12 @@ async fn revalidate_session(
             SocketFlow::Open
         }
         SessionState::Invalid => {
-            let _ = socket.send(Message::Close(None)).await;
+            send_close_frame(socket).await;
             SocketFlow::Close
         }
         SessionState::Error(error) => {
             warn!(error = %error, "websocket session revalidation failed");
-            let _ = socket.send(Message::Close(None)).await;
+            send_close_frame(socket).await;
             SocketFlow::Close
         }
     }
@@ -391,6 +471,7 @@ async fn forward_event(
     db: &crate::db::DbPool,
     auth_user: &crate::db::models::AuthUser,
     visible_projects: &mut Option<HashSet<i64>>,
+    client: &mut ClientState,
     event: Result<RealtimeMessage, RecvError>,
 ) -> SocketFlow {
     match event {
@@ -417,7 +498,7 @@ async fn forward_event(
                             projects.insert(project_id);
                         }
                     }
-                    SocketFlow::from_send(socket.send(message.message).await)
+                    send_bounded(socket, message.message).await
                 }
                 EventVisibility::Hidden => {
                     let revoked = matches!(message.event, RealtimeEvent::ProjectUpdated { .. })
@@ -427,7 +508,7 @@ async fn forward_event(
                                 .is_some_and(|projects| projects.remove(&project_id))
                         });
                     if revoked {
-                        send_event(socket, &RealtimeEvent::ResyncRequired).await
+                        send_resync(socket, client).await
                     } else {
                         SocketFlow::Open
                     }
@@ -439,7 +520,7 @@ async fn forward_event(
                 dropped,
                 "realtime websocket lagged; asking client to resync"
             );
-            send_event(socket, &RealtimeEvent::ResyncRequired).await
+            send_resync(socket, client).await
         }
         Err(RecvError::Closed) => SocketFlow::Close,
     }
@@ -461,16 +542,15 @@ async fn handle_client_message(
             }
 
             match client_action(message) {
-                ClientAction::Send(message) => SocketFlow::from_send(socket.send(message).await),
+                ClientAction::Send(message) => send_bounded(socket, message).await,
                 ClientAction::ActivityBaseline => {
                     client.record_progress(now);
                     send_activity_baseline(socket, db, auth_user, client).await
                 }
-                ClientAction::Heartbeat => {
+                ClientAction::Heartbeat | ClientAction::Pong => {
                     client.record_progress(now);
                     SocketFlow::Open
                 }
-                ClientAction::Ignore => SocketFlow::Open,
                 ClientAction::Close => close_socket(socket).await,
             }
         }
@@ -499,7 +579,23 @@ async fn send_activity_baseline(
                 .inspect(|event| client.cache_activity_baseline(now, event.clone()))
         }
     };
-    send_event(socket, &baseline_response(baseline)).await
+    match baseline_response(baseline) {
+        RealtimeEvent::ResyncRequired => send_resync(socket, client).await,
+        event => send_event(socket, &event).await,
+    }
+}
+
+/// Send `resync.required`, dropping the cached activity baseline first.
+///
+/// A resync tells the client every cached view it holds is stale, and the
+/// server's own `ACTIVITY_BASELINE_CACHE_TTL` cache is one of those views. Left
+/// alone, the client's very next `activity.baseline.request` would be answered
+/// from a snapshot taken up to 60 seconds before the event that forced the
+/// resync, so the resync would hand back the same stale number it was meant to
+/// correct. Every resync path routes through here for that reason.
+async fn send_resync(socket: &mut WebSocket, client: &mut ClientState) -> SocketFlow {
+    client.invalidate_activity_baseline();
+    send_event(socket, &RealtimeEvent::ResyncRequired).await
 }
 
 fn baseline_response(baseline: Result<RealtimeEvent, crate::error::LificError>) -> RealtimeEvent {
@@ -513,7 +609,7 @@ fn baseline_response(baseline: Result<RealtimeEvent, crate::error::LificError>) 
 }
 
 async fn close_socket(socket: &mut WebSocket) -> SocketFlow {
-    let _ = socket.send(Message::Close(None)).await;
+    send_close_frame(socket).await;
     SocketFlow::Close
 }
 
@@ -533,10 +629,10 @@ fn activity_baseline(
 
 async fn send_event(socket: &mut WebSocket, event: &RealtimeEvent) -> SocketFlow {
     match serde_json::to_string(event) {
-        Ok(json) => SocketFlow::from_send(socket.send(Message::Text(json.into())).await),
+        Ok(json) => send_bounded(socket, Message::Text(json.into())).await,
         Err(_) => {
             warn!("failed to serialize realtime event");
-            SocketFlow::from_send(socket.send(Message::Close(None)).await)
+            close_socket(socket).await
         }
     }
 }
@@ -763,6 +859,53 @@ mod tests {
     }
 
     #[test]
+    fn socket_slots_are_capped_instance_wide_across_users() {
+        let hub = RealtimeHub::new();
+        let users = MAX_SOCKETS_TOTAL / MAX_SOCKETS_PER_USER;
+        let mut slots: Vec<SocketPermit> = (0..users as i64)
+            .flat_map(|user_id| (0..MAX_SOCKETS_PER_USER).map(move |_| (user_id, ())))
+            .map(|(user_id, ())| {
+                hub.try_acquire_socket(user_id)
+                    .expect("slot under both caps")
+            })
+            .collect();
+        assert_eq!(slots.len(), MAX_SOCKETS_TOTAL);
+
+        // A brand new user is under the per-user cap yet still refused: the
+        // instance-wide budget is what is exhausted.
+        assert!(hub.try_acquire_socket(9_999).is_none());
+
+        // And the global count is released by the same RAII drop.
+        slots.pop();
+        assert!(hub.try_acquire_socket(9_999).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_that_never_completes_closes_the_socket() {
+        // A peer that stops reading leaves `send()` pending forever. The bound
+        // turns that into a close, which drops the socket and its permit.
+        assert_eq!(
+            bounded_send(std::future::pending::<Result<(), axum::Error>>()).await,
+            SocketFlow::Close
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_that_completes_in_time_keeps_the_socket_open() {
+        assert_eq!(
+            bounded_send(std::future::ready(Ok(()))).await,
+            SocketFlow::Open
+        );
+    }
+
+    #[test]
+    fn server_pings_fit_inside_the_progress_timeout() {
+        // A healthy client must survive a lost pong, so more than one ping has
+        // to land inside the timeout window.
+        assert!(SERVER_PING_INTERVAL * 2 < CLIENT_PROGRESS_TIMEOUT);
+    }
+
+    #[test]
     fn client_data_limits_are_pinned() {
         assert_eq!(MAX_CLIENT_FRAME_BYTES, 4 * 1024);
         assert_eq!(MAX_CLIENT_MESSAGE_BYTES, 16 * 1024);
@@ -773,6 +916,10 @@ mod tests {
         assert_eq!(
             client_action(Message::Ping(vec![1, 2, 3].into())),
             ClientAction::Send(Message::Pong(vec![1, 2, 3].into()))
+        );
+        assert_eq!(
+            client_action(Message::Pong(Vec::new().into())),
+            ClientAction::Pong
         );
         assert_eq!(
             client_action(Message::Text(r#"{"type":"heartbeat"}"#.into())),

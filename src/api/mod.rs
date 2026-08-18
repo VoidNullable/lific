@@ -2255,12 +2255,27 @@ mod authz_gating_tests {
     }
 
     async fn receive_activity_baseline(socket: &mut TestWebSocket) -> i64 {
-        let Some(Ok(Message::Text(text))) = socket.next().await else {
-            panic!("expected activity baseline response");
-        };
-        serde_json::from_str::<serde_json::Value>(&text).unwrap()["day_count"]
-            .as_i64()
-            .unwrap()
+        loop {
+            let event = next_realtime_event(socket).await;
+            if event["type"] == "activity.baseline" {
+                return event["day_count"].as_i64().unwrap();
+            }
+        }
+    }
+
+    /// Read the next application event, skipping the server's liveness pings
+    /// (and the client's own automatic pongs), which can arrive at any point
+    /// once a test advances the clock past the server ping interval.
+    async fn next_realtime_event(socket: &mut TestWebSocket) -> serde_json::Value {
+        loop {
+            let received =
+                tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+            match received {
+                Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).unwrap(),
+                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+                other => panic!("expected a realtime event, got {other:?}"),
+            }
+        }
     }
 
     fn activity_baseline_request(bytes: usize) -> String {
@@ -2291,10 +2306,22 @@ mod authz_gating_tests {
     }
 
     async fn assert_websocket_closed(socket: &mut TestWebSocket) {
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await,
-            Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
-        ));
+        loop {
+            let received =
+                tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
+            // Liveness pings queued before the close are not the close itself.
+            if matches!(received, Ok(Some(Ok(Message::Ping(_) | Message::Pong(_))))) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    received,
+                    Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
+                ),
+                "expected the socket to be closed, got {received:?}"
+            );
+            return;
+        }
     }
 
     #[tokio::test]
@@ -2463,7 +2490,7 @@ mod authz_gating_tests {
     }
 
     #[tokio::test]
-    async fn websocket_closes_incomplete_fragment_after_progress_deadline() {
+    async fn websocket_closes_incomplete_fragment_when_the_peer_answers_nothing() {
         let (db, token) = websocket_session();
         let realtime = crate::realtime::RealtimeHub::new();
         let (url, server) = websocket_test_server(db, realtime).await;
@@ -2471,6 +2498,8 @@ mod authz_gating_tests {
             .await
             .unwrap();
 
+        // Open a fragment and never finish it. The socket is genuinely live at
+        // this point: a client ping still round-trips.
         socket
             .send(Message::Frame(Frame::message(
                 Vec::new(),
@@ -2488,25 +2517,96 @@ mod authz_gating_tests {
             Some(Ok(Message::Pong(payload))) if payload.as_ref() == [1, 2, 3]
         ));
 
+        // Then go completely silent. The client is never polled or flushed
+        // again, so tungstenite never answers the server's liveness pings
+        // either, and the progress deadline is the only thing left to fire.
         tokio::time::pause();
-        tokio::time::advance(std::time::Duration::from_secs(110)).await;
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
         tokio::time::resume();
-        socket
-            .send(Message::Ping(vec![4, 5, 6].into()))
-            .await
-            .unwrap();
-        let response = socket.next().await;
-        assert!(
-            matches!(
-                &response,
-                Some(Ok(Message::Pong(payload))) if payload.as_ref() == [4, 5, 6]
-            ),
-            "expected Pong while fragmented, got {response:?}"
-        );
-        tokio::time::pause();
-        tokio::time::advance(std::time::Duration::from_secs(11)).await;
         assert_websocket_closed(&mut socket).await;
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_keeps_a_passive_client_alive_on_protocol_pongs_alone() {
+        let (db, token) = websocket_session();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let (url, server) = websocket_test_server(db, realtime).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        // Round-trip once so the socket task is definitely running, and its
+        // ping timer definitely started, before the test moves the clock.
+        assert_eq!(request_activity_baseline(&mut socket).await, 0);
+
+        // Six steps of just over the ping interval is more than 180 seconds,
+        // well past the 120 second progress deadline. The client never sends an
+        // application message: only tungstenite's automatic replies to the
+        // server's pings keep it alive, which is exactly what an existing
+        // passive client does with no code changes at all. Each step overshoots
+        // the interval slightly because the socket task starts its ping timer a
+        // moment after the test reads the clock.
+        for step in 0..6 {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(31)).await;
+            tokio::time::resume();
+
+            let received =
+                tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
+            assert!(
+                matches!(received, Ok(Some(Ok(Message::Ping(_))))),
+                "step {step}: expected a server liveness ping, got {received:?}"
+            );
+            // Push the queued pong out and give the server a moment to read it.
+            socket.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(request_activity_baseline(&mut socket).await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_resync_invalidates_the_cached_activity_baseline() {
+        let (db, token) = websocket_session();
+        // A one-slot channel lags the socket's receiver as soon as the test
+        // queues more than one event without yielding to the socket task.
+        let realtime = crate::realtime::RealtimeHub::with_capacity(1);
+        let (url, server) = websocket_test_server(db.clone(), realtime.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(websocket_request(&url, &token))
+            .await
+            .unwrap();
+
+        let initial = request_activity_baseline(&mut socket).await;
+        {
+            let conn = db.write().unwrap();
+            crate::db::queries::create_project(
+                &conn,
+                &crate::db::models::CreateProject {
+                    name: "After resync".into(),
+                    identifier: "RSNC".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        // Queued synchronously: the socket task cannot drain between sends, so
+        // its receiver overflows and the next recv reports a lag.
+        for project_id in 1..=3 {
+            realtime.send(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
+        }
+        assert_eq!(
+            next_realtime_event(&mut socket).await["type"],
+            "resync.required"
+        );
+
+        // The resync must drop the 60 second baseline cache with it. Without
+        // that this still answers `initial`, telling a client that was just
+        // told its view is stale to resync against the stale number.
+        assert_eq!(request_activity_baseline(&mut socket).await, initial + 1);
         server.abort();
     }
 
