@@ -1844,52 +1844,81 @@ impl LificMcp {
     #[tool(
         description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). Issues and pages return the markdown; projects return the exported file paths."
     )]
-    fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
-        self.export_inner(input).unwrap_or_else(error_response)
+    async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
+        self.export_inner(input).await.unwrap_or_else(error_response)
     }
 
-    fn export_inner(&self, input: ExportInput) -> Result<String, String> {
+    async fn export_inner(&self, input: ExportInput) -> Result<String, String> {
+        #[derive(Clone, Copy)]
+        enum Kind {
+            Issue,
+            Page,
+            Project,
+        }
+
         let ident = input.identifier.trim();
         // Same identifier-shape dispatch as get_activity: pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
         // tail, so a bare project identifier falls through cleanly.
-        if looks_like_page_identifier(ident) {
+        let kind = if looks_like_page_identifier(ident) {
             let project_id = self.read(|conn| {
                 let id = queries::resolve_page_identifier(conn, ident)?;
                 Ok(queries::get_page(conn, id)?.project_id)
             })?;
             require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-            let bundle = self.read(|conn| crate::export::export_page(conn, ident))?;
-            Ok(bundle
-                .files
-                .into_iter()
-                .next()
-                .map(|file| file.content)
-                .unwrap_or_else(|| "Error: page export produced no files".into()))
+            Kind::Page
         } else if let Ok(project_id) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, ident)?;
             Ok(queries::get_issue(conn, id)?.project_id)
         }) {
             require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
-            let bundle = self.read(|conn| crate::export::export_issue(conn, ident))?;
-            Ok(bundle
+            Kind::Issue
+        } else {
+            let project_id = resolve_project(&*self.read_conn()?, ident)
+                .map_err(|_| unknown_identifier(ident))?;
+            require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
+            Kind::Project
+        };
+
+        let slot = self
+            .db
+            .acquire_export_slot()
+            .map_err(|error| error.to_string())?;
+        let this = self.clone();
+        let identifier = ident.to_string();
+        let (bundle, _slot) = tokio::task::spawn_blocking(move || {
+            let bundle = match kind {
+                Kind::Issue => this.read(|conn| crate::export::export_issue(conn, &identifier)),
+                Kind::Page => this.read(|conn| crate::export::export_page(conn, &identifier)),
+                Kind::Project => {
+                    this.read(|conn| crate::export::export_project(conn, &identifier))
+                }
+            }?;
+            Ok::<_, String>((bundle, slot))
+        })
+        .await
+        .map_err(|error| format!("export worker failed: {error}"))??;
+
+        match kind {
+            Kind::Page => Ok(bundle
                 .files
                 .into_iter()
                 .next()
                 .map(|file| file.content)
-                .unwrap_or_else(|| "Error: issue export produced no files".into()))
-        } else {
-            let pid = resolve_project(&*self.read_conn()?, ident)
-                .map_err(|_| unknown_identifier(ident))?;
-            require_role_mcp(&self.db, pid, models::Role::Viewer)?;
-            let bundle = self.read(|conn| crate::export::export_project(conn, ident))?;
-            Ok(render_response(|output| {
+                .unwrap_or_else(|| "Error: page export produced no files".into())),
+            Kind::Issue => Ok(bundle
+                .files
+                .into_iter()
+                .next()
+                .map(|file| file.content)
+                .unwrap_or_else(|| "Error: issue export produced no files".into())),
+            Kind::Project => Ok(render_response(|output| {
                 writeln!(output, "{} exported file(s):", bundle.files.len())?;
                 bundle
                     .files
                     .iter()
                     .try_for_each(|file| writeln!(output, "- {}", file.path))
-            }))
+            })),
         }
     }
 
@@ -7746,8 +7775,8 @@ mod tests {
         assert!(!detail.contains("brown"), "got: {detail}");
     }
 
-    #[test]
-    fn export_dispatches_on_identifier_shape() {
+    #[tokio::test]
+    async fn export_dispatches_on_identifier_shape() {
         let (m, _guard) = mcp();
         seed_project(&m, "Test", "EXP");
         seed_issue_with_description(&m, "EXP", "Ship it", "issue body here");
@@ -7762,33 +7791,41 @@ mod tests {
         // Issue shape (EXP-1) returns the issue markdown.
         let issue = m.export(Parameters(ExportInput {
             identifier: "EXP-1".into(),
-        }));
+        })).await;
         assert!(issue.contains("issue body here"), "got: {issue}");
 
         // Page shape (EXP-DOC-1) returns the page markdown.
         let page = m.export(Parameters(ExportInput {
             identifier: "EXP-DOC-1".into(),
-        }));
+        })).await;
         assert!(page.contains("page body here"), "got: {page}");
 
         // Bare project shape (EXP) returns the exported file listing.
         let project = m.export(Parameters(ExportInput {
             identifier: "EXP".into(),
-        }));
+        })).await;
         assert!(project.contains("exported file(s)"), "got: {project}");
 
         // Unknown identifiers name all three shapes in the error.
         let err = m.export(Parameters(ExportInput {
             identifier: "NOPE-999".into(),
-        }));
+        })).await;
         assert!(
             err.contains("not a known issue, page, or project"),
             "got: {err}"
         );
+
+        let first = m.db.acquire_export_slot().unwrap();
+        let second = m.db.acquire_export_slot().unwrap();
+        let blocked = m.export(Parameters(ExportInput {
+            identifier: "EXP".into(),
+        })).await;
+        assert!(blocked.contains("too many exports"), "got: {blocked}");
+        drop((first, second));
     }
 
-    #[test]
-    fn create_and_edit_issue_preserves_literal_escapes_in_multiline_code() {
+    #[tokio::test]
+    async fn create_and_edit_issue_preserves_literal_escapes_in_multiline_code() {
         let (m, _guard) = mcp();
         seed_project(&m, "Test", "ESC");
         let description = "Example:\n```c\nprintf(\"\\n\");\n```\n";
@@ -7811,7 +7848,7 @@ mod tests {
 
         let exported = m.export(Parameters(ExportInput {
             identifier: "ESC-1".into(),
-        }));
+        })).await;
         assert!(
             exported.contains(description.trim_end()),
             "export mangled content: {exported}"
