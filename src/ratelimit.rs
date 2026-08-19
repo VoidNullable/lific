@@ -259,7 +259,11 @@ impl RateLimiter {
                 entry.retain(|t| now.saturating_duration_since(*t) < self.window);
                 entry.len() < self.max_attempts
             }
-            None => true,
+            // Absent key: allowed only if the table can actually admit it.
+            // Answering `true` here while `record_failure()` refuses to
+            // allocate at capacity would give every new identity unlimited
+            // untracked attempts once the table saturates (LIF-422).
+            None => Self::make_room(&mut state, now, self.window),
         }
     }
 
@@ -387,6 +391,35 @@ mod tests {
         let rl = RateLimiter::new(1, Duration::ZERO);
         assert!(rl.check("expired"));
         assert!(rl.check("new"));
+    }
+
+    // ── LIF-422: the login path (peek + record_failure) fails closed at
+    // saturation, matching check(). Before this, peek() answered `true` for
+    // any absent key while record_failure() refused to allocate one, so a
+    // saturated table granted new identities unlimited untracked attempts.
+    #[test]
+    fn full_table_fails_closed_on_the_peek_record_failure_path() {
+        let rl = RateLimiter::new(1, Duration::from_secs(60));
+        for index in 0..MAX_KEYS {
+            rl.record_failure(&format!("identity-{index}"));
+        }
+        // New identity: denied up front, and nothing is silently dropped.
+        assert!(!rl.peek("new-identity"));
+        rl.record_failure("new-identity");
+        assert!(!rl.contains_key("new-identity"));
+        // Existing identities keep their recorded state.
+        assert!(!rl.peek("identity-0"));
+    }
+
+    #[test]
+    fn peek_admits_new_identity_after_expired_keys_are_swept() {
+        let rl = RateLimiter::new(1, Duration::ZERO);
+        for index in 0..MAX_KEYS {
+            rl.record_failure(&format!("identity-{index}"));
+        }
+        // Every entry is expired (zero window), so peek's admission check
+        // sweeps and finds room instead of rejecting forever.
+        assert!(rl.peek("new-identity"));
     }
 
     #[test]
