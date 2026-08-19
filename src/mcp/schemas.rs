@@ -404,6 +404,10 @@ pub struct CreatePlanInput {
 pub struct GetPlanInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
+    #[schemars(
+        description = "Return full step descriptions (default false truncates each to 100 chars)"
+    )]
+    pub full_descriptions: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

@@ -434,7 +434,7 @@ impl Display for CommentLines<'_> {
 /// Render a plan + its step tree compactly for get_plan / create_plan output.
 /// Step lines carry `#<id>` so the agent can target edits, and issue-linked
 /// steps show provenance ("via LIF-42" / "reopened — LIF-42 reopened").
-pub(crate) fn fmt_plan(p: &models::Plan) -> String {
+pub(crate) fn fmt_plan(p: &models::Plan, full_descriptions: bool) -> String {
     let context = current_issue_link_context();
     render_response(|output| {
         write!(
@@ -443,6 +443,7 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
             PlanView {
                 plan: p,
                 context: context.as_deref(),
+                full_descriptions,
             }
         )
     })
@@ -451,6 +452,7 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
 struct PlanView<'a> {
     plan: &'a models::Plan,
     context: Option<&'a IssueLinkContext>,
+    full_descriptions: bool,
 }
 
 impl Display for PlanView<'_> {
@@ -476,6 +478,7 @@ impl Display for PlanView<'_> {
                 nodes: &plan.steps,
                 depth: 0,
                 context: self.context,
+                full_descriptions: self.full_descriptions,
             },
             formatter,
         )
@@ -688,6 +691,7 @@ struct PlanSteps<'a> {
     nodes: &'a [models::PlanStepNode],
     depth: usize,
     context: Option<&'a IssueLinkContext>,
+    full_descriptions: bool,
 }
 
 impl Display for PlanSteps<'_> {
@@ -718,8 +722,16 @@ impl Display for PlanSteps<'_> {
             formatter.write_char('\n')?;
             (!node.description.is_empty())
                 .then(|| {
-                    (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
-                    writeln!(formatter, "    {}", truncate_value(&node.description, 100))
+                    if self.full_descriptions {
+                        let prefix = format!("{}    ", "  ".repeat(self.depth));
+                        for line in node.description.lines() {
+                            writeln!(formatter, "{prefix}{line}")?;
+                        }
+                    } else {
+                        (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+                        writeln!(formatter, "    {}", truncate_value(&node.description, 100))?;
+                    }
+                    Ok(())
                 })
                 .transpose()?;
             (!node.children.is_empty())
@@ -729,6 +741,7 @@ impl Display for PlanSteps<'_> {
                             nodes: &node.children,
                             depth: self.depth + 1,
                             context: self.context,
+                            full_descriptions: self.full_descriptions,
                         },
                         formatter,
                     )
@@ -3749,13 +3762,14 @@ impl LificMcp {
                 PlanView {
                     plan: &plan,
                     context: context.as_deref(),
+                    full_descriptions: false,
                 }
             )
         }))
     }
 
     #[tool(
-        description = "Rehydrate a plan's full step tree (e.g. LIF-PLAN-3) when resuming work. Step lines show the #id used by edit_plan_step and update_plan_step, done state, and linked issues."
+        description = "Rehydrate a plan's full step tree (e.g. LIF-PLAN-3) when resuming work. Step lines show the #id used by edit_plan_step and update_plan_step, done state, and linked issues. Step descriptions are truncated to 100 chars unless full_descriptions=true."
     )]
     fn get_plan(&self, Parameters(input): Parameters<GetPlanInput>) -> String {
         self.get_plan_inner(input).unwrap_or_else(error_response)
@@ -3767,7 +3781,7 @@ impl LificMcp {
             queries::plans::get_plan(conn, id)
         })?;
         require_role_mcp(&self.db, plan.project_id, models::Role::Viewer)?;
-        Ok(fmt_plan(&plan))
+        Ok(fmt_plan(&plan, input.full_descriptions.unwrap_or(false)))
     }
 
     #[tool(
@@ -3823,6 +3837,7 @@ impl LificMcp {
                 PlanView {
                     plan: &plan,
                     context: context.as_deref(),
+                    full_descriptions: false,
                 }
             )
         }))
@@ -4043,6 +4058,7 @@ impl LificMcp {
                     PlanView {
                         plan: &plan,
                         context: context.as_deref(),
+                        full_descriptions: false,
                     }
                 ),
                 false => write!(
@@ -9903,6 +9919,7 @@ mod tests {
         crate::mcp::reset_issue_link_context_reads();
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
+            ..Default::default()
         }));
         assert!(
             got.contains("Frontend"),
@@ -9910,6 +9927,44 @@ mod tests {
         );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
         assert_eq!(crate::mcp::issue_link_context_reads(), 1);
+    }
+
+    #[test]
+    fn get_plan_full_descriptions_returns_untruncated_step_bodies() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PLN");
+
+        let long = "start ".to_string() + &"x".repeat(120) + " end";
+        m.create_plan(Parameters(CreatePlanInput {
+            project: "PLN".into(),
+            title: "Plan".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "step".into(),
+                description: Some(long.clone()),
+                ..Default::default()
+            }]),
+        }));
+
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+            full_descriptions: Some(false),
+        }));
+        assert!(
+            !got.contains(&long),
+            "default get_plan must truncate descriptions: {got}"
+        );
+        assert!(got.contains("…"), "truncation should be marked: {got}");
+
+        crate::mcp::reset_issue_link_context_reads();
+        let full = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+            full_descriptions: Some(true),
+        }));
+        assert!(
+            full.contains(&long),
+            "full_descriptions=true must return the whole body: {full}"
+        );
     }
 
     #[tokio::test]
@@ -10158,6 +10213,7 @@ mod tests {
         assert!(out.contains("Edited step"), "got: {out}");
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
+            ..Default::default()
         }));
         assert!(got.contains("new text"), "edit should persist: {got}");
     }
@@ -10243,6 +10299,7 @@ mod tests {
 
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
+            ..Default::default()
         }));
         assert!(got.contains("[x]"), "step should be auto-completed: {got}");
         assert!(got.contains("via PLN-1"), "provenance should show: {got}");
@@ -10320,6 +10377,7 @@ mod tests {
         );
         let plan = m.get_plan(Parameters(GetPlanInput {
             plan: "ARC-PLAN-1".into(),
+            ..Default::default()
         }));
         assert!(
             plan.contains("- [ ]"),
@@ -10346,6 +10404,7 @@ mod tests {
         assert_eq!(out, "Deleted plan PLN-PLAN-1");
         let got = m.get_plan(Parameters(GetPlanInput {
             plan: "PLN-PLAN-1".into(),
+            ..Default::default()
         }));
         assert!(
             got.contains("Error"),
@@ -10479,6 +10538,7 @@ mod tests {
         // via get_plan
         let plan = m.get_plan(Parameters(GetPlanInput {
             plan: "ESC-PLAN-1".into(),
+            ..Default::default()
         }));
         assert_no_html_escape(&plan, &[raw_step]);
     }
@@ -11341,6 +11401,7 @@ mod authz_gating_tests {
         let denied_plan = as_user(&non_member, || {
             m.get_plan(Parameters(GetPlanInput {
                 plan: "MEM-PLAN-1".into(),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied_plan), "got: {denied_plan}");
@@ -11354,6 +11415,7 @@ mod authz_gating_tests {
         let allowed_plan = as_user(&viewer, || {
             m.get_plan(Parameters(GetPlanInput {
                 plan: "MEM-PLAN-1".into(),
+                ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed_plan), "got: {allowed_plan}");
