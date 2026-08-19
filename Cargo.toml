@@ -21,6 +21,7 @@ include = [
 # HTTP
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br"] }
 # HTTP client — used by `lific doctor` to probe a running server (reachability,
 # OAuth discovery, MCP round-trip). rustls-tls (no OpenSSL linkage) so the
@@ -110,7 +111,6 @@ tempfile = "3"
 libc = "0.2"
 
 [dev-dependencies]
-futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Scratch directories for tests. Replaces hand-rolled

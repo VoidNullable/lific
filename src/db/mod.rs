@@ -6,6 +6,7 @@ use crossbeam_queue::ArrayQueue;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::LificError;
 
@@ -24,6 +25,7 @@ pub struct DbPool {
     writer: Arc<Mutex<Connection>>,
     readers: Arc<ArrayQueue<Connection>>,
     path: PathBuf,
+    export_slots: Arc<Semaphore>,
 }
 
 /// RAII guard that returns the read connection to the pool on drop.
@@ -49,6 +51,15 @@ impl Drop for ReadConn {
 }
 
 impl DbPool {
+    pub(crate) fn acquire_export_slot(&self) -> Result<OwnedSemaphorePermit, LificError> {
+        self.export_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                LificError::TooManyRequests("too many exports are already running".into())
+            })
+    }
+
     /// The database file this pool was opened from. Callers that need to
     /// place sidecar data next to the database (attachments, backups) resolve
     /// it from here rather than re-reading the config, so every consumer of a
@@ -220,6 +231,7 @@ pub fn open_memory() -> Result<DbPool, LificError> {
         writer: Arc::new(Mutex::new(writer)),
         readers: Arc::new(readers),
         path: PathBuf::from(&name),
+        export_slots: Arc::new(Semaphore::new(2)),
     })
 }
 
@@ -253,6 +265,7 @@ pub fn open(path: &Path) -> Result<DbPool, LificError> {
         writer: Arc::new(Mutex::new(writer)),
         readers: Arc::new(readers),
         path: path.to_path_buf(),
+        export_slots: Arc::new(Semaphore::new(2)),
     })
 }
 

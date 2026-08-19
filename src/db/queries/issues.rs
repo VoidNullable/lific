@@ -140,6 +140,18 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
     Ok(issue)
 }
 
+pub fn issue_project_id(conn: &Connection, id: i64) -> Result<i64, LificError> {
+    conn.query_row("SELECT project_id FROM issues WHERE id = ?1", [id], |row| {
+        row.get(0)
+    })
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("issue {id} not found"))
+        }
+        other => other.into(),
+    })
+}
+
 /// Look up just an issue's current status by id — a lightweight read used to
 /// annotate relation lines (LIF-303) without materializing the whole Issue.
 pub fn issue_status(conn: &Connection, id: i64) -> Result<String, LificError> {
@@ -963,7 +975,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "failed create must not leave a half-created issue");
+        assert_eq!(
+            count, 0,
+            "failed create must not leave a half-created issue"
+        );
     }
 
     #[test]
@@ -1021,7 +1036,13 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         for i in 0..3 {
-            quick_issue(&conn, pid, &format!("Issue {i}"), Status::Backlog, Priority::None);
+            quick_issue(
+                &conn,
+                pid,
+                &format!("Issue {i}"),
+                Status::Backlog,
+                Priority::None,
+            );
         }
         let got = list_issues(
             &conn,
@@ -1032,7 +1053,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(got.len(), 1, "limit=-1 must clamp to 1, not return everything");
+        assert_eq!(
+            got.len(),
+            1,
+            "limit=-1 must clamp to 1, not return everything"
+        );
     }
 
     #[test]
@@ -1456,7 +1481,13 @@ mod tests {
         let issue_project_id = seed_project(&conn, "ISS");
         let module_project_id = seed_project(&conn, "MOD");
         let module_id = seed_module(&conn, module_project_id, "Other project");
-        let issue = quick_issue(&conn, issue_project_id, "Wrong module", Status::Backlog, Priority::None);
+        let issue = quick_issue(
+            &conn,
+            issue_project_id,
+            "Wrong module",
+            Status::Backlog,
+            Priority::None,
+        );
 
         let err = update_issue(
             &conn,
@@ -1559,7 +1590,13 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         for i in 0..10 {
-            quick_issue(&conn, pid, &format!("Issue {i}"), Status::Backlog, Priority::None);
+            quick_issue(
+                &conn,
+                pid,
+                &format!("Issue {i}"),
+                Status::Backlog,
+                Priority::None,
+            );
         }
 
         let limited = list_issues(
@@ -1705,8 +1742,18 @@ mod tests {
         let pid = seed_project(&conn, "TST");
         let stale = quick_issue(&conn, pid, "Stale", Status::Todo, Priority::None);
         let fresh = quick_issue(&conn, pid, "Fresh", Status::Todo, Priority::None);
-        pin_timestamps(&conn, stale.id, "2026-01-01 00:00:00", "2026-01-02 00:00:00");
-        pin_timestamps(&conn, fresh.id, "2026-01-01 00:00:00", "2026-06-01 12:00:00");
+        pin_timestamps(
+            &conn,
+            stale.id,
+            "2026-01-01 00:00:00",
+            "2026-01-02 00:00:00",
+        );
+        pin_timestamps(
+            &conn,
+            fresh.id,
+            "2026-01-01 00:00:00",
+            "2026-06-01 12:00:00",
+        );
 
         let recent = list_issues(
             &conn,
@@ -1731,7 +1778,12 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let issue = quick_issue(&conn, pid, "Edge", Status::Todo, Priority::None);
-        pin_timestamps(&conn, issue.id, "2026-06-01 12:00:00", "2026-06-01 12:00:00");
+        pin_timestamps(
+            &conn,
+            issue.id,
+            "2026-06-01 12:00:00",
+            "2026-06-01 12:00:00",
+        );
 
         let hit = list_issues(
             &conn,
@@ -1742,7 +1794,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(hit.len(), 1, "inclusive bound equal to row timestamp must match");
+        assert_eq!(
+            hit.len(),
+            1,
+            "inclusive bound equal to row timestamp must match"
+        );
     }
 
     #[test]
