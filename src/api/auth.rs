@@ -94,22 +94,27 @@ pub(super) async fn auth_signup(
 ) -> Result<impl IntoResponse, LificError> {
     // Rate limit signups to prevent Argon2 CPU exhaustion. Key on TWO things
     // (LIF-138): the email AND the source IP. The attacker chooses the email,
-    // so an email-only key is bypassed by rotating addresses — each request
-    // still costing a full Argon2 hash. The per-IP key (same helper login
-    // uses) is what actually caps the DoS. `check` records on pass and the
-    // `||` short-circuits, so a rejected attempt never double-charges.
+    // so an email-only key is bypassed by rotating addresses. Check the IP
+    // first: a blocked source must not be able to allocate unlimited identity
+    // keys while short-circuiting the later check.
     let email_key = format!("signup:{}", input.email.to_lowercase());
     let ip_key = format!(
         "signup_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
     );
-    if let Some(Extension(ref rl)) = limiter
-        && (!rl.check(&email_key) || !rl.check(&ip_key))
-    {
-        let retry = rl.retry_after(&email_key).max(rl.retry_after(&ip_key));
-        return Err(LificError::BadRequest(format!(
-            "too many signup attempts — try again in {retry} seconds"
-        )));
+    if let Some(Extension(ref rl)) = limiter {
+        if !rl.check(&ip_key) {
+            let retry = rl.retry_after(&ip_key);
+            return Err(LificError::BadRequest(
+                crate::ratelimit::retry_after_message("too many signup attempts", retry),
+            ));
+        }
+        if !rl.check(&email_key) {
+            let retry = rl.retry_after(&email_key);
+            return Err(LificError::BadRequest(
+                crate::ratelimit::retry_after_message("too many signup attempts", retry),
+            ));
+        }
     }
 
     // The instance's signup policy. Read on a pooled connection so a closed
@@ -258,12 +263,12 @@ pub(super) async fn auth_login(
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
     );
     if let Some(Extension(ref rl)) = limiter
-        && (!rl.peek(&id_key) || !rl.peek(&ip_key))
+        && (!rl.peek(&ip_key) || !rl.peek(&id_key))
     {
         let retry = rl.retry_after(&id_key).max(rl.retry_after(&ip_key));
-        return Err(LificError::BadRequest(format!(
-            "too many login attempts — try again in {retry} seconds"
-        )));
+        return Err(LificError::BadRequest(
+            crate::ratelimit::retry_after_message("too many login attempts", retry),
+        ));
     }
 
     let user = match authenticate_off_writer(&db, &input.identity, &input.password).await {
@@ -1984,6 +1989,25 @@ mod tests {
             .layer(axum::Extension(limiter))
     }
 
+    fn signup_app_with_limiter(
+        max: usize,
+        peer: std::net::SocketAddr,
+    ) -> (axum::Router, std::sync::Arc<crate::ratelimit::RateLimiter>) {
+        let db = crate::db::open_memory().expect("test db");
+        let limiter = std::sync::Arc::new(crate::ratelimit::RateLimiter::new(
+            max,
+            std::time::Duration::from_secs(15 * 60),
+        ));
+        let app = with_client_ip_test_layers(crate::api::router(db, &[]), peer)
+            .layer(axum::Extension(crate::config::AuthConfig {
+                allow_signup: true,
+                required: true,
+                secure_cookies: false,
+            }))
+            .layer(axum::Extension(limiter.clone()));
+        (app, limiter)
+    }
+
     /// Fire one wrong-password login for `identity` from source IP `xff`.
     /// Returns the status and parsed JSON body so callers can distinguish an
     /// ordinary auth failure from a rate-limit rejection (both are 400).
@@ -2198,6 +2222,18 @@ mod tests {
             StatusCode::OK,
             "distinct IP should not be limited: {other}"
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_signup_does_not_allocate_a_new_email_key() {
+        let (app, limiter) = signup_app_with_limiter(1, test_peer());
+        let (status, _) = signup_attempt(&app, 0, "203.0.113.10").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = signup_attempt(&app, 1, "203.0.113.10").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(is_signup_rate_limited(&body));
+        assert!(!limiter.contains_key("signup:user1@test.com"));
     }
 
     // ── Instance-admin roster management (LIF-214) ───────────

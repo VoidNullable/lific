@@ -679,8 +679,8 @@ pub(crate) mod test_helpers {
 
     /// The loopback peer supplied to test routers. `MockConnectInfo` mirrors
     /// production's `into_make_service_with_connect_info` path for handlers
-    /// that need the TCP peer, while the matching trusted range keeps explicit
-    /// XFF test headers meaningful.
+    /// that need the TCP peer. Tests that exercise forwarded headers opt into
+    /// an explicit trusted range here; production defaults trust none.
     pub fn test_peer() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 4242))
     }
@@ -689,9 +689,8 @@ pub(crate) mod test_helpers {
     /// Callers can provide an untrusted peer to test spoofing defenses.
     pub fn with_client_ip_test_layers(router: Router, peer: SocketAddr) -> Router {
         let trusted_proxies = Arc::<[crate::ratelimit::IpNetwork]>::from(
-            crate::config::ServerConfig::default()
-                .trusted_proxy_ranges()
-                .expect("default trusted proxy ranges must parse"),
+            crate::ratelimit::parse_trusted_proxies(&["127.0.0.0/8".into()])
+                .expect("test trusted proxy range must parse"),
         );
         router
             .layer(Extension(trusted_proxies))

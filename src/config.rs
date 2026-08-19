@@ -199,9 +199,9 @@ pub struct ServerConfig {
     /// Example: ["https://your-app.example.com"]
     pub cors_origins: Vec<String>,
     /// IP addresses or CIDR ranges allowed to supply client-IP proxy headers.
-    /// Plain IPs are allowed; defaults to loopback so Tailscale Funnel keeps
-    /// working while directly exposed listeners ignore spoofed X-Forwarded-For.
-    /// Example: ["127.0.0.0/8", "::1/128", "10.0.0.0/8"]
+    /// Plain IPs are allowed; defaults to no trusted peers. Configure only
+    /// isolated reverse-proxy addresses that cannot be reached directly.
+    /// Example: ["10.0.0.0/8"]
     pub trusted_proxies: Vec<String>,
     /// If set, exposes an authless MCP endpoint at `/mcp/<token>` that skips the
     /// OAuth flow entirely — the path secret itself is the credential. This is an
@@ -258,7 +258,7 @@ impl Default for ServerConfig {
             port: 3456,
             public_url: None,
             cors_origins: Vec::new(),
-            trusted_proxies: vec!["127.0.0.0/8".into(), "::1/128".into()],
+            trusted_proxies: Vec::new(),
             mcp_path_token: None,
             mcp_path_user: None,
         }
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(config.server.port, 3456);
         assert_eq!(
             config.server.trusted_proxies,
-            vec!["127.0.0.0/8", "::1/128"]
+            Vec::<String>::new()
         );
         assert_eq!(config.database.path, PathBuf::from("lific.db"));
         assert!(config.backup.enabled);
@@ -699,7 +699,7 @@ enabled = false
         let toml_str = Config::default_toml();
         let parsed: Config = toml::from_str(&toml_str).expect("default toml should parse");
         assert_eq!(parsed.server.port, 3456);
-        assert_eq!(parsed.server.trusted_proxies, vec!["127.0.0.0/8", "::1/128"]);
+        assert!(parsed.server.trusted_proxies.is_empty());
     }
 
     #[test]

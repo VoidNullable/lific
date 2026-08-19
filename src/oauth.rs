@@ -331,11 +331,14 @@ async fn register_client(
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
                 "error": "too_many_requests",
-                "error_description": format!("too many client registrations — try again in {retry} seconds")
+                "error_description": crate::ratelimit::retry_after_message(
+                    "too many client registrations",
+                    retry,
+                )
             })),
         )
             .into_response();
-        if let Ok(v) = retry.to_string().parse() {
+        if retry > 0 && let Ok(v) = retry.to_string().parse() {
             resp.headers_mut().insert("retry-after", v);
         }
         return resp;
@@ -944,11 +947,14 @@ async fn device_authorization(
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
                 "error": "too_many_requests",
-                "error_description": format!("too many device authorization requests — try again in {retry} seconds")
+                "error_description": crate::ratelimit::retry_after_message(
+                    "too many device authorization requests",
+                    retry,
+                )
             })),
         )
             .into_response();
-        if let Ok(v) = retry.to_string().parse() {
+        if retry > 0 && let Ok(v) = retry.to_string().parse() {
             resp.headers_mut().insert("retry-after", v);
         }
         return resp;
@@ -1871,9 +1877,8 @@ mod tests {
 
     fn default_trusted_proxies() -> Arc<[crate::ratelimit::IpNetwork]> {
         Arc::<[crate::ratelimit::IpNetwork]>::from(
-            crate::config::ServerConfig::default()
-                .trusted_proxy_ranges()
-                .expect("default trusted proxy ranges must parse"),
+            crate::ratelimit::parse_trusted_proxies(&["127.0.0.0/8".into()])
+                .expect("test trusted proxy range must parse"),
         )
     }
 
