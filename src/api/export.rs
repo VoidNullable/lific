@@ -179,10 +179,6 @@ async fn stream_response_with_timeouts(
     idle_timeout: Duration,
     max_duration: Duration,
 ) -> Result<axum::response::Response, LificError> {
-    let content_length = tokio::fs::metadata(&prepared.path)
-        .await
-        .map_err(|error| LificError::Internal(format!("stat export file: {error}")))?
-        .len();
     let mut file = tokio::fs::File::open(&prepared.path)
         .await
         .map_err(|error| LificError::Internal(format!("open export file: {error}")))?;
@@ -198,15 +194,12 @@ async fn stream_response_with_timeouts(
                     Ok(read) => {
                         let chunk =
                             Ok::<_, std::io::Error>(Bytes::copy_from_slice(&buffer[..read]));
-                        if !matches!(
-                            tokio::time::timeout(idle_timeout, sender.send(chunk)).await,
-                            Ok(Ok(()))
-                        ) {
+                        if !send_stream_item(&sender, chunk, idle_timeout).await {
                             break;
                         }
                     }
                     Err(error) => {
-                        let _ = sender.try_send(Err(error));
+                        let _ = send_stream_item(&sender, Err(error), idle_timeout).await;
                         break;
                     }
                 }
@@ -223,12 +216,18 @@ async fn stream_response_with_timeouts(
     if let Some(filename) = prepared.download_name {
         headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
     }
-    headers.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&content_length.to_string())
-            .map_err(|error| LificError::Internal(format!("invalid export length: {error}")))?,
-    );
     Ok((headers, body).into_response())
+}
+
+async fn send_stream_item(
+    sender: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    item: Result<Bytes, std::io::Error>,
+    idle_timeout: Duration,
+) -> bool {
+    matches!(
+        tokio::time::timeout(idle_timeout, sender.send(item)).await,
+        Ok(Ok(()))
+    )
 }
 
 fn content_disposition(filename: &str) -> Result<HeaderValue, LificError> {
@@ -339,6 +338,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use axum::body::Bytes;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -537,18 +537,35 @@ mod tests {
             resp.headers()[axum::http::header::CONTENT_TYPE],
             "application/zip"
         );
-        let content_length = resp
-            .headers()
-            .get(axum::http::header::CONTENT_LENGTH)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        assert!(content_length > 0);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .is_none()
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.len(), content_length);
+        assert!(!body.is_empty());
         assert_eq!(&body[..2], b"PK");
+    }
+
+    #[tokio::test]
+    async fn stream_error_waits_for_the_queued_chunk() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.send(Ok(Bytes::from_static(b"chunk"))).await.unwrap();
+        let send_error = tokio::spawn(async move {
+            super::send_stream_item(
+                &sender,
+                Err(std::io::Error::other("read failed")),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), "chunk");
+        assert!(send_error.await.unwrap());
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap_err().to_string(),
+            "read failed"
+        );
     }
 
     #[tokio::test]
