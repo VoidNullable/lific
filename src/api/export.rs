@@ -1,15 +1,15 @@
-use axum::Extension;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
+use axum::Extension;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::authz;
-use crate::db::DbPool;
 use crate::db::models::Role;
+use crate::db::DbPool;
 use crate::error::LificError;
 
 use super::with_read;
@@ -50,7 +50,12 @@ impl PreparedExport {
         let file = bundle.files.into_iter().next().ok_or_else(|| {
             LificError::Internal(format!("export produced no files for {fallback_name}"))
         })?;
-        let download_name = file.path.rsplit('/').next().unwrap_or(fallback_name).to_string();
+        let download_name = file
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(fallback_name)
+            .to_string();
         let temp_dir = export_temp_dir()?;
         let path = temp_dir.path().join("export.md");
         std::fs::write(&path, file.content)
@@ -153,7 +158,10 @@ async fn single_file_response(
     let (prepared, permit) = match format {
         "json" => blocking_export(permit, move || PreparedExport::json(&bundle)).await?,
         "markdown" => {
-            blocking_export(permit, move || PreparedExport::markdown(bundle, fallback_name)).await?
+            blocking_export(permit, move || {
+                PreparedExport::markdown(bundle, fallback_name)
+            })
+            .await?
         }
         _ => unreachable!("format was validated before export"),
     };
@@ -183,34 +191,42 @@ async fn stream_response_with_timeouts(
         .await
         .map_err(|error| LificError::Internal(format!("open export file: {error}")))?;
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _temp_dir = prepared.temp_dir;
         let _permit = permit;
         let mut buffer = vec![0; EXPORT_STREAM_CHUNK_BYTES];
-        let _ = tokio::time::timeout(max_duration, async {
+        let result = tokio::time::timeout(max_duration, async {
             loop {
                 match file.read(&mut buffer).await {
-                    Ok(0) => break,
+                    Ok(0) => return Ok(()),
                     Ok(read) => {
-                        let chunk =
-                            Ok::<_, std::io::Error>(Bytes::copy_from_slice(&buffer[..read]));
-                        if !send_stream_item(&sender, chunk, idle_timeout).await {
-                            break;
+                        let chunk = Bytes::copy_from_slice(&buffer[..read]);
+                        match tokio::time::timeout(idle_timeout, sender.send(chunk)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) => return Ok(()),
+                            Err(_) => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "export stream idle timeout",
+                                ));
+                            }
                         }
                     }
-                    Err(error) => {
-                        let _ = send_stream_item(&sender, Err(error), idle_timeout).await;
-                        break;
-                    }
+                    Err(error) => return Err(error),
                 }
             }
         })
         .await;
+        let result = result.unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "export stream deadline exceeded",
+            ))
+        });
+        let _ = terminal_sender.send(result);
     });
-    let body = Body::from_stream(futures_util::stream::unfold(
-        receiver,
-        |mut receiver| async move { receiver.recv().await.map(|chunk| (chunk, receiver)) },
-    ));
+    let body = stream_body(receiver, terminal_receiver);
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, prepared.content_type);
     if let Some(filename) = prepared.download_name {
@@ -219,15 +235,24 @@ async fn stream_response_with_timeouts(
     Ok((headers, body).into_response())
 }
 
-async fn send_stream_item(
-    sender: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
-    item: Result<Bytes, std::io::Error>,
-    idle_timeout: Duration,
-) -> bool {
-    matches!(
-        tokio::time::timeout(idle_timeout, sender.send(item)).await,
-        Ok(Ok(()))
-    )
+fn stream_body(
+    receiver: tokio::sync::mpsc::Receiver<Bytes>,
+    terminal: tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+) -> Body {
+    Body::from_stream(futures_util::stream::unfold(
+        (receiver, Some(terminal)),
+        |(mut receiver, mut terminal)| async move {
+            if let Some(chunk) = receiver.recv().await {
+                return Some((Ok::<_, std::io::Error>(chunk), (receiver, terminal)));
+            }
+            let result = terminal.take()?.await.unwrap_or_else(|_| {
+                Err(std::io::Error::other(
+                    "export stream task ended without a result",
+                ))
+            });
+            result.err().map(|error| (Err(error), (receiver, terminal)))
+        },
+    ))
 }
 
 fn content_disposition(filename: &str) -> Result<HeaderValue, LificError> {
@@ -250,7 +275,7 @@ pub(super) async fn export_issue(
     }
     let project_id = with_read(&db, |conn| {
         let id = crate::db::queries::resolve_identifier(conn, &identifier)?;
-        Ok(crate::db::queries::get_issue(conn, id)?.project_id)
+        crate::db::queries::issue_project_id(conn, id)
     })?;
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
     let slot = db.acquire_export_slot()?;
@@ -282,7 +307,7 @@ pub(super) async fn export_page(
     }
     let project_id = with_read(&db, |conn| {
         let id = crate::db::queries::resolve_page_identifier(conn, &identifier)?;
-        Ok(crate::db::queries::get_page(conn, id)?.project_id)
+        crate::db::queries::page_project_id(conn, id)
     })?;
     match project_id {
         Some(pid) => authz::require_role(&db, &identity, pid, Role::Viewer)?,
@@ -344,7 +369,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        EXPORT_TEST_GATE, ExportTestGate, PreparedExport, blocking_export, stream_response,
+        blocking_export, stream_response, ExportTestGate, PreparedExport, EXPORT_TEST_GATE,
     };
     use crate::api::test_helpers::{
         json_post, parse_json, seed_project, setup_membership_test, test_app,
@@ -432,12 +457,10 @@ mod tests {
         let bundle = parse_json(resp).await;
         assert_eq!(bundle["root"], "TST");
         assert_eq!(bundle["files"][0]["path"], "TST/issues/tst-1-export-me.md");
-        assert!(
-            bundle["files"][0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("# Export me")
-        );
+        assert!(bundle["files"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("# Export me"));
     }
 
     #[tokio::test]
@@ -537,35 +560,30 @@ mod tests {
             resp.headers()[axum::http::header::CONTENT_TYPE],
             "application/zip"
         );
-        assert!(
-            resp.headers()
-                .get(axum::http::header::CONTENT_LENGTH)
-                .is_none()
-        );
+        assert!(resp
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .is_none());
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(!body.is_empty());
         assert_eq!(&body[..2], b"PK");
     }
 
     #[tokio::test]
-    async fn stream_error_waits_for_the_queued_chunk() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        sender.send(Ok(Bytes::from_static(b"chunk"))).await.unwrap();
-        let send_error = tokio::spawn(async move {
-            super::send_stream_item(
-                &sender,
-                Err(std::io::Error::other("read failed")),
-                Duration::from_secs(1),
-            )
-            .await
-        });
+    async fn stream_error_follows_the_queued_chunk() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
+        sender.send(Bytes::from_static(b"chunk")).await.unwrap();
+        terminal_sender
+            .send(Err(std::io::Error::other("read failed")))
+            .unwrap();
+        drop(sender);
 
-        assert_eq!(receiver.recv().await.unwrap().unwrap(), "chunk");
-        assert!(send_error.await.unwrap());
-        assert_eq!(
-            receiver.recv().await.unwrap().unwrap_err().to_string(),
-            "read failed"
-        );
+        let error = super::stream_body(receiver, terminal_receiver)
+            .collect()
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "read failed");
     }
 
     #[tokio::test]
@@ -639,6 +657,102 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(LificError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn issue_authorization_does_not_materialize_metadata_before_capacity() {
+        let (db, _, _, _, viewer, _, project_id) = setup_membership_test();
+        let issue = {
+            let conn = db.write().unwrap();
+            let issue = crate::db::queries::create_issue(
+                &conn,
+                &crate::db::models::CreateIssue {
+                    project_id,
+                    title: "Bound authorization".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO labels (project_id, name) VALUES (?1, X'80')",
+                [project_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO issue_labels (issue_id, label_id) VALUES (?1, last_insert_rowid())",
+                [issue.id],
+            )
+            .unwrap();
+            issue
+        };
+        let _first = db.acquire_export_slot().unwrap();
+        let _second = db.acquire_export_slot().unwrap();
+
+        let result = super::export_issue(
+            axum::extract::State(db),
+            axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: crate::db::models::AuthUser {
+                    id: viewer.id,
+                    username: viewer.username,
+                    display_name: viewer.display_name,
+                    is_admin: viewer.is_admin,
+                },
+                transport: crate::actor::Transport::Web,
+            })),
+            axum::extract::Path(issue.identifier),
+            axum::extract::Query(super::ExportQuery { format: None }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(LificError::TooManyRequests(_))));
+    }
+
+    #[tokio::test]
+    async fn page_authorization_does_not_materialize_metadata_before_capacity() {
+        let (db, _, _, _, viewer, _, project_id) = setup_membership_test();
+        let page = {
+            let conn = db.write().unwrap();
+            let page = crate::db::queries::create_page(
+                &conn,
+                &crate::db::models::CreatePage {
+                    project_id: Some(project_id),
+                    title: "Bound authorization".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO labels (project_id, name) VALUES (?1, X'80')",
+                [project_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO page_labels (page_id, label_id) VALUES (?1, last_insert_rowid())",
+                [page.id],
+            )
+            .unwrap();
+            page
+        };
+        let _first = db.acquire_export_slot().unwrap();
+        let _second = db.acquire_export_slot().unwrap();
+
+        let result = super::export_page(
+            axum::extract::State(db),
+            axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
+                user: crate::db::models::AuthUser {
+                    id: viewer.id,
+                    username: viewer.username,
+                    display_name: viewer.display_name,
+                    is_admin: viewer.is_admin,
+                },
+                transport: crate::actor::Transport::Web,
+            })),
+            axum::extract::Path(page.identifier),
+            axum::extract::Query(super::ExportQuery { format: None }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(LificError::TooManyRequests(_))));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -757,7 +871,7 @@ mod tests {
             .expect("stalled response should release its export slot")
             .unwrap();
         assert!(!temp_path.exists());
-        drop(response);
+        assert!(response.into_body().collect().await.is_err());
     }
 
     #[tokio::test]
@@ -792,5 +906,6 @@ mod tests {
             .expect("stream deadline should release the export slot")
             .unwrap();
         assert!(!temp_path.exists());
+        assert!(body.collect().await.is_err());
     }
 }

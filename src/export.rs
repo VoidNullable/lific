@@ -73,37 +73,82 @@ fn ensure_comment_sizes(conn: &Connection, issue_id: i64) -> Result<(), LificErr
     Ok(())
 }
 
-fn ensure_issue_metadata_size(conn: &Connection, issue_id: i64) -> Result<(), LificError> {
-    let (items, bytes): (i64, i64) = conn.query_row(
+fn ensure_issue_preflight(
+    conn: &Connection,
+    issue_id: i64,
+    max_total_bytes: i64,
+) -> Result<(), LificError> {
+    let (metadata_items, source_bytes): (i64, i64) = conn.query_row(
         "SELECT
             (SELECT COUNT(*) FROM issue_labels WHERE issue_id = ?1) +
             (SELECT COUNT(*) FROM issue_relations WHERE source_id = ?1 OR target_id = ?1),
+            length(CAST(i.title AS BLOB)) +
+            length(CAST(i.description AS BLOB)) +
+            length(CAST(COALESCE(i.source, '') AS BLOB)) +
+            length(CAST(p.name AS BLOB)) +
+            length(CAST(p.identifier AS BLOB)) +
+            length(CAST(p.description AS BLOB)) +
+            length(CAST(COALESCE(p.emoji, '') AS BLOB)) +
+            COALESCE(length(CAST(m.name AS BLOB)), 0) +
+            (SELECT COALESCE(SUM(length(CAST(c.content AS BLOB)) +
+                                 length(CAST(COALESCE(u.display_name, u.username) AS BLOB))), 0)
+               FROM comments c JOIN users u ON u.id = c.user_id WHERE c.issue_id = ?1) +
             (SELECT COALESCE(SUM(length(CAST(l.name AS BLOB))), 0)
                FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = ?1) +
-            (SELECT COALESCE(SUM(length(CAST(p.identifier AS BLOB)) + 20), 0)
+            (SELECT COALESCE(SUM(length(CAST(other_project.identifier AS BLOB)) + 20), 0)
                FROM issue_relations ir
                JOIN issues other ON other.id = CASE WHEN ir.source_id = ?1 THEN ir.target_id ELSE ir.source_id END
-               JOIN projects p ON p.id = other.project_id
-              WHERE ir.source_id = ?1 OR ir.target_id = ?1) +
-            (SELECT COALESCE(SUM(length(CAST(COALESCE(u.display_name, u.username) AS BLOB))), 0)
-               FROM comments c JOIN users u ON u.id = c.user_id WHERE c.issue_id = ?1) +
-            (SELECT COALESCE(length(CAST(m.name AS BLOB)), 0)
-               FROM issues i LEFT JOIN modules m ON m.id = i.module_id WHERE i.id = ?1)",
+               JOIN projects other_project ON other_project.id = other.project_id
+              WHERE ir.source_id = ?1 OR ir.target_id = ?1)
+         FROM issues i
+         JOIN projects p ON p.id = i.project_id
+         LEFT JOIN modules m ON m.id = i.module_id
+         WHERE i.id = ?1",
         [issue_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    ensure_metadata_size(items, bytes)
+    ensure_metadata_size(metadata_items, 0)?;
+    if source_bytes > max_total_bytes {
+        return Err(LificError::BadRequest(format!(
+            "issue source exceeds the {max_total_bytes} byte total export limit"
+        )));
+    }
+    Ok(())
 }
 
-fn ensure_page_metadata_size(conn: &Connection, page_id: i64) -> Result<(), LificError> {
-    let (items, bytes): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(length(CAST(l.name AS BLOB))), 0)
-           FROM page_labels pl JOIN labels l ON l.id = pl.label_id
-          WHERE pl.page_id = ?1",
+fn ensure_page_preflight(
+    conn: &Connection,
+    page_id: i64,
+    max_total_bytes: i64,
+) -> Result<(), LificError> {
+    let (metadata_items, source_bytes): (i64, i64) = conn.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM page_labels WHERE page_id = ?1) +
+            (SELECT COUNT(*) FROM folders WHERE project_id = page.project_id),
+            length(CAST(page.title AS BLOB)) +
+            length(CAST(page.content AS BLOB)) +
+            COALESCE(length(CAST(project.name AS BLOB)) +
+                     length(CAST(project.identifier AS BLOB)) +
+                     length(CAST(project.description AS BLOB)) +
+                     length(CAST(COALESCE(project.emoji, '') AS BLOB)), 0) +
+            (SELECT COALESCE(SUM(length(CAST(label.name AS BLOB))), 0)
+               FROM page_labels JOIN labels label ON label.id = page_labels.label_id
+              WHERE page_labels.page_id = ?1) +
+            (SELECT COALESCE(SUM(length(CAST(name AS BLOB))), 0)
+               FROM folders WHERE project_id = page.project_id)
+         FROM pages page
+         LEFT JOIN projects project ON project.id = page.project_id
+         WHERE page.id = ?1",
         [page_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    ensure_metadata_size(items, bytes)
+    ensure_metadata_size(metadata_items, 0)?;
+    if source_bytes > max_total_bytes {
+        return Err(LificError::BadRequest(format!(
+            "page source exceeds the {max_total_bytes} byte total export limit"
+        )));
+    }
+    Ok(())
 }
 
 fn bounded_folders(conn: &Connection, project_id: i64) -> Result<Vec<Folder>, LificError> {
@@ -246,10 +291,7 @@ fn validate_bundle(bundle: &ExportBundle) -> Result<(), LificError> {
     Ok(())
 }
 
-fn bounded_issue_comments(
-    conn: &Connection,
-    issue_id: i64,
-) -> Result<Vec<Comment>, LificError> {
+fn bounded_issue_comments(conn: &Connection, issue_id: i64) -> Result<Vec<Comment>, LificError> {
     let parent = queries::comments::CommentParent::Issue(issue_id);
     ensure_comment_sizes(conn, issue_id)?;
     if queries::comments::count_comments(conn, parent, None)? > MAX_EXPORT_COMMENTS {
@@ -274,10 +316,7 @@ pub fn export_issue(conn: &Connection, identifier: &str) -> Result<ExportBundle,
     Ok(bundle)
 }
 
-fn export_issue_snapshot(
-    conn: &Connection,
-    identifier: &str,
-) -> Result<ExportBundle, LificError> {
+fn export_issue_snapshot(conn: &Connection, identifier: &str) -> Result<ExportBundle, LificError> {
     let issue_id = queries::resolve_identifier(conn, identifier)?;
     let oversized: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?1 AND (
@@ -289,14 +328,12 @@ fn export_issue_snapshot(
         |row| row.get(0),
     )?;
     if oversized != 0 {
-        return Err(LificError::BadRequest("issue content exceeds export limit".into()));
+        return Err(LificError::BadRequest(
+            "issue content exceeds export limit".into(),
+        ));
     }
-    ensure_issue_metadata_size(conn, issue_id)?;
-    let project_id = conn.query_row(
-        "SELECT project_id FROM issues WHERE id = ?1",
-        [issue_id],
-        |row| row.get(0),
-    )?;
+    ensure_issue_preflight(conn, issue_id, MAX_EXPORT_TOTAL_BYTES as i64)?;
+    let project_id = queries::issue_project_id(conn, issue_id)?;
     let project = bounded_project(conn, project_id)?;
     let issue = queries::get_issue(conn, issue_id)?;
     ensure_text_size("issue title", &issue.title)?;
@@ -322,10 +359,7 @@ pub fn export_page(conn: &Connection, identifier: &str) -> Result<ExportBundle, 
     Ok(bundle)
 }
 
-fn export_page_snapshot(
-    conn: &Connection,
-    identifier: &str,
-) -> Result<ExportBundle, LificError> {
+fn export_page_snapshot(conn: &Connection, identifier: &str) -> Result<ExportBundle, LificError> {
     let page_id = queries::resolve_page_identifier(conn, identifier)?;
     let oversized: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pages WHERE id = ?1 AND (length(CAST(title AS BLOB)) > ?2 OR length(CAST(content AS BLOB)) > ?2))",
@@ -333,23 +367,22 @@ fn export_page_snapshot(
         |row| row.get(0),
     )?;
     if oversized != 0 {
-        return Err(LificError::BadRequest("page content exceeds export limit".into()));
+        return Err(LificError::BadRequest(
+            "page content exceeds export limit".into(),
+        ));
     }
-    ensure_page_metadata_size(conn, page_id)?;
-    let project_id = conn.query_row(
-        "SELECT project_id FROM pages WHERE id = ?1",
-        [page_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )?;
+    ensure_page_preflight(conn, page_id, MAX_EXPORT_TOTAL_BYTES as i64)?;
+    let project_id = queries::page_project_id(conn, page_id)?;
     let project = project_id
         .map(|project_id| bounded_project(conn, project_id))
         .transpose()?;
     let page = queries::get_page(conn, page_id)?;
     ensure_text_size("page title", &page.title)?;
     ensure_text_size("page content", &page.content)?;
-    let root = project
-        .as_ref()
-        .map_or_else(|| "workspace".to_string(), |project| project.identifier.clone());
+    let root = project.as_ref().map_or_else(
+        || "workspace".to_string(),
+        |project| project.identifier.clone(),
+    );
     let folders = project_id
         .map(|project_id| bounded_folders(conn, project_id))
         .transpose()?
@@ -381,7 +414,8 @@ fn ensure_project_preflight(
         comment_bytes,
         metadata_items,
         metadata_bytes,
-    ): (i64, i64, i64, i64, i64, i64, i64, i64) = conn.query_row(
+        project_bytes,
+    ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = conn.query_row(
         "SELECT
             (SELECT COUNT(*) FROM issues WHERE project_id = ?1),
             (SELECT COUNT(*) FROM pages WHERE project_id = ?1),
@@ -416,12 +450,18 @@ fn ensure_project_preflight(
                    JOIN projects source_project ON source_project.id = source.project_id
                    JOIN issues target ON target.id = ir.target_id
                    JOIN projects target_project ON target_project.id = target.project_id
-                  WHERE source.project_id = ?1 OR target.project_id = ?1)",
+                  WHERE source.project_id = ?1 OR target.project_id = ?1),
+            (SELECT length(CAST(name AS BLOB)) +
+                    length(CAST(identifier AS BLOB)) +
+                    length(CAST(description AS BLOB)) +
+                    length(CAST(COALESCE(emoji, '') AS BLOB))
+               FROM projects WHERE id = ?1)",
         [project_id],
         |row| {
             Ok((
                 row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
                 row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                row.get(8)?,
             ))
         },
     )?;
@@ -443,6 +483,7 @@ fn ensure_project_preflight(
         .checked_add(page_bytes)
         .and_then(|bytes| bytes.checked_add(comment_bytes))
         .and_then(|bytes| bytes.checked_add(metadata_bytes))
+        .and_then(|bytes| bytes.checked_add(project_bytes))
         .ok_or_else(|| LificError::BadRequest("export size overflow".into()))?;
     if source_bytes > max_total_bytes {
         return Err(LificError::BadRequest(format!(
@@ -469,7 +510,9 @@ fn ensure_project_preflight(
         |row| row.get(0),
     )?;
     if oversized != 0 {
-        return Err(LificError::BadRequest("project content exceeds export limit".into()));
+        return Err(LificError::BadRequest(
+            "project content exceeds export limit".into(),
+        ));
     }
     Ok(())
 }
@@ -479,8 +522,8 @@ fn export_project_snapshot(
     identifier: &str,
 ) -> Result<ExportBundle, LificError> {
     let project_id = queries::resolve_project_identifier(conn, identifier)?;
+    ensure_project_preflight(conn, project_id, MAX_EXPORT_TOTAL_BYTES as i64)?;
     let project = bounded_project(conn, project_id)?;
-    ensure_project_preflight(conn, project.id, MAX_EXPORT_TOTAL_BYTES as i64)?;
     let issue_ids = conn
         .prepare_cached("SELECT id FROM issues WHERE project_id = ?1 ORDER BY id")?
         .query_map([project.id], |row| row.get(0))?
@@ -728,10 +771,7 @@ pub fn bundle_to_zip_file(bundle: &ExportBundle, path: &Path) -> Result<(), Lifi
     Ok(())
 }
 
-pub(crate) fn bundle_to_json_file(
-    bundle: &ExportBundle,
-    path: &Path,
-) -> Result<(), LificError> {
+pub(crate) fn bundle_to_json_file(bundle: &ExportBundle, path: &Path) -> Result<(), LificError> {
     bundle_to_json_file_with_limit(bundle, path, MAX_EXPORT_JSON_BYTES)
 }
 
@@ -1054,7 +1094,10 @@ mod tests {
             .unwrap();
         assert!(issue_file.content.contains("identifier: EXP-1"));
         assert!(issue_file.content.contains("## Comments"));
-        assert_eq!(issue_file.content.matches("First exported comment").count(), 1);
+        assert_eq!(
+            issue_file.content.matches("First exported comment").count(),
+            1
+        );
     }
 
     // LIF-136: duplicate relations must appear in exported frontmatter, both
@@ -1520,12 +1563,8 @@ mod tests {
             }],
         };
         let output = scratch_dir("json-byte-cap");
-        let error = bundle_to_json_file_with_limit(
-            &bundle,
-            &output.path().join("export.json"),
-            64,
-        )
-        .unwrap_err();
+        let error = bundle_to_json_file_with_limit(&bundle, &output.path().join("export.json"), 64)
+            .unwrap_err();
 
         assert!(error.to_string().contains("encoded-output limit"));
     }
@@ -1584,6 +1623,85 @@ mod tests {
         .unwrap();
 
         let error = export_project(&conn, "META").unwrap_err();
+        assert!(error.to_string().contains("too many metadata entries"));
+    }
+
+    #[test]
+    fn issue_preflight_combines_all_source_bytes() {
+        let db = open_memory().unwrap();
+        let conn = db.write().unwrap();
+        let project = queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Source project".into(),
+                identifier: "ONE".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let issue = queries::create_issue(
+            &conn,
+            &CreateIssue {
+                project_id: project.id,
+                title: "Source title".into(),
+                description: "Source description".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let error = ensure_issue_preflight(&conn, issue.id, 32).unwrap_err();
+        assert!(error.to_string().contains("source exceeds"));
+    }
+
+    #[test]
+    fn page_export_combines_label_and_folder_metadata_counts() {
+        let db = open_memory().unwrap();
+        let conn = db.write().unwrap();
+        let project = queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Metadata project".into(),
+                identifier: "TWO".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let page = queries::create_page(
+            &conn,
+            &CreatePage {
+                project_id: Some(project.id),
+                title: "Metadata page".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 2501
+             )
+             INSERT INTO labels (project_id, name)
+             SELECT ?1, 'label-' || value FROM sequence",
+            [project.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO page_labels (page_id, label_id)
+             SELECT ?1, id FROM labels WHERE project_id = ?2",
+            rusqlite::params![page.id, project.id],
+        )
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE sequence(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 2500
+             )
+             INSERT INTO folders (project_id, name)
+             SELECT ?1, 'folder-' || value FROM sequence",
+            [project.id],
+        )
+        .unwrap();
+
+        let error = export_page(&conn, &page.identifier).unwrap_err();
         assert!(error.to_string().contains("too many metadata entries"));
     }
 }

@@ -70,8 +70,7 @@ fn populate_page_labels(conn: &Connection, pages: &mut [Page]) -> Result<(), Lif
         .iter()
         .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
         .collect();
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -242,6 +241,18 @@ pub fn get_page(conn: &Connection, id: i64) -> Result<Page, LificError> {
         })?;
     page.labels = page_labels(conn, id)?;
     Ok(page)
+}
+
+pub fn page_project_id(conn: &Connection, id: i64) -> Result<Option<i64>, LificError> {
+    conn.query_row("SELECT project_id FROM pages WHERE id = ?1", [id], |row| {
+        row.get(0)
+    })
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("page {id} not found"))
+        }
+        other => other.into(),
+    })
 }
 
 pub fn resolve_page_identifier(conn: &Connection, identifier: &str) -> Result<i64, LificError> {
@@ -966,7 +977,18 @@ mod tests {
         .unwrap();
         create_page(&conn, &blank_page(Some(pid), "Plain")).unwrap();
 
-        let filtered = list_pages(&conn, Some(pid), None, Some("design"), None, None, None, None, None).unwrap();
+        let filtered = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            Some("design"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Designy");
     }
@@ -1129,11 +1151,33 @@ mod tests {
         )
         .unwrap();
 
-        let archived = list_pages(&conn, Some(pid), None, None, Some("archived"), None, None, None, None).unwrap();
+        let archived = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            Some("archived"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].title, "Archived doc");
 
-        let drafts = list_pages(&conn, Some(pid), None, None, Some("draft"), None, None, None, None).unwrap();
+        let drafts = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            Some("draft"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].title, "Drafty");
     }
@@ -1143,7 +1187,12 @@ mod tests {
     /// Pin a page's timestamps so ordering tests don't race the clock.
     /// The `pages_updated` trigger rewrites updated_at to now on every
     /// UPDATE, which would silently overwrite the pin — drop it first.
-    fn pin_page_timestamps(conn: &rusqlite::Connection, page_id: i64, created: &str, updated: &str) {
+    fn pin_page_timestamps(
+        conn: &rusqlite::Connection,
+        page_id: i64,
+        created: &str,
+        updated: &str,
+    ) {
         conn.execute_batch("DROP TRIGGER IF EXISTS pages_updated;")
             .unwrap();
         conn.execute(
@@ -1163,12 +1212,33 @@ mod tests {
         create_page(&conn, &blank_page(Some(pid), "cherry")).unwrap();
 
         // COLLATE NOCASE: "Apple" sorts before "banana" despite case.
-        let asc = list_pages(&conn, Some(pid), None, None, None, Some("title"), None, None, None).unwrap();
+        let asc = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            None,
+            Some("title"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let titles: Vec<&str> = asc.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(titles, vec!["Apple", "banana", "cherry"]);
 
-        let desc =
-            list_pages(&conn, Some(pid), None, None, None, Some("title"), Some("desc"), None, None).unwrap();
+        let desc = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            None,
+            Some("title"),
+            Some("desc"),
+            None,
+            None,
+        )
+        .unwrap();
         let titles: Vec<&str> = desc.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(titles, vec!["cherry", "banana", "Apple"]);
     }
@@ -1180,11 +1250,31 @@ mod tests {
         let pid = seed_project(&conn, "TST");
         let stale = create_page(&conn, &blank_page(Some(pid), "Stale")).unwrap();
         let fresh = create_page(&conn, &blank_page(Some(pid), "Fresh")).unwrap();
-        pin_page_timestamps(&conn, stale.id, "2026-01-01 00:00:00", "2026-01-02 00:00:00");
-        pin_page_timestamps(&conn, fresh.id, "2026-01-01 00:00:00", "2026-06-01 00:00:00");
+        pin_page_timestamps(
+            &conn,
+            stale.id,
+            "2026-01-01 00:00:00",
+            "2026-01-02 00:00:00",
+        );
+        pin_page_timestamps(
+            &conn,
+            fresh.id,
+            "2026-01-01 00:00:00",
+            "2026-06-01 00:00:00",
+        );
 
-        let pages =
-            list_pages(&conn, Some(pid), None, None, None, Some("updated"), Some("desc"), None, None).unwrap();
+        let pages = list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            None,
+            Some("updated"),
+            Some("desc"),
+            None,
+            None,
+        )
+        .unwrap();
         let titles: Vec<&str> = pages.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(titles, vec!["Fresh", "Stale"]);
     }
@@ -1197,10 +1287,32 @@ mod tests {
         create_page(&conn, &blank_page(Some(pid), "P")).unwrap();
 
         assert!(
-            list_pages(&conn, Some(pid), None, None, None, Some("content; --"), None, None, None).is_err(),
+            list_pages(
+                &conn,
+                Some(pid),
+                None,
+                None,
+                None,
+                Some("content; --"),
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "unknown order_by must error, not be interpolated"
         );
-        assert!(list_pages(&conn, Some(pid), None, None, None, None, Some("up"), None, None).is_err());
+        assert!(list_pages(
+            &conn,
+            Some(pid),
+            None,
+            None,
+            None,
+            None,
+            Some("up"),
+            None,
+            None
+        )
+        .is_err());
     }
 
     // ── LIF-183: page pinning ────────────────────────────────

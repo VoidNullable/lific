@@ -10,12 +10,12 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
     authz::filter_visible,
-    db::{DbPool, models, queries},
+    db::{models, queries, DbPool},
     links::{IssueLinkContext, MarkdownReference},
 };
 
 use super::schemas::*;
-use super::{LificMcp, current_issue_link_context, sanitize_error};
+use super::{current_issue_link_context, sanitize_error, LificMcp};
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
 /// **zero** projects, so the first agent connecting to a fresh install learns
@@ -1845,7 +1845,9 @@ impl LificMcp {
         description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). Issues and pages return the markdown; projects return the exported file paths."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
-        self.export_inner(input).await.unwrap_or_else(error_response)
+        self.export_inner(input)
+            .await
+            .unwrap_or_else(error_response)
     }
 
     async fn export_inner(&self, input: ExportInput) -> Result<String, String> {
@@ -1863,13 +1865,13 @@ impl LificMcp {
         let kind = if looks_like_page_identifier(ident) {
             let project_id = self.read(|conn| {
                 let id = queries::resolve_page_identifier(conn, ident)?;
-                Ok(queries::get_page(conn, id)?.project_id)
+                queries::page_project_id(conn, id)
             })?;
             require_page_role_mcp(&self.db, project_id, models::Role::Viewer)?;
             Kind::Page
         } else if let Ok(project_id) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, ident)?;
-            Ok(queries::get_issue(conn, id)?.project_id)
+            queries::issue_project_id(conn, id)
         }) {
             require_role_mcp(&self.db, project_id, models::Role::Viewer)?;
             Kind::Issue
@@ -1890,9 +1892,7 @@ impl LificMcp {
             let bundle = match kind {
                 Kind::Issue => this.read(|conn| crate::export::export_issue(conn, &identifier)),
                 Kind::Page => this.read(|conn| crate::export::export_page(conn, &identifier)),
-                Kind::Project => {
-                    this.read(|conn| crate::export::export_project(conn, &identifier))
-                }
+                Kind::Project => this.read(|conn| crate::export::export_project(conn, &identifier)),
             }?;
             Ok::<_, String>((bundle, slot))
         })
@@ -2150,8 +2150,10 @@ impl LificMcp {
                             &models::UpdateIssue {
                                 status: models::Status::parse_opt(input.set_status.as_deref())
                                     .map_err(crate::error::LificError::BadRequest)?,
-                                priority: models::Priority::parse_opt(input.set_priority.as_deref())
-                                    .map_err(crate::error::LificError::BadRequest)?,
+                                priority: models::Priority::parse_opt(
+                                    input.set_priority.as_deref(),
+                                )
+                                .map_err(crate::error::LificError::BadRequest)?,
                                 module_id: set_module_id.map(Some),
                                 ..Default::default()
                             },
@@ -3141,11 +3143,7 @@ impl LificMcp {
                 let lead_user_id = super::current_auth_user().and_then(|u| {
                     self.read(|conn| {
                         Ok(conn
-                            .query_row(
-                                "SELECT 1 FROM users WHERE id = ?1",
-                                rusqlite::params![u.id],
-                                |_| Ok(()),
-                            )
+                            .query_row("SELECT 1 FROM users WHERE id = ?1", rusqlite::params![u.id], |_| Ok(()))
                             .is_ok())
                     })
                     .ok()
@@ -3176,10 +3174,7 @@ impl LificMcp {
             }
             ("project", "update") => {
                 if matches!((&input.current_name, &input.project), (Some(_), None)) {
-                    return Err(
-                        "project updates must be targeted with project=<identifier>, not current_name"
-                            .into(),
-                    );
+                    return Err("project updates must be targeted with project=<identifier>, not current_name".into());
                 }
                 let Some(ref proj) = input.project else {
                     return Err("project identifier required".into());
@@ -4628,7 +4623,11 @@ mod tests {
         seed_first_admin(&db);
         let realtime = crate::realtime::RealtimeHub::new();
         let rx = realtime.subscribe();
-        (LificMcp::with_realtime(db, realtime), rx, acquire_test_guard())
+        (
+            LificMcp::with_realtime(db, realtime),
+            rx,
+            acquire_test_guard(),
+        )
     }
 
     fn drain_realtime(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::RealtimeMessage>) {
@@ -6222,19 +6221,18 @@ mod tests {
         };
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let result =
-            crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
-                m.add_comment(Parameters(AddCommentInput {
-                    identifier: "SRC-1".into(),
-                    content: "Unique comment needle".into(),
-                }));
-                m.search(Parameters(SearchInput {
-                    query: "needle".into(),
-                    result_type: Some("comment".into()),
-                    ..Default::default()
-                }))
-            })
-            .await;
+        let result = crate::mcp::with_request_context(Some(auth_user), Some(context), || async {
+            m.add_comment(Parameters(AddCommentInput {
+                identifier: "SRC-1".into(),
+                content: "Unique comment needle".into(),
+            }));
+            m.search(Parameters(SearchInput {
+                query: "needle".into(),
+                result_type: Some("comment".into()),
+                ..Default::default()
+            }))
+        })
+        .await;
 
         assert!(
             result.contains(
@@ -6315,14 +6313,8 @@ mod tests {
         let attachment_id = m
             .write(|conn| {
                 use crate::db::queries::attachments as att;
-                let attachment = att::create_attachment(
-                    conn,
-                    "sha",
-                    "server.log",
-                    "text/plain",
-                    64,
-                    None,
-                )?;
+                let attachment =
+                    att::create_attachment(conn, "sha", "server.log", "text/plain", 64, None)?;
                 att::link_attachment(
                     conn,
                     attachment.id,
@@ -6339,7 +6331,10 @@ mod tests {
             ..Default::default()
         }));
         assert!(result.contains("[attachment] server.log"), "got: {result}");
-        assert!(result.contains(&format!("#{attachment_id}")), "got: {result}");
+        assert!(
+            result.contains(&format!("#{attachment_id}")),
+            "got: {result}"
+        );
         assert!(result.contains("SRC-1"), "got: {result}");
     }
 
@@ -7150,7 +7145,10 @@ mod tests {
         assert!(result.starts_with("Comment #"), "got: {result}");
 
         let comment_id = comment_id_from(&result);
-        assert_eq!(links_for(&m, att), vec![("comment".to_string(), comment_id)]);
+        assert_eq!(
+            links_for(&m, att),
+            vec![("comment".to_string(), comment_id)]
+        );
     }
 
     #[test]
@@ -7167,7 +7165,10 @@ mod tests {
             content: format!("/api/attachments/{old}"),
         }));
         let comment_id = comment_id_from(&created);
-        assert_eq!(links_for(&m, old), vec![("comment".to_string(), comment_id)]);
+        assert_eq!(
+            links_for(&m, old),
+            vec![("comment".to_string(), comment_id)]
+        );
 
         let result = m.edit_comment(Parameters(EditCommentInput {
             comment_id,
@@ -7176,7 +7177,10 @@ mod tests {
         assert!(result.starts_with("Comment #"), "got: {result}");
 
         assert!(links_for(&m, old).is_empty(), "dropped reference unlinks");
-        assert_eq!(links_for(&m, new), vec![("comment".to_string(), comment_id)]);
+        assert_eq!(
+            links_for(&m, new),
+            vec![("comment".to_string(), comment_id)]
+        );
     }
 
     #[test]
@@ -7789,27 +7793,35 @@ mod tests {
         assert!(created.starts_with("Created"), "got: {created}");
 
         // Issue shape (EXP-1) returns the issue markdown.
-        let issue = m.export(Parameters(ExportInput {
-            identifier: "EXP-1".into(),
-        })).await;
+        let issue = m
+            .export(Parameters(ExportInput {
+                identifier: "EXP-1".into(),
+            }))
+            .await;
         assert!(issue.contains("issue body here"), "got: {issue}");
 
         // Page shape (EXP-DOC-1) returns the page markdown.
-        let page = m.export(Parameters(ExportInput {
-            identifier: "EXP-DOC-1".into(),
-        })).await;
+        let page = m
+            .export(Parameters(ExportInput {
+                identifier: "EXP-DOC-1".into(),
+            }))
+            .await;
         assert!(page.contains("page body here"), "got: {page}");
 
         // Bare project shape (EXP) returns the exported file listing.
-        let project = m.export(Parameters(ExportInput {
-            identifier: "EXP".into(),
-        })).await;
+        let project = m
+            .export(Parameters(ExportInput {
+                identifier: "EXP".into(),
+            }))
+            .await;
         assert!(project.contains("exported file(s)"), "got: {project}");
 
         // Unknown identifiers name all three shapes in the error.
-        let err = m.export(Parameters(ExportInput {
-            identifier: "NOPE-999".into(),
-        })).await;
+        let err = m
+            .export(Parameters(ExportInput {
+                identifier: "NOPE-999".into(),
+            }))
+            .await;
         assert!(
             err.contains("not a known issue, page, or project"),
             "got: {err}"
@@ -7817,9 +7829,11 @@ mod tests {
 
         let first = m.db.acquire_export_slot().unwrap();
         let second = m.db.acquire_export_slot().unwrap();
-        let blocked = m.export(Parameters(ExportInput {
-            identifier: "EXP".into(),
-        })).await;
+        let blocked = m
+            .export(Parameters(ExportInput {
+                identifier: "EXP".into(),
+            }))
+            .await;
         assert!(blocked.contains("too many exports"), "got: {blocked}");
         drop((first, second));
     }
@@ -7846,9 +7860,11 @@ mod tests {
             "get_issue mangled content: {detail}"
         );
 
-        let exported = m.export(Parameters(ExportInput {
-            identifier: "ESC-1".into(),
-        })).await;
+        let exported = m
+            .export(Parameters(ExportInput {
+                identifier: "ESC-1".into(),
+            }))
+            .await;
         assert!(
             exported.contains(description.trim_end()),
             "export mangled content: {exported}"
@@ -7896,7 +7912,7 @@ mod tests {
             realtime_events(&mut rx),
             vec![crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,
-                issue_id,
+                issue_id
             }]
         );
     }
@@ -9175,9 +9191,7 @@ mod tests {
         );
         assert_eq!(
             deleted,
-            format!(
-                "Comment #{comment_id} deleted from [PRJ-1](https://tracker.example/PRJ/issues/PRJ-1)"
-            )
+            format!("Comment #{comment_id} deleted from [PRJ-1](https://tracker.example/PRJ/issues/PRJ-1)")
         );
     }
 
@@ -9206,7 +9220,7 @@ mod tests {
             realtime_events(&mut events),
             vec![crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,
-                issue_id,
+                issue_id
             }]
         );
 
@@ -9215,7 +9229,7 @@ mod tests {
             realtime_events(&mut events),
             vec![crate::realtime::RealtimeEvent::IssueUpdated {
                 project_id,
-                issue_id,
+                issue_id
             }]
         );
     }
@@ -9594,26 +9608,25 @@ mod tests {
         assert_eq!(linked, "TST-1 blocks TST-2");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
 
-        let (live, stale) =
-            crate::mcp::with_request_context(None, Some(context), || async {
-                let live = m.get_activity(Parameters(GetActivityInput {
-                    identifier: "TST".into(),
-                    ..Default::default()
-                }));
-                m.manage_resource(Parameters(ManageResourceInput {
-                    resource_type: "project".into(),
-                    action: "update".into(),
-                    project: Some("TST".into()),
-                    identifier: Some("NEW".into()),
-                    ..Default::default()
-                }));
-                let stale = m.get_activity(Parameters(GetActivityInput {
-                    identifier: "NEW".into(),
-                    ..Default::default()
-                }));
-                (live, stale)
-            })
-            .await;
+        let (live, stale) = crate::mcp::with_request_context(None, Some(context), || async {
+            let live = m.get_activity(Parameters(GetActivityInput {
+                identifier: "TST".into(),
+                ..Default::default()
+            }));
+            m.manage_resource(Parameters(ManageResourceInput {
+                resource_type: "project".into(),
+                action: "update".into(),
+                project: Some("TST".into()),
+                identifier: Some("NEW".into()),
+                ..Default::default()
+            }));
+            let stale = m.get_activity(Parameters(GetActivityInput {
+                identifier: "NEW".into(),
+                ..Default::default()
+            }));
+            (live, stale)
+        })
+        .await;
 
         assert!(
             live.contains(
@@ -9653,9 +9666,7 @@ mod tests {
         .await;
 
         assert!(
-            out.contains(
-                "created plan_step [TST-PLAN-1](https://tracker.example/TST/plans/1): Exercise the link"
-            ),
+            out.contains("created plan_step [TST-PLAN-1](https://tracker.example/TST/plans/1): Exercise the link"),
             "got: {out}"
         );
     }
@@ -10059,7 +10070,7 @@ mod tests {
             vec![
                 crate::realtime::RealtimeEvent::IssueUpdated {
                     project_id,
-                    issue_id,
+                    issue_id
                 },
                 crate::realtime::RealtimeEvent::ProjectUpdated { project_id },
             ]
@@ -10900,7 +10911,8 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_read_denies_non_member_allows_viewer() {
-        let (m, _admin, lead, _maintainer, viewer, non_member, project_id, _guard) = setup_membership_mcp();
+        let (m, _admin, lead, _maintainer, viewer, non_member, project_id, _guard) =
+            setup_membership_mcp();
         let _ = project_id;
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
@@ -11447,7 +11459,8 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_create_gated_by_maintainer_role() {
-        let (m, admin, lead, maintainer, viewer, non_member, _project_id, _guard) = setup_membership_mcp();
+        let (m, admin, lead, maintainer, viewer, non_member, _project_id, _guard) =
+            setup_membership_mcp();
 
         for (user, expect_ok) in [
             (&non_member, false),
@@ -11479,7 +11492,8 @@ mod authz_gating_tests {
 
     #[test]
     fn issue_update_and_delete_gated_by_maintainer_role() {
-        let (m, _admin, lead, maintainer, viewer, non_member, _project_id, _guard) = setup_membership_mcp();
+        let (m, _admin, lead, maintainer, viewer, non_member, _project_id, _guard) =
+            setup_membership_mcp();
         let created = as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
                 project: "MEM".into(),
