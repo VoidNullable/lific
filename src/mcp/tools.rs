@@ -431,9 +431,11 @@ impl Display for CommentLines<'_> {
     }
 }
 
-/// Render a plan + its step tree compactly for get_plan / create_plan output.
-/// Step lines carry `#<id>` so the agent can target edits, and issue-linked
-/// steps show provenance ("via LIF-42" / "reopened — LIF-42 reopened").
+/// Render a plan + its step tree for get_plan output, with complete step
+/// descriptions (get_plan is the rehydration tool and the only read path
+/// for them). Step lines carry `#<id>` so the agent can target edits, and
+/// issue-linked steps show provenance ("via LIF-42" / "reopened — LIF-42
+/// reopened").
 pub(crate) fn fmt_plan(p: &models::Plan) -> String {
     let context = current_issue_link_context();
     render_response(|output| {
@@ -443,6 +445,7 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
             PlanView {
                 plan: p,
                 context: context.as_deref(),
+                full_descriptions: true,
             }
         )
     })
@@ -451,6 +454,8 @@ pub(crate) fn fmt_plan(p: &models::Plan) -> String {
 struct PlanView<'a> {
     plan: &'a models::Plan,
     context: Option<&'a IssueLinkContext>,
+    /// See `PlanSteps::full_descriptions`.
+    full_descriptions: bool,
 }
 
 impl Display for PlanView<'_> {
@@ -476,6 +481,7 @@ impl Display for PlanView<'_> {
                 nodes: &plan.steps,
                 depth: 0,
                 context: self.context,
+                full_descriptions: self.full_descriptions,
             },
             formatter,
         )
@@ -688,6 +694,10 @@ struct PlanSteps<'a> {
     nodes: &'a [models::PlanStepNode],
     depth: usize,
     context: Option<&'a IssueLinkContext>,
+    /// `get_plan` renders complete step descriptions (it is the only read
+    /// path for them, so truncation would make long notes write-only);
+    /// mutation/create echoes keep the compact 100-char form (LIF-302).
+    full_descriptions: bool,
 }
 
 impl Display for PlanSteps<'_> {
@@ -717,9 +727,15 @@ impl Display for PlanSteps<'_> {
             }?;
             formatter.write_char('\n')?;
             (!node.description.is_empty())
-                .then(|| {
-                    (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
-                    writeln!(formatter, "    {}", truncate_value(&node.description, 100))
+                .then(|| match self.full_descriptions {
+                    true => node.description.lines().try_for_each(|line| {
+                        (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+                        writeln!(formatter, "    {line}")
+                    }),
+                    false => {
+                        (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+                        writeln!(formatter, "    {}", truncate_value(&node.description, 100))
+                    }
                 })
                 .transpose()?;
             (!node.children.is_empty())
@@ -729,6 +745,7 @@ impl Display for PlanSteps<'_> {
                             nodes: &node.children,
                             depth: self.depth + 1,
                             context: self.context,
+                            full_descriptions: self.full_descriptions,
                         },
                         formatter,
                     )
@@ -3773,6 +3790,7 @@ impl LificMcp {
                 PlanView {
                     plan: &plan,
                     context: context.as_deref(),
+                    full_descriptions: false,
                 }
             )
         }))
@@ -3847,6 +3865,7 @@ impl LificMcp {
                 PlanView {
                     plan: &plan,
                     context: context.as_deref(),
+                    full_descriptions: false,
                 }
             )
         }))
@@ -4067,6 +4086,7 @@ impl LificMcp {
                     PlanView {
                         plan: &plan,
                         context: context.as_deref(),
+                        full_descriptions: false,
                     }
                 ),
                 false => write!(
@@ -9958,6 +9978,51 @@ mod tests {
         );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
         assert_eq!(crate::mcp::issue_link_context_reads(), 1);
+    }
+
+    // Reported on Discord (dr.leech, 2026-08-19): get_plan truncated step
+    // descriptions at ~100 chars. get_plan is the only read path for them,
+    // so anything longer was write-only. The rehydrate must return complete,
+    // multi-line descriptions; the compact 100-char form stays on the
+    // create/mutation echoes (LIF-302's compactness).
+    #[tokio::test]
+    async fn get_plan_returns_full_step_descriptions() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PLN");
+
+        let description = "This description runs well past the hundred character compact \
+                           cutoff so the rehydrate must return every word of it.\n\
+                           Second line survives too.";
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: "PLN".into(),
+            title: "Long notes".into(),
+            anchor_issue: None,
+            steps: Some(vec![PlanStepInput {
+                title: "step".into(),
+                description: Some(description.into()),
+                ..Default::default()
+            }]),
+        }));
+        assert!(
+            created.contains('…') && !created.contains("every word of it."),
+            "create echo keeps the compact form: {created}"
+        );
+
+        let got = m.get_plan(Parameters(GetPlanInput {
+            plan: "PLN-PLAN-1".into(),
+        }));
+        assert!(
+            got.contains("every word of it."),
+            "get_plan must return the full description: {got}"
+        );
+        assert!(
+            got.contains("    Second line survives too."),
+            "multi-line descriptions keep tree indentation: {got}"
+        );
+        assert!(
+            !got.contains('…'),
+            "no ellipsis in the rehydrate: {got}"
+        );
     }
 
     #[tokio::test]
