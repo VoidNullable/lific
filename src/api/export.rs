@@ -615,7 +615,7 @@ mod tests {
 
         let blocked = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(blocked.headers()[axum::http::header::RETRY_AFTER], "1");
+        assert_eq!(blocked.headers()[axum::http::header::RETRY_AFTER], "30");
 
         drop(first);
         drop(second);

@@ -55,9 +55,12 @@ impl IntoResponse for LificError {
         let body = json!({ "error": message });
         let mut response = (status, axum::Json(body)).into_response();
         if matches!(self, LificError::TooManyRequests(_)) {
+            // Export slots are typically freed in seconds, but a stalled
+            // stream holds one until the 30-second idle timeout reaps it.
+            // Advertise that horizon rather than an optimistic 1 (LIF-424).
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
+                axum::http::HeaderValue::from_static("30"),
             );
         }
         response
