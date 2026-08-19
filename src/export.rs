@@ -27,13 +27,19 @@ pub struct ExportBundle {
     pub files: Vec<ExportFile>,
 }
 
-/// Export limits are on the uncompressed representation. They bound both
-/// query result memory and the amount of data a single request can serialize.
-pub const MAX_EXPORT_FILES: usize = 500;
-pub const MAX_EXPORT_COMMENTS: i64 = 500;
+/// Export limits are on the uncompressed representation. The byte limits are
+/// the primary memory bound; the counts only stop pathological row
+/// explosions, so they are sized for real projects (LIF-423: a tracker with
+/// a few thousand issues and tens of thousands of comments must export).
+/// `MAX_EXPORT_FILES` matches `MAX_ARCHIVE_ENTRIES`, so any bundle the
+/// builder accepts is one the CLI-side unpacker accepts too.
+pub const MAX_EXPORT_FILES: usize = 10_000;
+/// Per-issue comment cap; `MAX_EXPORT_PROJECT_COMMENTS` bounds the aggregate.
+pub const MAX_EXPORT_COMMENTS: i64 = 1_000;
+pub const MAX_EXPORT_PROJECT_COMMENTS: i64 = 100_000;
 pub const MAX_EXPORT_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_EXPORT_TOTAL_BYTES: usize = 128 * 1024 * 1024;
-const MAX_EXPORT_METADATA_ITEMS: i64 = 5_000;
+const MAX_EXPORT_METADATA_ITEMS: i64 = 50_000;
 // A JSON string can encode one source byte as a six-byte `\u00xx` escape.
 // Keep that representation bounded without rejecting a bundle ZIP accepts.
 const MAX_EXPORT_JSON_BYTES: usize = MAX_EXPORT_TOTAL_BYTES * 6 + 64 * 1024;
@@ -404,6 +410,7 @@ fn ensure_project_preflight(
     conn: &Connection,
     project_id: i64,
     max_total_bytes: i64,
+    max_comments: i64,
 ) -> Result<(), LificError> {
     let (
         issue_count,
@@ -472,10 +479,10 @@ fn ensure_project_preflight(
             MAX_EXPORT_FILES
         )));
     }
-    if comment_count > MAX_EXPORT_COMMENTS {
+    if comment_count > max_comments {
         return Err(LificError::BadRequest(format!(
             "project export contains too many comments ({} > {})",
-            comment_count, MAX_EXPORT_COMMENTS
+            comment_count, max_comments
         )));
     }
     ensure_metadata_size(metadata_items, metadata_bytes)?;
@@ -522,7 +529,12 @@ fn export_project_snapshot(
     identifier: &str,
 ) -> Result<ExportBundle, LificError> {
     let project_id = queries::resolve_project_identifier(conn, identifier)?;
-    ensure_project_preflight(conn, project_id, MAX_EXPORT_TOTAL_BYTES as i64)?;
+    ensure_project_preflight(
+        conn,
+        project_id,
+        MAX_EXPORT_TOTAL_BYTES as i64,
+        MAX_EXPORT_PROJECT_COMMENTS,
+    )?;
     let project = bounded_project(conn, project_id)?;
     let issue_ids = conn
         .prepare_cached("SELECT id FROM issues WHERE project_id = ?1 ORDER BY id")?
@@ -948,8 +960,17 @@ fn build_page_path(root: &str, page: &Page, folders: &[Folder]) -> String {
 fn folder_segments(folder_id: i64, folders: &[Folder]) -> Vec<String> {
     let map: HashMap<i64, &Folder> = folders.iter().map(|folder| (folder.id, folder)).collect();
     let mut segments = Vec::new();
+    // A parent cycle cannot be created through the app (folders are only
+    // reparented at creation, and update_folder only renames), but a
+    // hand-edited database must not spin this walk forever inside a
+    // blocking worker that holds an export slot (LIF-424). Visiting a
+    // folder twice ends the walk.
+    let mut visited = std::collections::HashSet::new();
     let mut current = Some(folder_id);
     while let Some(id) = current {
+        if !visited.insert(id) {
+            break;
+        }
         if let Some(folder) = map.get(&id) {
             segments.push(slugify(&folder.name));
             current = folder.parent_id;
@@ -1456,7 +1477,9 @@ mod tests {
             .unwrap();
         }
 
-        let error = ensure_project_preflight(&conn, project.id, 32).unwrap_err();
+        let error =
+            ensure_project_preflight(&conn, project.id, 32, MAX_EXPORT_PROJECT_COMMENTS)
+                .unwrap_err();
         assert!(error.to_string().contains("project source exceeds"));
     }
 
@@ -1496,6 +1519,11 @@ mod tests {
             )
             .unwrap()
         });
+        // The aggregate cap is exercised through the preflight's parameter
+        // (the same seam the byte-limit test uses): inserting the real
+        // 100k-comment cap would fire audit/FTS/bump triggers 100k times
+        // and take minutes. Split the overage across two issues so it is
+        // unambiguously the project-wide count, not a per-issue property.
         for issue in issues {
             for _ in 0..251 {
                 queries::comments::create_comment(
@@ -1508,7 +1536,13 @@ mod tests {
             }
         }
 
-        let error = export_project(&conn, "CMT").unwrap_err();
+        let error = ensure_project_preflight(
+            &conn,
+            project.id,
+            MAX_EXPORT_TOTAL_BYTES as i64,
+            501,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("too many comments"));
     }
 
@@ -1537,6 +1571,39 @@ mod tests {
 
         let error = export_project(&conn, "FLD").unwrap_err();
         assert!(error.to_string().contains("too many metadata entries"));
+    }
+
+    // ── LIF-424: a parent cycle (only creatable by hand-editing the
+    // database) must terminate the segment walk, not hang a blocking
+    // worker that holds an export slot.
+    #[test]
+    fn folder_segments_terminate_on_parent_cycles() {
+        let folders = vec![
+            Folder {
+                id: 1,
+                project_id: 1,
+                parent_id: Some(2),
+                name: "Alpha".into(),
+                sort_order: 0.0,
+            },
+            Folder {
+                id: 2,
+                project_id: 1,
+                parent_id: Some(1),
+                name: "Beta".into(),
+                sort_order: 0.0,
+            },
+        ];
+        assert_eq!(folder_segments(1, &folders), vec!["beta", "alpha"]);
+        // A folder that is its own parent yields just itself.
+        let looped = vec![Folder {
+            id: 7,
+            project_id: 1,
+            parent_id: Some(7),
+            name: "Self".into(),
+            sort_order: 0.0,
+        }];
+        assert_eq!(folder_segments(7, &looped), vec!["self"]);
     }
 
     #[test]
@@ -1676,13 +1743,15 @@ mod tests {
             },
         )
         .unwrap();
+        // One item past the cap in aggregate: neither the labels nor the
+        // folders alone exceed it.
         conn.execute(
             "WITH RECURSIVE sequence(value) AS (
-                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 2501
+                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?2
              )
              INSERT INTO labels (project_id, name)
              SELECT ?1, 'label-' || value FROM sequence",
-            [project.id],
+            rusqlite::params![project.id, MAX_EXPORT_METADATA_ITEMS / 2 + 1],
         )
         .unwrap();
         conn.execute(
@@ -1693,11 +1762,11 @@ mod tests {
         .unwrap();
         conn.execute(
             "WITH RECURSIVE sequence(value) AS (
-                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 2500
+                 SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?2
              )
              INSERT INTO folders (project_id, name)
              SELECT ?1, 'folder-' || value FROM sequence",
-            [project.id],
+            rusqlite::params![project.id, MAX_EXPORT_METADATA_ITEMS / 2],
         )
         .unwrap();
 
