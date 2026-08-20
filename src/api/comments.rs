@@ -5,11 +5,16 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::comments::{self, CommentContext, CommentParent};
-use crate::db::{DbPool, models::*};
+use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{require_user, with_read};
+
+/// Comments are gated at `Viewer` — anyone who can see a project
+/// can read and post comments on its issues/pages (the actual auth-required
+/// check for *who* the comment is attributed to is separate, below).
+/// Workspace-level pages (`project_id = None`) fall back to admin-only.
 fn require_comment_viewer(
     db: &DbPool,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
@@ -45,6 +50,7 @@ fn list_for_parent(
     parent: CommentParent,
     q: &ListCommentsQuery,
 ) -> Result<Json<Vec<Comment>>, LificError> {
+    let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
     require_comment_viewer(db, identity, project_id)?;
     with_read(db, |conn| {
@@ -53,8 +59,8 @@ fn list_for_parent(
             parent,
             q.author.as_deref(),
             q.order.as_deref(),
-            q.limit,
-            q.offset,
+            Some(limit),
+            Some(offset),
         )
     })
     .map(Json)
@@ -388,6 +394,34 @@ mod tests {
         let comments = comments.as_array().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0]["content"], "second");
+    }
+
+    #[tokio::test]
+    async fn issue_comment_list_defaults_to_shared_page_limit() {
+        let (app, issue_id, _) = setup_comment_test();
+        for index in 0..=crate::db::queries::DEFAULT_PAGE_LIMIT {
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": format!("comment-{index}")}),
+            )
+            .await;
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/issues/{issue_id}/comments"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            parse_json(response).await.as_array().unwrap().len(),
+            crate::db::queries::DEFAULT_PAGE_LIMIT as usize
+        );
     }
 
     #[tokio::test]

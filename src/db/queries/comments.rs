@@ -5,6 +5,20 @@ use crate::error::LificError;
 
 use super::unescape_text;
 
+/// Comment bodies are intentionally much smaller than the transport-wide JSON
+/// ceiling. This bounds persistent attacker-controlled history and the largest
+/// single row loaded by a detail view.
+pub const MAX_COMMENT_BYTES: usize = 256 * 1024;
+
+pub fn validate_comment_content(content: &str) -> Result<(), LificError> {
+    if content.len() > MAX_COMMENT_BYTES {
+        return Err(LificError::BadRequest(format!(
+            "comment is too large (max {MAX_COMMENT_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 /// What a comment is attached to.
 ///
 /// The `comments` table allows exactly one of (issue_id, page_id) to be set
@@ -94,6 +108,7 @@ pub fn create_comment(
     content: &str,
 ) -> Result<Comment, LificError> {
     let content = unescape_text(content);
+    validate_comment_content(&content)?;
 
     // Verify the parent exists. We do this explicitly (vs. relying on the FK)
     // so the error message names the missing entity rather than surfacing a
@@ -279,6 +294,7 @@ pub fn list_comments_page(
 /// Update a comment's content. Parent-agnostic.
 pub fn update_comment(conn: &Connection, id: i64, content: &str) -> Result<Comment, LificError> {
     let content = unescape_text(content);
+    validate_comment_content(&content)?;
 
     let changed = conn.execute(
         "UPDATE comments SET content = ?1, updated_at = datetime('now') WHERE id = ?2",
@@ -583,6 +599,37 @@ mod tests {
 
         drop(conn);
         (pool, issue.id, page.id, user.id)
+    }
+
+    #[test]
+    fn comment_body_limit_is_inclusive_for_create_and_update() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let boundary = "x".repeat(MAX_COMMENT_BYTES);
+        let comment = create_comment(&conn, CommentParent::Issue(issue_id), user_id, &boundary)
+            .expect("the maximum comment body is allowed");
+        assert_eq!(comment.content.len(), MAX_COMMENT_BYTES);
+
+        let escaped_boundary = format!("{}\\n", "x".repeat(MAX_COMMENT_BYTES - 1));
+        let normalized = create_comment(
+            &conn,
+            CommentParent::Issue(issue_id),
+            user_id,
+            &escaped_boundary,
+        )
+        .expect("the limit applies to normalized content");
+        assert_eq!(normalized.content.len(), MAX_COMMENT_BYTES);
+
+        let oversized = format!("{boundary}x");
+        assert!(matches!(
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, &oversized),
+            Err(crate::error::LificError::BadRequest(_))
+        ));
+        assert!(matches!(
+            update_comment(&conn, comment.id, &oversized),
+            Err(crate::error::LificError::BadRequest(_))
+        ));
+        assert_eq!(get_comment(&conn, comment.id).unwrap().content, boundary);
     }
 
     #[test]
