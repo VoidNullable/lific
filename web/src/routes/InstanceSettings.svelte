@@ -400,7 +400,14 @@
     u: UserSummary,
     attempt: (userId: number, username: string) => Promise<boolean>,
   ) {
-    if (rowBusy !== null) return;
+    if (
+      rowBusy !== null ||
+      creating ||
+      saving ||
+      settingsReplayInFlight ||
+      reauthFor !== null ||
+      reauthBusy
+    ) return;
     rowBusy = u.id;
     rowError = null;
     reauthError = "";
@@ -505,7 +512,16 @@
 
   async function submitCreate() {
     const username = newUsername.trim();
-    if (!username || !newPassword || creating) return;
+    if (
+      !username ||
+      !newPassword ||
+      creating ||
+      rowBusy !== null ||
+      saving ||
+      settingsReplayInFlight ||
+      reauthFor !== null ||
+      reauthBusy
+    ) return;
     creating = true;
     createError = "";
     createdName = "";
@@ -592,7 +608,15 @@
         </section>
 
         <!-- ── SETTINGS FORM ──────────────────────────────── -->
-        <section class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5 animate-reveal delay-250">
+        <fieldset
+          disabled={
+            creating ||
+            rowBusy !== null ||
+            (reauthFor !== null && reauthFor.kind !== "settings") ||
+            reauthBusy
+          }
+          class="rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] p-5 animate-reveal delay-250"
+        >
           <div class="flex items-center gap-2 mb-5">
             <SlidersHorizontal size={15} class="text-[var(--text-muted)]" />
             <h2 class="text-body-lg font-semibold text-[var(--text)]">Settings</h2>
@@ -825,7 +849,7 @@
               <span class="text-[var(--text-muted)]">Changes save automatically.</span>
             {/if}
           </div>
-        </section>
+        </fieldset>
 
         <!-- ── MEMBERS ────────────────────────────────────── -->
         <section class="mt-10 animate-reveal delay-250">
@@ -842,6 +866,7 @@
             <div class="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)] flex-wrap">
               <input
                 bind:value={newUsername}
+                disabled={reauthFor !== null || reauthBusy}
                 placeholder="username"
                 autocomplete="off"
                 class="flex-1 min-w-[150px] px-3 py-1.5 text-body-sm font-mono rounded-md border border-[var(--border)]
@@ -849,6 +874,7 @@
               />
               <input
                 bind:value={newPassword}
+                disabled={reauthFor !== null || reauthBusy}
                 type="password"
                 placeholder="password"
                 autocomplete="new-password"
@@ -859,7 +885,7 @@
                 class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)]
                        bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
                        transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                disabled={creating || !newUsername.trim() || !newPassword}
+                disabled={creating || rowBusy !== null || saving || settingsReplayInFlight || !newUsername.trim() || !newPassword || reauthFor !== null || reauthBusy}
                 onclick={submitCreate}
               >
                 <UserPlus size={14} />
@@ -1015,7 +1041,7 @@
                           class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
                                  hover:text-[var(--accent)] hover:bg-[var(--accent-subtle)] transition-colors
                                  disabled:opacity-40 disabled:cursor-not-allowed"
-                          disabled={rowBusy === u.id}
+                          disabled={rowBusy === u.id || creating || saving || settingsReplayInFlight || reauthFor !== null || reauthBusy}
                           onclick={() => runGrant(u, attemptPromote)}
                           title="Make instance admin"
                           aria-label="Make {u.display_name || u.username} an instance admin"
@@ -1038,7 +1064,7 @@
                           class="size-7 grid place-items-center rounded-md text-[var(--text-muted)]
                                  hover:text-[var(--success)] hover:bg-[var(--success-bg)] transition-colors
                                  disabled:opacity-40 disabled:cursor-not-allowed"
-                          disabled={rowBusy === u.id}
+                          disabled={rowBusy === u.id || creating || saving || settingsReplayInFlight || reauthFor !== null || reauthBusy}
                           onclick={() => runGrant(u, attemptReactivate)}
                           title="Restore account"
                           aria-label="Restore {u.display_name || u.username}"

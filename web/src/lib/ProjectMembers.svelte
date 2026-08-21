@@ -199,7 +199,13 @@
   }
 
   async function addMember() {
-    if (addUserId == null || adding) return;
+    if (
+      addUserId == null ||
+      adding ||
+      roleBusy !== null ||
+      pendingGrant !== null ||
+      grantBusy
+    ) return;
     adding = true;
     addError = "";
     grantError = "";
@@ -245,7 +251,13 @@
   }
 
   async function setRole(m: ProjectMember, role: ProjectRole) {
-    if (role === m.role || roleBusy != null) return;
+    if (
+      role === m.role ||
+      roleBusy != null ||
+      adding ||
+      pendingGrant !== null ||
+      grantBusy
+    ) return;
     roleBusy = m.user_id;
     roleError = null;
     grantError = "";
@@ -342,6 +354,7 @@
           placeholder={eligibleUsers.length === 0 && usersLoaded ? "No one left to add" : "Choose a person…"}
           size="sm"
           class="min-w-[190px] flex-1"
+          disabled={pendingGrant !== null || grantBusy || roleBusy !== null || adding}
         >
           {#snippet renderOption(opt, isSelected)}
             <span class="flex flex-col text-body-sm {isSelected ? 'text-[var(--accent)] font-medium' : 'text-[var(--text)]'}">
@@ -355,12 +368,13 @@
           bind:value={addRole}
           size="sm"
           class="w-[130px] shrink-0"
+          disabled={pendingGrant !== null || grantBusy || roleBusy !== null || adding}
         />
         <button
           class="flex items-center gap-1.5 text-body-sm font-medium text-[var(--btn-success-text)]
                  bg-[var(--btn-success)] px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)]
                  transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-          disabled={adding || addUserId == null}
+          disabled={adding || roleBusy !== null || addUserId == null || pendingGrant !== null || grantBusy}
           onclick={addMember}
         >
           <UserPlus size={14} />
@@ -478,6 +492,7 @@
                 onchange={(opt) => setRole(m, opt.value as ProjectRole)}
                 size="sm"
                 class="w-[130px] shrink-0"
+                disabled={pendingGrant !== null || grantBusy || adding || roleBusy !== null}
               >
                 {#snippet renderSelected(opt)}
                   <span class="text-caption font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full {ROLE_BADGE[opt.value as ProjectRole]}">

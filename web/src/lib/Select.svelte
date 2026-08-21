@@ -12,6 +12,7 @@
     renderOption,
     renderSelected,
     onchange,
+    disabled = false,
   }: {
     options: Option[];
     value?: string | number | null;
@@ -24,6 +25,7 @@
      *  update — handy for per-row selects (e.g. a list loop) where a plain
      *  two-way binding can't carry which row changed. */
     onchange?: (opt: Option) => void;
+    disabled?: boolean;
   } = $props();
 
   let sm = $derived(size === "sm");
@@ -37,6 +39,10 @@
   // rounded settings cards (ProjectMembers, LabelManager) clip any
   // absolute-positioned child to the card.
   let menuPos = $state({ top: 0, left: 0, minWidth: 0 });
+
+  $effect(() => {
+    if (disabled) open = false;
+  });
 
   function seedMenuPos() {
     if (!triggerEl) return;
@@ -68,6 +74,7 @@
 
   function toggle(e: Event) {
     e.stopPropagation();
+    if (disabled) return;
     if (!open) seedMenuPos();
     open = !open;
   }
@@ -139,6 +146,7 @@
     onclick={toggle}
     onkeydown={handleKeydown}
     type="button"
+    {disabled}
   >
     {#if selected && renderSelected}
       {@render renderSelected(selected)}

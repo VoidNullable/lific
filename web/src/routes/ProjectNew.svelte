@@ -1,9 +1,22 @@
 <script lang="ts">
-  import { createProject, assignProjectGroup } from "../lib/api";
+  import {
+    createProject,
+    assignProjectGroup,
+    getInstance,
+    me,
+    type CreateProjectInput,
+  } from "../lib/api";
+  import {
+    RECENT_AUTH_ERROR,
+    needsReauth,
+    reauthenticateWithPassword,
+    reauthenticateWithoutPassword,
+    retryOnceAfterReauth,
+  } from "../lib/reauth";
   import { toast } from "../lib/toast/toast.svelte";
   import ProjectForm from "../lib/ProjectForm.svelte";
-  import { ArrowLeft } from "lucide-svelte";
-  import { getContext } from "svelte";
+  import { ArrowLeft, Lock } from "lucide-svelte";
+  import { getContext, onMount } from "svelte";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
 
@@ -24,40 +37,131 @@
   let groupId = $state<number | null>(null);
   let saving = $state(false);
   let error = $state("");
+  let currentUserId = $state<number | null>(null);
+  let webAutoLogin = $state(false);
+
+  type PendingCreate = {
+    input: CreateProjectInput;
+    groupId: number | null;
+    userId: number;
+  };
+  let pendingCreate = $state<PendingCreate | null>(null);
+  let reauthPassword = $state("");
+  let reauthBusy = $state(false);
+  let reauthError = $state("");
+  let autoReauthNote = $state("");
 
   let canSave = $derived(name.trim().length > 0 && identifier.trim().length > 0);
 
-  async function save() {
-    if (!canSave) return;
-    saving = true;
-    error = "";
+  onMount(async () => {
+    const [user, instance] = await Promise.all([me(), getInstance()]);
+    if (user.ok) currentUserId = user.data.id;
+    if (instance.ok) webAutoLogin = instance.data.web_auto_login;
+  });
 
-    const res = await createProject({
-      name: name.trim(),
-      identifier: identifier.trim().toUpperCase(),
-      description: description.trim() || undefined,
-      emoji: emoji.trim() || undefined,
-      lead_user_id: leadUserId ?? undefined,
-    });
+  async function autoReauth(userId: number) {
+    if (!webAutoLogin) {
+      return { ok: false as const, error: RECENT_AUTH_ERROR, recoverable: true };
+    }
+    const refreshed = await reauthenticateWithoutPassword(userId);
+    if (!refreshed.ok) autoReauthNote = refreshed.error;
+    return refreshed;
+  }
+
+  async function attemptCreate(pending: PendingCreate, recover = true) {
+    const res = await retryOnceAfterReauth(
+      () => createProject(pending.input),
+      () =>
+        recover
+          ? autoReauth(pending.userId)
+          : Promise.resolve({
+              ok: false as const,
+              error: RECENT_AUTH_ERROR,
+              recoverable: false,
+            }),
+    );
 
     if (res.ok) {
       // The group rides a separate endpoint, so it can only be filed once the
       // project has an id. If that call fails the project still exists — say
       // so rather than landing the user on the overview with their choice
       // silently dropped.
-      if (groupId !== null) {
-        const assigned = await assignProjectGroup(res.data.id, groupId);
+      if (pending.groupId !== null) {
+        const assigned = await assignProjectGroup(res.data.id, pending.groupId);
         if (!assigned.ok) {
           toast(`Project created, but it wasn't added to the group: ${assigned.error}`, {
             kind: "error",
           });
         }
       }
+      pendingCreate = null;
       navigate(`/${res.data.identifier}/overview`);
-    } else {
-      error = res.error;
-      saving = false;
+      return;
     }
+    if (needsReauth(res)) {
+      pendingCreate = pending;
+      reauthError = "";
+      saving = false;
+      return;
+    }
+    pendingCreate = null;
+    error = res.error;
+    saving = false;
+  }
+
+  async function save() {
+    if (!canSave || saving || pendingCreate) return;
+    saving = true;
+    error = "";
+    if (currentUserId == null) {
+      const user = await me();
+      if (user.ok) currentUserId = user.data.id;
+    }
+    if (currentUserId == null) {
+      error = "Couldn't verify the current user. Reload and try again.";
+      saving = false;
+      return;
+    }
+    await attemptCreate({
+      input: {
+        name: name.trim(),
+        identifier: identifier.trim().toUpperCase(),
+        description: description.trim() || undefined,
+        emoji: emoji.trim() || undefined,
+        lead_user_id: leadUserId ?? undefined,
+      },
+      groupId,
+      userId: currentUserId,
+    });
+  }
+
+  async function submitReauth() {
+    const pending = pendingCreate;
+    if (!pending || reauthBusy || !reauthPassword || currentUserId !== pending.userId) return;
+    reauthBusy = true;
+    reauthError = "";
+    const refreshed = await reauthenticateWithPassword(reauthPassword, pending.userId);
+    reauthPassword = "";
+    if (!refreshed.ok) {
+      reauthError = refreshed.error;
+      reauthBusy = false;
+      return;
+    }
+    autoReauthNote = "";
+    saving = true;
+    await attemptCreate(pending, false);
+    if (pendingCreate && !error && !reauthError) {
+      reauthError = "That still was not accepted. Sign out and back in, then try again.";
+    }
+    reauthBusy = false;
+  }
+
+  function cancelReauth() {
+    pendingCreate = null;
+    reauthPassword = "";
+    reauthError = "";
+    autoReauthNote = "";
+    saving = false;
   }
 </script>
 
@@ -73,6 +177,45 @@
       bind:groupId
       mode="create"
     />
+    {#if pendingCreate}
+      <div class="mx-auto mb-8 w-full max-w-[680px] px-6">
+        <div class="rounded-lg border border-[var(--border)] bg-[var(--bg-subtle)] p-4 flex flex-col gap-3">
+          <div class="flex items-start gap-2 text-body-sm text-[var(--text)]">
+            <Lock size={15} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
+            <p>
+              Verify it's you to create this project with the selected lead. Granting another
+              person access requires a recent sign-in.
+            </p>
+          </div>
+          {#if autoReauthNote}
+            <p class="text-caption text-[var(--text-muted)]" role="status">{autoReauthNote}</p>
+          {/if}
+          <input
+            bind:value={reauthPassword}
+            type="password"
+            autocomplete="current-password"
+            placeholder="Current password"
+            class="w-full px-3 py-2 text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            onkeydown={(e) => { if (e.key === "Enter") submitReauth(); }}
+          />
+          {#if reauthError}
+            <p class="text-caption text-[var(--error)]" role="alert">{reauthError}</p>
+          {/if}
+          <div class="flex gap-2">
+            <button
+              class="text-body-sm font-medium text-[var(--accent-text)] bg-[var(--accent)] px-3 py-1.5 rounded-md disabled:opacity-40"
+              disabled={reauthBusy || !reauthPassword}
+              onclick={submitReauth}
+            >{reauthBusy ? "Verifying..." : "Verify and create"}</button>
+            <button
+              class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--surface)]"
+              disabled={reauthBusy}
+              onclick={cancelReauth}
+            >Cancel</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -110,7 +253,7 @@
                bg-[var(--accent)] px-2.5 py-1 rounded-md
                hover:bg-[var(--accent-hover)] transition-colors
                disabled:opacity-40 disabled:cursor-not-allowed"
-        disabled={!canSave || saving}
+        disabled={!canSave || saving || pendingCreate !== null}
         onclick={save}
       >
         {saving ? "Creating..." : "Create project"}

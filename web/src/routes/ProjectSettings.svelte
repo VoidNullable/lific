@@ -159,18 +159,20 @@
 
   // ── Field-level autosave (no Save button) ────────────
   async function saveField(field: string, value: unknown) {
-    if (!project) return;
+    if (!project) return false;
     const res = await updateProject(project.id, { [field]: value });
     if (res.ok) {
       project = res.data;
       onProjectChange?.();
       savedAt = Date.now();
       window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+      return true;
     } else {
       // `error` only feeds the initial-load ErrorState, which isn't rendered
       // in the loaded view — so a field autosave failure here would otherwise
       // be silent. The identity hero has no inline slot, so toast it (LIF-284).
       toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
+      return false;
     }
   }
 
@@ -303,21 +305,29 @@
   $effect(() => {
     const v = leadValue;
     if (!project) return;
+    if (pendingLead || leadBusy) return;
     const next = v === "" ? null : Number(v);
     if (next === lastLead) return;
     const previous = lastLead;
     lastLead = next;
     if (next == null) {
       // Clearing the lead is a reduction: no grant, no prompt.
-      saveField("lead_user_id", null);
+      const projectId = project.id;
+      leadBusy = true;
+      void saveField("lead_user_id", null)
+        .then((saved) => {
+          if (!saved && project?.id === projectId) restoreLead(previous);
+        })
+        .finally(() => { leadBusy = false; });
       return;
     }
+    leadBusy = true;
     void assignLead({
       projectId: project.id,
       leadUserId: next,
       previousLead: previous,
       userId: currentUserId ?? -1,
-    });
+    }).finally(() => { leadBusy = false; });
   });
 
   // ── Sidebar group ────────────────────────────────────────
@@ -792,6 +802,7 @@
                 </div>
                 <select
                   bind:value={leadValue}
+                  disabled={pendingLead !== null || leadBusy}
                   class="text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)]
                          text-[var(--text)] px-2.5 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                 >
