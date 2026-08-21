@@ -426,9 +426,13 @@ impl GithubFetcher for LiveGithub {
                 .get("link")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            let batch: Vec<GithubComment> = resp
-                .json()
-                .map_err(|e| format!("failed to parse comments JSON: {e}"))?;
+            let batch: Vec<GithubComment> = Self::json_bounded(resp, "comments")?;
+            if batch.len() > 100 || all.len() + batch.len() > MAX_GITHUB_COMMENTS_PER_ISSUE {
+                return Err(format!(
+                    "GitHub comments exceed the {} per-issue limit",
+                    MAX_GITHUB_COMMENTS_PER_ISSUE
+                ));
+            }
             all.extend(batch);
             if !has_next_page(link.as_deref()) {
                 break;
@@ -539,6 +543,7 @@ mod tests {
     struct FakeGithub {
         pages: Vec<Vec<GithubIssue>>,
         comments: Vec<GithubComment>,
+        comment_fetches: std::cell::Cell<usize>,
     }
     impl GithubFetcher for FakeGithub {
         fn fetch_issues_page(
@@ -552,6 +557,7 @@ mod tests {
             Ok((issues, has_next))
         }
         fn fetch_comments(&self, _n: i64) -> Result<Vec<GithubComment>, String> {
+            self.comment_fetches.set(self.comment_fetches.get() + 1);
             Ok(self.comments.clone())
         }
     }
@@ -570,14 +576,84 @@ mod tests {
                 body: Some("a comment".into()),
                 created_at: Some("2024-01-01T00:00:00Z".into()),
             }],
+            comment_fetches: std::cell::Cell::new(0),
         };
-        let fetched =
-            collect(&fetcher, "octocat/hello", StateFilter::All, &StatusMap::default()).unwrap();
+        let fetched = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap();
         // Fixture: 3 real issues + 1 PR.
         assert_eq!(fetched.issues.len(), 3);
         assert_eq!(fetched.skipped_non_issues, 1);
         // Each real issue got one comment from the fake.
         assert!(fetched.issues.iter().all(|i| i.comments.len() == 1));
         assert_eq!(fetched.issues[0].comments[0].author, "octocat");
+    }
+
+    #[test]
+    fn collect_rejects_comment_blowup() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let fetcher = FakeGithub {
+            pages: vec![vec![issue]],
+            comments: vec![
+                GithubComment {
+                    user: None,
+                    body: Some("x".into()),
+                    created_at: None,
+                };
+                MAX_GITHUB_COMMENTS_PER_ISSUE + 1
+            ],
+            comment_fetches: std::cell::Cell::new(0),
+        };
+        let error = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("too many comments"));
+    }
+
+    #[test]
+    fn collect_rejects_issue_limit_before_fetching_comments() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let fetcher = FakeGithub {
+            pages: vec![vec![issue; MAX_GITHUB_ISSUES + 1]],
+            comments: Vec::new(),
+            comment_fetches: std::cell::Cell::new(0),
+        };
+        let error = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("too many issues"));
+        assert_eq!(fetcher.comment_fetches.get(), MAX_GITHUB_ISSUES);
+    }
+
+    #[test]
+    fn normalized_size_counts_empty_comment_allocations() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let comments = vec![
+            GithubComment {
+                user: None,
+                body: None,
+                created_at: None,
+            };
+            MAX_GITHUB_COMMENTS_PER_ISSUE
+        ];
+        let normalized = map_issue("octocat/hello", &issue, &comments, &StatusMap::default());
+
+        assert!(
+            normalized_retained_bytes(&normalized)
+                >= comments.len() * std::mem::size_of::<super::super::NormalizedComment>()
+        );
     }
 }
