@@ -309,8 +309,24 @@ pub fn require_project_delete_role(
     identity: &Option<ResolvedIdentity>,
     project_id: i64,
 ) -> Result<(), LificError> {
-    if authz_enforced(db)? {
-        require_role(db, identity, project_id, Role::Lead)
+    let conn = db.read()?;
+    require_project_delete_role_conn(&conn, identity, project_id)
+}
+
+/// [`require_project_delete_role`] on a caller-supplied connection, so the
+/// check can run inside the transaction that performs the delete.
+///
+/// Deleting a project destroys every issue, page and plan in it. Deciding that
+/// from a role snapshot taken before the request was routed means an admin
+/// demoted, or a lead removed, a moment ago can still do it. The read has to
+/// be inside the transaction that acts on it.
+pub(crate) fn require_project_delete_role_conn(
+    conn: &Connection,
+    identity: &Option<ResolvedIdentity>,
+    project_id: i64,
+) -> Result<(), LificError> {
+    if authz_enforced_conn(conn)? {
+        require_role_conn(conn, identity, project_id, Role::Lead)
     } else {
         match identity {
             Some(i) if i.user.is_admin => Ok(()),

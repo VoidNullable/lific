@@ -165,6 +165,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             ("DELETE", "/api/auth/me/sessions"),
             Exempt(NOT_PROJECT_SCOPED),
         ),
+        (("POST", "/api/auth/me/refresh"), Exempt(NOT_PROJECT_SCOPED)),
         (("GET", "/api/auth/keys"), Exempt(NOT_PROJECT_SCOPED)),
         (("POST", "/api/auth/keys"), Exempt(NOT_PROJECT_SCOPED)),
         (

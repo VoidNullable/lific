@@ -220,6 +220,50 @@ impl PasswordChallenge {
     }
 }
 
+/// The generic failure a login reports. Kept in one place so the finalization
+/// below cannot accidentally say something more specific than the verify does.
+pub const INVALID_LOGIN_MESSAGE: &str = "invalid username/email or password";
+
+/// Confirm, inside the transaction that is about to mint a session, that the
+/// login which just succeeded is still true.
+///
+/// The Argon2 verify deliberately runs with no lock held, which takes tens of
+/// milliseconds. In that window the account can be deactivated, its owner
+/// deactivated, or its password changed by a lockdown, and the pre-transaction
+/// verify has no way to know. Minting a session on that evidence hands out a
+/// week-long credential for a password that no longer exists, which is exactly
+/// what a password change is supposed to prevent.
+///
+/// So the user is re-read by id here and three things are required:
+///
+/// - the row still exists;
+/// - the credential may authenticate at all ([`credential_is_live`], which
+///   covers both a deactivated account and a bot whose owner was deactivated);
+/// - the stored password hash is **byte-identical** to the one just verified.
+///
+/// The hash comparison is the load-bearing one: it is what makes "the password
+/// was correct" mean "the password is correct". Argon2 is not re-run, so this
+/// costs one indexed read.
+pub fn finalize_login(
+    conn: &Connection,
+    user_id: i64,
+    verified_hash: &str,
+) -> Result<User, LificError> {
+    let user = get_user_by_id(conn, user_id)
+        .map_err(|_| LificError::BadRequest(INVALID_LOGIN_MESSAGE.into()))?;
+    if !credential_is_live(conn, &user)? {
+        return Err(LificError::BadRequest(
+            "this account has been deactivated. Ask an admin to restore it.".into(),
+        ));
+    }
+    if user.password_hash != verified_hash {
+        // The password changed between the verify and here, which means the
+        // one presented is the old one. Same message a wrong password gets.
+        return Err(LificError::BadRequest(INVALID_LOGIN_MESSAGE.into()));
+    }
+    Ok(user)
+}
+
 /// The database half of a login: find the account by username or email and
 /// pick the hash to verify against. Pure read, safe on a pooled read
 /// connection.
@@ -309,6 +353,16 @@ pub fn update_password(
     user_id: i64,
     new_password: &str,
 ) -> Result<(), LificError> {
+    let hash = prepare_new_password(new_password)?;
+    update_password_hash(conn, user_id, &hash)
+}
+
+/// Check a proposed password against policy and hash it. Touches no
+/// connection, so a caller holding no lock can run this on the blocking pool.
+///
+/// The policy lives here rather than at each call site so the CLI, the API and
+/// the tests cannot drift apart on what a valid password is.
+pub fn prepare_new_password(new_password: &str) -> Result<String, LificError> {
     if new_password.len() < 8 {
         return Err(LificError::BadRequest(
             "password must be at least 8 characters".into(),
@@ -319,10 +373,23 @@ pub fn update_password(
             "password must be 1024 characters or fewer".into(),
         ));
     }
-    let hash = hash_password(new_password)?;
+    hash_password(new_password)
+}
+
+/// Store a hash that has already been prepared by [`prepare_new_password`].
+///
+/// Split out so the API path can do the Argon2 work with no lock held and then
+/// take the writer only for the write. Hashing under the exclusive writer
+/// stalled every other write in the process for the duration, which is the
+/// same problem LIF-412 fixed for login and signup.
+pub fn update_password_hash(
+    conn: &Connection,
+    user_id: i64,
+    prepared_hash: &str,
+) -> Result<(), LificError> {
     conn.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",
-        params![hash, user_id],
+        params![prepared_hash, user_id],
     )?;
     Ok(())
 }
@@ -524,7 +591,7 @@ fn hash_session_token(token: &str) -> String {
 /// Best-effort: a failure here must never fail the login/logout it rides on.
 fn purge_expired_sessions(conn: &Connection) {
     let _ = conn.execute(
-        "DELETE FROM sessions WHERE expires_at < datetime('now')",
+        "DELETE FROM sessions WHERE datetime(expires_at) < datetime('now')",
         [],
     );
 }
@@ -606,25 +673,12 @@ pub fn credential_is_live(conn: &Connection, user: &User) -> Result<bool, LificE
     Ok(owner_is_active.unwrap_or(true))
 }
 
-/// Load a user by id and refuse to hand it back when the credential naming it
-/// may not authenticate ([`credential_is_live`]).
-///
-/// Callers that resolve a bearer credential to an identity use this instead of
-/// [`get_user_by_id`], so a deactivated account and a bot with a deactivated
-/// owner are rejected at exactly the same door.
-pub fn get_live_user_by_id(conn: &Connection, user_id: i64) -> Result<User, LificError> {
-    let user = get_user_by_id(conn, user_id)?;
-    if !credential_is_live(conn, &user)? {
-        return Err(LificError::BadRequest("this account is deactivated".into()));
-    }
-    Ok(user)
-}
-
 /// Validate a session token. Returns the associated user if the session
 /// exists and has not expired. The incoming plaintext token is hashed with
 /// SHA-256 before lookup.
 ///
-/// LIF-139: read-only. Expiry is enforced by the `expires_at > datetime('now')`
+/// LIF-139: read-only. Expiry is enforced by the `datetime(expires_at) >
+/// datetime('now')`
 /// predicate below, so an expired row is rejected whether or not it has been
 /// swept yet. The sweep moved to `create_session`/`delete_session`
 /// (see [`purge_expired_sessions`]), which lets the auth middleware validate on
@@ -634,7 +688,8 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
 
     let user_id: i64 = conn
         .query_row(
-            "SELECT user_id FROM sessions WHERE token = ?1 AND expires_at > datetime('now')",
+            "SELECT user_id FROM sessions WHERE token = ?1
+             AND datetime(expires_at) > datetime('now')",
             params![token_hash],
             |row| row.get(0),
         )
@@ -686,28 +741,75 @@ pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificE
     Ok(())
 }
 
-/// Revoke every durable credential owned by a user during a lockdown action:
-/// the user's API keys, keys for connected-tool bots they own, and user-bound
-/// OAuth access tokens. Password changes and sign-out-all call this together
-/// with session deletion so the recovery state is committed atomically.
-pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result<(), LificError> {
-    crate::db::queries::savepoint(conn, "revoke_durable_credentials", || {
-        let mut api_keys = conn.prepare(
-            "SELECT id, name FROM api_keys
-             WHERE revoked = 0
-               AND (user_id = ?1 OR user_id IN (
-                   SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1
-               ))",
+/// SQL fragment matching every identity an account lockdown covers: the human
+/// named by `?1`, plus every connected-tool bot they own. A bot carries no
+/// permissions of its own ([`credential_is_live`]), so a credential minted for
+/// one is the owner's reach by another name and has to fall with the owner's.
+///
+/// Deliberately matches on `user_id`, which is what every credential table
+/// binds. A key with `user_id IS NULL` is the *unbound operator* key: it names
+/// nobody, belongs to whoever runs the server locally, and is out of scope.
+const LOCKDOWN_SCOPE_SQL: &str = "(user_id = ?1 OR user_id IN (\
+     SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1))";
+
+/// The ids of every connected-tool bot `owner_id` owns.
+///
+/// Deactivation and lockdown both act on the owner plus these, so anything
+/// that has to be told about it (a realtime socket, say) needs the same set.
+pub fn owned_bot_ids(conn: &Connection, owner_id: i64) -> Result<Vec<i64>, LificError> {
+    let mut stmt =
+        conn.prepare("SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1 ORDER BY id")?;
+    let ids = stmt
+        .query_map(params![owner_id], |row| row.get(0))?
+        .collect::<Result<Vec<i64>, _>>()?;
+    Ok(ids)
+}
+
+/// Lock an account down: sever every credential that could still act as the
+/// user, or as one of their connected tools, right now.
+///
+/// This is the one primitive behind all three recovery front doors (API
+/// password change, API sign-out-everywhere, and `lific user set-password`),
+/// so "I've been compromised" means the same thing whichever one the user
+/// reaches for. Blast radius, for the human **and every bot they own**:
+///
+/// - every session row is deleted;
+/// - every active API key is revoked;
+/// - every active OAuth access token is revoked;
+/// - every unexchanged OAuth authorization code is burned (marked used, so a
+///   racing exchange sees the single-use transition already spent rather than
+///   a missing row it could mistake for a lookup failure);
+/// - every *approved* OAuth device code is flipped to `denied`, which is the
+///   terminal state its exchange path already refuses.
+///
+/// Deliberately NOT in scope: unbound operator API keys (they name no user),
+/// bot identities themselves (the tool row survives so the UI can show it as
+/// disconnected and offer a reconnect), and OAuth public-client registrations
+/// (a client is not a credential). Pending, still-unbound device codes are
+/// handled by the approval path revalidating the approver's session inside the
+/// same transaction that binds them, not here: at lockdown time such a row
+/// names nobody to scope it to.
+///
+/// Every revoked API key and OAuth token gets its own audit row, labelled with
+/// the key name or client id. No token material is written anywhere.
+///
+/// Runs inside a SAVEPOINT and opens no independent write of its own, so a
+/// caller may wrap it in a larger transaction and get one atomic recovery.
+pub fn lock_down_account(conn: &Connection, user_id: i64) -> Result<(), LificError> {
+    crate::db::queries::savepoint(conn, "lock_down_account", || {
+        conn.execute(
+            &format!("DELETE FROM sessions WHERE {LOCKDOWN_SCOPE_SQL}"),
+            params![user_id],
         )?;
+
+        let mut api_keys = conn.prepare(&format!(
+            "SELECT id, name FROM api_keys WHERE revoked = 0 AND {LOCKDOWN_SCOPE_SQL}"
+        ))?;
         let api_keys = api_keys
             .query_map(params![user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<(i64, String)>, _>>()?;
         conn.execute(
-            "UPDATE api_keys SET revoked = 1
-             WHERE revoked = 0
-               AND (user_id = ?1 OR user_id IN (
-                   SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1
-               ))",
+            &format!("UPDATE api_keys SET revoked = 1 WHERE revoked = 0 AND {LOCKDOWN_SCOPE_SQL}"),
             params![user_id],
         )?;
         for (id, name) in api_keys {
@@ -722,15 +824,16 @@ pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result
             )?;
         }
 
-        let mut oauth_tokens = conn.prepare(
-            "SELECT rowid, client_id FROM oauth_tokens
-             WHERE user_id = ?1 AND revoked = 0",
-        )?;
+        let mut oauth_tokens = conn.prepare(&format!(
+            "SELECT rowid, client_id FROM oauth_tokens WHERE revoked = 0 AND {LOCKDOWN_SCOPE_SQL}"
+        ))?;
         let oauth_tokens = oauth_tokens
             .query_map(params![user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<(i64, String)>, _>>()?;
         conn.execute(
-            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+            &format!(
+                "UPDATE oauth_tokens SET revoked = 1 WHERE revoked = 0 AND {LOCKDOWN_SCOPE_SQL}"
+            ),
             params![user_id],
         )?;
         for (id, client_id) in oauth_tokens {
@@ -744,6 +847,25 @@ pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result
                 params![id, client_id],
             )?;
         }
+
+        // An authorization code is a bearer credential in flight. One issued
+        // before the compromise was noticed would otherwise still exchange for
+        // a fresh 30-day access token after every stored credential died.
+        conn.execute(
+            &format!("UPDATE oauth_codes SET used = 1 WHERE used = 0 AND {LOCKDOWN_SCOPE_SQL}"),
+            params![user_id],
+        )?;
+
+        // Same reasoning for a device grant the user already approved: the
+        // device is still polling and would collect a token on its next poll.
+        conn.execute(
+            &format!(
+                "UPDATE oauth_device_codes SET status = 'denied'
+                 WHERE status = 'approved' AND {LOCKDOWN_SCOPE_SQL}"
+            ),
+            params![user_id],
+        )?;
+
         Ok(())
     })
 }
@@ -963,43 +1085,46 @@ pub fn set_admin_guarded(
 /// failure part-way through used to be able to leave a deactivated account
 /// holding live credentials; now it leaves nothing at all.
 pub fn set_active(conn: &Connection, user_id: i64, is_active: bool) -> Result<User, LificError> {
-    let tx = conn.unchecked_transaction()?;
+    // A SAVEPOINT, not `unchecked_transaction`: callers now wrap this in their
+    // own transaction (the reactivate route revalidates the admin's session in
+    // the same one), and `BEGIN` inside an open transaction is an error.
+    // Savepoints nest, and behave as a plain transaction when there is no
+    // outer one.
+    crate::db::queries::savepoint(conn, "set_active", || {
+        let target = manageable_target(conn, user_id)?;
 
-    let target = manageable_target(&tx, user_id)?;
+        if !is_active && target.is_admin && target.is_active && count_active_admins(conn)? <= 1 {
+            return Err(LificError::Conflict(
+                "cannot deactivate the last instance admin. Promote someone else first.".into(),
+            ));
+        }
 
-    if !is_active && target.is_admin && target.is_active && count_active_admins(&tx)? <= 1 {
-        return Err(LificError::Conflict(
-            "cannot deactivate the last instance admin. Promote someone else first.".into(),
-        ));
-    }
-
-    tx.execute(
-        "UPDATE users SET is_active = ?1, updated_at = datetime('now') WHERE id = ?2",
-        params![is_active, target.id],
-    )?;
-
-    if !is_active {
-        delete_all_sessions(&tx, target.id)?;
-        tx.execute(
-            "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
-            params![target.id],
+        conn.execute(
+            "UPDATE users SET is_active = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![is_active, target.id],
         )?;
-        tx.execute(
-            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
-            params![target.id],
-        )?;
-        // Owned bots: sessions only. Their keys and tokens stay intact and
-        // simply stop authenticating (see the doc comment above).
-        tx.execute(
-            "DELETE FROM sessions WHERE user_id IN
-             (SELECT id FROM users WHERE owner_id = ?1 AND is_bot = 1)",
-            params![target.id],
-        )?;
-    }
 
-    let refreshed = get_user_by_id(&tx, target.id)?;
-    tx.commit()?;
-    Ok(refreshed)
+        if !is_active {
+            delete_all_sessions(conn, target.id)?;
+            conn.execute(
+                "UPDATE api_keys SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+                params![target.id],
+            )?;
+            conn.execute(
+                "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+                params![target.id],
+            )?;
+            // Owned bots: sessions only. Their keys and tokens stay intact and
+            // simply stop authenticating (see the doc comment above).
+            conn.execute(
+                "DELETE FROM sessions WHERE user_id IN
+                 (SELECT id FROM users WHERE owner_id = ?1 AND is_bot = 1)",
+                params![target.id],
+            )?;
+        }
+
+        get_user_by_id(conn, target.id)
+    })
 }
 
 /// Find a bot by its stable (owner, tool) pairing (LIFIC-17).
@@ -2834,18 +2959,32 @@ mod tests {
         assert!(!session_is_recent(&conn, &session.token).unwrap());
     }
 
-    #[test]
-    fn compromised_recovery_revokes_user_bot_and_oauth_credentials() {
-        let pool = test_db();
-        let conn = pool.write().unwrap();
-        let user = test_create_user(&conn);
-        let bot = create_bot_user(&conn, user.id, "bot", "Bot", Some("bot")).unwrap();
+    /// Seed one account plus a bot it owns, an unrelated account, and one of
+    /// every credential shape a lockdown has an opinion about. Returns
+    /// `(user, bot, stranger)`.
+    fn seed_lockdown_fixture(conn: &Connection) -> (User, User, User) {
+        let user = test_create_user(conn);
+        let bot = create_bot_user(conn, user.id, "bot", "Bot", Some("bot")).unwrap();
+        let stranger = create_user(
+            conn,
+            &CreateUser {
+                username: "stranger".into(),
+                email: "stranger@test.com".into(),
+                password: "strangerpassword".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+
         conn.execute(
             "INSERT INTO api_keys (name, key_hash, user_id) VALUES
              ('human-recovery-key', 'hash-human', ?1),
              ('bot-recovery-key', 'hash-bot', ?2),
+             ('stranger-key', 'hash-stranger', ?3),
              ('operator-recovery-key', 'hash-operator', NULL)",
-            params![user.id, bot.id],
+            params![user.id, bot.id, stranger.id],
         )
         .unwrap();
         conn.execute(
@@ -2855,41 +2994,331 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, user_id)
-             VALUES ('oauth-hash', 'recovery-client', '2099-01-01T00:00:00Z', ?1)",
-            params![user.id],
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, user_id) VALUES
+             ('oauth-hash-human', 'recovery-client', '2099-01-01T00:00:00Z', ?1),
+             ('oauth-hash-bot', 'recovery-client', '2099-01-01T00:00:00Z', ?2),
+             ('oauth-hash-stranger', 'recovery-client', '2099-01-01T00:00:00Z', ?3)",
+            params![user.id, bot.id, stranger.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_codes
+                (code, client_id, redirect_uri, code_challenge, expires_at, user_id) VALUES
+             ('code-bot', 'recovery-client', 'http://localhost', 'c', '2099-01-01T00:00:00Z', ?1),
+             ('code-stranger', 'recovery-client', 'http://localhost', 'c', '2099-01-01T00:00:00Z', ?2)",
+            params![bot.id, stranger.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_device_codes
+                (device_code_hash, user_code, expires_at, status, user_id) VALUES
+             ('dev-bot', 'BCDF-GHJK', '2099-01-01T00:00:00Z', 'approved', ?1),
+             ('dev-stranger', 'BCDF-GHJL', '2099-01-01T00:00:00Z', 'approved', ?2),
+             ('dev-pending', 'BCDF-GHJM', '2099-01-01T00:00:00Z', 'pending', NULL)",
+            params![bot.id, stranger.id],
         )
         .unwrap();
 
-        revoke_all_durable_credentials(&conn, user.id).unwrap();
-        let active_keys: i64 = conn
-            .query_row("SELECT COUNT(*) FROM api_keys WHERE revoked = 0", [], |r| r.get(0))
-            .unwrap();
-        let active_tokens: i64 = conn
-            .query_row("SELECT COUNT(*) FROM oauth_tokens WHERE revoked = 0", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(active_keys, 1, "unbound operator keys are not this user's");
-        assert_eq!(active_tokens, 0);
+        (user, bot, stranger)
+    }
 
-        let operator_key_active: i64 = conn
-            .query_row(
-                "SELECT revoked = 0 FROM api_keys WHERE name = 'operator-recovery-key'",
-                [],
-                |r| r.get(0),
+    /// Signup's two atomicity claims, on a real file with two independently
+    /// opened pools, which is the separation two processes have.
+    ///
+    /// The first-admin decision is `SELECT COUNT(*) = 0 FROM users` followed by
+    /// an insert. Those are two statements, so on a bare writer guard they were
+    /// two implicit transactions and two racing signups could both read zero.
+    /// Inside one `BEGIN IMMEDIATE` they cannot: SQLite admits one writer, so
+    /// the second signup reads the first one's committed row.
+    #[test]
+    fn concurrent_signups_produce_exactly_one_first_admin() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("lific.db");
+        let first = crate::db::open(&path).expect("first pool");
+        let second = crate::db::open(&path).expect("second pool");
+
+        // The shape `auth_signup` runs: policy read, first-admin decision,
+        // insert and session, all in one immediate transaction.
+        let signup = |pool: &crate::db::DbPool, username: &str| -> Result<User, LificError> {
+            let hash = hash_password("testpassword1").unwrap();
+            pool.transaction(|tx| {
+                let settings = crate::db::queries::settings::get(tx)?;
+                let mut input = CreateUser {
+                    username: username.into(),
+                    email: format!("{username}@test.local"),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: false,
+                    is_bot: false,
+                };
+                input.is_admin =
+                    tx.query_row("SELECT COUNT(*) = 0 FROM users", [], |r| r.get(0))?;
+                let user = insert_user_with_hash(tx, &input, &hash)?;
+                create_session(tx, user.id, Some(settings.session_lifetime_days * 24))?;
+                Ok(user)
+            })
+        };
+
+        let (a, b) = std::thread::scope(|scope| {
+            let one = scope.spawn(|| signup(&first, "alice"));
+            let two = scope.spawn(|| signup(&second, "bob"));
+            (one.join().unwrap(), two.join().unwrap())
+        });
+
+        let a = a.expect("alice signs up");
+        let b = b.expect("bob signs up");
+        assert!(
+            a.is_admin ^ b.is_admin,
+            "exactly one of two racing signups may become the first admin"
+        );
+
+        let conn = first.read().unwrap();
+        let admins: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users WHERE is_admin = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(admins, 1);
+        // And neither account exists without the session that signed it in.
+        for user in [&a, &b] {
+            let sessions: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ?1",
+                    params![user.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(sessions, 1, "no user is left without a session");
+        }
+    }
+
+    /// The other half: a failure anywhere in the signup transaction leaves no
+    /// account behind. On the old bare-writer path the insert had already
+    /// committed by the time the session failed.
+    #[test]
+    fn a_signup_that_fails_after_the_insert_leaves_no_account() {
+        let pool = test_db();
+        let hash = hash_password("testpassword1").unwrap();
+        let outcome: Result<(), LificError> = pool.transaction(|tx| {
+            let input = CreateUser {
+                username: "half-created".into(),
+                email: "half@test.local".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            };
+            insert_user_with_hash(tx, &input, &hash)?;
+            Err(LificError::Internal("session mint failed".into()))
+        });
+        assert!(outcome.is_err());
+
+        let conn = pool.read().unwrap();
+        assert!(
+            get_user_by_username(&conn, "half-created").is_err(),
+            "a failed signup must not leave an account nobody can sign in to"
+        );
+    }
+
+    /// Login's finalization: the hash verified off the writer must still be
+    /// the stored one when the session is minted.
+    #[test]
+    fn a_login_finalizes_only_against_the_hash_it_verified() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let verified = user.password_hash.clone();
+
+        // Ordinary case: nothing changed in between.
+        assert_eq!(
+            finalize_login(&conn, user.id, &verified).unwrap().id,
+            user.id
+        );
+
+        // A password change committed during the Argon2 verify. The password
+        // just proven correct is now the old one.
+        update_password(&conn, user.id, "a whole new password").unwrap();
+        let err = finalize_login(&conn, user.id, &verified).expect_err("stale hash");
+        assert!(
+            matches!(&err, LificError::BadRequest(m) if m == INVALID_LOGIN_MESSAGE),
+            "a superseded password must report as simply wrong: {err:?}"
+        );
+
+        // The liveness arm: a deactivated account cannot finalize either,
+        // even with the right hash. (An admin exists alongside so the
+        // last-admin guard permits switching this one off.)
+        create_user(
+            &conn,
+            &CreateUser {
+                username: "keeper".into(),
+                email: "keeper@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: true,
+                is_bot: false,
+            },
+        )
+        .unwrap();
+        let fresh = get_user_by_id(&conn, user.id).unwrap().password_hash;
+        set_active(&conn, user.id, false).unwrap();
+        assert!(finalize_login(&conn, user.id, &fresh).is_err());
+    }
+
+    #[test]
+    fn lockdown_severs_every_credential_for_the_user_and_their_bots() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (user, bot, _stranger) = seed_lockdown_fixture(&conn);
+        let human_session = create_session(&conn, user.id, None).unwrap();
+        let bot_session = create_session(&conn, bot.id, None).unwrap();
+
+        lock_down_account(&conn, user.id).unwrap();
+
+        assert!(validate_session(&conn, &human_session.token).is_err());
+        assert!(validate_session(&conn, &bot_session.token).is_err());
+
+        let live = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            live("SELECT COUNT(*) FROM api_keys WHERE revoked = 0 AND name = 'human-recovery-key'"),
+            0
+        );
+        assert_eq!(
+            live("SELECT COUNT(*) FROM api_keys WHERE revoked = 0 AND name = 'bot-recovery-key'"),
+            0
+        );
+        assert_eq!(
+            live(
+                "SELECT COUNT(*) FROM oauth_tokens WHERE revoked = 0 AND access_token IN ('oauth-hash-human', 'oauth-hash-bot')"
+            ),
+            0
+        );
+        assert_eq!(
+            live("SELECT used FROM oauth_codes WHERE code = 'code-bot'"),
+            1,
+            "an unexchanged code bound to an owned bot is burned"
+        );
+        assert_eq!(
+            live(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE device_code_hash = 'dev-bot' AND status = 'denied'"
+            ),
+            1,
+            "an approved device grant bound to an owned bot is denied"
+        );
+
+        // The bot identity itself survives, so the UI can show the tool as
+        // disconnected and offer a reconnect rather than losing it.
+        assert!(get_user_by_id(&conn, bot.id).is_ok());
+    }
+
+    #[test]
+    fn lockdown_spares_other_accounts_and_the_unbound_operator_key() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (user, _bot, stranger) = seed_lockdown_fixture(&conn);
+        let stranger_session = create_session(&conn, stranger.id, None).unwrap();
+
+        lock_down_account(&conn, user.id).unwrap();
+
+        assert!(validate_session(&conn, &stranger_session.token).is_ok());
+        let live = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            live("SELECT revoked FROM api_keys WHERE name = 'operator-recovery-key'"),
+            0,
+            "an unbound operator key names nobody and is out of scope"
+        );
+        assert_eq!(
+            live("SELECT revoked FROM api_keys WHERE name = 'stranger-key'"),
+            0
+        );
+        assert_eq!(
+            live("SELECT revoked FROM oauth_tokens WHERE access_token = 'oauth-hash-stranger'"),
+            0
+        );
+        assert_eq!(
+            live("SELECT used FROM oauth_codes WHERE code = 'code-stranger'"),
+            0
+        );
+        assert_eq!(
+            live(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE device_code_hash = 'dev-stranger' AND status = 'approved'"
+            ),
+            1
+        );
+        assert_eq!(
+            live(
+                "SELECT COUNT(*) FROM oauth_device_codes WHERE device_code_hash = 'dev-pending' AND status = 'pending'"
+            ),
+            1,
+            "an unbound pending grant names nobody to scope it to"
+        );
+    }
+
+    #[test]
+    fn lockdown_audits_each_revoked_credential_without_token_material() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (user, _bot, _stranger) = seed_lockdown_fixture(&conn);
+
+        lock_down_account(&conn, user.id).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT entity_type, entity_label FROM audit_log
+                 WHERE action = 'revoke' ORDER BY entity_type, entity_label",
             )
             .unwrap();
-        assert_eq!(operator_key_active, 1);
-
-        let audited: i64 = conn
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("api_key".to_string(), "bot-recovery-key".to_string()),
+                ("api_key".to_string(), "human-recovery-key".to_string()),
+                ("oauth_token".to_string(), "recovery-client".to_string()),
+                ("oauth_token".to_string(), "recovery-client".to_string()),
+            ]
+        );
+        // Labels are names and client ids. No hash or token value is copied
+        // into the log.
+        let leaked: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM audit_log
-                 WHERE entity_type IN ('api_key', 'oauth_token')
-                   AND action = 'revoke'",
+                 WHERE entity_label LIKE 'hash-%' OR entity_label LIKE 'oauth-hash-%'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(audited, 3, "each revoked credential has an audit row");
+        assert_eq!(leaked, 0);
+    }
+
+    #[test]
+    fn lockdown_rolls_back_whole_when_the_caller_transaction_fails() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let (user, _bot, _stranger) = seed_lockdown_fixture(&conn);
+        let session = create_session(&conn, user.id, None).unwrap();
+
+        // A caller that wraps the primitive and then fails must leave nothing
+        // half-severed: the lockdown opens no independent write of its own.
+        let outcome: Result<(), LificError> =
+            crate::db::queries::savepoint(&conn, "caller_transaction", || {
+                lock_down_account(&conn, user.id)?;
+                Err(LificError::BadRequest("caller changed its mind".into()))
+            });
+        assert!(outcome.is_err());
+
+        assert!(validate_session(&conn, &session.token).is_ok());
+        let live_keys: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM api_keys WHERE revoked = 0 AND user_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live_keys, 3);
     }
 
     // ── API key ownership tests ──────────────────────────────

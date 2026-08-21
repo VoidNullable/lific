@@ -122,18 +122,58 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
         .clone()
 }
 
-/// LIFIC-18: install the session-level identity for a stdio MCP server.
+/// The `LIFIC_TOKEN` a stdio MCP session was launched with, plus what it takes
+/// to check it.
 ///
-/// A stdio session is one long-lived, serialized process that is never wrapped
-/// in [`with_request_context`] (there is no HTTP request to carry the user), so
-/// installing the resolved agent here makes every tool call resolve as that
-/// agent via [`current_auth_user`] until the process exits. The operator
-/// fallback (a missing/unbound `LIFIC_TOKEN`) is the caller passing `None`,
-/// which keeps the existing credential-less resolution — also the operator.
-pub(crate) fn set_stdio_user(user: Option<AuthUser>) {
-    *MCP_REQUEST_USER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
+/// `LIFIC_TOKEN` is an API key by documented contract, so this is the same
+/// credential the HTTP transport would validate per request. A stdio session
+/// has no per-request credential to validate, which is exactly the problem:
+/// the process can outlive the key by days. Keeping the raw token here lets
+/// [`LificMcp::with_stdio_auth`] re-check it on every tool call, so revoking
+/// the key takes effect at the next call instead of the next restart.
+///
+/// The token is never logged, never rendered, and never leaves this struct;
+/// there is deliberately no `Debug`, `Display` or accessor for it.
+pub(crate) struct StdioAuth {
+    token: String,
+    manager: api_keys_simplified::ApiKeyManagerV0,
+}
+
+impl StdioAuth {
+    pub(crate) fn new(token: String, manager: api_keys_simplified::ApiKeyManagerV0) -> Self {
+        Self { token, manager }
+    }
+
+    /// Resolve the token against the database as it stands *now*.
+    ///
+    /// `Ok(Some(user))` is a valid key bound to a live identity;
+    /// `Ok(None)` is a valid but unbound key, which keeps the operator
+    /// fallback; `Err` is a key that no longer authenticates at all (revoked,
+    /// expired, belonging to a deactivated account or to a bot whose owner was
+    /// deactivated), or a database failure, which fails closed.
+    fn resolve(&self, db: &DbPool) -> Result<Option<AuthUser>, String> {
+        crate::auth::resolve_api_key_user(db, &self.manager, &self.token)
+    }
+}
+
+/// The stdio credential did not revalidate, so the tool was not run.
+///
+/// Deliberately carries nothing. Why the token failed (revoked, expired, owner
+/// deactivated, database unavailable) is operator information and goes to the
+/// log; the agent gets one message and one instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StdioAuthFailed;
+
+impl StdioAuthFailed {
+    /// What the agent is told. No database state, no distinction between
+    /// causes, just the action that fixes every one of them.
+    const MESSAGE: &'static str = "This Lific session's credential (LIFIC_TOKEN) is no longer \
+         valid, so the tool was not run. Run `lific connect` to reconnect this tool, then \
+         restart the MCP server.";
+
+    fn into_tool_result(self) -> rmcp::model::CallToolResult {
+        rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(Self::MESSAGE)])
+    }
 }
 
 /// LIFIC-11: the resolved identity for the current MCP request. MCP now
@@ -202,9 +242,19 @@ pub struct LificMcp {
     /// one content-addressed directory.
     store: AttachmentStore,
     tool_router: ToolRouter<Self>,
+    /// Present only for a stdio session launched with a `LIFIC_TOKEN`. `None`
+    /// covers both the HTTP transport (where per-request middleware already
+    /// owns identity, and where re-entering [`with_request_context`] here would
+    /// deadlock on [`MCP_HANDLER_LOCK`]) and a tokenless local stdio session,
+    /// which keeps its credential-less operator behavior.
+    stdio_auth: Option<Arc<StdioAuth>>,
 }
 
 impl LificMcp {
+    /// An HTTP-transport server with a private realtime hub. Production wires
+    /// [`Self::with_realtime`] (to share the hub) and [`Self::for_stdio`];
+    /// this is the convenience shape the test suites build on.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(db: DbPool) -> Self {
         Self::with_realtime(db, RealtimeHub::new())
     }
@@ -216,6 +266,79 @@ impl LificMcp {
             realtime,
             store,
             tool_router: Self::create_tool_router(),
+            stdio_auth: None,
+        }
+    }
+
+    /// The `lific mcp` (stdio) constructor.
+    ///
+    /// `auth` is `Some` when the session was launched with a `LIFIC_TOKEN`,
+    /// which is then revalidated before every tool call. `None` is the
+    /// tokenless local session: no credential to check, operator behavior, the
+    /// same as before.
+    pub fn for_stdio(db: DbPool, auth: Option<StdioAuth>) -> Self {
+        Self {
+            stdio_auth: auth.map(Arc::new),
+            ..Self::with_realtime(db, RealtimeHub::new())
+        }
+    }
+
+    /// The stdio revalidation seam. Every tool call goes through here.
+    ///
+    /// With no stdio credential this is a pass-through, which is what the HTTP
+    /// transport needs: `server.rs` already wraps each request in
+    /// [`with_request_context`], and taking [`MCP_HANDLER_LOCK`] a second time
+    /// here would deadlock.
+    ///
+    /// With one, the token is re-resolved against the database *on this call*
+    /// and the tool runs inside [`with_request_user`] with whatever came back,
+    /// so both the authorization gates and the audit actor read the identity as
+    /// it is now rather than as it was at launch. A token that no longer
+    /// authenticates returns [`StdioAuthFailed`] and `f` is never awaited, so a
+    /// revoked agent cannot mutate anything on its next call.
+    ///
+    /// The failure is a typed local error rather than a wire type, so the seam
+    /// stays reusable and the decision about how a client should see it lives
+    /// in one place ([`Self::dispatch_tool`]).
+    async fn with_stdio_auth<F, Fut, R>(&self, f: F) -> Result<R, StdioAuthFailed>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let Some(auth) = self.stdio_auth.clone() else {
+            return Ok(f().await);
+        };
+        let user = auth.resolve(&self.db).map_err(|reason| {
+            // The reason names DB state (revoked, expired, deactivated owner,
+            // backend fault). It is useful in the operator's log and is not
+            // something the agent needs, or should be told.
+            tracing::warn!(reason, "stdio LIFIC_TOKEN no longer authenticates");
+            StdioAuthFailed
+        })?;
+        Ok(with_request_user(user, f).await)
+    }
+
+    /// The central tool-call seam: revalidate, then dispatch.
+    ///
+    /// A stdio credential that no longer authenticates comes back as a failed
+    /// **tool result** (`is_error: true`) rather than a JSON-RPC protocol
+    /// error. The request itself was perfectly well formed, so `-32600
+    /// Invalid Request` is a lie about what went wrong, and MCP clients treat
+    /// protocol errors as a broken server: several drop the session or stop
+    /// surfacing anything to the model. A tool error reaches the agent as text
+    /// it can read and act on, which is the whole point of telling it to
+    /// reconnect. Either way `f` never runs.
+    async fn dispatch_tool<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>,
+    {
+        match self.with_stdio_auth(f).await {
+            Ok(result) => result,
+            Err(StdioAuthFailed) => Ok(StdioAuthFailed.into_tool_result()),
         }
     }
 
@@ -353,6 +476,14 @@ impl ServerHandler for LificMcp {
         }))
     }
 
+    /// The one place every MCP tool call passes through, whatever the
+    /// transport. The stdio credential check lives here rather than in each
+    /// tool for exactly that reason.
+    ///
+    /// Not an `async fn`: the `rmcp` trait declares an explicit
+    /// `MaybeSendFuture` bound on the return type, which the desugared form
+    /// has to restate.
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
@@ -360,9 +491,12 @@ impl ServerHandler for LificMcp {
     ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
     + rmcp::service::MaybeSendFuture
     + '_ {
-        let tool_context =
-            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        self.tool_router.call(tool_context)
+        async move {
+            let tool_context =
+                rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            self.dispatch_tool(|| self.tool_router.call(tool_context))
+                .await
+        }
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
@@ -773,67 +907,274 @@ mod tests {
         }
     }
 
-    /// Clears the process-wide MCP identity again on scope exit, panic or not.
-    /// `set_stdio_user` writes a global with no request scope to unwind it, so
-    /// a test that installs an agent and walks away leaves *every* later MCP
-    /// test in the process resolving as that agent instead of the operator.
-    /// That is invisible while the tools only gate on roles (legacy mode lets
-    /// Maintainer through regardless), and very visible once one of them
-    /// decides an attachment link by uploader identity: whichever test the
-    /// runner happened to schedule next fails, and only sometimes.
-    struct StdioUserReset;
-    impl Drop for StdioUserReset {
-        fn drop(&mut self) {
-            set_stdio_user(None);
-        }
+    /// Seed a human owner plus a connected-tool bot they own, and mint the
+    /// bot an API key: the exact shape `lific connect` produces and hands to
+    /// an agent as `LIFIC_TOKEN`.
+    fn connected_agent(
+        pool: &crate::db::DbPool,
+        manager: &api_keys_simplified::ApiKeyManagerV0,
+    ) -> (crate::db::models::AuthUser, crate::db::models::User, String) {
+        // A separate instance admin exists as the operator fallback, so
+        // deactivating the owner is not "the last admin" and the agent's
+        // identity is provably not just that fallback.
+        seed_user(pool, "operator", true);
+        let owner = seed_user(pool, "owner", false);
+        let bot = {
+            let conn = pool.write().expect("write conn");
+            crate::db::queries::users::create_bot_user(
+                &conn,
+                owner.id,
+                "opencode-owner",
+                "OpenCode",
+                Some("opencode"),
+            )
+            .expect("create bot")
+        };
+        let token = crate::auth::create_api_key(pool, manager, "opencode-owner", Some(bot.id))
+            .expect("mint agent key");
+        (owner, bot, token)
     }
 
-    #[test]
-    fn stdio_session_with_agent_identity_resolves_as_that_agent() {
-        // Serialize against the whole MCP suite: `set_stdio_user` mutates the
-        // process-wide MCP_REQUEST_USER global, which concurrent tool tests
-        // also read. Holding the shared test guard prevents a cross-test race.
+    fn server_for(pool: &crate::db::DbPool, auth: Option<StdioAuth>) -> LificMcp {
+        LificMcp::for_stdio(pool.clone(), auth)
+    }
+
+    /// Run a body through the revalidation seam and report what identity it
+    /// saw. Standing in for a real tool body: `with_stdio_auth` is what every
+    /// tool runs inside, so whatever this observes, a tool observes.
+    async fn observed_identity(
+        server: &LificMcp,
+        pool: &crate::db::DbPool,
+    ) -> Result<Option<crate::resolve_caller::ResolvedIdentity>, StdioAuthFailed> {
+        server
+            .with_stdio_auth(|| async { current_identity(pool) })
+            .await
+    }
+
+    /// The shape `dispatch_tool` dispatches: a boxed future producing what the
+    /// real `ToolRouter::call` produces.
+    type ToolBody = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+                + Send,
+        >,
+    >;
+
+    /// A tool body that records whether it ran and writes if it does, plus the
+    /// flag to check afterwards. Anything that reaches this has been let
+    /// through the seam.
+    fn mutating_tool(
+        pool: &crate::db::DbPool,
+    ) -> (
+        impl FnOnce() -> ToolBody + use<>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let pool = pool.clone();
+        let body = move || {
+            Box::pin(async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                let conn = pool.write().unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+                     VALUES ('mutation-marker', 'Tool ran', '[]')",
+                    [],
+                )
+                .unwrap();
+                Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::Content::text("ran"),
+                ]))
+            }) as ToolBody
+        };
+        (body, ran)
+    }
+
+    #[tokio::test]
+    async fn a_stdio_tool_call_resolves_as_the_agent_the_token_names() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
-        // Declared after the serialization guard so it resets the global
-        // *before* the guard lets the next test in (reverse drop order).
-        let _reset = StdioUserReset;
-        // A first admin exists as the operator fallback, but the bound session
-        // must resolve to the agent, NOT the admin.
         let pool = crate::db::open_memory().expect("test db");
-        let admin = seed_user(&pool, "admin", true);
-        let agent = seed_user(&pool, "opencode-solo", false);
+        let manager = crate::auth::create_key_manager().unwrap();
+        let (owner, bot, token) = connected_agent(&pool, &manager);
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
-        // Mirrors main.rs: LIFIC_TOKEN resolved to `agent`, installed for the
-        // whole session.
-        set_stdio_user(Some(agent.clone()));
-
-        let identity = current_identity(&pool).expect("a bound stdio session resolves");
+        let identity = observed_identity(&server, &pool)
+            .await
+            .expect("a live token authenticates")
+            .expect("a bound stdio session resolves");
         assert_eq!(
-            identity.user, agent,
-            "agent session must resolve as the agent, not the operator"
+            identity.user.id, bot.id,
+            "the audit actor is the bot, not the operator it inherits from"
         );
-        assert_ne!(identity.user.id, admin.id);
+        assert_ne!(identity.user.id, owner.id);
         assert_eq!(identity.transport, crate::actor::Transport::Mcp);
     }
 
-    #[test]
-    fn stdio_session_without_identity_falls_back_to_operator() {
-        // Serialize against the whole MCP suite for the same process-global
-        // reason as above (set_stdio_user writes MCP_REQUEST_USER).
+    /// The whole point of the seam: a long-running session must not keep
+    /// working after its credential is revoked.
+    #[tokio::test]
+    async fn revoking_the_token_stops_the_very_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
-        let _reset = StdioUserReset;
-        // No LIFIC_TOKEN / unbound → `set_stdio_user(None)` → the operator
-        // (first admin) fallback, the same pre-LIFIC-18 behavior.
+        let pool = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().unwrap();
+        let (_owner, _bot, token) = connected_agent(&pool, &manager);
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+
+        assert!(observed_identity(&server, &pool).await.is_ok());
+
+        crate::auth::revoke_api_key(&pool, "opencode-owner").expect("revoke");
+
+        // Through `dispatch_tool`, which is the exact seam `call_tool` uses,
+        // so this is the mapping a client actually receives.
+        let (body, ran) = mutating_tool(&pool);
+        let result = server
+            .dispatch_tool(body)
+            .await
+            .expect("a dead credential is a tool failure, not a protocol failure");
+
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "the agent must see this as a failed tool call"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the tool body must not run at all, so nothing is mutated"
+        );
+        let mutations: i64 = pool
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_clients WHERE client_id = 'mutation-marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mutations, 0, "nothing was written");
+
+        // The message tells the agent what to do and leaks no database state.
+        let text = format!("{:?}", result.content);
+        assert!(text.contains("lific connect"), "{text}");
+        assert!(text.contains("restart"), "{text}");
+        for internal in ["revoked", "deactivated", "database", "expired", "hash"] {
+            assert!(
+                !text.contains(internal),
+                "the agent must not be told why: {text}"
+            );
+        }
+    }
+
+    /// The success side of the same seam: a live credential dispatches, and
+    /// the tool's own result comes back untouched.
+    #[tokio::test]
+    async fn a_live_credential_dispatches_the_tool_through_the_central_seam() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        let pool = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().unwrap();
+        let (_owner, _bot, token) = connected_agent(&pool, &manager);
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+
+        let (body, ran) = mutating_tool(&pool);
+        let result = server.dispatch_tool(body).await.expect("dispatches");
+
+        assert_eq!(result.is_error, Some(false));
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A password change or sign-out-everywhere revokes the owner's bots'
+    /// keys, so the same seam catches it.
+    #[tokio::test]
+    async fn an_account_lockdown_stops_the_agents_next_tool_call() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        let pool = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().unwrap();
+        let (owner, _bot, token) = connected_agent(&pool, &manager);
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+
+        assert!(observed_identity(&server, &pool).await.is_ok());
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::lock_down_account(&conn, owner.id).unwrap();
+        }
+        assert!(observed_identity(&server, &pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deactivating_the_owner_stops_the_agents_next_tool_call() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        let pool = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().unwrap();
+        let (owner, _bot, token) = connected_agent(&pool, &manager);
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+
+        assert!(observed_identity(&server, &pool).await.is_ok());
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::set_active(&conn, owner.id, false).unwrap();
+        }
+        assert!(
+            observed_identity(&server, &pool).await.is_err(),
+            "a bot whose owner is deactivated is a dead credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_key_still_resolves_to_the_operator() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        let pool = crate::db::open_memory().expect("test db");
+        let manager = crate::auth::create_key_manager().unwrap();
+        let admin = seed_user(&pool, "operator", true);
+        let token = crate::auth::create_api_key(&pool, &manager, "default", None).unwrap();
+        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+
+        let identity = observed_identity(&server, &pool)
+            .await
+            .expect("an unbound key is valid")
+            .expect("operator fallback resolves");
+        assert_eq!(identity.user.id, admin.id);
+        assert!(identity.user.is_admin);
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_stdio_session_keeps_operator_behavior() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
         let admin = seed_user(&pool, "operator", true);
+        let server = server_for(&pool, None);
 
-        set_stdio_user(None);
-        let identity = current_identity(&pool).expect("operator fallback resolves");
+        let identity = observed_identity(&server, &pool)
+            .await
+            .expect("no credential to fail")
+            .expect("operator fallback resolves");
         assert_eq!(
             identity.user.id, admin.id,
             "no-token stdio session must resolve to the first admin"
         );
-        assert!(identity.user.is_admin);
         assert_eq!(identity.transport, crate::actor::Transport::Mcp);
+    }
+
+    /// The HTTP transport is already wrapped in `with_request_context` by
+    /// `server.rs`, which holds `MCP_HANDLER_LOCK` for the whole request. If
+    /// the seam took that lock again the request would deadlock, so an
+    /// HTTP-shaped server must pass straight through.
+    #[tokio::test]
+    async fn the_http_transport_seam_does_not_retake_the_handler_lock() {
+        let _sguard = crate::mcp::tools::acquire_test_guard();
+        let pool = crate::db::open_memory().expect("test db");
+        let server = LificMcp::new(pool.clone());
+        let user = seed_user(&pool, "http-caller", true);
+
+        let seen = with_request_context(Some(user.clone()), None, || async {
+            server
+                .with_stdio_auth(|| async { current_auth_user() })
+                .await
+                .expect("pass-through")
+        })
+        .await;
+        assert_eq!(
+            seen.map(|u| u.id),
+            Some(user.id),
+            "the middleware's identity survives the seam untouched"
+        );
     }
 }

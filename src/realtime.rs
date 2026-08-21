@@ -119,6 +119,12 @@ impl RealtimeHub {
         let _ = self.revocations.send(user_id);
     }
 
+    /// Subscribe to the revocation stream, for tests that assert who was told.
+    #[cfg(test)]
+    pub(crate) fn subscribe_revocations(&self) -> broadcast::Receiver<i64> {
+        self.revocations.subscribe()
+    }
+
     fn send_message(&self, event: RealtimeEvent, audience: RealtimeAudience) {
         if self.tx.receiver_count() == 0 {
             trace!("dropped realtime event because no receivers are subscribed");
@@ -243,15 +249,14 @@ pub async fn serve_socket(
 
     loop {
         let progress_deadline = client.progress_deadline();
-        let input = tokio::select! {
-            biased;
-            _ = time::sleep_until(progress_deadline) => SocketInput::ProgressDeadline,
-            _ = revalidate.tick() => SocketInput::Revalidate,
-            _ = ping.tick() => SocketInput::Ping,
-            event = rx.recv() => SocketInput::Event(event),
-            revoked = revocations.recv() => SocketInput::Revocation(revoked),
-            message = socket.recv() => SocketInput::Message(message),
-        };
+        let input = next_socket_input!(
+            time::sleep_until(progress_deadline),
+            revocations.recv(),
+            revalidate.tick(),
+            ping.tick(),
+            rx.recv(),
+            socket.recv(),
+        );
         let flow = match input {
             SocketInput::Revalidate => {
                 let flow =
@@ -306,6 +311,52 @@ enum SocketInput {
     Message(Option<Result<Message, axum::Error>>),
     ProgressDeadline,
 }
+
+/// Pick the next thing the socket loop should act on, in priority order.
+///
+/// `biased` makes this an ordering policy, not a fair race, and the order is
+/// the security-relevant part of the loop, so it lives in one macro that
+/// production and tests both invoke. A test-only copy of the arm order would
+/// pin the copy, not the thing that runs.
+///
+/// The policy, most urgent first:
+///
+/// 1. **Progress deadline.** A socket that has stopped making progress is
+///    closed before anything else is attempted on it.
+/// 2. **Revocation.** Access has just been taken away, so this is the other
+///    fail-closed arm and nothing that merely serves the client may come
+///    first. It sits *above* interval revalidation deliberately: a revocation
+///    broadcast is already the answer, and making it wait behind an unrelated
+///    revalidate would put a database round trip between a recovery and the
+///    socket it is meant to close.
+/// 3. **Interval revalidation**, the slow-path version of the same check.
+/// 4. **Ping**, then **queued events**, then **client frames**: everything
+///    that serves the connection rather than ending it. A socket with a busy
+///    event stream must not be able to starve arms 1 to 3.
+///
+/// Each argument is a future; the payload types are exactly what the
+/// corresponding [`SocketInput`] variant carries.
+macro_rules! next_socket_input {
+    (
+        $progress:expr,
+        $revocations:expr,
+        $revalidate:expr,
+        $ping:expr,
+        $events:expr,
+        $socket:expr $(,)?
+    ) => {
+        tokio::select! {
+            biased;
+            _ = $progress => $crate::realtime::SocketInput::ProgressDeadline,
+            revoked = $revocations => $crate::realtime::SocketInput::Revocation(revoked),
+            _ = $revalidate => $crate::realtime::SocketInput::Revalidate,
+            _ = $ping => $crate::realtime::SocketInput::Ping,
+            event = $events => $crate::realtime::SocketInput::Event(event),
+            message = $socket => $crate::realtime::SocketInput::Message(message),
+        }
+    };
+}
+use next_socket_input;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RevocationFlow {
@@ -1082,6 +1133,164 @@ mod tests {
         );
         assert_eq!(revocation_flow(Ok(7), 42), RevocationFlow::Ignore);
         assert_eq!(revocation_flow(Ok(42), 42), RevocationFlow::Close);
+    }
+
+    /// One recovery must reach every socket the account has open, and no
+    /// socket belonging to anyone else. The hub is a fan-out broadcast, so
+    /// this is about the subscription, not the flow decision above.
+    #[test]
+    fn one_revocation_reaches_every_socket_the_account_has_open() {
+        let hub = RealtimeHub::new();
+        let mut first = hub.revocations.subscribe();
+        let mut second = hub.revocations.subscribe();
+
+        hub.revoke_user(42);
+
+        assert_eq!(
+            revocation_flow(Ok(first.try_recv().unwrap()), 42),
+            RevocationFlow::Close
+        );
+        assert_eq!(
+            revocation_flow(Ok(second.try_recv().unwrap()), 42),
+            RevocationFlow::Close
+        );
+        // The same message, judged by a socket belonging to someone else.
+        assert_eq!(revocation_flow(Ok(42), 7), RevocationFlow::Ignore);
+    }
+
+    /// A revocation is dispatched as an ordinary [`SocketInput`], so once its
+    /// arm is selected it runs through the same loop body as pings, events and
+    /// client frames, and its three outcomes are the same `SocketFlow` values
+    /// every other arm produces. Losing that would mean losing the send
+    /// budget, the progress timeout and the bounded `close_socket` the rest of
+    /// the loop depends on. (Its *priority* among the arms is a separate
+    /// question, pinned by
+    /// `the_socket_loop_takes_inputs_in_the_documented_priority_order`.)
+    ///
+    /// There is no harness for driving a live `axum::extract::ws::WebSocket`
+    /// in-process, so the socket half of the loop is pinned by construction
+    /// rather than by assertion: `revocation_flow` returns `SocketFlow`-shaped
+    /// decisions only, and the `Close` arm has nowhere to go but
+    /// `close_socket`.
+    #[test]
+    fn revocation_outcomes_are_the_same_three_the_loop_already_handles() {
+        for (input, flow) in [
+            (Ok(42), RevocationFlow::Close),
+            (Ok(7), RevocationFlow::Ignore),
+            (Err(RecvError::Lagged(3)), RevocationFlow::Revalidate),
+            (Err(RecvError::Closed), RevocationFlow::Close),
+        ] {
+            assert_eq!(revocation_flow(input, 42), flow);
+        }
+    }
+
+    /// The loop's priority order, exercised through the very macro the loop
+    /// invokes. Each arm is handed either a ready future or one that never
+    /// completes, so which variant comes out is decided purely by the `biased`
+    /// ordering inside `next_socket_input!` and nothing else.
+    ///
+    /// This is the only place that ordering is checked, and it checks the
+    /// production definition rather than a restatement of it: change the arm
+    /// order in the macro and these assertions fail.
+    #[tokio::test]
+    async fn the_socket_loop_takes_inputs_in_the_documented_priority_order() {
+        use std::future::{pending, ready};
+
+        // Payload types are the real ones each `SocketInput` variant carries.
+        macro_rules! revocation {
+            (ready) => {
+                ready(Ok::<i64, RecvError>(7))
+            };
+            (never) => {
+                pending::<Result<i64, RecvError>>()
+            };
+        }
+        macro_rules! event {
+            (ready) => {
+                ready(Err::<RealtimeMessage, RecvError>(RecvError::Closed))
+            };
+            (never) => {
+                pending::<Result<RealtimeMessage, RecvError>>()
+            };
+        }
+        macro_rules! frame {
+            (ready) => {
+                ready(None::<Result<Message, axum::Error>>)
+            };
+            (never) => {
+                pending::<Option<Result<Message, axum::Error>>>()
+            };
+        }
+
+        // Everything ready at once: the progress deadline wins outright.
+        let input = next_socket_input!(
+            ready(()),
+            revocation!(ready),
+            ready(()),
+            ready(()),
+            event!(ready),
+            frame!(ready),
+        );
+        assert!(
+            matches!(input, SocketInput::ProgressDeadline),
+            "a stalled socket is closed before anything else is attempted"
+        );
+
+        // Revocation outranks revalidation, ping, events and client frames.
+        let input = next_socket_input!(
+            pending::<()>(),
+            revocation!(ready),
+            ready(()),
+            ready(()),
+            event!(ready),
+            frame!(ready),
+        );
+        assert!(
+            matches!(input, SocketInput::Revocation(Ok(7))),
+            "a ready revocation must not wait behind a revalidate DB round trip, a ping, a queued event or a client frame"
+        );
+
+        // Then the slow-path revalidation.
+        let input = next_socket_input!(
+            pending::<()>(),
+            revocation!(never),
+            ready(()),
+            ready(()),
+            event!(ready),
+            frame!(ready),
+        );
+        assert!(matches!(input, SocketInput::Revalidate));
+
+        // Then the arms that merely serve the connection, in order.
+        let input = next_socket_input!(
+            pending::<()>(),
+            revocation!(never),
+            pending::<()>(),
+            ready(()),
+            event!(ready),
+            frame!(ready),
+        );
+        assert!(matches!(input, SocketInput::Ping));
+
+        let input = next_socket_input!(
+            pending::<()>(),
+            revocation!(never),
+            pending::<()>(),
+            pending::<()>(),
+            event!(ready),
+            frame!(ready),
+        );
+        assert!(matches!(input, SocketInput::Event(Err(RecvError::Closed))));
+
+        let input = next_socket_input!(
+            pending::<()>(),
+            revocation!(never),
+            pending::<()>(),
+            pending::<()>(),
+            event!(never),
+            frame!(ready),
+        );
+        assert!(matches!(input, SocketInput::Message(None)));
     }
 
     #[test]

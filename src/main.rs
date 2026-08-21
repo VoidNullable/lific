@@ -420,13 +420,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!(path = %cfg.database.path.display(), "database ready");
 
             // LIFIC-18: a stdio agent carries its identity in LIFIC_TOKEN. Read
-            // it at startup, validate it, and resolve the caller as that agent
-            // for the whole session. A missing/unbound token runs as the
-            // operator with a stderr warning (MCP stdio has no transport auth;
-            // the launch boundary is the trust). A PRESENT-but-invalid token is
-            // a hard error: a revoked or mistyped agent credential must not
-            // silently fall back to higher-privilege operator access (PR #23
-            // review).
+            // it at startup and validate it there so a broken credential fails
+            // the launch loudly instead of half-working. A missing/unbound
+            // token runs as the operator with a stderr warning (MCP stdio has
+            // no transport auth; the launch boundary is the trust). A
+            // PRESENT-but-invalid token is a hard error: a revoked or mistyped
+            // agent credential must not silently fall back to higher-privilege
+            // operator access (PR #23 review).
             let manager = auth::create_key_manager()?;
             let token_user = match auth::resolve_stdio_token(&pool, &manager) {
                 Ok(Some(user)) => Some(user),
@@ -451,10 +451,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let server = mcp::LificMcp::new(pool);
-            // LIFIC-18: bind the resolved agent (or operator) as this stdio
-            // session's identity for the whole process lifetime.
-            mcp::set_stdio_user(token_user.clone());
+            // The startup check above is a fail-fast, not the enforcement
+            // point. A stdio session can run for days, so the raw token goes
+            // onto the server and is re-resolved before every tool call: revoke
+            // the key, change the owner's password, deactivate the account, and
+            // the very next tool call fails instead of the next restart.
+            let stdio_auth = std::env::var("LIFIC_TOKEN")
+                .ok()
+                .map(|raw| raw.trim().to_string())
+                .filter(|token| !token.is_empty())
+                .map(|token| mcp::StdioAuth::new(token, manager));
+
+            let server = mcp::LificMcp::for_stdio(pool, stdio_auth);
             let transport = rmcp::transport::io::stdio();
 
             info!("lific MCP server started (stdio)");

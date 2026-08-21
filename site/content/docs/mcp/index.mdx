@@ -44,6 +44,10 @@ OAuth-capable MCP clients can connect to the endpoint URL and complete the autho
 
 Lific implements dynamic client registration at `/oauth/register`. Clients can register a redirect URI before starting authorization. Registered redirect URIs must be absolute HTTP or HTTPS URLs.
 
+Both grants are approved from a signed-in browser, and only from one: an OAuth access token cannot approve an authorization request or a device code. The browser session must also have signed in within the last 15 minutes, because approving a connection mints a 30-day credential for the tool.
+
+An older session is refused, and the refusal is not resumed for you. Nothing is created. To continue: sign **out** of Lific (revisiting the login page does not help, since the old session is still valid, just old), sign back in, then start the connection again from your MCP client. On an instance that signs in without a password, signing out and reloading is enough. Approval binds the grant to a per-tool bot owned by the approving human, and the token exchange is refused unless the grant names an identity that may still authenticate. A grant that names nobody, which only pre-2.1 rows do, returns `invalid_grant`; so does one whose bot was deleted, whose owner was deactivated, or whose owner ran an account recovery between approval and exchange.
+
 ## Identity and authorization
 
 MCP resolves the caller exactly as REST does, in every auth mode. An agent cannot do more through MCP than the same account can do through the web UI, and the gates read the same resolved identity on both surfaces.
@@ -52,11 +56,21 @@ Writes made by a connected agent are attributed to that agent in the audit log, 
 
 ## stdio sessions and `LIFIC_TOKEN`
 
-A stdio MCP session has no transport authentication, so it carries its identity in the `LIFIC_TOKEN` environment variable instead. `lific connect --stdio` writes that variable into the client's configuration entry. Lific resolves it once at startup and uses it for the whole session.
+A stdio MCP session has no transport authentication, so it carries its identity in the `LIFIC_TOKEN` environment variable instead. `LIFIC_TOKEN` is an API key. `lific connect --stdio` writes that variable into the client's configuration entry.
+
+Lific checks it at startup:
 
 - **Absent, or valid but not bound to a user:** the session runs as the operator and Lific prints a warning to standard error.
 - **Present and valid:** the session runs as that agent.
 - **Present but invalid**, for example revoked or mistyped: Lific refuses to start. A bad agent credential must not silently fall back to operator access.
+
+### Revocation takes effect at the next tool call
+
+The startup check is a fail-fast, not the enforcement point. A stdio session can run for days, so Lific revalidates `LIFIC_TOKEN` before **every** tool call and resolves the caller's identity from that check. Revoking the key, changing the owner's password, signing out everywhere, or deactivating the account stops the agent at its next tool call, and the tool body never runs, so nothing is written.
+
+The refusal comes back as a failed tool result (`isError: true`) rather than a JSON-RPC protocol error, because the request was well formed and the session is still usable: the agent reads the text, which tells it to run `lific connect` and restart the MCP server. The text does not say why the credential failed; that goes to the server's log.
+
+A session launched with no `LIFIC_TOKEN` has no credential to revalidate and keeps its operator behavior.
 
 `LIFIC_TOKEN` is not the same thing as `LIFIC_API_KEY`. `LIFIC_API_KEY` is the bearer credential for remote HTTP access.
 

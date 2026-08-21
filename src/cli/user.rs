@@ -124,24 +124,37 @@ pub fn run(
 
             let conn = pool.write()?;
             let user = db::queries::users::get_user_by_username(&conn, &username)?;
-            db::queries::users::update_password(&conn, user.id, &pw)?;
-            // LIF-205 semantics: any password change signs out every
-            // existing session — a reset must not leave a possibly
-            // hijacked session alive.
-            db::queries::users::delete_all_sessions(&conn, user.id)?;
+            // An operator reset is a recovery action, so it carries the same
+            // blast radius as the account holder changing their own password:
+            // update the hash and run the full lockdown in one savepoint, so a
+            // failure anywhere leaves the old password and the old credentials
+            // both intact rather than a half-locked account.
+            //
+            // There is no realtime hub in the direct-DB CLI to push a
+            // revocation from. Other processes notice on their own: web
+            // sockets revalidate on their periodic tick, and a long-running
+            // stdio MCP session revalidates its token on every tool call.
+            db::queries::savepoint(&conn, "cli_set_password", || {
+                db::queries::users::update_password(&conn, user.id, &pw)?;
+                db::queries::users::lock_down_account(&conn, user.id)
+            })?;
 
             if json {
                 let out = serde_json::json!({
                     "username": user.username,
                     "password_set": true,
                     "sessions_cleared": true,
+                    "credentials_revoked": true,
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 ui::step(format!(
                     "Password updated for '{}' {}",
                     user.username,
-                    ui::dim("(all sessions signed out)")
+                    ui::dim(
+                        "(all sessions signed out; API keys, OAuth sessions and connected tools \
+                         owned by this account revoked; they must be reconnected)"
+                    )
                 ));
             }
         }
@@ -167,4 +180,94 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    /// Drive the real `lific user` entrypoint against a scratch database.
+    fn run_user(dir: &tempfile::TempDir, action: UserAction) {
+        let mut cfg = Config::default();
+        cfg.database.path = dir.path().join("lific.db");
+        run(&cfg, action, true).expect("user command");
+    }
+
+    /// `lific user set-password` is the operator's recovery door, so it carries
+    /// the same blast radius as the account holder changing their own password:
+    /// sessions, keys and OAuth tokens for the user *and* the tools they own,
+    /// all in one write with the new password hash.
+    #[test]
+    fn set_password_locks_the_account_down() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        run_user(
+            &dir,
+            UserAction::Create {
+                username: "blake".into(),
+                email: "blake@test.local".into(),
+                password: Some("original password".into()),
+                admin: true,
+                bot: false,
+            },
+        );
+
+        let pool = db::open(&dir.path().join("lific.db")).expect("open db");
+        let (user_id, bot_id) = {
+            let conn = pool.write().unwrap();
+            let user = db::queries::users::get_user_by_username(&conn, "blake").unwrap();
+            let bot = db::queries::users::create_bot_user(
+                &conn,
+                user.id,
+                "opencode-blake",
+                "OpenCode",
+                Some("opencode"),
+            )
+            .unwrap();
+            db::queries::users::create_session(&conn, user.id, None).unwrap();
+            conn.execute(
+                "INSERT INTO api_keys (name, key_hash, user_id) VALUES
+                 ('blake-key', 'hash-human', ?1),
+                 ('bot-key', 'hash-bot', ?2),
+                 ('operator', 'hash-operator', NULL)",
+                params![user.id, bot.id],
+            )
+            .unwrap();
+            (user.id, bot.id)
+        };
+        drop(pool);
+
+        run_user(
+            &dir,
+            UserAction::SetPassword {
+                username: "blake".into(),
+                password: Some("reset by operator".into()),
+            },
+        );
+
+        let pool = db::open(&dir.path().join("lific.db")).expect("reopen db");
+        let conn = pool.read().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+        assert_eq!(count("SELECT COUNT(*) FROM sessions"), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM api_keys WHERE revoked = 0 AND user_id IS NOT NULL"),
+            0,
+            "the human's key and the owned bot's key are both revoked"
+        );
+        assert_eq!(
+            count("SELECT revoked FROM api_keys WHERE name = 'operator'"),
+            0,
+            "the unbound operator key names nobody and survives"
+        );
+
+        // The bot identity survives so the tool shows as disconnected and can
+        // be reconnected, rather than disappearing.
+        assert!(db::queries::users::get_user_by_id(&conn, bot_id).is_ok());
+
+        let user = db::queries::users::get_user_by_id(&conn, user_id).unwrap();
+        assert!(
+            db::queries::users::verify_password("reset by operator", &user.password_hash).unwrap()
+        );
+    }
 }

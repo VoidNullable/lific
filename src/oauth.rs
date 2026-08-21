@@ -8,9 +8,11 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, Mac};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::db::models::AuthUser;
 use tracing::{info, warn};
 
 use crate::auth::{hex_encode, sha256_hex};
@@ -525,6 +527,106 @@ struct ApproveForm {
     tool_custom: Option<String>,
 }
 
+/// The one page both approval handlers render when the presented credential is
+/// not a live browser session: absent, wrong shape, expired, or revoked out
+/// from under the form between rendering and submitting. Deliberately one
+/// message for all of those.
+fn invalid_session_page() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html("<h1>Invalid session</h1><p>Your session has expired or is invalid. <a href=\"/#/login\">Sign in again</a></p>".to_string()),
+    )
+        .into_response()
+}
+
+/// The page shown when the session is real but was not authenticated recently
+/// enough to hand out a durable credential.
+///
+/// Distinct copy from [`invalid_session_page`] because the fix is different:
+/// nothing is wrong with the session, it is simply older than the window.
+/// Telling them "expired or invalid" would send them looking for a problem that
+/// is not there.
+///
+/// The copy is deliberately literal about what has to happen, and deliberately
+/// does not promise a retry. This request is a form POST carrying a PKCE
+/// challenge, a redirect URI and a CSRF token bound to the presenting session.
+/// Replaying it after a fresh sign-in would need a server-side continuation
+/// store keyed on something the browser can carry back, which is a real feature
+/// with its own security surface, not a redirect. It also does not send them to
+/// `/#/login`, because a stored session that is merely old still satisfies the
+/// login screen: it would show them the app, they would come back, and it would
+/// be just as stale. Signing **out** is what actually clears it.
+fn stale_session_page() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(
+            "<h1>Your sign-in is too old to connect a tool</h1>\
+             <p>Connecting a tool gives it lasting access to your account, so Lific requires a \
+             sign-in from the last 15 minutes. Yours is older than that. Nothing has been \
+             connected and nothing has changed.</p>\
+             <p>To continue:</p>\
+             <ol>\
+             <li>Open Lific and <strong>sign out</strong>. Simply reloading or revisiting the \
+             login page will not help, because your existing sign-in is still valid, just old.</li>\
+             <li>Sign back in. (On an instance that signs in without a password, signing out and \
+             reloading is enough.)</li>\
+             <li>Start the connection again from your MCP client. This page cannot resume it for \
+             you.</li>\
+             </ol>\
+             <p><a href=\"/#/settings\">Open Lific settings</a></p>"
+                .to_string(),
+        ),
+    )
+        .into_response()
+}
+
+/// Establish, on `conn`, that `token` is a live browser session authenticated
+/// inside the recent-authentication window, and return whose it is.
+///
+/// Approving an OAuth grant mints a 30-day credential for a tool, which is the
+/// same authority as minting an API key, so it carries the same 15-minute rule
+/// that `POST /api/auth/keys` does. Without it a session token stolen from a
+/// browser that was signed in last week is enough to attach a permanent tool
+/// credential to the account.
+///
+/// Callers run this as the first statement of the write transaction that
+/// resolves the bot and stores the grant, so a lockdown cannot land between
+/// the check and the write.
+fn recent_approver(
+    conn: &rusqlite::Connection,
+    token: &str,
+) -> Result<crate::db::models::User, ApprovalRefusal> {
+    let user = crate::db::queries::users::validate_session(conn, token)
+        .map_err(|_| ApprovalRefusal::InvalidSession)?;
+    match crate::db::queries::users::session_is_recent(conn, token) {
+        Ok(true) => Ok(user),
+        Ok(false) => Err(ApprovalRefusal::StaleSession),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to check session recency");
+            Err(ApprovalRefusal::Database)
+        }
+    }
+}
+
+/// Why an approval was refused before anything was written. Kept as a small
+/// enum rather than a built `Response` so the error half of
+/// [`recent_approver`]'s result stays cheap to move.
+enum ApprovalRefusal {
+    InvalidSession,
+    StaleSession,
+    Database,
+}
+
+impl ApprovalRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidSession => invalid_session_page(),
+            Self::StaleSession => stale_session_page(),
+            Self::Database => (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        }
+    }
+}
+
 async fn authorize_approve(
     State(oauth): State<OAuthState>,
     headers: axum::http::HeaderMap,
@@ -560,38 +662,13 @@ async fn authorize_approve(
             .into_response();
     };
 
-    // Validate the token against the database AND capture the approving
-    // user's identity so it can be bound to the issued code (LIF-79). OAuth
-    // routes bypass the auth middleware, so we validate here.
-    //
-    // auth_outcome:
-    //   None           -> token invalid -> reject
-    //   Some(None)     -> authenticated but no resolvable user (a legacy
-    //                     OAuth token issued before LIF-79) -> proceed and
-    //                     bind no user, preserving the old behavior
-    //   Some(Some(id)) -> authenticated as user `id` -> bind it to the code
-    let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
-        let conn = match oauth.db.read() {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        crate::db::queries::users::validate_session(&conn, &token)
-            .ok()
-            .map(|u| Some(u.id))
-    } else if token.starts_with("lific_at_") {
-        // OAuth tokens can also approve (valid authenticated identity).
-        authenticate_oauth_token(&oauth.db, &token)
-    } else {
-        None
-    };
-
-    let Some(approving_user_id) = auth_outcome else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html("<h1>Invalid session</h1><p>Your session has expired or is invalid. <a href=\"/#/login\">Sign in again</a></p>".to_string()),
-        )
-            .into_response();
-    };
+    // Approving an OAuth grant is an account-level act, so it requires a
+    // browser session and nothing else. An OAuth access token used to be
+    // accepted here, which let one connected tool authorize another and
+    // survive a lockdown by re-minting through the grant it already held.
+    if !token.starts_with("lific_sess_") {
+        return invalid_session_page();
+    }
 
     // Validate the redirect_uri against the client's registered URIs
     let redirect_ok = if let Ok(conn) = oauth.db.read() {
@@ -619,14 +696,46 @@ async fn authorize_approve(
             .into_response();
     }
 
+    let code = uuid_v4();
+    let expires = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let scope = form.scope.as_deref().unwrap_or("mcp");
+
+    // One transaction for the authorization decision and everything it
+    // produces: revalidate the approving session, mint or reuse the tool's
+    // bot, and store the code. SQLite serializes writers, so an account
+    // lockdown either commits first (and this transaction finds no session) or
+    // commits after (and burns the code this one wrote). There is no order in
+    // which an approval outlives the session that authorized it.
+    let conn = match oauth.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let tx = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open OAuth authorization transaction");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
+    };
+
+    // Validated inside the transaction, not before it: anything checked
+    // earlier can be revoked between the check and this write. The approving
+    // user's identity is bound to the issued code (LIF-79), and the session
+    // must have been authenticated recently, because what this hands out is a
+    // durable credential.
+    let approver = match recent_approver(&tx, &token) {
+        Ok(user) => user,
+        Err(refusal) => return refusal.into_response(),
+    };
+
     // LIFIC-13: pick which tool is connecting, then ensure (or reuse) its bot
     // so the issued credential attributes to the tool, not the approving human.
     // The bot inherits the human's permissions via authz's bot→owner resolution.
     let bot_id = match resolve_approval_bot(
-        &oauth,
+        &tx,
         &form.tool,
         &form.tool_custom,
-        approving_user_id,
+        Some(approver.id),
         Some(&form.client_id),
     ) {
         Ok(id) => id,
@@ -635,15 +744,7 @@ async fn authorize_approve(
         }
     };
 
-    let code = uuid_v4();
-    let expires = chrono::Utc::now() + chrono::Duration::minutes(10);
-    let scope = form.scope.as_deref().unwrap_or("mcp");
-
-    let conn = match oauth.db.write() {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-    };
-    if let Err(e) = conn.execute(
+    if let Err(e) = tx.execute(
         "INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, code_challenge_method, expires_at, scope, user_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -658,6 +759,11 @@ async fn authorize_approve(
         ],
     ) {
         tracing::error!(error = %e, "failed to store OAuth authorization code");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
+
+    if let Err(e) = tx.commit() {
+        tracing::error!(error = %e, "failed to commit OAuth authorization");
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
@@ -833,11 +939,17 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
 /// `(StatusCode, message)` the caller renders as its error page (missing tool,
 /// unsanitizable/reserved id, no resolvable owner, or DB failure).
 ///
+/// Takes the caller's connection rather than reaching for the pool itself, so
+/// the bot it mints lands in the same transaction as the grant that names it.
+/// It used to take its own write lock, which forced both approval handlers to
+/// resolve the bot *before* opening their own write and left a window where a
+/// recovery could revoke the approver between the two.
+///
 /// When `client_id` is `Some`, the resolved `tool_id` is remembered on that
 /// client (LIFIC-15) so a reconnect pre-fills the pick-list instead of
 /// re-asking. The device flow passes `None` — it has no persistent client.
 fn resolve_approval_bot(
-    oauth: &OAuthState,
+    conn: &rusqlite::Connection,
     tool: &Option<String>,
     tool_custom: &Option<String>,
     approving_user_id: Option<i64>,
@@ -868,10 +980,6 @@ fn resolve_approval_bot(
             "No operator to attribute to — sign in as a human first".into(),
         ));
     };
-    let conn = match oauth.db.write() {
-        Ok(c) => c,
-        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "database error".into())),
-    };
     // LIFIC-15: remember the tool on the client (same conn, best-effort).
     if let Some(client_id) = client_id
         && let Err(e) = conn.execute(
@@ -881,7 +989,7 @@ fn resolve_approval_bot(
     {
         tracing::error!(error = %e, client_id, "failed to remember client tool");
     }
-    match crate::db::queries::users::ensure_bot(&conn, owner_id, &tool_id, &display_name) {
+    match crate::db::queries::users::ensure_bot(conn, owner_id, &tool_id, &display_name) {
         Ok(bot) => Ok(bot.id),
         Err(e) => {
             tracing::error!(error = %e, "failed to mint OAuth tool bot");
@@ -912,7 +1020,12 @@ fn normalize_user_code(input: &str) -> String {
 fn cleanup_expired_device_codes(db: &DbPool) {
     if let Ok(conn) = db.write() {
         let _ = conn.execute(
-            "DELETE FROM oauth_device_codes WHERE expires_at <= datetime('now')",
+            // `datetime(expires_at)`: device codes are stored as RFC 3339
+            // ('2026-08-20T12:00:00+00:00'), which does NOT compare correctly
+            // against SQLite's own 'YYYY-MM-DD HH:MM:SS' form as raw text. The
+            // 'T' sorts after every digit, so a same-day RFC 3339 timestamp
+            // reads as later than it is and an expired code looks live.
+            "DELETE FROM oauth_device_codes WHERE datetime(expires_at) <= datetime('now')",
             [],
         );
     }
@@ -1152,58 +1265,71 @@ async fn device_approve(
             .into_response();
     };
 
-    let auth_outcome: Option<Option<i64>> = if token.starts_with("lific_sess_") {
-        let conn = match oauth.db.read() {
-            Ok(c) => c,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-        };
-        crate::db::queries::users::validate_session(&conn, &token)
-            .ok()
-            .map(|u| Some(u.id))
-    } else if token.starts_with("lific_at_") {
-        authenticate_oauth_token(&oauth.db, &token)
-    } else {
-        None
-    };
-
-    let Some(approving_user_id) = auth_outcome else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html("<h1>Invalid session</h1><p>Your session has expired or is invalid. <a href=\"/#/login\">Sign in again</a></p>".to_string()),
-        )
-            .into_response();
-    };
+    // Same rule as the authorization-code flow: only a browser session may
+    // approve a device. An OAuth access token is a tool's credential, not a
+    // human at a keyboard.
+    if !token.starts_with("lific_sess_") {
+        return invalid_session_page();
+    }
 
     let normalized = normalize_user_code(&form.user_code);
     let deny = form.decision.as_deref() == Some("deny");
-
-    // Originally pending, unexpired codes only get acted on below. Defer the
-    // write-lock acquisition until after LIFIC-13 bot resolution, because
-    // resolve_approval_bot also takes a write lock — acquiring it here first
-    // would self-deadlock the pool.
     let new_status = if deny { "denied" } else { "approved" };
+
+    // One transaction: revalidate the approving session, resolve the tool's
+    // bot, and move the device code out of `pending`. `resolve_approval_bot`
+    // used to take its own write lock, which is why this handler had to
+    // resolve the bot before opening its own, and why a lockdown could land
+    // between the two.
+    let conn = match oauth.db.write() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let tx = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open device approval transaction");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
+    };
+
+    // Denying is a refusal, not a grant. It creates nothing, hands out
+    // nothing, and is the thing a person does when a device they do not
+    // recognise is asking for access, which is exactly the moment not to make
+    // them sign in again first. So a *live* session is required either way,
+    // and the 15-minute freshness rule applies only to approval.
+    let approver = if deny {
+        match crate::db::queries::users::validate_session(&tx, &token) {
+            Ok(user) => user,
+            Err(_) => return invalid_session_page(),
+        }
+    } else {
+        match recent_approver(&tx, &token) {
+            Ok(user) => user,
+            Err(refusal) => return refusal.into_response(),
+        }
+    };
 
     // LIFIC-13: on approval, pick which tool is connecting and mint (or reuse)
     // its bot, binding the device code to the bot so the exchanged token
-    // attributes to the tool. Deny needs no tool resolution.
+    // attributes to the tool. Deny resolves no tool and mints no bot: a
+    // refused device must not leave a connected-tool identity behind as a
+    // side effect of refusing it.
     let target_user_id: Option<i64> = if deny {
-        approving_user_id
+        Some(approver.id)
     } else {
-        match resolve_approval_bot(&oauth, &form.tool, &form.tool_custom, approving_user_id, None) {
+        match resolve_approval_bot(&tx, &form.tool, &form.tool_custom, Some(approver.id), None) {
             Ok(id) => Some(id),
             Err((status, msg)) => return (status, Html(msg)).into_response(),
         }
     };
 
-    let conn = match oauth.db.write() {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
-    };
-    let updated = conn
+    let updated = tx
         .execute(
             "UPDATE oauth_device_codes
              SET status = ?1, user_id = ?2
-             WHERE user_code = ?3 AND status = 'pending' AND expires_at > datetime('now')",
+             WHERE user_code = ?3 AND status = 'pending'
+               AND datetime(expires_at) > datetime('now')",
             params![new_status, target_user_id, normalized],
         )
         .unwrap_or(0);
@@ -1217,6 +1343,11 @@ async fn device_approve(
             )),
         )
             .into_response();
+    }
+
+    if let Err(e) = tx.commit() {
+        tracing::error!(error = %e, "failed to commit device approval");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
     info!(user_code = %normalized, decision = %new_status, "OAuth device verification");
@@ -1293,10 +1424,21 @@ async fn token_exchange(
             .into_response();
     };
 
-    // Look up the authorization code
+    // The whole exchange is one transaction: read the code, validate it, check
+    // that the identity it names may still authenticate, burn it, and insert
+    // the token. Splitting the read from the burn is what let a recovery land
+    // in between and hand out a 30-day token against a code it had already
+    // invalidated.
     let conn = match state.db.write() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+    };
+    let conn = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open OAuth token transaction");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
     };
 
     // Named row type keeps the query_row result readable and avoids
@@ -1312,7 +1454,11 @@ async fn token_exchange(
     }
 
     let code_row: Result<AuthCodeRow, _> = conn.query_row(
-        "SELECT client_id, redirect_uri, code_challenge, code_challenge_method, used, scope, user_id FROM oauth_codes WHERE code = ?1 AND expires_at > datetime('now')",
+        // `datetime(expires_at)` for the same reason as the device codes: the
+        // column holds RFC 3339, and raw text comparison against
+        // `datetime('now')` mis-orders it within the same day.
+        "SELECT client_id, redirect_uri, code_challenge, code_challenge_method, used, scope, user_id \
+         FROM oauth_codes WHERE code = ?1 AND datetime(expires_at) > datetime('now')",
         params![code],
         |row| {
             Ok(AuthCodeRow {
@@ -1399,22 +1545,36 @@ async fn token_exchange(
             .into_response();
     }
 
-    // A code bound to a user must still resolve that user at exchange time —
-    // the bot may have been deleted between approval and exchange (PR #23
-    // review). Minting anyway would create a dangling-user token.
-    if let Some(uid) = code_user_id {
-        let exists = conn
-            .query_row("SELECT 1 FROM users WHERE id = ?1", params![uid], |_| {
-                Ok(())
-            })
-            .is_ok();
-        if !exists {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_grant", "error_description": "authorizing user no longer exists"})),
-            )
-                .into_response();
-        }
+    // The code must name an identity, and that identity must still be one that
+    // may authenticate.
+    //
+    // A NULL `user_id` is a pre-LIF-79 legacy row. Every approval since binds
+    // the per-tool bot, so nothing issues one any more, and exchanging one
+    // produced an *unbound* access token: a credential that names nobody,
+    // which the caller resolution then treats as the operator. That is a
+    // silent privilege escalation, and no lockdown can revoke it either, since
+    // a lockdown scopes by user id. Fail closed instead.
+    //
+    // A bound code still has to resolve a live identity: the bot may have been
+    // deleted between approval and exchange (PR #23 review), and its owner may
+    // have been deactivated or locked down since. `credential_is_live` is the
+    // same predicate every other bearer credential is judged by.
+    let Some(code_user_id) = code_user_id else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_grant", "error_description": "this authorization is not bound to an identity; reconnect to authorize again"})),
+        )
+            .into_response();
+    };
+    let live = crate::db::queries::users::get_user_by_id(&conn, code_user_id)
+        .and_then(|user| crate::db::queries::users::credential_is_live(&conn, &user))
+        .unwrap_or(false);
+    if !live {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid_grant", "error_description": "authorizing user is no longer active"})),
+        )
+            .into_response();
     }
 
     // Mark code as used
@@ -1440,6 +1600,11 @@ async fn token_exchange(
         return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
+    if let Err(e) = conn.commit() {
+        tracing::error!(error = %e, "failed to commit OAuth token exchange");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    }
+
     info!(client_id = %stored_client_id, scope = %scope, "OAuth token issued");
 
     Json(TokenResponse {
@@ -1461,10 +1626,35 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     };
     let device_code_hash = sha256_hex(device_code.as_bytes());
 
-    let mut conn = match state.db.write() {
+    // LIF-370 extended: the read, the status decision, the liveness check, the
+    // token insert and the consumed transition are all one transaction. The
+    // approved-row read used to sit outside the transaction that consumed it,
+    // so a recovery that denied the grant between the two still handed the
+    // polling device a token.
+    let conn = match state.db.write() {
         Ok(c) => c,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     };
+    let conn = match rusqlite::Transaction::new_unchecked(&conn, TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open device token transaction");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
+    };
+
+    /// Commit the bookkeeping a non-issuing outcome still needs to persist
+    /// (the expiry sweep, the poll timestamp) and hand back the response. A
+    /// failed commit is not worth failing the poll over: the client simply
+    /// retries, so log it and answer as decided.
+    macro_rules! finish {
+        ($conn:expr, $response:expr) => {{
+            if let Err(e) = $conn.commit() {
+                tracing::error!(error = %e, "failed to commit device poll bookkeeping");
+            }
+            return $response;
+        }};
+    }
 
     struct DeviceRow {
         status: String,
@@ -1506,7 +1696,10 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             "DELETE FROM oauth_device_codes WHERE device_code_hash = ?1",
             params![device_code_hash],
         );
-        return device_error(StatusCode::BAD_REQUEST, "expired_token", None);
+        finish!(
+            conn,
+            device_error(StatusCode::BAD_REQUEST, "expired_token", None)
+        );
     }
 
     // slow_down: reject if polled faster than `interval` since the last poll.
@@ -1519,7 +1712,10 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
         if elapsed < row.interval_seconds {
             // Do NOT update last_polled_at here — an early poll shouldn't push
             // the window out; the client is told to slow down.
-            return device_error(StatusCode::BAD_REQUEST, "slow_down", None);
+            finish!(
+                conn,
+                device_error(StatusCode::BAD_REQUEST, "slow_down", None)
+            );
         }
     }
 
@@ -1530,27 +1726,63 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     );
 
     match row.status.as_str() {
-        "pending" => device_error(StatusCode::BAD_REQUEST, "authorization_pending", None),
-        "denied" => device_error(StatusCode::BAD_REQUEST, "access_denied", None),
-        "consumed" => device_error(StatusCode::BAD_REQUEST, "invalid_grant", Some("device code already used")),
+        "pending" => finish!(
+            conn,
+            device_error(StatusCode::BAD_REQUEST, "authorization_pending", None)
+        ),
+        "denied" => finish!(
+            conn,
+            device_error(StatusCode::BAD_REQUEST, "access_denied", None)
+        ),
+        "consumed" => finish!(
+            conn,
+            device_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                Some("device code already used")
+            )
+        ),
         "approved" => {
             // Mint the access token bound to the approving user, then mark the
-            // code consumed (single use). The bound user must still exist —
-            // the bot may have been deleted between approval and this poll
-            // (PR #23 review).
-            if let Some(uid) = row.user_id {
-                let exists = conn
-                    .query_row("SELECT 1 FROM users WHERE id = ?1", params![uid], |_| {
-                        Ok(())
-                    })
-                    .is_ok();
-                if !exists {
-                    return device_error(
+            // code consumed (single use).
+            //
+            // The approval must name an identity. A NULL `user_id` on an
+            // approved row is a pre-LIF-79 legacy grant; exchanging it minted
+            // an *unbound* access token, which resolves as the operator and
+            // which no lockdown can revoke, because a lockdown scopes by user
+            // id. Nothing issues one any more, so fail closed. Same reasoning
+            // and same wording as the authorization-code path.
+            //
+            // A bound approval still has to resolve a live identity: the bot
+            // may have been deleted between approval and this poll (PR #23
+            // review), and its owner may have been deactivated or locked down
+            // since. `credential_is_live` is the predicate every other bearer
+            // credential is judged by.
+            let Some(approved_user_id) = row.user_id else {
+                finish!(
+                    conn,
+                    device_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_grant",
-                        Some("authorizing user no longer exists"),
-                    );
-                }
+                        Some(
+                            "this authorization is not bound to an identity; reconnect to \
+                             authorize again"
+                        ),
+                    )
+                );
+            };
+            let live = crate::db::queries::users::get_user_by_id(&conn, approved_user_id)
+                .and_then(|user| crate::db::queries::users::credential_is_live(&conn, &user))
+                .unwrap_or(false);
+            if !live {
+                finish!(
+                    conn,
+                    device_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        Some("authorizing user is no longer active"),
+                    )
+                );
             }
             let scope = "mcp";
             let client_id = "device";
@@ -1564,14 +1796,11 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             // atomic step. Previously the consumed-UPDATE was `let _ =`, so a
             // failed write handed out a token while leaving the code
             // `approved` and replayable for as many tokens as the client cared
-            // to poll for. Either both writes land or neither does.
-            let tx = match conn.transaction() {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to open device token transaction");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-                }
-            };
+            // to poll for. Either both writes land or neither does, and since
+            // LIF-PR32 the approved-row read is inside the same transaction, so
+            // a denial that lands first wins cleanly instead of being read
+            // stale.
+            let tx = conn;
 
             // Ensure a client row exists so the FK on oauth_tokens is satisfied.
             let _ = tx.execute(
@@ -1583,7 +1812,13 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             if let Err(e) = tx.execute(
                 "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![token_hash, client_id, expires_at.to_rfc3339(), scope, row.user_id],
+                params![
+                    token_hash,
+                    client_id,
+                    expires_at.to_rfc3339(),
+                    scope,
+                    approved_user_id
+                ],
             ) {
                 tracing::error!(error = %e, "failed to store device OAuth token");
                 return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
@@ -1625,7 +1860,10 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             })
             .into_response()
         }
-        _ => device_error(StatusCode::BAD_REQUEST, "invalid_grant", None),
+        _ => finish!(
+            conn,
+            device_error(StatusCode::BAD_REQUEST, "invalid_grant", None)
+        ),
     }
 }
 
@@ -1761,31 +1999,134 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Check if a bearer token is a valid OAuth access token: known, not revoked,
-/// not expired. Tokens are stored as SHA-256 hashes; the incoming raw token is
-/// hashed before lookup.
+/// What an OAuth bearer token resolved to.
 ///
-/// LIF-384: this used to delegate to a `validate_oauth_token_with_scope` that
-/// returned the granted scope, which the only production caller (this
-/// function) discarded with `.is_some()`. Nothing ever compared a scope
-/// against a required one, and the column is always 'mcp'. Tokens still carry
-/// a scope in the database and in the token response, since clients read it;
-/// only the Rust path pretending to check it is gone.
-pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
+/// The middleware used to answer this with three separate calls: "is it
+/// valid", "whose is it", "is that user live". Each took its own pooled
+/// connection, so the three answers came from three different snapshots of the
+/// database. A token revoked between the first and the second read as valid,
+/// then as unbound, and an unbound OAuth token is the operator: revoking a
+/// tool's credential could *promote* it. That is the whole reason this is one
+/// function and one connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthCredential {
+    /// Valid, and bound to a user who may authenticate right now.
+    Bound(AuthUser),
+    /// Valid, and genuinely carries no user binding.
+    ///
+    /// Only rows issued before user binding existed (pre-LIF-79) can be in
+    /// this state; every approval since binds the per-tool bot, and the token
+    /// exchange refuses an unbound grant outright. It is kept because such
+    /// rows may still exist in an upgraded database, and it resolves to the
+    /// operator fallback, which is the documented pre-LIF-79 behaviour.
+    LegacyUnbound,
+}
+
+/// Why an OAuth bearer token did not authenticate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthReject {
+    /// Wrong prefix, no such row, revoked, or expired.
+    Invalid,
+    /// The row is fine but names an identity that may not authenticate: the
+    /// user is gone, deactivated, or is a bot whose owner is deactivated.
+    ///
+    /// Deliberately distinct from [`OAuthReject::Invalid`] at the type level so
+    /// it can never be collapsed into "unbound". A dead binding is a dead
+    /// credential, not an anonymous one.
+    DeadBinding,
+    /// The database could not be read. Fails closed.
+    Unavailable,
+}
+
+/// Resolve an OAuth bearer token with one SQL statement.
+///
+/// A connection alone is not a snapshot in SQLite autocommit mode: each
+/// statement starts its own read transaction. Keep token validity, its nullable
+/// binding, the bound user, and the bot owner's liveness in one joined query so
+/// revocation cannot land between those decisions.
+pub fn resolve_oauth_credential(db: &DbPool, token: &str) -> Result<OAuthCredential, OAuthReject> {
     if !token.starts_with("lific_at_") {
-        return false;
+        return Err(OAuthReject::Invalid);
     }
     let token_hash = sha256_hex(token.as_bytes());
-    let Ok(conn) = db.read() else {
-        return false;
+    let conn = db.read().map_err(|error| {
+        tracing::error!(%error, "OAuth token lookup could not read the database");
+        OAuthReject::Unavailable
+    })?;
+
+    struct CredentialRow {
+        bound_user_id: Option<i64>,
+        user_id: Option<i64>,
+        username: Option<String>,
+        display_name: Option<String>,
+        is_admin: Option<bool>,
+        is_active: Option<bool>,
+        is_bot: Option<bool>,
+        owner_id: Option<i64>,
+        owner_is_active: Option<bool>,
+    }
+
+    let row = conn
+        .query_row(
+            "SELECT token.user_id,
+                    user.id, user.username, user.display_name, user.is_admin,
+                    user.is_active, user.is_bot, user.owner_id, owner.is_active
+             FROM oauth_tokens token
+             LEFT JOIN users user ON user.id = token.user_id
+             LEFT JOIN users owner ON owner.id = user.owner_id
+             WHERE token.access_token = ?1 AND token.revoked = 0
+               AND datetime(token.expires_at) > datetime('now')",
+            params![token_hash],
+            |row| {
+                Ok(CredentialRow {
+                    bound_user_id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    display_name: row.get(3)?,
+                    is_admin: row.get(4)?,
+                    is_active: row.get(5)?,
+                    is_bot: row.get(6)?,
+                    owner_id: row.get(7)?,
+                    owner_is_active: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            tracing::error!(%error, "OAuth token lookup failed");
+            OAuthReject::Unavailable
+        })?
+        .ok_or(OAuthReject::Invalid)?;
+
+    let Some(bound_user_id) = row.bound_user_id else {
+        return Ok(OAuthCredential::LegacyUnbound);
     };
-    conn.query_row(
-        "SELECT 1 FROM oauth_tokens
-         WHERE access_token = ?1 AND revoked = 0 AND expires_at > datetime('now')",
-        params![token_hash],
-        |_| Ok(()),
-    )
-    .is_ok()
+
+    let (Some(user_id), Some(username), Some(display_name), Some(is_admin), Some(is_active), Some(is_bot)) = (
+        row.user_id,
+        row.username,
+        row.display_name,
+        row.is_admin,
+        row.is_active,
+        row.is_bot,
+    ) else {
+        return Err(OAuthReject::DeadBinding);
+    };
+    debug_assert_eq!(user_id, bound_user_id);
+
+    // Match `credential_is_live`: an inactive user is dead; an owned bot is
+    // dead when its owner exists and is inactive. Ownerless and dangling-owner
+    // bots retain the existing fallback of being evaluated as themselves.
+    if !is_active || (is_bot && row.owner_id.is_some() && row.owner_is_active == Some(false)) {
+        return Err(OAuthReject::DeadBinding);
+    }
+
+    Ok(OAuthCredential::Bound(AuthUser {
+        id: user_id,
+        username,
+        display_name,
+        is_admin,
+    }))
 }
 
 /// Authenticate an OAuth access token as an *approving identity*.
@@ -1801,38 +2142,11 @@ pub fn validate_oauth_token(db: &DbPool, token: &str) -> bool {
 /// This is the OAuth-token twin of [`crate::db::queries::users::validate_session`],
 /// which applies the same liveness rule to session tokens.
 fn authenticate_oauth_token(db: &DbPool, token: &str) -> Option<Option<i64>> {
-    if !validate_oauth_token(db, token) {
-        return None;
+    match resolve_oauth_credential(db, token) {
+        Ok(OAuthCredential::Bound(user)) => Some(Some(user.id)),
+        Ok(OAuthCredential::LegacyUnbound) => Some(None),
+        Err(_) => None,
     }
-    match oauth_token_user_id(db, token) {
-        None => Some(None),
-        Some(uid) => {
-            let conn = db.read().ok()?;
-            crate::db::queries::users::get_live_user_by_id(&conn, uid)
-                .ok()
-                .map(|u| Some(u.id))
-        }
-    }
-}
-
-/// Resolve the user bound to a (valid, non-revoked, unexpired) OAuth access
-/// token, if any (LIF-79). Returns `None` when the token is invalid OR when it
-/// is a legacy token issued before user binding existed — callers treat both
-/// as "no user identity." Tokens are stored as SHA-256 hashes.
-pub fn oauth_token_user_id(db: &DbPool, token: &str) -> Option<i64> {
-    if !token.starts_with("lific_at_") {
-        return None;
-    }
-    let token_hash = sha256_hex(token.as_bytes());
-    let conn = db.read().ok()?;
-    conn.query_row(
-        "SELECT user_id FROM oauth_tokens
-         WHERE access_token = ?1 AND revoked = 0 AND expires_at > datetime('now')",
-        params![token_hash],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .ok()
-    .flatten()
 }
 
 #[cfg(test)]
@@ -1923,6 +2237,15 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         val["client_id"].as_str().unwrap().to_string()
+    }
+
+    /// The user an access token resolves to, or `None` for anything that does
+    /// not authenticate as a bound identity.
+    fn bound_user(db: &DbPool, token: &str) -> Option<i64> {
+        match resolve_oauth_credential(db, token) {
+            Ok(OAuthCredential::Bound(user)) => Some(user.id),
+            _ => None,
+        }
     }
 
     /// Create a user session for OAuth tests.
@@ -2494,7 +2817,7 @@ mod tests {
         }
 
         // Token should be valid
-        assert!(validate_oauth_token(&db, token));
+        assert!(resolve_oauth_credential(&db, token).is_ok());
 
         // Revoke it (must be authenticated)
         let body = format!("token={token}");
@@ -2514,7 +2837,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Token should now be invalid
-        assert!(!validate_oauth_token(&db, token));
+        assert!(resolve_oauth_credential(&db, token).is_err());
     }
 
     #[tokio::test]
@@ -2893,7 +3216,7 @@ mod tests {
         let access_token = val["access_token"].as_str().unwrap();
 
         // The middleware resolves this token to the tool bot, not the human.
-        assert_eq!(oauth_token_user_id(&db, access_token), Some(bot_id));
+        assert_eq!(bound_user(&db, access_token), Some(bot_id));
         assert_ne!(bot_id, user_id, "bot must differ from the approving human");
     }
 
@@ -3196,9 +3519,12 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(validate_oauth_token(&db, token), "token still valid");
+        assert!(
+            resolve_oauth_credential(&db, token).is_ok(),
+            "token still valid"
+        );
         assert_eq!(
-            oauth_token_user_id(&db, token),
+            bound_user(&db, token),
             None,
             "legacy token has no bound user"
         );
@@ -3424,7 +3750,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "expected token, got {body}");
         let access_token = body["access_token"].as_str().unwrap();
         assert!(access_token.starts_with("lific_at_"));
-        assert_eq!(oauth_token_user_id(&db, access_token), Some(bot_id));
+        assert_eq!(bound_user(&db, access_token), Some(bot_id));
         assert_ne!(bot_id, user_id, "bot must differ from the approving human");
 
         // Single-use: a replay poll now fails (consumed → invalid_grant).
@@ -3605,13 +3931,30 @@ mod tests {
     /// Approve a device code directly in the DB (the verification-page dance
     /// is covered end-to-end above) and clear `last_polled_at` so the next
     /// poll isn't answered with `slow_down`.
+    ///
+    /// Binds a real user, because the real approval path always does and an
+    /// approved row that names nobody is refused at exchange time (see
+    /// `grant_lifetime::a_legacy_unbound_device_approval_cannot_be_exchanged`).
+    /// These tests are about the consume/mint transaction, not about that.
     fn approve_device_code(db: &DbPool, device_hash: &str) {
         let conn = db.write().unwrap();
+        let approver = crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: "device-approver".into(),
+                email: "device-approver@test.com".into(),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap();
         conn.execute(
             "UPDATE oauth_device_codes
-             SET status = 'approved', last_polled_at = NULL
+             SET status = 'approved', user_id = ?2, last_polled_at = NULL
              WHERE device_code_hash = ?1",
-            params![device_hash],
+            params![device_hash, approver.id],
         )
         .unwrap();
     }
@@ -3763,5 +4106,1147 @@ mod tests {
     fn resolve_tool_rejects_empty_or_only_symbols() {
         assert!(resolve_tool("").is_err());
         assert!(resolve_tool("   ").is_err());
+    }
+
+    /// One snapshot, one answer.
+    ///
+    /// The middleware used to ask three questions on three pooled connections:
+    /// is the token valid, whose is it, is that user live. Between the first
+    /// two, a revocation could land, and the pair then read "valid" and
+    /// "unbound". An unbound OAuth token takes the operator fallback, so
+    /// revoking a tool's credential could promote it to the first admin.
+    /// `resolve_oauth_credential` makes that unrepresentable: the outcome is
+    /// one value from one connection.
+    mod credential_resolution {
+        use super::*;
+
+        struct Fixture {
+            db: DbPool,
+            owner_id: i64,
+            bot_id: i64,
+            token: String,
+        }
+
+        fn fixture() -> Fixture {
+            let db = crate::db::open_memory().unwrap();
+            let (owner_id, bot_id) = {
+                let conn = db.write().unwrap();
+                let owner = crate::db::queries::users::create_user(
+                    &conn,
+                    &crate::db::models::CreateUser {
+                        username: "owner".into(),
+                        email: "owner@test.local".into(),
+                        password: "testpassword1".into(),
+                        display_name: None,
+                        is_admin: true,
+                        is_bot: false,
+                    },
+                )
+                .unwrap();
+                let bot = crate::db::queries::users::create_bot_user(
+                    &conn,
+                    owner.id,
+                    "zed-owner",
+                    "Zed",
+                    Some("zed"),
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+                     VALUES ('c', 'Test', '[\"http://localhost\"]')",
+                    [],
+                )
+                .unwrap();
+                (owner.id, bot.id)
+            };
+            let token = insert_token(&db, "bound", Some(bot_id));
+            Fixture {
+                db,
+                owner_id,
+                bot_id,
+                token,
+            }
+        }
+
+        fn insert_token(db: &DbPool, suffix: &str, user_id: Option<i64>) -> String {
+            let token = format!("lific_at_{suffix}");
+            let hash = sha256_hex(token.as_bytes());
+            let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+                     VALUES (?1, 'c', ?2, 'mcp', ?3)",
+                    params![hash, expires, user_id],
+                )
+                .unwrap();
+            token
+        }
+
+        #[test]
+        fn a_live_bound_token_resolves_to_its_user() {
+            let f = fixture();
+            assert_eq!(
+                resolve_oauth_credential(&f.db, &f.token),
+                Ok(OAuthCredential::Bound(crate::db::models::AuthUser {
+                    id: f.bot_id,
+                    username: "zed-owner".into(),
+                    display_name: "Zed".into(),
+                    is_admin: false,
+                })),
+            );
+        }
+
+        /// The escalation this consolidation exists to prevent. Whatever the
+        /// state, a bound token can never come back as unbound.
+        #[test]
+        fn a_bound_token_never_degrades_to_unbound() {
+            for (label, mutate) in [
+                (
+                    "revoked",
+                    Box::new(|f: &Fixture| {
+                        f.db.write()
+                            .unwrap()
+                            .execute("UPDATE oauth_tokens SET revoked = 1", [])
+                            .unwrap();
+                    }) as Box<dyn Fn(&Fixture)>,
+                ),
+                (
+                    "expired",
+                    Box::new(|f: &Fixture| {
+                        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+                        f.db.write()
+                            .unwrap()
+                            .execute("UPDATE oauth_tokens SET expires_at = ?1", params![past])
+                            .unwrap();
+                    }),
+                ),
+                (
+                    "bot deleted",
+                    Box::new(|f: &Fixture| {
+                        f.db.write()
+                            .unwrap()
+                            .execute("DELETE FROM users WHERE id = ?1", params![f.bot_id])
+                            .unwrap();
+                    }),
+                ),
+                (
+                    "owner deactivated",
+                    Box::new(|f: &Fixture| {
+                        let conn = f.db.write().unwrap();
+                        crate::db::queries::users::create_user(
+                            &conn,
+                            &crate::db::models::CreateUser {
+                                username: "spare".into(),
+                                email: "spare@test.local".into(),
+                                password: "testpassword1".into(),
+                                display_name: None,
+                                is_admin: true,
+                                is_bot: false,
+                            },
+                        )
+                        .unwrap();
+                        crate::db::queries::users::set_active(&conn, f.owner_id, false).unwrap();
+                    }),
+                ),
+            ] {
+                let f = fixture();
+                mutate(&f);
+                let outcome = resolve_oauth_credential(&f.db, &f.token);
+                assert!(
+                    outcome.is_err(),
+                    "{label}: must not authenticate, got {outcome:?}"
+                );
+                assert_ne!(
+                    outcome,
+                    Ok(OAuthCredential::LegacyUnbound),
+                    "{label}: a dead binding must never read as unbound, which is the operator"
+                );
+            }
+        }
+
+        /// The documented pre-LIF-79 behaviour, kept for rows that predate
+        /// user binding. Nothing issued since can be in this state.
+        #[test]
+        fn a_genuinely_unbound_legacy_token_still_resolves_to_the_operator_fallback() {
+            let f = fixture();
+            let legacy = insert_token(&f.db, "legacy", None);
+            assert_eq!(
+                resolve_oauth_credential(&f.db, &legacy),
+                Ok(OAuthCredential::LegacyUnbound)
+            );
+        }
+
+        #[test]
+        fn an_unknown_or_wrong_shaped_token_is_invalid() {
+            let f = fixture();
+            for token in ["lific_at_never-issued", "lific_sess_wrong-shape", ""] {
+                assert_eq!(
+                    resolve_oauth_credential(&f.db, token),
+                    Err(OAuthReject::Invalid),
+                    "{token}"
+                );
+            }
+        }
+
+        /// Through the real middleware, which is where the escalation would
+        /// have happened: a revoked bot token must 401, not arrive as the
+        /// first admin.
+        #[tokio::test]
+        async fn a_revoked_bot_token_is_refused_by_the_middleware_not_promoted() {
+            use tower::ServiceExt;
+            let f = fixture();
+            let auth_state = crate::auth::AuthState {
+                db: f.db.clone(),
+                manager: crate::auth::create_key_manager().unwrap(),
+                public_url: "https://example.com".into(),
+                required: true,
+            };
+            let app = crate::api::router(f.db.clone(), &[])
+                .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+                .layer(axum::Extension(crate::config::AuthConfig {
+                    allow_signup: true,
+                    required: true,
+                    secure_cookies: false,
+                }))
+                .layer(axum::middleware::from_fn_with_state(
+                    auth_state,
+                    crate::auth::require_api_key,
+                ));
+
+            let call = |token: String| {
+                let app = app.clone();
+                async move {
+                    app.oneshot(
+                        Request::builder()
+                            .uri("/api/auth/me")
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                }
+            };
+
+            assert_eq!(call(f.token.clone()).await.status(), StatusCode::OK);
+
+            f.db.write()
+                .unwrap()
+                .execute("UPDATE oauth_tokens SET revoked = 1", [])
+                .unwrap();
+
+            let resp = call(f.token.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "a revoked token must not authenticate at all, let alone as the operator"
+            );
+        }
+    }
+
+    /// Every OAuth expiry column is written with `to_rfc3339`, and SQLite's
+    /// `datetime('now')` is not that format. Compared as raw text they
+    /// disagree within the same day: 'T' sorts after every digit, so
+    /// '2026-08-20T11:59:00+00:00' reads as later than '2026-08-20 12:00:00'
+    /// and an expired grant looks live. Every predicate wraps the column in
+    /// `datetime()`; these prove it, a minute either side of now so nothing
+    /// rests on a second boundary.
+    mod expiry_is_compared_as_a_datetime {
+        use super::*;
+
+        fn rfc3339_from_now(minutes: i64) -> String {
+            (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
+        }
+
+        fn seeded_db() -> DbPool {
+            let db = crate::db::open_memory().unwrap();
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+                     VALUES ('c', 'Test', '[\"http://localhost\"]')",
+                    [],
+                )
+                .unwrap();
+            db
+        }
+
+        fn insert_token(db: &DbPool, name: &str, minutes: i64) -> String {
+            let token = format!("lific_at_{name}");
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope)
+                     VALUES (?1, 'c', ?2, 'mcp')",
+                    params![sha256_hex(token.as_bytes()), rfc3339_from_now(minutes)],
+                )
+                .unwrap();
+            token
+        }
+
+        #[test]
+        fn an_access_token_expiring_in_a_minute_is_still_valid() {
+            let db = seeded_db();
+            let token = insert_token(&db, "live", 1);
+            assert!(resolve_oauth_credential(&db, &token).is_ok());
+        }
+
+        #[test]
+        fn an_access_token_that_expired_a_minute_ago_is_refused() {
+            let db = seeded_db();
+            let token = insert_token(&db, "dead", -1);
+            assert_eq!(
+                resolve_oauth_credential(&db, &token),
+                Err(OAuthReject::Invalid)
+            );
+        }
+
+        fn insert_code(db: &DbPool, code: &str, minutes: i64) {
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_codes
+                        (code, client_id, redirect_uri, code_challenge, expires_at, user_id)
+                     VALUES (?1, 'c', 'http://localhost', 'x', ?2, NULL)",
+                    params![code, rfc3339_from_now(minutes)],
+                )
+                .unwrap();
+        }
+
+        fn code_is_visible(db: &DbPool, code: &str) -> bool {
+            db.read()
+                .unwrap()
+                .query_row(
+                    "SELECT 1 FROM oauth_codes
+                     WHERE code = ?1 AND datetime(expires_at) > datetime('now')",
+                    params![code],
+                    |_| Ok(()),
+                )
+                .is_ok()
+        }
+
+        #[test]
+        fn an_authorization_code_expiring_in_a_minute_is_still_exchangeable() {
+            let db = seeded_db();
+            insert_code(&db, "live-code", 1);
+            assert!(code_is_visible(&db, "live-code"));
+        }
+
+        #[test]
+        fn an_authorization_code_that_expired_a_minute_ago_is_gone() {
+            let db = seeded_db();
+            insert_code(&db, "dead-code", -1);
+            assert!(!code_is_visible(&db, "dead-code"));
+        }
+
+        fn insert_device_code(db: &DbPool, hash: &str, user_code: &str, minutes: i64) {
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_device_codes
+                        (device_code_hash, user_code, expires_at, status)
+                     VALUES (?1, ?2, ?3, 'pending')",
+                    params![hash, user_code, rfc3339_from_now(minutes)],
+                )
+                .unwrap();
+        }
+
+        fn device_codes(db: &DbPool) -> i64 {
+            db.read()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM oauth_device_codes", [], |r| r.get(0))
+                .unwrap()
+        }
+
+        /// The opportunistic sweep must remove the expired one and keep the
+        /// live one. Reading these as text does the opposite within a day.
+        #[test]
+        fn the_device_code_sweep_removes_only_the_expired_one() {
+            let db = seeded_db();
+            insert_device_code(&db, "live", "BCDF-GHJK", 1);
+            insert_device_code(&db, "dead", "BCDF-GHJL", -1);
+            assert_eq!(device_codes(&db), 2);
+
+            cleanup_expired_device_codes(&db);
+
+            assert_eq!(device_codes(&db), 1, "only the expired grant is swept");
+            let survivor: String = db
+                .read()
+                .unwrap()
+                .query_row("SELECT device_code_hash FROM oauth_device_codes", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(survivor, "live");
+        }
+
+        /// Approval only acts on a code that has not expired.
+        #[test]
+        fn only_an_unexpired_device_code_can_be_approved() {
+            let db = seeded_db();
+            insert_device_code(&db, "live", "BCDF-GHJK", 1);
+            insert_device_code(&db, "dead", "BCDF-GHJL", -1);
+
+            let approve = |user_code: &str| -> usize {
+                db.write()
+                    .unwrap()
+                    .execute(
+                        "UPDATE oauth_device_codes SET status = 'approved'
+                         WHERE user_code = ?1 AND status = 'pending'
+                           AND datetime(expires_at) > datetime('now')",
+                        params![user_code],
+                    )
+                    .unwrap()
+            };
+            assert_eq!(approve("BCDF-GHJK"), 1, "the live grant is approvable");
+            assert_eq!(approve("BCDF-GHJL"), 0, "the expired grant is not");
+        }
+    }
+
+    // ── Grants may not outlive the authorization that produced them ──
+    //
+    // Every test here is about ordering: a grant that was legitimately issued,
+    // then invalidated by an account recovery before the client got round to
+    // exchanging it. The approval and the exchange each run as one
+    // transaction, so "before" and "after" are the only two orders that exist;
+    // these pin what each one produces.
+    mod grant_lifetime {
+        use super::*;
+
+        const VERIFIER: &str = "test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789";
+
+        fn challenge() -> String {
+            base64_url_encode(&Sha256::digest(VERIFIER.as_bytes()))
+        }
+
+        fn owner_id(db: &DbPool) -> i64 {
+            db.read()
+                .unwrap()
+                .query_row(
+                    "SELECT id FROM users WHERE username = 'oauthtest'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        /// Run the authorize POST with a live session cookie and return the
+        /// issued code from the redirect.
+        async fn approve_code(app: &Router, client_id: &str, session: &str) -> String {
+            let body = format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(&challenge()),
+                urlencoding::encode(&generate_csrf_token(session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/authorize")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                resp.status().is_redirection(),
+                "approve should redirect, got {}",
+                resp.status()
+            );
+            let location = resp
+                .headers()
+                .get("location")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            location
+                .split("code=")
+                .nth(1)
+                .unwrap()
+                .split('&')
+                .next()
+                .unwrap()
+                .to_string()
+        }
+
+        async fn exchange_code(
+            app: &Router,
+            client_id: &str,
+            code: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            let body = format!(
+                "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
+                code,
+                urlencoding::encode("http://localhost/callback"),
+                client_id,
+                VERIFIER,
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/token")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({})),
+            )
+        }
+
+        #[tokio::test]
+        async fn an_ordinary_authorization_code_flow_still_works() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+            let code = approve_code(&app, &client_id, &session).await;
+            let (status, body) = exchange_code(&app, &client_id, &code).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(
+                body["access_token"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("lific_at_")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_code_approved_before_a_lockdown_cannot_mint_after_it() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+            let code = approve_code(&app, &client_id, &session).await;
+
+            {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::lock_down_account(&conn, owner_id(&db)).unwrap();
+            }
+
+            let (status, body) = exchange_code(&app, &client_id, &code).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+
+            let tokens: i64 = db
+                .read()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(tokens, 0, "no token was minted");
+        }
+
+        #[tokio::test]
+        async fn a_code_whose_bot_owner_went_inactive_cannot_be_exchanged() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+            let code = approve_code(&app, &client_id, &session).await;
+
+            {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::set_active(&conn, owner_id(&db), false).unwrap();
+            }
+
+            let (status, body) = exchange_code(&app, &client_id, &code).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+            assert_eq!(
+                body["error_description"],
+                "authorizing user is no longer active"
+            );
+        }
+
+        /// A code with `user_id IS NULL` is a pre-LIF-79 legacy row. Nothing
+        /// issues one any more; exchanging one used to mint an *unbound*
+        /// access token, which resolves as the operator and which no account
+        /// lockdown can revoke, because a lockdown scopes by user id.
+        #[tokio::test]
+        async fn a_legacy_unbound_code_cannot_be_exchanged() {
+            let (app, db) = test_oauth_app();
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+            // Otherwise valid in every respect: unexpired, unused, correct
+            // client and redirect, and a PKCE challenge the verifier matches.
+            db.write()
+                .unwrap()
+                .execute(
+                    "INSERT INTO oauth_codes
+                        (code, client_id, redirect_uri, code_challenge, code_challenge_method,
+                         expires_at, scope, user_id)
+                     VALUES ('legacy-code', ?1, 'http://localhost/callback', ?2, 'S256',
+                             ?3, 'mcp', NULL)",
+                    params![
+                        client_id,
+                        challenge(),
+                        (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                    ],
+                )
+                .unwrap();
+
+            let (status, body) = exchange_code(&app, &client_id, "legacy-code").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+
+            let conn = db.read().unwrap();
+            let tokens: i64 = conn
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(tokens, 0, "no unbound token was minted");
+            let used: i64 = conn
+                .query_row(
+                    "SELECT used FROM oauth_codes WHERE code = 'legacy-code'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(used, 0, "the refused exchange rolled back cleanly");
+        }
+
+        /// The device twin of the above: an approved row that names nobody.
+        #[tokio::test]
+        async fn a_legacy_unbound_device_approval_cannot_be_exchanged() {
+            let (app, db) = test_oauth_app();
+            let v = request_device_code(&app, Some("My CLI")).await;
+            db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE oauth_device_codes
+                     SET status = 'approved', user_id = NULL, last_polled_at = NULL",
+                    [],
+                )
+                .unwrap();
+
+            let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+
+            let conn = db.read().unwrap();
+            let tokens: i64 = conn
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(tokens, 0, "no unbound token was minted");
+            let status: String = conn
+                .query_row("SELECT status FROM oauth_device_codes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                status, "approved",
+                "the grant is not consumed by a refused exchange"
+            );
+            // The poll bookkeeping the refusal still owes the client did
+            // commit, so the next poll is rate-limited as usual rather than
+            // being treated as a first poll.
+            let polled: Option<String> = conn
+                .query_row("SELECT last_polled_at FROM oauth_device_codes", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(polled.is_some());
+        }
+
+        /// Approving a connection mints a 30-day tool credential, so it needs
+        /// the same recent sign-in `POST /api/auth/keys` needs. A session
+        /// token lifted from a browser that signed in last week must not be
+        /// enough to attach a permanent credential to the account.
+        #[tokio::test]
+        async fn an_aged_session_may_not_approve_an_authorization_request() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+            db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                    [],
+                )
+                .unwrap();
+
+            let body = format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(&challenge()),
+                urlencoding::encode(&generate_csrf_token(&session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/authorize")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let page = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            // The copy has to be actionable and honest: name the window, say
+            // that signing out is what clears the stale session, and say the
+            // connection must be restarted from the client. It must NOT claim
+            // the approval will be retried automatically, because it will not.
+            for phrase in [
+                "15 minutes",
+                "sign out",
+                "Sign back in",
+                "Start the connection again from your MCP client",
+                "nothing has changed",
+            ] {
+                assert!(
+                    page.to_lowercase().contains(&phrase.to_lowercase()),
+                    "the page must say {phrase:?}: {page}"
+                );
+            }
+            for forbidden in ["automatically", "will be retried", "try again shortly"] {
+                assert!(
+                    !page.to_lowercase().contains(forbidden),
+                    "the page must not promise a retry it does not do: {page}"
+                );
+            }
+
+            let conn = db.read().unwrap();
+            let codes: i64 = conn
+                .query_row("SELECT COUNT(*) FROM oauth_codes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(codes, 0, "no code was issued");
+            let bots: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(bots, 0, "no bot was minted either");
+            // The session itself is untouched; only this action needed more.
+            assert!(crate::db::queries::users::validate_session(&conn, &session).is_ok());
+        }
+
+        #[tokio::test]
+        async fn an_aged_session_may_not_approve_a_device() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("My CLI")).await;
+            db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                    [],
+                )
+                .unwrap();
+
+            let body = format!(
+                "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
+                urlencoding::encode(v["user_code"].as_str().unwrap()),
+                urlencoding::encode(&generate_csrf_token(&session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let conn = db.read().unwrap();
+            let pending: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM oauth_device_codes WHERE status = 'pending'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pending, 1, "the grant is still waiting, not approved");
+            let bots: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(bots, 0);
+        }
+
+
+        /// Refusing a device is not a grant, so it must not be made harder
+        /// than approving one. Someone who sees a code they do not recognise
+        /// should be able to deny it immediately, from whatever session they
+        /// already have open.
+        #[tokio::test]
+        async fn an_aged_session_may_still_deny_a_device() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("Unknown device")).await;
+            db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                    [],
+                )
+                .unwrap();
+
+            let body = format!(
+                "user_code={}&decision=deny&csrf_token={}",
+                urlencoding::encode(v["user_code"].as_str().unwrap()),
+                urlencoding::encode(&generate_csrf_token(&session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let conn = db.read().unwrap();
+            let denied: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM oauth_device_codes WHERE status = 'denied'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(denied, 1, "the grant is refused");
+            let bots: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(bots, 0, "denying resolves no tool and mints no bot");
+
+            // The exchange sees the denial.
+            drop(conn);
+            db.write()
+                .unwrap()
+                .execute("UPDATE oauth_device_codes SET last_polled_at = NULL", [])
+                .unwrap();
+            let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "access_denied");
+        }
+
+        /// A dead session may not deny either: the page still has to know who
+        /// is refusing.
+        #[tokio::test]
+        async fn a_revoked_session_may_not_deny_a_device() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, None).await;
+            db.write()
+                .unwrap()
+                .execute("DELETE FROM sessions", [])
+                .unwrap();
+
+            let body = format!(
+                "user_code={}&decision=deny&csrf_token={}",
+                urlencoding::encode(v["user_code"].as_str().unwrap()),
+                urlencoding::encode(&generate_csrf_token(&session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let pending: i64 = db
+                .read()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM oauth_device_codes WHERE status = 'pending'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(pending, 1);
+        }
+
+        #[tokio::test]
+        async fn an_oauth_token_may_not_approve_an_authorization_request() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+            // A perfectly valid access token for the same account.
+            let access_token = {
+                let token = "lific_at_tool-held-token".to_string();
+                let hash = crate::auth::sha256_hex(token.as_bytes());
+                let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+                let conn = db.write().unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+                     VALUES (?1, ?2, ?3, 'mcp', ?4)",
+                    params![hash, client_id, expires, owner_id(&db)],
+                )
+                .unwrap();
+                token
+            };
+            let _ = session;
+
+            let body = format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(&challenge()),
+                urlencoding::encode(&generate_csrf_token(&access_token)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/authorize")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("authorization", format!("Bearer {access_token}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let codes: i64 = db
+                .read()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM oauth_codes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(codes, 0, "no code was issued");
+        }
+
+        #[tokio::test]
+        async fn a_revoked_session_cannot_approve_and_mints_no_bot() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let client_id = register_client_helper(&app, "http://localhost/callback").await;
+            db.write()
+                .unwrap()
+                .execute("DELETE FROM sessions", [])
+                .unwrap();
+
+            let body = format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(&challenge()),
+                urlencoding::encode(&generate_csrf_token(&session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/authorize")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let conn = db.read().unwrap();
+            let codes: i64 = conn
+                .query_row("SELECT COUNT(*) FROM oauth_codes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(codes, 0);
+            let bots: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(bots, 0, "a refused approval mints no bot either");
+        }
+
+        // ── Device grant ────────────────────────────────────────
+
+        /// Approve a device code through the real verification page, bound to
+        /// the tool bot, then clear `last_polled_at` so the next poll is not
+        /// answered with `slow_down`.
+        async fn approve_device(app: &Router, db: &DbPool, session: &str, user_code: &str) {
+            let body = format!(
+                "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
+                urlencoding::encode(user_code),
+                urlencoding::encode(&generate_csrf_token(session)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            db.write()
+                .unwrap()
+                .execute("UPDATE oauth_device_codes SET last_polled_at = NULL", [])
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_ordinary_device_flow_still_works() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("My CLI")).await;
+            approve_device(&app, &db, &session, v["user_code"].as_str().unwrap()).await;
+
+            let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(
+                body["access_token"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("lific_at_")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_device_approved_before_a_lockdown_is_denied_after_it() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("My CLI")).await;
+            approve_device(&app, &db, &session, v["user_code"].as_str().unwrap()).await;
+
+            {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::lock_down_account(&conn, owner_id(&db)).unwrap();
+            }
+
+            let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "access_denied", "the denial wins cleanly");
+
+            let tokens: i64 = db
+                .read()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM oauth_tokens", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(tokens, 0);
+        }
+
+        #[tokio::test]
+        async fn a_device_bound_to_a_bot_with_an_inactive_owner_cannot_exchange() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("My CLI")).await;
+            approve_device(&app, &db, &session, v["user_code"].as_str().unwrap()).await;
+
+            {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::set_active(&conn, owner_id(&db), false).unwrap();
+            }
+
+            let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+            assert_eq!(
+                body["error_description"],
+                "authorizing user is no longer active"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_oauth_token_may_not_approve_a_device() {
+            let (app, db) = test_oauth_app();
+            let session = create_test_session(&db);
+            let v = request_device_code(&app, Some("My CLI")).await;
+
+            let access_token = {
+                let token = "lific_at_device-approver".to_string();
+                let hash = crate::auth::sha256_hex(token.as_bytes());
+                let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+                let conn = db.write().unwrap();
+                conn.execute(
+                    "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
+                     VALUES ('device', 'Device Authorization', '[]')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+                     VALUES (?1, 'device', ?2, 'mcp', ?3)",
+                    params![hash, expires, owner_id(&db)],
+                )
+                .unwrap();
+                token
+            };
+            let _ = session;
+
+            let body = format!(
+                "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
+                urlencoding::encode(v["user_code"].as_str().unwrap()),
+                urlencoding::encode(&generate_csrf_token(&access_token)),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("authorization", format!("Bearer {access_token}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let still_pending: i64 = db
+                .read()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM oauth_device_codes WHERE status = 'pending'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(still_pending, 1);
+        }
     }
 }

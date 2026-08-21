@@ -33,21 +33,70 @@ pub(super) async fn get_project(
     Ok(Json(project))
 }
 
+/// POST /api/projects.
+///
+/// `create_project` upserts a `lead` membership for whoever `lead_user_id`
+/// names (LIF-195), so naming somebody else is a lasting access grant, exactly
+/// as `PUT /api/projects/{id}` is. It is a grant on a project that is empty at
+/// the moment it is made, but the project does not stay empty, and the
+/// membership does not expire, so it is gated on the same terms as every other
+/// grant: a browser session authenticated in the last 15 minutes.
+///
+/// Naming *yourself*, or naming nobody (the default), grants nothing that the
+/// act of creating the project did not already grant, so neither needs
+/// recency. That keeps `lific connect`-style API-key automation creating its
+/// own projects exactly as before.
+///
+/// "Yourself" means the **effective** user, not `identity.user`. A bot's
+/// permissions are its owner's ([`crate::authz::effective_user`]), so a
+/// connected tool creating a project leads it as its owner, which is what the
+/// project would resolve to anyway. That also closes the alternative reading:
+/// a bot cannot use "my owner is not literally me" to smuggle in a grant,
+/// because naming the owner *is* naming itself here.
 pub(super) async fn create_project(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(mut input): Json<CreateProject>,
 ) -> Result<Json<Project>, LificError> {
-    // LIF-102 fix #1: if no lead was supplied, default to the authenticated
-    // creator. This prevents the "unowned project" trap where require_project_lead
-    // rejects everyone except admins.
-    if input.lead_user_id.is_none()
-        && let Some(i) = &identity
-    {
-        input.lead_user_id = Some(i.user.id);
-    }
-    let project = with_write(&db, |conn| crate::db::queries::create_project(conn, &input))?;
+    let caller = super::require_user(&identity)?;
+    // Only parsed when the body asks for a lead that might not be the caller;
+    // resolving "might not be" needs the effective user, which needs the
+    // transaction, so the token is captured here and judged there.
+    let session_token = crate::auth::recent_session_token(&headers).ok();
+
+    let project = db.transaction(|tx| {
+        let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+        let effective =
+            crate::authz::effective_user(tx, &Some(crate::auth::fresh_auth_user(&fresh)))
+                .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
+
+        match input.lead_user_id {
+            // LIF-102 fix #1: no lead supplied means the creator leads it.
+            // Without this, `require_project_lead` rejects everyone but admins
+            // and the project is unowned.
+            None => input.lead_user_id = Some(effective.id),
+            // Naming yourself grants nothing new.
+            Some(id) if id == effective.id => {}
+            // Naming anybody else does, so it needs a recent human sign-in.
+            Some(_) => {
+                let token = session_token.as_deref().ok_or_else(|| {
+                    LificError::Forbidden("recent authentication required".into())
+                })?;
+                let session_user = crate::auth::revalidate_recent_session(tx, token, caller.id)?;
+                // A session belongs to a human, so the effective user is that
+                // human; assert it rather than assume it.
+                if session_user.id != effective.id {
+                    return Err(LificError::Forbidden(
+                        "recent authentication required".into(),
+                    ));
+                }
+            }
+        }
+
+        crate::db::queries::create_project(tx, &input)
+    })?;
     realtime.send(RealtimeEvent::ProjectCreated {
         project_id: project.id,
     });
@@ -59,11 +108,51 @@ pub(super) async fn update_project(
     Extension(realtime): Extension<RealtimeHub>,
     Path(id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, LificError> {
     require_project_lead(&db, &identity, id)?;
-    let project = with_write(&db, |conn| {
-        crate::db::queries::update_project(conn, id, &input)
+
+    // Naming a lead is a membership grant in disguise: `update_project` upserts
+    // a `lead` row for whoever is named (LIF-195), which is the same access
+    // expansion `POST /api/projects/{id}/members` performs and must carry the
+    // same rule. Renames, descriptions, emoji and *clearing* the lead are not
+    // expansions and stay ungated.
+    let grants_lead = matches!(input.lead_user_id, Some(Some(_)));
+    let recent = if grants_lead {
+        let granter = super::require_user(&identity)?;
+        Some((crate::auth::recent_session_token(&headers)?, granter.id))
+    } else {
+        None
+    };
+
+    let project = db.transaction(|tx| {
+        // When this grants a lead membership the gate re-runs against the
+        // freshly read session user, so a lead revoked since the request
+        // arrived cannot hand the role to anyone.
+        let gate_identity = match &recent {
+            Some((token, granter_id)) => {
+                let fresh = crate::auth::revalidate_recent_session(tx, token, *granter_id)?;
+                Some(crate::auth::fresh_identity(
+                    &fresh,
+                    crate::actor::Transport::Web,
+                ))
+            }
+            // Not a grant (a rename, or clearing the lead). No recency, but
+            // still not the middleware's snapshot: the caller is re-read here
+            // so a demoted admin cannot edit on the strength of a stale
+            // `is_admin`.
+            None => {
+                let caller = super::require_user(&identity)?;
+                let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+                Some(crate::auth::fresh_identity(
+                    &fresh,
+                    crate::actor::Transport::Web,
+                ))
+            }
+        };
+        crate::authz::require_role_conn(tx, &gate_identity, id, Role::Lead)?;
+        crate::db::queries::update_project(tx, id, &input)
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated {
         project_id: project.id,
@@ -96,9 +185,21 @@ pub(super) async fn delete_project_handler(
     Path(id): Path<i64>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
+    // Preflight on a read connection so an unauthorized caller never reaches
+    // the writer; re-run authoritatively inside the transaction below.
     require_project_delete(&db, &identity, id)?;
-    let (project, audience) = with_write(&db, |conn| {
-        crate::db::queries::delete_project_with_audience(conn, id)
+    let caller = super::require_user(&identity)?;
+    let (project, audience) = db.transaction(|tx| {
+        // Deleting a project destroys everything in it, so the decision is
+        // made from state read here rather than from the snapshot the
+        // middleware attached before the request was routed.
+        let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+        let fresh_identity = Some(crate::auth::fresh_identity(
+            &fresh,
+            crate::actor::Transport::Web,
+        ));
+        crate::authz::require_project_delete_role_conn(tx, &fresh_identity, id)?;
+        crate::db::queries::delete_project_with_audience(tx, id)
     })?;
     let event = RealtimeEvent::ProjectDeleted {
         project_id: project.id,

@@ -32,7 +32,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{with_read, with_write};
+use super::with_read;
 
 /// GET /api/projects/{id}/members — visible to any project member
 /// (`Viewer`+); non-members are denied same as any other project read.
@@ -93,21 +93,61 @@ pub(super) async fn my_project_role(
     })))
 }
 
+/// Parse a role name the way the DB's CHECK constraint does, so a comparison
+/// against the current role is made on the same values the write will use.
+fn parse_role(raw: &str) -> Result<Role, LificError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "viewer" => Ok(Role::Viewer),
+        "maintainer" => Ok(Role::Maintainer),
+        "lead" => Ok(Role::Lead),
+        other => Err(LificError::BadRequest(format!("unknown role '{other}'"))),
+    }
+}
+
 /// POST /api/projects/{id}/members — add a member. `role` defaults to
 /// `viewer` when omitted (design: "default grant = viewer"). 409 if the
 /// user is already a member (use `PATCH` to change an existing role), 404
 /// if `user_id` doesn't resolve to a real user.
+///
+/// Requires a **recent browser session**. Adding somebody to a project grants
+/// them standing access to its contents, which no lockdown on the granter's
+/// credentials will take back, so it is an access expansion on the same terms
+/// as minting a key. A leaked lead-scoped API key can no longer quietly add an
+/// account the attacker controls.
+///
+/// The session revalidation and the lead check both run inside the write
+/// transaction, so neither an account lockdown nor a role change can land
+/// between the checks and the write.
 pub(super) async fn add_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(project_id): Path<i64>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<AddMember>,
 ) -> Result<Json<ProjectMember>, LificError> {
+    // Cheap pre-check on a read connection, so an unauthorized caller never
+    // reaches the writer. Re-run authoritatively inside the transaction below.
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
+    let granter = super::require_user(&identity)?;
+    let session_token = crate::auth::recent_session_token(&headers)?;
     let role = input.role.as_deref().unwrap_or("viewer").to_string();
-    let member = with_write(&db, |conn| {
-        members::add_member(conn, project_id, input.user_id, &role)
+
+    let member = db.transaction(|tx| {
+        // A session token is always a human's, so the identity the middleware
+        // resolved IS the session's user; `revalidate_recent_session` asserts
+        // exactly that. Bot callers cannot reach here at all, because they do
+        // not present a `lific_sess_` token.
+        let fresh = crate::auth::revalidate_recent_session(tx, &session_token, granter.id)?;
+        // The gate runs against the identity as it is *now*: the middleware's
+        // copy carries an `is_admin` snapshot, and a lead membership revoked
+        // since would still look present in it.
+        let fresh_identity = Some(crate::auth::fresh_identity(
+            &fresh,
+            crate::actor::Transport::Web,
+        ));
+        authz::require_role_conn(tx, &fresh_identity, project_id, Role::Lead)?;
+        members::add_member(tx, project_id, input.user_id, &role)
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(member))
@@ -116,16 +156,62 @@ pub(super) async fn add_project_member(
 /// PATCH /api/projects/{id}/members/{user_id} — change an existing
 /// member's role. 404 if they aren't a member; 409 if this would demote
 /// the project's sole `lead`.
+///
+/// Requires a recent browser session **only when the new role is higher than
+/// the current one**. Raising someone to maintainer or lead expands access and
+/// is gated; lowering it or leaving it alone reduces access and is not, so an
+/// automation holding a lead-scoped API key can still contain a compromise by
+/// downgrading people, which is exactly what it should be able to do at 3am.
+///
+/// The current role is read inside the write transaction, so the
+/// increase-or-not decision cannot be made against a stale value.
 pub(super) async fn update_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path((project_id, user_id)): Path<(i64, i64)>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<ChangeMemberRole>,
 ) -> Result<Json<ProjectMember>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
-    let member = with_write(&db, |conn| {
-        members::change_role(conn, project_id, user_id, &input.role)
+    let requested = parse_role(&input.role)?;
+    // Parsed before the transaction so a malformed body is a 400 rather than a
+    // recent-auth refusal, but only *used* inside it.
+    let session_token = crate::auth::recent_session_token(&headers).ok();
+    let granter = super::require_user(&identity).ok();
+
+    let member = db.transaction(|tx| {
+        let current = members::get_member_role(tx, project_id, user_id)?;
+        let is_increase = current.is_none_or(|role| requested > role);
+        if is_increase {
+            // A raise is a grant, so both the recency check and the lead check
+            // run against freshly read state.
+            let (Some(token), Some(user)) = (&session_token, &granter) else {
+                return Err(LificError::Forbidden(
+                    "recent authentication required".into(),
+                ));
+            };
+            let fresh = crate::auth::revalidate_recent_session(tx, token, user.id)?;
+            let fresh_identity = Some(crate::auth::fresh_identity(
+                &fresh,
+                crate::actor::Transport::Web,
+            ));
+            authz::require_role_conn(tx, &fresh_identity, project_id, Role::Lead)?;
+        } else {
+            // A reduction: no recency, but the lead check is re-run inside the
+            // transaction *against freshly read state*. The middleware's
+            // identity carries an `is_admin` snapshot, and `require_role_conn`
+            // lets an admin through before it looks at membership at all, so a
+            // demoted admin would otherwise keep downgrading people.
+            let caller = super::require_user(&identity)?;
+            let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+            let fresh_identity = Some(crate::auth::fresh_identity(
+                &fresh,
+                crate::actor::Transport::Web,
+            ));
+            authz::require_role_conn(tx, &fresh_identity, project_id, Role::Lead)?;
+        }
+        members::change_role(tx, project_id, user_id, &input.role)
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(member))
@@ -133,6 +219,10 @@ pub(super) async fn update_project_member(
 
 /// DELETE /api/projects/{id}/members/{user_id} — remove a member. 404 if
 /// they aren't a member; 409 if they're the project's sole `lead`.
+///
+/// Not gated on recency: removing a member only ever takes access away.
+/// The lead check is re-run inside the write transaction so it cannot act on
+/// an authorization that was revoked after the read-connection check.
 pub(super) async fn remove_project_member(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
@@ -140,8 +230,18 @@ pub(super) async fn remove_project_member(
     Path((project_id, user_id)): Path<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
-    with_write(&db, |conn| {
-        members::remove_member_guarded(conn, project_id, user_id)
+    let caller = super::require_user(&identity)?;
+    db.transaction(|tx| {
+        // Same reasoning as the downgrade path: the authoritative check reads
+        // the caller inside the transaction, so a demoted admin or a removed
+        // lead cannot act on a stale snapshot.
+        let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+        let fresh_identity = Some(crate::auth::fresh_identity(
+            &fresh,
+            crate::actor::Transport::Web,
+        ));
+        authz::require_role_conn(tx, &fresh_identity, project_id, Role::Lead)?;
+        members::remove_member_guarded(tx, project_id, user_id)
     })?;
     realtime.send(RealtimeEvent::ProjectUpdated { project_id });
     Ok(Json(serde_json::json!({"deleted": true})))
@@ -150,6 +250,7 @@ pub(super) async fn remove_project_member(
 #[cfg(test)]
 mod tests {
     use crate::api::test_helpers::*;
+    use crate::db::models::{CreateUser, Role};
     use axum::http::StatusCode;
 
     // ── Lead can add / change / remove ───────────────────────────
@@ -656,5 +757,636 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// The membership twin of
+    /// `api::auth::tests::a_stale_admin_snapshot_cannot_expand_access`.
+    ///
+    /// `require_role_conn` lets an instance admin through before it looks at
+    /// membership at all, and it reads `is_admin` off the identity it is
+    /// handed. Given the middleware's snapshot, a demoted admin still walks
+    /// through that door. The granting paths build a fresh identity from the
+    /// session user read inside the transaction, so they do not.
+    #[tokio::test]
+    async fn a_stale_admin_snapshot_cannot_grant_project_access() {
+        let (db, admin, lead, _maintainer, viewer, non_member, project_id) =
+            setup_membership_test();
+        // Snapshot taken while they were an admin.
+        let app = app_as_user(db.clone(), &admin);
+        {
+            let conn = db.write().unwrap();
+            // A second admin so the last-admin guard permits the demotion.
+            crate::db::queries::users::create_user(
+                &conn,
+                &CreateUser {
+                    username: "spare-admin".into(),
+                    email: "spare@test.com".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            crate::db::queries::users::set_admin_guarded(&conn, admin.id, false).unwrap();
+        }
+
+        let add = json_post(
+            &app,
+            &format!("/api/projects/{project_id}/members"),
+            serde_json::json!({ "user_id": non_member.id, "role": "viewer" }),
+        )
+        .await;
+        assert_eq!(add.status(), StatusCode::FORBIDDEN, "add");
+
+        let raise = json_patch(
+            &app,
+            &format!("/api/projects/{project_id}/members/{}", viewer.id),
+            serde_json::json!({ "role": "maintainer" }),
+        )
+        .await;
+        assert_eq!(raise.status(), StatusCode::FORBIDDEN, "role increase");
+
+        let name_lead = json_put(
+            &app,
+            &format!("/api/projects/{project_id}"),
+            serde_json::json!({ "lead_user_id": non_member.id }),
+        )
+        .await;
+        assert_eq!(name_lead.status(), StatusCode::FORBIDDEN, "naming a lead");
+
+        let conn = db.read().unwrap();
+        assert_eq!(
+            crate::db::queries::members::get_member_role(&conn, project_id, non_member.id).unwrap(),
+            None,
+            "nobody was added"
+        );
+        assert_eq!(
+            crate::db::queries::members::get_member_role(&conn, project_id, viewer.id).unwrap(),
+            Some(Role::Viewer),
+            "no role was raised"
+        );
+        let _ = lead;
+    }
+
+    // ── Granting access needs a recent sign-in ───────────────
+    //
+    // Adding somebody to a project, or raising their role, hands them standing
+    // access that no lockdown on the granter's credentials takes back. Both
+    // are therefore gated on a browser session authenticated in the last 15
+    // minutes, and both are exercised here over the real
+    // `auth::require_api_key` middleware with real bearer tokens, because the
+    // question is what the middleware makes of each credential shape.
+    mod recent_auth {
+        use crate::api::test_helpers::*;
+        use crate::db::DbPool;
+        use crate::db::models::*;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        struct Fixture {
+            db: DbPool,
+            app: axum::Router,
+            project_id: i64,
+            lead: User,
+            viewer: User,
+            outsider: User,
+            /// A live browser session for the lead.
+            session: String,
+            /// An API key bound to the lead. Authenticates, leads the project.
+            lead_key: String,
+            /// An OAuth token bound to the lead.
+            lead_oauth: String,
+        }
+
+        fn fixture() -> Fixture {
+            let (db, _admin, lead, _maintainer, viewer, outsider, project_id) =
+                setup_membership_test();
+            let manager = crate::auth::create_key_manager().unwrap();
+            let session = {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::create_session(&conn, lead.id, None)
+                    .unwrap()
+                    .token
+            };
+            let lead_key =
+                crate::auth::create_api_key(&db, &manager, "lead-key", Some(lead.id)).unwrap();
+            let lead_oauth = {
+                let token = "lific_at_lead".to_string();
+                let hash = crate::auth::sha256_hex(token.as_bytes());
+                let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+                let conn = db.write().unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+                     VALUES ('c', 'Test', '[\"http://localhost\"]')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
+                     VALUES (?1, 'c', ?2, 'mcp', ?3)",
+                    rusqlite::params![hash, expires, lead.id],
+                )
+                .unwrap();
+                token
+            };
+
+            let auth_state = crate::auth::AuthState {
+                db: db.clone(),
+                manager,
+                public_url: "https://example.com".into(),
+                required: true,
+            };
+            let app = crate::api::router(db.clone(), &[])
+                .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
+                .layer(axum::Extension(crate::config::AuthConfig {
+                    allow_signup: true,
+                    required: true,
+                    secure_cookies: false,
+                }))
+                .layer(axum::middleware::from_fn_with_state(
+                    auth_state,
+                    crate::auth::require_api_key,
+                ));
+
+            Fixture {
+                db,
+                app,
+                project_id,
+                lead,
+                viewer,
+                outsider,
+                session,
+                lead_key,
+                lead_oauth,
+            }
+        }
+
+        async fn send(
+            f: &Fixture,
+            method: &str,
+            uri: &str,
+            token: &str,
+            body: Option<serde_json::Value>,
+        ) -> (StatusCode, serde_json::Value) {
+            let builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json");
+            let request = match &body {
+                Some(value) => builder
+                    .body(axum::body::Body::from(serde_json::to_vec(value).unwrap()))
+                    .unwrap(),
+                None => builder.body(axum::body::Body::empty()).unwrap(),
+            };
+            let response = f.app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            )
+        }
+
+        fn role_of(f: &Fixture, user_id: i64) -> Option<Role> {
+            crate::db::queries::members::get_member_role(
+                &f.db.read().unwrap(),
+                f.project_id,
+                user_id,
+            )
+            .unwrap()
+        }
+
+        fn age_sessions(f: &Fixture) {
+            f.db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        async fn add_outsider(f: &Fixture, token: &str) -> StatusCode {
+            send(
+                f,
+                "POST",
+                &format!("/api/projects/{}/members", f.project_id),
+                token,
+                Some(serde_json::json!({ "user_id": f.outsider.id, "role": "viewer" })),
+            )
+            .await
+            .0
+        }
+
+        async fn set_role(f: &Fixture, token: &str, user_id: i64, role: &str) -> StatusCode {
+            send(
+                f,
+                "PATCH",
+                &format!("/api/projects/{}/members/{}", f.project_id, user_id),
+                token,
+                Some(serde_json::json!({ "role": role })),
+            )
+            .await
+            .0
+        }
+
+        #[tokio::test]
+        async fn a_recent_session_may_add_a_member_and_raise_a_role() {
+            let f = fixture();
+            assert_eq!(add_outsider(&f, &f.session).await, StatusCode::OK);
+            assert_eq!(role_of(&f, f.outsider.id), Some(Role::Viewer));
+
+            assert_eq!(
+                set_role(&f, &f.session, f.viewer.id, "maintainer").await,
+                StatusCode::OK
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Maintainer));
+        }
+
+        #[tokio::test]
+        async fn an_aged_session_may_not_add_a_member_or_raise_a_role() {
+            let f = fixture();
+            age_sessions(&f);
+
+            assert_eq!(add_outsider(&f, &f.session).await, StatusCode::FORBIDDEN);
+            assert_eq!(role_of(&f, f.outsider.id), None, "nobody was added");
+            assert_eq!(
+                set_role(&f, &f.session, f.viewer.id, "maintainer").await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Viewer), "unchanged");
+        }
+
+        /// A lead-scoped API key still leads the project, so this is a policy
+        /// refusal rather than an authorization failure. It is exactly the
+        /// credential the rule is aimed at: one that survives being stolen.
+        #[tokio::test]
+        async fn a_lead_api_key_may_not_add_a_member_or_raise_a_role() {
+            let f = fixture();
+            let (status, _) = send(
+                &f,
+                "GET",
+                &format!("/api/projects/{}/members", f.project_id),
+                &f.lead_key,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "the key does lead this project");
+
+            assert_eq!(add_outsider(&f, &f.lead_key).await, StatusCode::FORBIDDEN);
+            assert_eq!(role_of(&f, f.outsider.id), None);
+            assert_eq!(
+                set_role(&f, &f.lead_key, f.viewer.id, "maintainer").await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Viewer));
+        }
+
+        #[tokio::test]
+        async fn an_oauth_token_may_not_add_a_member_or_raise_a_role() {
+            let f = fixture();
+            assert_eq!(add_outsider(&f, &f.lead_oauth).await, StatusCode::FORBIDDEN);
+            assert_eq!(role_of(&f, f.outsider.id), None);
+            assert_eq!(
+                set_role(&f, &f.lead_oauth, f.viewer.id, "maintainer").await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Viewer));
+        }
+
+        /// Containment must stay fast. An automation holding a lead key can
+        /// still downgrade and remove people at 3am, from an aged session or
+        /// no session at all.
+        #[tokio::test]
+        async fn reductions_need_no_recent_authentication() {
+            let f = fixture();
+            age_sessions(&f);
+
+            // Raise first, with the one credential allowed to.
+            {
+                let conn = f.db.write().unwrap();
+                crate::db::queries::members::change_role(
+                    &conn,
+                    f.project_id,
+                    f.viewer.id,
+                    "maintainer",
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                set_role(&f, &f.lead_key, f.viewer.id, "viewer").await,
+                StatusCode::OK,
+                "a downgrade is a reduction"
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Viewer));
+
+            // Same role again is not an increase either.
+            assert_eq!(
+                set_role(&f, &f.lead_key, f.viewer.id, "viewer").await,
+                StatusCode::OK
+            );
+
+            let (status, _) = send(
+                &f,
+                "DELETE",
+                &format!("/api/projects/{}/members/{}", f.project_id, f.viewer.id),
+                &f.lead_key,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "removal is a reduction");
+            assert_eq!(role_of(&f, f.viewer.id), None);
+        }
+
+        /// `PATCH /api/projects/{id}` with `lead_user_id` upserts a `lead`
+        /// membership for whoever is named (LIF-195). That is a membership
+        /// grant wearing a project-settings hat, so it carries the same rule
+        /// as `POST .../members`. Renaming the project does not.
+        #[tokio::test]
+        async fn naming_a_project_lead_is_a_grant_and_needs_a_recent_session() {
+            let f = fixture();
+            let uri = format!("/api/projects/{}", f.project_id);
+
+            // A rename is not an expansion: an aged session may do it.
+            age_sessions(&f);
+            let (status, _) = send(
+                &f,
+                "PUT",
+                &uri,
+                &f.session,
+                Some(serde_json::json!({ "name": "Renamed" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "a rename grants nothing");
+
+            // Naming a lead is.
+            for token in [&f.session, &f.lead_key, &f.lead_oauth] {
+                let (status, _) = send(
+                    &f,
+                    "PUT",
+                    &uri,
+                    token,
+                    Some(serde_json::json!({ "lead_user_id": f.outsider.id })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(role_of(&f, f.outsider.id), None, "no membership was minted");
+            }
+
+            // Clearing the lead is a reduction and stays open.
+            let (status, body) = send(
+                &f,
+                "PUT",
+                &uri,
+                &f.lead_key,
+                Some(serde_json::json!({ "lead_user_id": null })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+
+        #[tokio::test]
+        async fn a_recent_session_may_name_a_project_lead() {
+            let f = fixture();
+            let (status, body) = send(
+                &f,
+                "PUT",
+                &format!("/api/projects/{}", f.project_id),
+                &f.session,
+                Some(serde_json::json!({ "lead_user_id": f.outsider.id })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(role_of(&f, f.outsider.id), Some(Role::Lead));
+        }
+
+        // ── Project creation and its implied lead grant ──────
+
+        async fn create_project_led_by(
+            f: &Fixture,
+            token: &str,
+            identifier: &str,
+            lead: Option<i64>,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut body = serde_json::json!({
+                "name": format!("Project {identifier}"),
+                "identifier": identifier,
+            });
+            if let Some(lead) = lead {
+                body["lead_user_id"] = serde_json::json!(lead);
+            }
+            send(f, "POST", "/api/projects", token, Some(body)).await
+        }
+
+        fn lead_of(f: &Fixture, project_id: i64) -> Option<i64> {
+            f.db.read()
+                .unwrap()
+                .query_row(
+                    "SELECT lead_user_id FROM projects WHERE id = ?1",
+                    rusqlite::params![project_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        /// The ordinary case, and the one automation depends on: an API key
+        /// creating its own project. It leads it, and nothing asks for a
+        /// password.
+        #[tokio::test]
+        async fn an_api_key_may_still_create_a_project_it_leads() {
+            let f = fixture();
+            age_sessions(&f);
+
+            let (status, body) = create_project_led_by(&f, &f.lead_key, "OWN", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let created = body["id"].as_i64().unwrap();
+            assert_eq!(
+                lead_of(&f, created),
+                Some(f.lead.id),
+                "the creator leads it by default"
+            );
+
+            // Naming yourself explicitly is the same grant, so also fine.
+            let (status, body) =
+                create_project_led_by(&f, &f.lead_key, "SELF", Some(f.lead.id)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+
+        /// Naming somebody else hands them a lead membership that outlives any
+        /// lockdown on the creating credential, so it needs a recent human.
+        #[tokio::test]
+        async fn a_key_or_token_may_not_create_a_project_led_by_someone_else() {
+            let f = fixture();
+            for token in [&f.lead_key, &f.lead_oauth] {
+                let (status, body) =
+                    create_project_led_by(&f, token, "OTHER", Some(f.outsider.id)).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            }
+
+            let conn = f.db.read().unwrap();
+            let projects: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM projects WHERE identifier = 'OTHER'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(projects, 0, "no project, and so no membership, was created");
+            let memberships: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM project_members WHERE user_id = ?1",
+                    rusqlite::params![f.outsider.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(memberships, 0);
+        }
+
+        #[tokio::test]
+        async fn an_aged_session_may_not_create_a_project_led_by_someone_else() {
+            let f = fixture();
+            age_sessions(&f);
+            let (status, _) =
+                create_project_led_by(&f, &f.session, "AGED", Some(f.outsider.id)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn a_recent_session_may_create_a_project_led_by_someone_else() {
+            let f = fixture();
+            let (status, body) =
+                create_project_led_by(&f, &f.session, "GIFT", Some(f.outsider.id)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let created = body["id"].as_i64().unwrap();
+            assert_eq!(lead_of(&f, created), Some(f.outsider.id));
+            assert_eq!(
+                crate::db::queries::members::get_member_role(
+                    &f.db.read().unwrap(),
+                    created,
+                    f.outsider.id
+                )
+                .unwrap(),
+                Some(Role::Lead),
+            );
+        }
+
+        // ── Reductions read their authorization freshly too ──
+
+        /// A demoted admin must not be able to downgrade, remove, clear a lead
+        /// or delete a project on the strength of the middleware snapshot.
+        /// These are reductions, so they are *not* recency-gated; the point is
+        /// that their authorization is still read inside the transaction.
+        #[tokio::test]
+        async fn a_stale_admin_snapshot_cannot_perform_reductions() {
+            let (db, admin, _lead, _maintainer, viewer, _non_member, project_id) =
+                setup_membership_test();
+            let app = app_as_user(db.clone(), &admin);
+            {
+                let conn = db.write().unwrap();
+                crate::db::queries::users::create_user(
+                    &conn,
+                    &CreateUser {
+                        username: "spare-admin".into(),
+                        email: "spare2@test.com".into(),
+                        password: "testpassword1".into(),
+                        display_name: None,
+                        is_admin: true,
+                        is_bot: false,
+                    },
+                )
+                .unwrap();
+                crate::db::queries::members::change_role(
+                    &conn,
+                    project_id,
+                    viewer.id,
+                    "maintainer",
+                )
+                .unwrap();
+                crate::db::queries::users::set_admin_guarded(&conn, admin.id, false).unwrap();
+            }
+
+            let downgrade = json_patch(
+                &app,
+                &format!("/api/projects/{project_id}/members/{}", viewer.id),
+                serde_json::json!({ "role": "viewer" }),
+            )
+            .await;
+            assert_eq!(downgrade.status(), StatusCode::FORBIDDEN, "downgrade");
+
+            let remove = json_delete(
+                &app,
+                &format!("/api/projects/{project_id}/members/{}", viewer.id),
+            )
+            .await;
+            assert_eq!(remove.status(), StatusCode::FORBIDDEN, "remove");
+
+            let clear_lead = json_put(
+                &app,
+                &format!("/api/projects/{project_id}"),
+                serde_json::json!({ "lead_user_id": null }),
+            )
+            .await;
+            assert_eq!(clear_lead.status(), StatusCode::FORBIDDEN, "clear the lead");
+
+            let rename = json_put(
+                &app,
+                &format!("/api/projects/{project_id}"),
+                serde_json::json!({ "name": "Renamed" }),
+            )
+            .await;
+            assert_eq!(rename.status(), StatusCode::FORBIDDEN, "rename");
+
+            let delete = json_delete(&app, &format!("/api/projects/{project_id}")).await;
+            assert_eq!(delete.status(), StatusCode::FORBIDDEN, "delete the project");
+
+            // Nothing moved.
+            let conn = db.read().unwrap();
+            assert_eq!(
+                crate::db::queries::members::get_member_role(&conn, project_id, viewer.id).unwrap(),
+                Some(Role::Maintainer),
+            );
+            let still_there: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM projects WHERE id = ?1",
+                    rusqlite::params![project_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(still_there, 1, "the project survived");
+        }
+
+        /// The lead check is re-run inside the write transaction, so an
+        /// authorization revoked after the request arrived cannot be acted on.
+        #[tokio::test]
+        async fn losing_lead_between_requests_stops_the_next_grant() {
+            let f = fixture();
+            assert_eq!(add_outsider(&f, &f.session).await, StatusCode::OK);
+
+            {
+                // Promote the newcomer so the last-lead guard lets the
+                // original lead step down, then step them down.
+                let conn = f.db.write().unwrap();
+                crate::db::queries::members::change_role(
+                    &conn,
+                    f.project_id,
+                    f.outsider.id,
+                    "lead",
+                )
+                .unwrap();
+                crate::db::queries::members::change_role(&conn, f.project_id, f.lead.id, "viewer")
+                    .unwrap();
+            }
+
+            assert_eq!(
+                set_role(&f, &f.session, f.viewer.id, "maintainer").await,
+                StatusCode::FORBIDDEN,
+                "a former lead may not raise anyone"
+            );
+            assert_eq!(role_of(&f, f.viewer.id), Some(Role::Viewer), "unchanged");
+        }
     }
 }

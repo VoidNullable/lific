@@ -8,6 +8,8 @@
     listIssues,
     listProjectActivity,
     listUsers,
+    me,
+    getInstance,
     getIssueCounts,
     updateProject,
     deleteProject,
@@ -21,6 +23,13 @@
     type IssueStatusCounts,
     type UserSummary,
   } from "../lib/api";
+  import {
+    RECENT_AUTH_ERROR,
+    needsReauth,
+    reauthenticateWithoutPassword,
+    reauthenticateWithPassword,
+    retryOnceAfterReauth,
+  } from "../lib/reauth";
   import IconPicker from "../lib/IconPicker.svelte";
   import LabelManager from "../lib/LabelManager.svelte";
   import ProjectMembers from "../lib/ProjectMembers.svelte";
@@ -114,12 +123,18 @@
     leadValue = found.lead_user_id == null ? "" : String(found.lead_user_id);
     lastLead = found.lead_user_id;
 
-    const [countsRes, issuesRes, actRes, usersRes] = await Promise.all([
+    const [countsRes, issuesRes, actRes, usersRes, meRes, instanceRes] = await Promise.all([
       getIssueCounts(found.id),
       listIssues({ project_id: found.id, limit: 1000 }),
       listProjectActivity(found.id, 14),
       listUsers(),
+      // Who is signed in, and whether this instance signs in without a
+      // password: both decide how a refused lead assignment recovers.
+      me(),
+      getInstance(),
     ]);
+    if (meRes.ok) currentUserId = meRes.data.id;
+    if (instanceRes.ok) webAutoLogin = instanceRes.data.web_auto_login;
     if (countsRes.ok) counts = countsRes.data;
     if (issuesRes.ok) issues = issuesRes.data;
     if (actRes.ok) activity = actRes.data.items;
@@ -180,16 +195,129 @@
     if (project && v !== project.description) saveField("description", v);
   }
 
-  // Lead change (danger zone). Autosaves on select; guarded so the initial
-  // hydrate doesn't fire a write.
+  // ── Lead change (danger zone) ─────────────────────────────
+  //
+  // Naming a lead grants that person a `lead` membership on the project, so
+  // the server requires a sign-in from the last 15 minutes, exactly as adding
+  // a member does. Clearing the lead grants nothing and is never gated.
+  //
+  // The pending operation is a snapshot: `leadValue` is a live selector and
+  // `project` can be replaced by a reload, so a retry must not read either.
+  type PendingLead = {
+    projectId: number;
+    leadUserId: number;
+    previousLead: number | null;
+    userId: number;
+  };
+  let pendingLead = $state<PendingLead | null>(null);
+  let leadPassword = $state("");
+  let leadBusy = $state(false);
+  let leadError = $state("");
+  let autoLeadNote = $state("");
+  let webAutoLogin = $state(false);
+  let currentUserId = $state<number | null>(null);
+
+  /** Put the selector, and the effect's own guard, back to the stored lead.
+   *  Restoring only `leadValue` would leave `lastLead` holding the value that
+   *  was refused, so the effect would see them differ and immediately re-fire
+   *  the write it just abandoned. */
+  function restoreLead(previous: number | null) {
+    lastLead = previous;
+    leadValue = previous == null ? "" : String(previous);
+  }
+
+  async function autoLeadReauth() {
+    if (!webAutoLogin || currentUserId == null) {
+      return { ok: false as const, error: RECENT_AUTH_ERROR, recoverable: true };
+    }
+    const auto = await reauthenticateWithoutPassword(currentUserId);
+    if (!auto.ok) autoLeadNote = auto.error;
+    return auto;
+  }
+
+  async function assignLead(pending: PendingLead, recover = true): Promise<boolean> {
+    const res = await retryOnceAfterReauth(
+      () => updateProject(pending.projectId, { lead_user_id: pending.leadUserId }),
+      () =>
+        recover
+          ? autoLeadReauth()
+          : Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false }),
+    );
+    if (res.ok) {
+      if (project?.id === pending.projectId) {
+        project = res.data;
+        onProjectChange?.();
+        savedAt = Date.now();
+        window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
+      }
+      return true;
+    }
+    if (needsReauth(res)) {
+      pendingLead = pending;
+      return false;
+    }
+    toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
+    restoreLead(pending.previousLead);
+    return false;
+  }
+
+  /** Verify, then retry the interrupted assignment exactly once. */
+  async function submitLeadReauth() {
+    const pending = pendingLead;
+    if (!pending || leadBusy || !leadPassword || currentUserId == null) return;
+    if (pending.projectId !== project?.id || pending.userId !== currentUserId) {
+      leadError = "That change was interrupted and was not applied.";
+      pendingLead = null;
+      leadPassword = "";
+      return;
+    }
+    leadBusy = true;
+    leadError = "";
+    const refreshed = await reauthenticateWithPassword(leadPassword, pending.userId);
+    leadPassword = "";
+    if (!refreshed.ok) {
+      leadError = refreshed.error;
+      leadBusy = false;
+      return;
+    }
+    autoLeadNote = "";
+    if (await assignLead(pending, false)) {
+      pendingLead = null;
+    } else if (!leadError) {
+      leadError = "That still was not accepted. Sign out and sign back in, then try again.";
+      restoreLead(pending.previousLead);
+      pendingLead = null;
+    }
+    leadBusy = false;
+  }
+
+  function cancelLeadReauth() {
+    if (pendingLead) restoreLead(pendingLead.previousLead);
+    pendingLead = null;
+    leadPassword = "";
+    leadError = "";
+    autoLeadNote = "";
+  }
+
+  // Autosaves on select; guarded so the initial hydrate doesn't fire a write.
   $effect(() => {
     const v = leadValue;
     if (!project) return;
     const next = v === "" ? null : Number(v);
-    if (next !== lastLead) {
-      lastLead = next;
-      saveField("lead_user_id", next);
+    if (next === lastLead) return;
+    const previous = lastLead;
+    lastLead = next;
+    if (next == null) {
+      // Clearing the lead is a reduction: no grant, no prompt.
+      saveField("lead_user_id", null);
+      return;
     }
+    void assignLead({
+      projectId: project.id,
+      leadUserId: next,
+      previousLead: previous,
+      userId: currentUserId ?? -1,
+    });
   });
 
   // ── Sidebar group ────────────────────────────────────────
@@ -672,6 +800,58 @@
                   {/each}
                 </select>
               </div>
+
+              <!-- Naming a lead grants that person a lead membership, so the
+                   server wants a recent sign-in. Confirm inline, right under
+                   the control that was refused. -->
+              {#if pendingLead}
+                <div class="flex flex-col gap-2 rounded-md bg-[var(--bg-subtle)] px-3 py-2.5">
+                  <p class="text-caption text-[var(--text)] leading-relaxed">
+                    Verify it's you to make that person the project lead. It grants them lead
+                    access to this project, and you have been signed in for a while.
+                  </p>
+                  {#if autoLeadNote}
+                    <p class="text-caption text-[var(--text-muted)]" role="status">
+                      Signing you in automatically did not work ({autoLeadNote}).
+                    </p>
+                  {/if}
+                  {#if leadError}
+                    <p class="text-caption text-[var(--error)]" role="alert">{leadError}</p>
+                  {/if}
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <label class="flex-1 min-w-[170px]">
+                      <span class="sr-only">Your current password</span>
+                      <input
+                        bind:value={leadPassword}
+                        type="password"
+                        placeholder="your current password"
+                        autocomplete="current-password"
+                        disabled={leadBusy}
+                        class="w-full px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
+                               bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2
+                               focus-visible:ring-[var(--accent)] disabled:opacity-50"
+                        onkeydown={(e) => { if (e.key === 'Enter') submitLeadReauth(); }}
+                      />
+                    </label>
+                    <button
+                      class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                             px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
+                             disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      disabled={leadBusy || !leadPassword}
+                      onclick={submitLeadReauth}
+                    >
+                      {leadBusy ? "Verifying…" : "Confirm and continue"}
+                    </button>
+                    <button
+                      class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--surface)] transition-colors disabled:opacity-50 shrink-0"
+                      disabled={leadBusy}
+                      onclick={cancelLeadReauth}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              {/if}
 
               <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
 

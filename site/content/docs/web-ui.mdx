@@ -67,6 +67,21 @@ Appearance settings include accent color, density, font scale, and reduced motio
 
 From account settings, manage your profile, password, active sessions, and connected tools. Instance settings control signups, browser auto-login, authorization enforcement, and login messaging. Project settings manage members and their viewer, maintainer, or lead roles; the last lead cannot be removed or demoted.
 
+### Changing your password revokes more than your sessions
+
+Both destructive actions in account settings are full account recoveries. They revoke every session, API key, OAuth session, and connected tool belonging to your account and to the tools it owns:
+
+- **Change password** signs you out on every other device and leaves you signed in here on a fresh session. The page states this next to the button, and re-reads your connected tools afterwards so they show as disconnected.
+- **Sign out everywhere and revoke access** does the same and mints no replacement, so it signs out this browser too. It asks for confirmation inline before running, and stays put if the request fails, so a network error does not sign you out of a session that is still valid.
+
+Reconnect each tool afterwards from the Connected tools section, or with `lific connect`, and replace any API key a script depends on. Restart a running MCP client after reconnecting it; it will not pick up a new credential on its own.
+
+### Some actions ask you to confirm your password
+
+Connecting a tool, creating an account, granting instance admin, restoring a deactivated account, changing instance settings, adding a project member, and raising a member's project role all leave lasting access behind, so the server requires a sign-in from the last 15 minutes. A tab left open for longer than that is asked to confirm: the connect dialog, the Members roster and a project's member list each grow a single password field that names the waiting action, the action resumes with its inputs intact once you confirm, and a wrong password leaves everything where it was. On an instance with `web_auto_login` there is usually no password to confirm, since the session refreshes silently; if that is refused, the password prompt appears instead. Either way the refresh only ever produces a session for the account already signed in, never for the instance's first admin.
+
+Signing out of a device, demoting an admin, deactivating an account, lowering a project role, removing a project member, and refusing a device connection request never ask. They only take access away, which is what you want to be fast while dealing with a compromise.
+
 Use the connected-tools and API-key controls to review which agents can access the instance. Prefer user-owned bot identities for agents that should follow project membership. See [self-hosting](/docs/self-hosting) and the [REST authorization notes](/docs/rest-api) for operator-level access rules.
 
 The browser's Connected Tools page is a smaller manual-configuration subset: OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code, and Zed. The CLI [connect](/docs/connect) flow supports those clients plus Gemini CLI, Windsurf, Goose, and Crush, with detection and per-client file writes.

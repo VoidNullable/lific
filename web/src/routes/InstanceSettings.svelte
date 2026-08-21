@@ -5,6 +5,7 @@
   import {
     me,
     listUsers,
+    getInstance,
     getInstanceSettings,
     updateInstanceSettings,
     createUser,
@@ -17,6 +18,15 @@
     type InstanceSettings,
     type InstanceSettingsPatch,
   } from "../lib/api";
+  import {
+    RECENT_AUTH_ERROR,
+    needsReauth,
+    reauthenticateWithoutPassword,
+    reauthenticateWithPassword,
+    retryOnceAfterReauth,
+  } from "../lib/reauth";
+  import { createSaveQueue } from "../lib/saveQueue";
+  import { disposePatch, drainStep, takePending } from "../lib/pendingPatch";
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import TimeAgo from "../lib/TimeAgo.svelte";
@@ -67,9 +77,17 @@
     const meRes = await me();
     if (meRes.ok) user = meRes.data;
     if (user?.is_admin) {
-      const [u, s] = await Promise.all([listUsers(), getInstanceSettings()]);
+      // `/api/instance` reports the *effective* sign-in mode: it is true both
+      // for `web_auto_login` and for `[auth] required = false`, which the
+      // stored settings row does not capture on its own.
+      const [u, s, instance] = await Promise.all([
+        listUsers(),
+        getInstanceSettings(),
+        getInstance(),
+      ]);
       if (u.ok) users = u.data;
       if (s.ok) hydrate(s.data);
+      if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     }
     loading = false;
   });
@@ -83,26 +101,120 @@
   // on blur, toggles on click. We re-sync only the fields named in the patch
   // from the normalized server response, so an in-progress edit in a different
   // field is never clobbered.
-  async function commit(patch: InstanceSettingsPatch) {
-    if (saving) return;
-    saving = true;
+  /** Re-read every editable control from the authoritative settings row.
+   *  Used after a save lands (so the displayed values are the stored ones) and
+   *  after one fails (so an optimistic toggle does not sit there claiming a
+   *  change the server refused). */
+  function hydrateFields(from: InstanceSettings, patch: InstanceSettingsPatch) {
+    if (patch.instance_name !== undefined) fName = from.instance_name ?? "";
+    if (patch.signup_email_domains !== undefined)
+      fDomains = from.signup_email_domains.join(", ");
+    if (patch.session_lifetime_days !== undefined) fSession = from.session_lifetime_days;
+    if (patch.login_message !== undefined) fMessage = from.login_message ?? "";
+    if (patch.allow_signup !== undefined) fSignups = from.allow_signup;
+    if (patch.web_auto_login !== undefined) fAutoLogin = from.web_auto_login;
+    if (patch.authz_enforced !== undefined) fAuthzEnforced = from.authz_enforced;
+  }
+
+  /** One save. `recover` is false once the password prompt has already
+   *  refreshed the session, so the retry is genuinely the last try. */
+  async function sendPatch(patch: InstanceSettingsPatch, replaying = false): Promise<boolean> {
+    // `reauthFor` is a single slot, and a settings refusal parks a patch in
+    // it. Anything sent afterwards would overwrite that slot and strand the
+    // first patch: the prompt would confirm the *last* field touched and
+    // silently drop the earlier one. So while a confirmation is outstanding,
+    // every patch merges into the parked one and goes nowhere near the
+    // network. That includes edits made *during* the replay request, which the
+    // drain below picks up on its next pass rather than losing.
+    //
+    // `replaying` is true only for the drain's own sends, which own the
+    // snapshot they carry.
+    const parked = parkedSettingsPatch();
+    const disposition = disposePatch(parked, patch, {
+      replaying,
+      hold: settingsReplayInFlight,
+    });
+    if (disposition.action === "park") {
+      reauthFor = { kind: "settings", patch: disposition.patch };
+      return false;
+    }
     saveError = "";
-    const res = await updateInstanceSettings(patch);
-    saving = false;
+    const res = await retryOnceAfterReauth(() => updateInstanceSettings(patch), () =>
+      replaying
+        ? Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false })
+        : autoReauth(),
+    );
     if (res.ok) {
       settings = res.data;
-      if (patch.instance_name !== undefined) fName = res.data.instance_name ?? "";
-      if (patch.signup_email_domains !== undefined)
-        fDomains = res.data.signup_email_domains.join(", ");
-      if (patch.session_lifetime_days !== undefined) fSession = res.data.session_lifetime_days;
-      if (patch.login_message !== undefined) fMessage = res.data.login_message ?? "";
-      if (patch.allow_signup !== undefined) fSignups = res.data.allow_signup;
-      if (patch.web_auto_login !== undefined) fAutoLogin = res.data.web_auto_login;
-      if (patch.authz_enforced !== undefined) fAuthzEnforced = res.data.authz_enforced;
+      hydrateFields(res.data, patch);
       savedAt = Date.now();
       window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
-    } else {
-      saveError = res.error;
+      return true;
+    }
+    if (needsReauth(res)) {
+      // Hold the exact patch. The control keeps showing the requested value so
+      // the intent stays visible while the prompt is up; cancelling restores it
+      // from `settings`.
+      reauthFor = { kind: "settings", patch };
+      return false;
+    }
+    saveError = res.error;
+    // An ordinary refusal: put the controls back to what is actually stored,
+    // rather than leaving a toggle asserting a change that did not happen.
+    if (settings) hydrateFields(settings, patch);
+    return false;
+  }
+
+  // Serialized and coalescing. `if (saving) return` used to *drop* a second
+  // edit made during an in-flight save, with no error anywhere.
+  const saveQueue = createSaveQueue<InstanceSettingsPatch>({
+    send: (patch) => sendPatch(patch),
+    onStateChange: (state) => { saving = state === "sending"; },
+  });
+
+  function commit(patch: InstanceSettingsPatch): Promise<boolean> {
+    return saveQueue.push(patch);
+  }
+
+  /** Send everything the confirmation is holding, one snapshot at a time.
+   *
+   *  Each pass takes the parked patch and clears the slot, so edits arriving
+   *  while a request is in flight start a fresh parked patch instead of being
+   *  folded into one already on the wire or dropped when the drain ends. A
+   *  failure stops immediately, leaving whatever has accumulated parked for
+   *  the prompt to show. Bounded: every pass consumes exactly one snapshot,
+   *  and the only way to keep going is for edits to keep landing. */
+  /** The settings patch currently waiting for confirmation, if any. */
+  function parkedSettingsPatch(): InstanceSettingsPatch | null {
+    return reauthFor?.kind === "settings" ? reauthFor.patch : null;
+  }
+
+  async function drainParkedSettings(first: InstanceSettingsPatch): Promise<boolean> {
+    settingsReplayInFlight = true;
+    // The drain owns `first` now, so clear the slot: an edit made during the
+    // request below starts a fresh parked patch instead of being merged into
+    // one already on the wire.
+    reauthFor = null;
+    let patch = first;
+    try {
+      for (;;) {
+        const landed = await sendPatch(patch, true);
+        const parked = parkedSettingsPatch();
+        const step = drainStep(landed, parked);
+        if (step.next === "continue") {
+          const { taken } = takePending(parked);
+          reauthFor = null;
+          patch = step.patch;
+          void taken;
+          continue;
+        }
+        // "done" leaves the slot already null. "stop" leaves whatever
+        // `sendPatch` parked: a second staleness refusal re-parks the exact
+        // patch, and an ordinary failure parks nothing and shows `saveError`.
+        return step.next === "done";
+      }
+    } finally {
+      settingsReplayInFlight = false;
     }
   }
 
@@ -169,6 +281,83 @@
     users = users.map((u) => (u.id === updated.id ? updated : u));
   }
 
+  // ── Re-authentication for the two granting actions ───────
+  //
+  // Creating an account and promoting one to admin both leave lasting access
+  // behind, so the server requires a sign-in from the last 15 minutes. Demote,
+  // deactivate and reactivate only ever take access away, are not gated, and
+  // deliberately do not go through any of this: they are what an admin reaches
+  // for while containing a compromise.
+  //
+  // One prompt serves both, and it remembers which operation was interrupted
+  // so the retry resumes exactly that one with its inputs intact.
+  // Every pending operation carries its own arguments. Nothing here reads a
+  // reactive field at retry time: the form may have been typed into, the
+  // roster may have reloaded, and the retry must run what was actually
+  // refused, not what happens to be on screen a minute later.
+  type ReauthTarget =
+    | { kind: "create"; username: string; password: string }
+    | { kind: "promote"; userId: number; username: string }
+    | { kind: "reactivate"; userId: number; username: string }
+    | { kind: "settings"; patch: InstanceSettingsPatch };
+  let reauthFor = $state<ReauthTarget | null>(null);
+  let reauthPassword = $state("");
+  let reauthBusy = $state(false);
+  let reauthError = $state("");
+
+  /** Why the automatic sign-in did not work, when one was attempted. */
+  let autoReauthNote = $state("");
+  /** True for the whole confirmation drain, including between its sends. The
+   *  drain clears the parked slot before each send, so "is something parked"
+   *  cannot answer "is a replay in flight". */
+  let settingsReplayInFlight = $state(false);
+  /** Effective passwordless sign-in, from the public instance payload. */
+  let webAutoLogin = $state(false);
+
+  /** The automatic way out of a staleness refusal, where one exists: a
+   *  passwordless instance can mint a fresh session without asking anything.
+   *  Anywhere else, and on any failure (auto-login off, refused, or a session
+   *  belonging to a different admin), this declines as *recoverable* and the
+   *  caller shows the password prompt instead of ending the action. */
+  async function autoReauth() {
+    // The *effective* mode, from the public `/api/instance` payload. The
+    // stored `settings.web_auto_login` flag is not the whole answer: an
+    // instance running `[auth] required = false` also signs in without a
+    // password, and reading the raw flag there would put an impossible
+    // password prompt in front of an operator who has no password to type.
+    if (!webAutoLogin || !user) {
+      return { ok: false as const, error: RECENT_AUTH_ERROR, recoverable: true };
+    }
+    const auto = await reauthenticateWithoutPassword(user.id);
+    if (!auto.ok) autoReauthNote = auto.error;
+    return auto;
+  }
+
+  /** Promote, handling a staleness refusal. Returns true when it landed.
+   *  `recover` is false once the password prompt has already refreshed the
+   *  session, so the retry is genuinely the last attempt. */
+  async function attemptPromote(
+    userId: number,
+    username: string,
+    recover = true,
+  ): Promise<boolean> {
+    const res = await retryOnceAfterReauth(() => promoteUser(userId), () =>
+      recover
+        ? autoReauth()
+        : Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false }),
+    );
+    if (res.ok) {
+      applyUser(res.data);
+      return true;
+    }
+    if (needsReauth(res)) {
+      reauthFor = { kind: "promote", userId, username };
+      return false;
+    }
+    rowError = { id: userId, message: res.error };
+    return false;
+  }
+
   async function runAction(
     u: UserSummary,
     action: (id: number) => ReturnType<typeof promoteUser>,
@@ -183,6 +372,94 @@
     else rowError = { id: u.id, message: res.error };
   }
 
+  /** Restore a deactivated account. An expansion, so same rule as promote. */
+  async function attemptReactivate(
+    userId: number,
+    username: string,
+    recover = true,
+  ): Promise<boolean> {
+    const res = await retryOnceAfterReauth(() => reactivateUser(userId), () =>
+      recover
+        ? autoReauth()
+        : Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false }),
+    );
+    if (res.ok) {
+      applyUser(res.data);
+      return true;
+    }
+    if (needsReauth(res)) {
+      reauthFor = { kind: "reactivate", userId, username };
+      return false;
+    }
+    rowError = { id: userId, message: res.error };
+    return false;
+  }
+
+  /** The two granting row buttons. Same shape as `runAction`, plus recovery. */
+  async function runGrant(
+    u: UserSummary,
+    attempt: (userId: number, username: string) => Promise<boolean>,
+  ) {
+    if (rowBusy !== null) return;
+    rowBusy = u.id;
+    rowError = null;
+    reauthError = "";
+    await attempt(u.id, u.username);
+    rowBusy = null;
+    pending = null;
+  }
+
+  /** Verify the admin's own password, then resume whatever was interrupted,
+   *  exactly once. The pending operation's inputs are untouched throughout,
+   *  so a wrong password costs a retype of the password and nothing else. */
+  async function submitReauth() {
+    const target = reauthFor;
+    if (!target || !user || reauthBusy || !reauthPassword) return;
+    reauthBusy = true;
+    reauthError = "";
+    const refreshed = await reauthenticateWithPassword(reauthPassword, user.id);
+    if (!refreshed.ok) {
+      reauthError = refreshed.error;
+      reauthBusy = false;
+      return;
+    }
+    reauthPassword = "";
+    autoReauthNote = "";
+    // The session is fresh now, so these are the one retry; no further
+    // recovery is offered, and a refusal here is a real failure.
+    // Take the settings snapshot *now*: `target` was captured before the
+    // password round-trip, and more may have merged into the slot since.
+    const settingsPatch = parkedSettingsPatch();
+    const landed = await (target.kind === "create"
+      ? attemptCreate(target.username, target.password, false)
+      : target.kind === "promote"
+        ? attemptPromote(target.userId, target.username, false)
+        : target.kind === "reactivate"
+          ? attemptReactivate(target.userId, target.username, false)
+          : settingsPatch
+            ? drainParkedSettings(settingsPatch)
+            : Promise.resolve(true));
+    // `drainParkedSettings` owns the slot while it runs; the others clear it
+    // here on success.
+    if (landed && target.kind !== "settings") reauthFor = null;
+    // Only worth saying if the prompt is still on screen. An ordinary failure
+    // clears the prompt and reports itself through `saveError`/`rowError`.
+    if (!landed && !reauthError && reauthFor) {
+      reauthError = "That still was not accepted. Sign out and sign back in, then try again.";
+    }
+    reauthBusy = false;
+  }
+
+  function cancelReauth() {
+    // An abandoned settings change must not leave its control asserting a
+    // value the server never stored.
+    if (reauthFor?.kind === "settings" && settings) hydrateFields(settings, reauthFor.patch);
+    reauthFor = null;
+    reauthPassword = "";
+    reauthError = "";
+    autoReauthNote = "";
+  }
+
   // ── Create a member ─────────────────────────────────────
   // Deliberately minimal: a username and a password is everything the server
   // needs (it fills in a {username}@local address), and this is an admin
@@ -193,22 +470,48 @@
   let createError = $state("");
   let createdName = $state("");
 
+  /** Create the account, handling a staleness refusal. On refusal the form
+   *  keeps its values, so the retry after re-authenticating creates exactly
+   *  the account that was typed. */
+  async function attemptCreate(
+    username: string,
+    password: string,
+    recover = true,
+  ): Promise<boolean> {
+    const res = await retryOnceAfterReauth(
+      () => createUser({ username, password }),
+      () =>
+        recover
+          ? autoReauth()
+          : Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false }),
+    );
+    if (res.ok) {
+      users = [...users, res.data];
+      createdName = res.data.username;
+      newUsername = "";
+      newPassword = "";
+      return true;
+    }
+    if (needsReauth(res)) {
+      // The password is held here, not read back off the form: the field is
+      // cleared as soon as the account lands, and an admin may well retype
+      // something else while the prompt is up.
+      reauthFor = { kind: "create", username, password };
+      return false;
+    }
+    createError = res.error;
+    return false;
+  }
+
   async function submitCreate() {
     const username = newUsername.trim();
     if (!username || !newPassword || creating) return;
     creating = true;
     createError = "";
     createdName = "";
-    const res = await createUser({ username, password: newPassword });
+    reauthError = "";
+    await attemptCreate(username, newPassword);
     creating = false;
-    if (res.ok) {
-      users = [...users, res.data];
-      createdName = res.data.username;
-      newUsername = "";
-      newPassword = "";
-    } else {
-      createError = res.error;
-    }
   }
 </script>
 
@@ -499,8 +802,14 @@
             </div>
           </div>
 
+          {#if reauthFor?.kind === "settings"}
+            <p class="text-caption text-[var(--text-muted)] mt-4 flex items-center gap-1" role="status">
+              <Lock size={12} /> That change needs a recent sign-in. Confirm your password under
+              <strong>Members</strong> below and it will be saved.
+            </p>
+          {/if}
           {#if saveError}
-            <p class="text-caption text-[var(--error)] mt-4 flex items-center gap-1"><AlertTriangle size={12} /> {saveError}</p>
+            <p class="text-caption text-[var(--error)] mt-4 flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {saveError}</p>
           {/if}
 
           <!-- Autosave status (no Save button — each field commits on change). -->
@@ -558,10 +867,77 @@
               </button>
             </div>
             {#if createError}
-              <div class="px-4 py-2 text-caption text-[var(--error)] bg-[var(--error-bg)]">{createError}</div>
+              <div class="px-4 py-2 text-caption text-[var(--error)] bg-[var(--error-bg)]" role="alert">{createError}</div>
             {:else if createdName}
-              <div class="px-4 py-2 text-caption text-[var(--success)]">
+              <div class="px-4 py-2 text-caption text-[var(--success)]" role="status">
                 Created <span class="font-mono">@{createdName}</span>. Share the password with them; they can change it in their settings.
+              </div>
+            {/if}
+
+            <!-- One prompt for both granting actions. It appears only when the
+                 server refused for staleness, names which action is waiting,
+                 and leaves that action's inputs alone so confirming resumes it
+                 unchanged. -->
+            {#if reauthFor}
+              <div class="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-subtle)] flex flex-col gap-2">
+                <div class="flex items-start gap-2 text-caption text-[var(--text)]">
+                  <Lock size={13} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
+                  <p class="leading-relaxed">
+                    Verify it's you to
+                    {#if reauthFor.kind === "create"}
+                      create <span class="font-mono">@{reauthFor.username}</span>.
+                    {:else if reauthFor.kind === "promote"}
+                      make <span class="font-mono">@{reauthFor.username}</span> an admin.
+                    {:else if reauthFor.kind === "reactivate"}
+                      restore <span class="font-mono">@{reauthFor.username}</span>.
+                    {:else}
+                      save that instance setting.
+                    {/if}
+                    Expanding access needs a recent sign-in, and you have been signed in for a while.
+                  </p>
+                </div>
+                {#if autoReauthNote}
+                  <p class="text-caption text-[var(--text-muted)]" role="status">
+                    Signing you in automatically did not work ({autoReauthNote}).
+                  </p>
+                {/if}
+                {#if reauthError}
+                  <p class="text-caption text-[var(--error)] flex items-center gap-1" role="alert">
+                    <AlertTriangle size={12} /> {reauthError}
+                  </p>
+                {/if}
+                <div class="flex items-center gap-2 flex-wrap">
+                  <label class="flex-1 min-w-[180px]">
+                    <span class="sr-only">Your current password</span>
+                    <input
+                      bind:value={reauthPassword}
+                      type="password"
+                      placeholder="your current password"
+                      autocomplete="current-password"
+                      disabled={reauthBusy}
+                      class="w-full px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
+                             bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2
+                             focus-visible:ring-[var(--accent)] disabled:opacity-50"
+                      onkeydown={(e) => { if (e.key === 'Enter') submitReauth(); }}
+                    />
+                  </label>
+                  <button
+                    class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                           px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
+                           disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    disabled={reauthBusy || !reauthPassword}
+                    onclick={submitReauth}
+                  >
+                    {reauthBusy ? "Verifying…" : "Confirm and continue"}
+                  </button>
+                  <button
+                    class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--surface)] transition-colors disabled:opacity-50 shrink-0"
+                    disabled={reauthBusy}
+                    onclick={cancelReauth}
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             {/if}
 
@@ -640,7 +1016,7 @@
                                  hover:text-[var(--accent)] hover:bg-[var(--accent-subtle)] transition-colors
                                  disabled:opacity-40 disabled:cursor-not-allowed"
                           disabled={rowBusy === u.id}
-                          onclick={() => runAction(u, promoteUser)}
+                          onclick={() => runGrant(u, attemptPromote)}
                           title="Make instance admin"
                           aria-label="Make {u.display_name || u.username} an instance admin"
                         >
@@ -663,7 +1039,7 @@
                                  hover:text-[var(--success)] hover:bg-[var(--success-bg)] transition-colors
                                  disabled:opacity-40 disabled:cursor-not-allowed"
                           disabled={rowBusy === u.id}
-                          onclick={() => runAction(u, reactivateUser)}
+                          onclick={() => runGrant(u, attemptReactivate)}
                           title="Restore account"
                           aria-label="Restore {u.display_name || u.username}"
                         >

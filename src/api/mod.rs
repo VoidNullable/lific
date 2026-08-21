@@ -72,6 +72,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/auth/me", get(auth::auth_me).patch(auth::update_me))
         .route("/api/auth/me/password", post(auth::change_password))
         .route("/api/auth/me/sessions", delete(auth::revoke_all_sessions))
+        // Same-user session refresh: the honest way to satisfy the
+        // recent-authentication rule from a tab that has been open a while.
+        // Never mints for anyone but the caller. See `auth::refresh_session`.
+        .route("/api/auth/me/refresh", post(auth::refresh_session))
         .route(
             "/api/auth/keys",
             get(auth::list_keys).post(auth::create_key),
@@ -735,6 +739,41 @@ pub(crate) mod test_helpers {
             ))))
     }
 
+    /// Attach a real, freshly minted session token to every request the test
+    /// router serves, unless the test set its own `Authorization` header.
+    ///
+    /// `app_as_user` and `test_app` model "requests made by this signed-in
+    /// person", and a signed-in person has a session. Several endpoints now
+    /// require one explicitly (the recent-authentication rule on credential
+    /// minting, account creation, admin grants, instance settings and
+    /// membership grants), so the fixture has to supply the thing it always
+    /// claimed to represent. The gate itself is proven separately, over the
+    /// real middleware stack, in `api::auth::tests::lockdown` and
+    /// `api::members::tests::recent_auth`.
+    pub fn with_session_header(router: Router, db: &DbPool, user_id: i64) -> Router {
+        let token = {
+            let conn = db.write().expect("test session");
+            crate::db::queries::users::create_session(&conn, user_id, None)
+                .expect("mint test session")
+                .token
+        };
+        router.layer(axum::middleware::from_fn(
+            move |mut request: axum::http::Request<axum::body::Body>,
+                  next: axum::middleware::Next| {
+                let token = token.clone();
+                async move {
+                    if !request.headers().contains_key("authorization") {
+                        request.headers_mut().insert(
+                            "authorization",
+                            format!("Bearer {token}").parse().expect("header"),
+                        );
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    }
+
     pub fn test_app() -> Router {
         test_app_with_realtime().app
     }
@@ -765,46 +804,50 @@ pub(crate) mod test_helpers {
             conn.last_insert_rowid()
         };
         let realtime = crate::realtime::RealtimeHub::new();
-        let app = with_client_ip_test_layers(with_attachment_layers(super::router(db, &[])), test_peer())
-            .layer(Extension(realtime.clone()))
-            .layer(Extension(crate::config::AuthConfig {
-                allow_signup: true,
-                required,
-                secure_cookies: false,
-            }))
-            .layer(Extension(Some(AuthUser {
+        let app = with_client_ip_test_layers(
+            with_attachment_layers(super::router(db.clone(), &[])),
+            test_peer(),
+        )
+        .layer(Extension(realtime.clone()))
+        .layer(Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            required,
+            secure_cookies: false,
+        }))
+        .layer(Extension(Some(AuthUser {
+            id: admin_id,
+            username: "test-admin".into(),
+            display_name: "Test Admin".into(),
+            is_admin: true,
+        })))
+        .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
                 id: admin_id,
                 username: "test-admin".into(),
                 display_name: "Test Admin".into(),
                 is_admin: true,
-            })))
-            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "test-admin".into(),
-                    display_name: "Test Admin".into(),
-                    is_admin: true,
-                },
-                transport: crate::actor::Transport::Web,
-            })))
-            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "test-admin".into(),
-                    display_name: "Test Admin".into(),
-                    is_admin: true,
-                },
-                transport: crate::actor::Transport::Web,
-            })))
-            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "test-admin".into(),
-                    display_name: "Test Admin".into(),
-                    is_admin: true,
-                },
-                transport: crate::actor::Transport::Web,
-            })));
+            },
+            transport: crate::actor::Transport::Web,
+        })))
+        .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
+                id: admin_id,
+                username: "test-admin".into(),
+                display_name: "Test Admin".into(),
+                is_admin: true,
+            },
+            transport: crate::actor::Transport::Web,
+        })))
+        .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
+                id: admin_id,
+                username: "test-admin".into(),
+                display_name: "Test Admin".into(),
+                is_admin: true,
+            },
+            transport: crate::actor::Transport::Web,
+        })));
+        let app = with_session_header(app, &db, admin_id);
         RealtimeTestApp { app, realtime }
     }
 
@@ -918,8 +961,29 @@ pub(crate) mod test_helpers {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Like [`app_as_user`], but with a realtime hub the caller can observe.
+    ///
+    /// `app_as_user` layers its own hub; a hub added *outside* that router is
+    /// overwritten by it, so a test that wants to see what was broadcast has
+    /// to supply it from the start.
+    pub fn app_as_user_with_realtime(
+        db: DbPool,
+        user: &User,
+        realtime: crate::realtime::RealtimeHub,
+    ) -> Router {
+        app_as_user_inner(db, user, realtime)
+    }
+
     /// Build a test app authenticated as a specific user.
     pub fn app_as_user(db: DbPool, user: &User) -> Router {
+        app_as_user_inner(db, user, crate::realtime::RealtimeHub::new())
+    }
+
+    fn app_as_user_inner(
+        db: DbPool,
+        user: &User,
+        realtime: crate::realtime::RealtimeHub,
+    ) -> Router {
         let auth_user = AuthUser {
             id: user.id,
             username: user.username.clone(),
@@ -930,15 +994,19 @@ pub(crate) mod test_helpers {
             user: auth_user.clone(),
             transport: crate::actor::Transport::Web,
         };
-        with_client_ip_test_layers(with_attachment_layers(super::router(db, &[])), test_peer())
-            .layer(Extension(crate::realtime::RealtimeHub::new()))
-            .layer(Extension(crate::config::AuthConfig {
-                allow_signup: true,
-                required: true,
-                secure_cookies: false,
-            }))
-            .layer(Extension(Some(auth_user)))
-            .layer(Extension(Some(identity)))
+        let router = with_client_ip_test_layers(
+            with_attachment_layers(super::router(db.clone(), &[])),
+            test_peer(),
+        )
+        .layer(Extension(realtime))
+        .layer(Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            required: true,
+            secure_cookies: false,
+        }))
+        .layer(Extension(Some(auth_user)))
+        .layer(Extension(Some(identity)));
+        with_session_header(router, &db, user.id)
     }
 
     /// Set up a DB with an admin, a project lead, a regular user, and a project.

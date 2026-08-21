@@ -1,9 +1,9 @@
 ---
-title: Upgrade from 2.0 to 2.6
-description: Back up, upgrade, verify, and adopt the changes from 2.1 through 2.6 on an existing Lific 2.0 installation.
+title: Upgrade from 2.0 to 2.7
+description: Back up, upgrade, verify, and adopt the changes from 2.1 through 2.7 on an existing Lific 2.0 installation.
 ---
 
-This guide covers upgrades from Lific 2.0 through 2.6. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
+This guide covers upgrades from Lific 2.0 through 2.7. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
 
 ## Before upgrading
 
@@ -11,7 +11,7 @@ This guide covers upgrades from Lific 2.0 through 2.6. It assumes an existing 2.
 2. Make a complete backup while the service is stopped or quiesced:
 
    ```shell
-   lific dump --out ./lific-before-2.6.tar.gz
+   lific dump --out ./lific-before-2.7.tar.gz
    ```
 
    The archive includes a consistent database snapshot, attachments, and `manifest.json`.
@@ -67,9 +67,23 @@ Stop the background service before replacing the binary or restoring a backup. K
 - `lific init` presents an auth-mode choice on a fresh install and creates the first administrator directly. An existing instance with users skips this entirely.
 - Connected AI tools have identities of their own. Audit entries for their writes are attributed to the tool rather than to the operator who connected it.
 
+### v2.7
+
+Account recovery changed shape. Read this before rolling out if anything automated holds an API key.
+
+- **API-key callers lose credential-minting permission.** `POST /api/auth/keys` and `POST /api/auth/bots` now require a browser session token created within the last 15 minutes and answer `403 recent authentication required` to anything else, API keys included. This is deliberate: a key that could mint another key outlived the revocation of the key it came from. A script that provisioned keys by presenting an existing key must move to `lific key create` on the server, which writes to the database directly. `lific connect` is unaffected for the same reason.
+- **A password change or sign-out-everywhere now revokes far more than sessions.** For the account and every connected-tool bot it owns: sessions, API keys, OAuth access tokens, unexchanged authorization codes, and uncollected device approvals. `lific user set-password` does the same. Plan for reconnecting tools and reissuing any API key a script depends on after a reset. Unbound operator keys are not affected.
+- **A password change returns a replacement session in `token`, and it is the only credential left that works.** A REST client that changes a password on a user's behalf must store that token before its next request. The web UI does this for you.
+- **A running stdio MCP agent stops at its next tool call once its key is revoked.** `LIFIC_TOKEN` is revalidated on every tool call rather than only at startup. Expect agents to need `lific connect` plus a client restart after any recovery.
+- **OAuth access tokens can no longer approve an authorization request or a device code**, and the browser session that approves must have signed in within the last 15 minutes. Approve from a signed-in browser, signing in again first if prompted. A tool that scripted its own re-approval through a token it already held will stop working.
+- **Every access-expanding admin endpoint requires a recent browser session.** `POST /api/users`, `POST /api/users/{id}/promote`, `POST /api/users/{id}/reactivate`, `PATCH /api/instance/settings`, `POST /api/projects/{id}/members`, role *increases* through `PATCH /api/projects/{id}/members/{user_id}`, `PUT /api/projects/{id}` when it sets `lead_user_id` (which grants a lead membership), and `POST /api/projects` when it names a lead **other than the caller**. Creating a project with no lead, or with yourself as lead, is unchanged, so automation that creates its own projects keeps working. Each answers `403 recent authentication required` to an API key or OAuth token, because each leaves access behind that a lockdown aimed at the calling credential cannot reach. Scripted user provisioning moves to `lific user create` and `lific user promote` on the server. Reductions are untouched: `demote`, `deactivate`, role downgrades and member removal all still work from an API key, so containment stays fast.
+- **Instance settings are gated as a whole, not field by field.** A patch that only changes `instance_name` is refused from an API key just like one that turns on `web_auto_login`. Classifying each field as expanding or not is a rule that has to be re-derived every time a field is added, and one miss reopens the hole.
+- **An OAuth grant that is not bound to an identity can no longer be exchanged.** Authorization codes and device approvals stored before 2.1 have no user attached; exchanging one produced an access token that named nobody and was therefore treated as the operator, and which no account recovery could revoke. Both exchange paths now return `invalid_grant` for these. Codes expire in ten minutes and device codes in fifteen, so in practice this only affects a client mid-flow across the upgrade: have it authorize again. Access tokens already issued are unchanged; revoke any unbound one you find with `DELETE FROM oauth_tokens WHERE user_id IS NULL` and reconnect the tool.
+- Nothing here needs a migration.
+
 ## Upgrade and verify
 
-1. Install the v2.6 binary and restart the existing service.
+1. Install the v2.7 binary and restart the existing service.
 2. Run `lific doctor` with the operator credential. Resolve configuration, database, backup, server, OAuth, and MCP failures before opening the instance to users.
 3. Check `lific instance info` and confirm the expected database, public URL, signup policy, and `authz_enforced` state.
 4. Review membership and operator keys:

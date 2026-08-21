@@ -66,6 +66,14 @@ When `--key` is not supplied, `lific connect` mints one credential per selected 
 
 `--oauth` mints nothing; the client obtains its own token. Use `--key <key>` to reuse an existing key verbatim instead of minting new ones.
 
+`lific connect` writes to the database directly rather than calling the REST API, so it is unaffected by the recent-session requirement that `POST /api/auth/keys` and `POST /api/auth/bots` enforce.
+
+### Reconnecting after an account recovery
+
+Changing your password, signing out everywhere, or having an operator run `lific user set-password` revokes every credential the account owns, including the keys and OAuth tokens of every tool it has connected. The bot identities survive, so the tools are still listed; they are simply disconnected.
+
+Re-run `lific connect` for each affected client to mint a fresh credential and rewrite its configuration, or reconnect from the Connected tools section of Settings in the web UI. A tool that OAuth'd in has to run its own login flow again. A running stdio MCP session picks up nothing automatically: restart the client after reconnecting.
+
 ### `LIFIC_API_KEY` and `LIFIC_TOKEN`
 
 These are two different variables and they are not interchangeable.

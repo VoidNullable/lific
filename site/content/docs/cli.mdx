@@ -435,7 +435,11 @@ lific user list
 
 ### user set-password
 
-Sets a user's password and clears that user's sessions. Password input follows the same prompt behavior as `user create`.
+Sets a user's password and locks the account down. Password input follows the same prompt behavior as `user create`.
+
+This is the operator's recovery door, so it carries the same consequences as the account holder changing their own password from the web UI. The password write and the lockdown are one transaction covering the named user and every connected-tool bot they own: every session is deleted, every active API key and OAuth access token is revoked, and every unexchanged authorization code and uncollected device approval is invalidated. Unbound operator keys, other accounts, and the bot identities themselves are untouched, so the tools remain listed as disconnected and can be reconnected.
+
+The user has to sign in again with the new password, and each of their tools has to be reconnected with `lific connect` or from the Connected tools section of Settings. A running stdio MCP session stops at its next tool call.
 
 ```shell
 lific user set-password --username <USERNAME> [--password <PASSWORD>]

@@ -10,11 +10,19 @@
     revokeAllSessions,
     logout,
     clearSession,
+    getInstance,
     TOOL_TEMPLATES,
     type AuthUser,
     type Bot,
     type ToolTemplate,
   } from "../lib/api";
+  import {
+    RECENT_AUTH_ERROR,
+    needsReauth,
+    reauthenticateWithoutPassword,
+    reauthenticateWithPassword,
+    retryOnceAfterReauth,
+  } from "../lib/reauth";
   import ToolIcon from "../lib/ToolIcon.svelte";
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
@@ -163,6 +171,11 @@
   let pwSaving = $state(false);
   let pwSuccess = $state(false);
   let signingOut = $state(false);
+  // Two-step inline confirm for the destructive sign-out. It revokes every
+  // credential the account owns, not just this browser's session, so it does
+  // not belong behind a single click.
+  let confirmingSignOutAll = $state(false);
+  let signOutAllError = $state("");
 
   $effect(() => {
     themePref = getPreference();
@@ -230,12 +243,18 @@
     pwError = ""; pwSuccess = false;
     if (newPw.length < 8) { pwError = "New password must be at least 8 characters."; return; }
     pwSaving = true;
+    // `changePassword` adopts the replacement session token the server
+    // returns. Everything after this point depends on that: the old token is
+    // dead the moment the request succeeds.
     const res = await changePassword({ current_password: curPw, new_password: newPw });
     pwSaving = false;
     if (res.ok) {
       pwSuccess = true;
       curPw = ""; newPw = "";
-      window.setTimeout(() => { pwSuccess = false; }, 2500);
+      // Connected tools were revoked along with everything else, so re-read
+      // them rather than leaving the page claiming they are still connected.
+      await loadBots();
+      window.setTimeout(() => { pwSuccess = false; }, 6000);
     } else {
       pwError = res.error;
     }
@@ -244,8 +263,17 @@
   async function signOutAll() {
     if (signingOut) return;
     signingOut = true;
-    await revokeAllSessions();
-    navigate("/login");
+    signOutAllError = "";
+    const res = await revokeAllSessions();
+    signingOut = false;
+    if (res.ok) {
+      confirmingSignOutAll = false;
+      navigate("/login");
+      return;
+    }
+    // The local token is still valid (the helper only clears it on success),
+    // so stay put, keep the confirm open, and let them try again.
+    signOutAllError = res.error;
   }
 
   async function logoutNow() {
@@ -255,6 +283,10 @@
   }
 
   async function loadUser() {
+    // Whether this instance signs in without a password decides how a stale
+    // session is recovered below, so it is read once with the profile.
+    const instance = await getInstance();
+    if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     const result = await me();
     if (result.ok) {
       user = result.data;
@@ -279,6 +311,62 @@
     return bot.connected ? "connected" : "disconnected";
   }
 
+  // ── Re-authentication for connecting a tool ──────────────
+  //
+  // Connecting a tool mints a credential that outlives the browser session, so
+  // the server requires a sign-in from the last 15 minutes. A tab left open
+  // over lunch hits that, and "recent authentication required" on its own is a
+  // dead end: nothing on screen says what to do about it.
+  //
+  // Passwordless instances have no password to ask for, so we mint a fresh
+  // session and retry without bothering anyone. Everywhere else the modal
+  // grows one password field, and the retry happens exactly once.
+  // Snapshot of which tool was being connected, and who was connecting it.
+  // `connectTool` is cleared by closing the modal and `user` can be replaced
+  // by a reload, so the retry must not read either back.
+  let reauthNeeded = $state<{ toolId: string; userId: number } | null>(null);
+  let reauthPassword = $state("");
+  let reauthBusy = $state(false);
+  let webAutoLogin = $state(false);
+  /** Why the automatic sign-in did not work, when one was attempted. */
+  let autoReauthNote = $state("");
+
+  /** Mint the bot, and report whether staleness is what stopped us.
+   *
+   *  `recover` is the automatic route out of a staleness refusal, used only
+   *  where one exists: a passwordless instance can mint a fresh session on its
+   *  own. Everywhere else it declines, which surfaces as "stale" and puts the
+   *  password prompt on screen. */
+  async function attemptConnect(
+    template: ToolTemplate,
+    recover: boolean,
+  ): Promise<"ok" | "stale" | "failed"> {
+    const res = await retryOnceAfterReauth(
+      () => createBot(template.id),
+      async () => {
+        if (!recover || !webAutoLogin || !user) {
+          // `recover` false means the password prompt already refreshed the
+          // session, so there is nothing left to fall back to.
+          return { ok: false, error: RECENT_AUTH_ERROR, recoverable: recover };
+        }
+        const auto = await reauthenticateWithoutPassword(user.id);
+        // A failed or wrong-account auto-login is not the end of the road:
+        // note why, and fall through to the password prompt. The stored token
+        // is untouched either way.
+        if (!auto.ok) autoReauthNote = auto.error;
+        return auto;
+      },
+    );
+    if (res.ok) {
+      connectKey = res.data.key;
+      await loadBots();
+      return "ok";
+    }
+    if (needsReauth(res)) return "stale";
+    connectError = res.error;
+    return "failed";
+  }
+
   // Open the modal and mint credentials in one step (no extra confirm).
   async function openConnect(template: ToolTemplate) {
     connectTool = template;
@@ -289,6 +377,9 @@
     exportCopied = false;
     noteCopiedIdx = null;
     keyRevealed = false;
+    reauthNeeded = null;
+    reauthPassword = "";
+    autoReauthNote = "";
     // Default to the viewer's OS, but if the tool has no config for it
     // (e.g. Claude Desktop on Linux), fall back to the first OS it does
     // support so the modal never opens on an empty path.
@@ -301,20 +392,56 @@
           ) ?? "mac");
     }
     connecting = true;
-    const res = await createBot(template.id);
-    if (res.ok) {
-      connectKey = res.data.key;
-      await loadBots();
-    } else {
-      connectError = res.error;
+    if ((await attemptConnect(template, true)) === "stale" && user) {
+      reauthNeeded = { toolId: template.id, userId: user.id };
     }
     connecting = false;
   }
+
+  /** The password path: verify, then retry the connect exactly once. */
+  async function submitReauthAndConnect() {
+    const pending = reauthNeeded;
+    if (reauthBusy || !pending || !user || !reauthPassword) return;
+    if (pending.userId !== user.id || connectTool?.id !== pending.toolId) {
+      // The signed-in account or the open tool changed under the prompt.
+      // Retrying would connect something nobody asked for.
+      connectError = "That connection was interrupted. Close this and try again.";
+      reauthNeeded = null;
+      reauthPassword = "";
+      return;
+    }
+    reauthBusy = true;
+    connectError = "";
+    const refreshed = await reauthenticateWithPassword(reauthPassword, pending.userId);
+    // Clear the field whatever happens, so a wrong password is retyped rather
+    // than resubmitted by a stray Enter.
+    reauthPassword = "";
+    if (!refreshed.ok) {
+      connectError = refreshed.error;
+      reauthBusy = false;
+      return;
+    }
+    autoReauthNote = "";
+    // The session is fresh now, so this is the one retry. No recovery route
+    // is offered to it: a refusal here is a real failure, not staleness.
+    const outcome = await attemptConnect(connectTool, false);
+    if (outcome === "ok") reauthNeeded = null;
+    else if (outcome === "stale" && !connectError) {
+      connectError =
+        "That still was not accepted. Sign out and sign back in, then try connecting again.";
+    }
+    reauthBusy = false;
+  }
+
   function closeConnect() {
     connectTool = null;
     connectKey = null;
     connectError = "";
     connecting = false;
+    reauthNeeded = null;
+    reauthPassword = "";
+    reauthBusy = false;
+    autoReauthNote = "";
   }
 
   function configText(): string {
@@ -680,8 +807,13 @@
               onkeydown={(e) => { if (e.key === 'Enter') submitPassword(); }}
             />
           </div>
+          <p class="text-caption text-[var(--text-muted)] mt-2.5 max-w-[480px] leading-relaxed">
+            Changing your password signs you out on every other device and revokes this account's
+            API keys, OAuth sessions and connected tools. You stay signed in here. Every tool you
+            use with Lific has to be reconnected afterwards.
+          </p>
           {#if pwError}
-            <p class="text-caption text-[var(--error)] mt-2 flex items-center gap-1"><AlertTriangle size={12} /> {pwError}</p>
+            <p class="text-caption text-[var(--error)] mt-2 flex items-center gap-1" role="alert"><AlertTriangle size={12} /> {pwError}</p>
           {/if}
           <div class="flex items-center gap-3 mt-3">
             <button
@@ -693,7 +825,9 @@
               {pwSaving ? "Updating…" : "Change password"}
             </button>
             {#if pwSuccess}
-              <span class="inline-flex items-center gap-1 text-body-sm text-[var(--success)]"><Check size={13} /> Changed</span>
+              <span class="inline-flex items-center gap-1 text-body-sm text-[var(--success)]" role="status">
+                <Check size={13} /> Password changed. Connected tools were revoked; reconnect them below.
+              </span>
             {/if}
           </div>
         </div>
@@ -702,7 +836,7 @@
         <div class="mt-8 pt-6 border-t border-[var(--border)]">
           <h3 class="text-body-lg font-semibold text-[var(--text)] mb-1">Sessions</h3>
           <p class="text-body-sm text-[var(--text-muted)] mb-3.5 leading-relaxed">
-            Sign out of this device, or revoke every active session everywhere.
+            Sign out of this device, or revoke access everywhere at once.
           </p>
           <div class="flex flex-wrap items-center gap-2">
             <button
@@ -718,11 +852,51 @@
               class="inline-flex items-center gap-1.5 text-body-sm text-[var(--error)] border border-[var(--error)]
                      px-3 py-1.5 rounded-md hover:bg-[var(--error-bg)] transition-colors disabled:opacity-50"
               disabled={signingOut}
-              onclick={signOutAll}
+              aria-expanded={confirmingSignOutAll}
+              onclick={() => { confirmingSignOutAll = !confirmingSignOutAll; signOutAllError = ""; }}
             >
-              {signingOut ? "Signing out…" : "Sign out of all sessions"}
+              Sign out everywhere and revoke access
             </button>
           </div>
+          <!-- Inline confirm (never a browser confirm()), matching the
+               attachment-delete pattern: the consequence is spelled out where
+               the second click happens. -->
+          {#if confirmingSignOutAll}
+            <div
+              class="mt-3 max-w-[480px] flex flex-col gap-2 rounded-md border border-[var(--error)]
+                     bg-[var(--error-bg)] px-3 py-2.5"
+              role="alert"
+            >
+              <p class="text-caption text-[var(--text)] leading-relaxed">
+                This signs out every device, including this one, and revokes this account's API
+                keys, OAuth sessions and connected tools. Every tool you use with Lific has to be
+                reconnected afterwards. This cannot be undone.
+              </p>
+              {#if signOutAllError}
+                <p class="text-caption text-[var(--error)] flex items-center gap-1">
+                  <AlertTriangle size={12} /> {signOutAllError}
+                </p>
+              {/if}
+              <div class="flex items-center gap-2">
+                <button
+                  class="text-body-sm font-medium text-[var(--error-text)] bg-[var(--error)] px-3 py-1.5 rounded-md
+                         transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={signingOut}
+                  onclick={signOutAll}
+                >
+                  {signingOut ? "Revoking…" : "Yes, revoke everything"}
+                </button>
+                <button
+                  class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md
+                         hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                  disabled={signingOut}
+                  onclick={() => { confirmingSignOutAll = false; signOutAllError = ""; }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
       </section>
     {/if}
@@ -758,6 +932,61 @@
           <div class="flex items-center gap-3 py-8 justify-center text-[var(--text-muted)]">
             <div class="size-5 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin"></div>
             <span class="text-body">Minting credentials…</span>
+          </div>
+        {:else if reauthNeeded}
+          <!-- The session is fine; it is just older than the window a durable
+               credential needs. Say that, and give them the one field that
+               fixes it, rather than an error with nowhere to go. -->
+          <div class="flex flex-col gap-3">
+            <div class="flex items-start gap-2.5 text-body text-[var(--text)] bg-[var(--bg-subtle)] px-3.5 py-3 rounded-md">
+              <Lock size={16} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
+              <p class="leading-relaxed">
+                Connecting {connectTool.name} gives it lasting access to your account, so confirm
+                your password to continue. You have been signed in for a while.
+              </p>
+            </div>
+            {#if autoReauthNote}
+              <p class="text-caption text-[var(--text-muted)]" role="status">
+                Signing you in automatically did not work ({autoReauthNote}), so please confirm
+                your password.
+              </p>
+            {/if}
+            {#if connectError}
+              <p class="text-caption text-[var(--error)] flex items-center gap-1" role="alert">
+                <AlertTriangle size={12} /> {connectError}
+              </p>
+            {/if}
+            <label class="block">
+              <span class="block text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)] mb-1.5">
+                Current password
+              </span>
+              <input
+                type="password"
+                bind:value={reauthPassword}
+                autocomplete="current-password"
+                disabled={reauthBusy}
+                class="w-full px-3 py-2 text-body rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)]
+                       outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
+                onkeydown={(e) => { if (e.key === 'Enter') submitReauthAndConnect(); }}
+              />
+            </label>
+            <div class="flex items-center gap-2">
+              <button
+                class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-1.5 rounded-md
+                       hover:bg-[var(--btn-success-hover)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={reauthBusy || !reauthPassword}
+                onclick={submitReauthAndConnect}
+              >
+                {reauthBusy ? "Verifying…" : `Confirm and connect ${connectTool.name}`}
+              </button>
+              <button
+                class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50"
+                disabled={reauthBusy}
+                onclick={closeConnect}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         {:else if connectError}
           <div class="flex items-start gap-2.5 text-body text-[var(--error)] bg-[var(--error-bg)] px-3.5 py-3 rounded-md" role="alert">

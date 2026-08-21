@@ -68,40 +68,282 @@ pub fn create_api_key_with_expiry(
     expires_at: Option<&str>,
     user_id: Option<i64>,
 ) -> Result<String, crate::error::LificError> {
-    let conn = db.write()?;
+    let prepared = PreparedApiKey::generate(manager)?;
+    // One immediate transaction, not a bare `write()`. `insert` reads the
+    // name's existing rows, deletes a matching tombstone and inserts: three
+    // statements that must be one atomic unit, and that must serialize against
+    // an account lockdown running in *another process* (the CLI resetting a
+    // password while the server is up). A bare writer guard only serializes
+    // within this process.
+    db.transaction(|tx| prepared.insert(tx, name, expires_at, user_id))
+}
 
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM api_keys WHERE name = ?1 AND revoked = 0",
-            params![name],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
+/// Key material generated but not yet written.
+///
+/// Splitting generation from the insert lets a caller do the expensive,
+/// side-effect-free half (CSPRNG draw plus the manager's hashing) *outside* the
+/// writer, then take the writer once and revalidate its authorization in the
+/// same transaction that stores the key. Nothing here is persisted until
+/// [`PreparedApiKey::insert`] runs, so an abandoned preparation leaves no trace
+/// and no live credential.
+///
+/// The plaintext lives in this struct and is handed to the caller exactly once,
+/// by `insert`. It is never written to the database, which stores only the
+/// hash and the derived lookup id.
+pub struct PreparedApiKey {
+    plaintext: String,
+    hash: String,
+    key_id: String,
+}
 
-    if exists {
-        return Err(crate::error::LificError::BadRequest(format!(
-            "an active key named '{name}' already exists"
-        )));
+impl PreparedApiKey {
+    /// Draw fresh key material. Touches no connection.
+    pub fn generate(manager: &ApiKeyManagerV0) -> Result<Self, crate::error::LificError> {
+        let api_key = manager.generate(Environment::production()).map_err(|e| {
+            crate::error::LificError::Internal(format!("key generation failed: {e}"))
+        })?;
+        Ok(Self {
+            plaintext: api_key.key().expose_secret().to_string(),
+            hash: api_key.expose_hash().hash().to_string(),
+            key_id: api_key.expose_hash().key_id().to_string(),
+        })
     }
 
-    let api_key = manager
-        .generate(Environment::production())
-        .map_err(|e| crate::error::LificError::Internal(format!("key generation failed: {e}")))?;
+    /// Claim the name and store the key on `conn`, returning the plaintext.
+    ///
+    /// Takes a borrowed connection rather than the pool so the caller controls
+    /// the transaction: claiming the name and inserting are several statements
+    /// and must not be separable, and a caller that revalidated its
+    /// authorization moments earlier needs that revalidation to be inside the
+    /// same transaction as this write.
+    ///
+    /// `api_keys.name` is globally `UNIQUE`, not unique-per-active-key, so a
+    /// revoked row keeps its name reserved forever. After an account lockdown
+    /// revoked `opencode-blake`, reconnecting that tool hit the UNIQUE
+    /// constraint and failed with an opaque database error, and the account
+    /// could not get its tools back without shell access. Names are therefore
+    /// reusable, but only on terms narrow enough that reuse is never a way to
+    /// reach somebody else's row:
+    ///
+    /// - any **active** row with this exact name is refused, the rule every
+    ///   caller has always had;
+    /// - a **revoked** row with this exact name is reusable only when its
+    ///   ownership matches the key being created: same `user_id`, or both
+    ///   `NULL` for the unbound operator key. `NULL` and `Some(id)` are
+    ///   different owners, in both directions.
+    /// - anything else is refused without touching the row.
+    ///
+    /// The owner check matters because the name is the whole handle here. Bot
+    /// usernames are derived (`{tool}-{owner}`), so `opencode-blake`'s
+    /// tombstone is exactly what a second account would have to displace to
+    /// take that name, and deleting another owner's row is a write on their
+    /// account's history that the caller has no claim to. Refusing is also
+    /// what stops name reuse becoming an oracle: the caller learns the name is
+    /// taken, not by whom.
+    ///
+    /// The delete is exact-name (never a `LIKE` or prefix), revoked-only, and
+    /// owner-matched, so it cannot touch a live credential or another
+    /// account's. It carries no key material anywhere: the row is dropped, not
+    /// copied. The audit rows that recorded the revocation survive it,
+    /// deliberately, and nothing references `api_keys` by foreign key, so there
+    /// is nothing else to cascade.
+    ///
+    /// LIF-391: the user binding is part of the insert, not a follow-up
+    /// update. A key is never briefly on disk unbound, so a crash mid-creation
+    /// cannot leave behind an orphan key that resolves as the operator.
+    pub fn insert(
+        self,
+        conn: &rusqlite::Connection,
+        name: &str,
+        expires_at: Option<&str>,
+        user_id: Option<i64>,
+    ) -> Result<String, crate::error::LificError> {
+        let mut stmt = conn.prepare("SELECT user_id, revoked FROM api_keys WHERE name = ?1")?;
+        let existing = stmt
+            .query_map(params![name], |row| {
+                Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
 
-    let plaintext = api_key.key().expose_secret().to_string();
-    let hash = api_key.expose_hash().hash().to_string();
-    let key_id = api_key.expose_hash().key_id().to_string();
+        if existing.iter().any(|(_, revoked)| !revoked) {
+            return Err(crate::error::LificError::BadRequest(format!(
+                "an active key named '{name}' already exists"
+            )));
+        }
+        if existing.iter().any(|(owner, _)| *owner != user_id) {
+            return Err(crate::error::LificError::BadRequest(format!(
+                "the key name '{name}' is already reserved by another owner"
+            )));
+        }
 
-    // LIF-391: the user binding is part of this insert, not a follow-up
-    // update. A key is never briefly on disk unbound, so a crash mid-creation
-    // cannot leave behind an orphan key that resolves as the operator.
-    conn.execute(
-        "INSERT INTO api_keys (name, key_hash, key_id, expires_at, user_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![name, hash, key_id, expires_at, user_id],
-    )?;
+        if !existing.is_empty() {
+            conn.execute(
+                "DELETE FROM api_keys WHERE name = ?1 AND revoked = 1",
+                params![name],
+            )?;
+        }
 
-    Ok(plaintext)
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, key_id, expires_at, user_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, self.hash, self.key_id, expires_at, user_id],
+        )?;
+
+        Ok(self.plaintext)
+    }
+}
+
+/// The error every failure of [`recent_session_token`] /
+/// [`revalidate_recent_session`] returns. One string on purpose: which of
+/// "no token", "not a session token", "expired", "too old" or "wrong user"
+/// applies is not something an unauthorized caller should get to probe for.
+fn recent_auth_required() -> crate::error::LificError {
+    crate::error::LificError::Forbidden("recent authentication required".into())
+}
+
+/// Pull the browser session token out of an `Authorization: Bearer` header for
+/// a route that mints durable credentials.
+///
+/// Minting an API key or connecting a tool is an account-level action, so it
+/// requires the thing a human just typed a password into: a browser session.
+/// An API key, an OAuth access token, a cookie, or no credential at all is
+/// refused here regardless of what the authentication middleware made of it.
+/// This is a *shape* check only; validity, freshness and ownership are
+/// re-established by [`revalidate_recent_session`] inside the write
+/// transaction, because anything checked before that transaction opens can be
+/// revoked out from under the write.
+pub fn recent_session_token(headers: &HeaderMap) -> Result<String, crate::error::LificError> {
+    session_bearer_token(headers).map_err(|_| recent_auth_required())
+}
+
+/// The browser session token from an `Authorization: Bearer` header, or a
+/// `Forbidden` naming what is missing.
+///
+/// Shape only: this says the caller presented something session-shaped, not
+/// that it is live or whose it is. Split out from [`recent_session_token`] so
+/// `POST /api/auth/me/refresh` can require a session without also requiring it
+/// to be recent, which is the one thing it exists to fix.
+pub fn session_bearer_token(headers: &HeaderMap) -> Result<String, crate::error::LificError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .ok_or_else(|| {
+            crate::error::LificError::Forbidden(
+                "this action requires a signed-in browser session".into(),
+            )
+        })?;
+
+    if !token.starts_with("lific_sess_") {
+        return Err(crate::error::LificError::Forbidden(
+            "this action requires a signed-in browser session".into(),
+        ));
+    }
+    Ok(token.to_string())
+}
+
+/// Re-establish, on `conn`, that `token` is a live browser session belonging to
+/// `expected_user_id` and created inside the recent-authentication window, and
+/// hand back **the user as the database has them right now**.
+///
+/// Callers run this as the first statement of the writer transaction that
+/// grants something. SQLite serializes writers, so an account lockdown is
+/// either wholly before this check (which then fails, because the session row
+/// is gone) or wholly after the write (which then revokes what was granted).
+/// There is no interleaving that leaves a live credential behind a revoked
+/// session.
+///
+/// `expected_user_id` is the identity the authentication middleware resolved.
+/// Comparing it to the session's own user closes the gap where a token is
+/// swapped between the middleware's read and this write.
+///
+/// **Use the returned user, not the middleware's copy, for any authorization
+/// decision this transaction makes.** The `AuthUser` the middleware attached
+/// was read before the request was routed; `is_admin` on it is a snapshot, and
+/// a demotion committed since is invisible to it. The value returned here was
+/// read inside this transaction and is the only trustworthy one. Callers that
+/// need nothing but "the session belongs to this person" may ignore it.
+pub fn revalidate_recent_session(
+    conn: &rusqlite::Connection,
+    token: &str,
+    expected_user_id: i64,
+) -> Result<crate::db::models::User, crate::error::LificError> {
+    let user = crate::db::queries::users::validate_session(conn, token)
+        .map_err(|_| recent_auth_required())?;
+    if user.id != expected_user_id {
+        return Err(recent_auth_required());
+    }
+    if !crate::db::queries::users::session_is_recent(conn, token)? {
+        return Err(recent_auth_required());
+    }
+    Ok(user)
+}
+
+/// The freshly-read user as an `AuthUser`, for re-running an authorization gate
+/// inside the transaction that is about to write.
+pub fn fresh_auth_user(user: &crate::db::models::User) -> AuthUser {
+    AuthUser {
+        id: user.id,
+        username: user.username.clone(),
+        display_name: user.display_name.clone(),
+        is_admin: user.is_admin,
+    }
+}
+
+/// The freshly-read user as a `ResolvedIdentity` for `authz::require_role_conn`.
+///
+/// A session caller is always a human, so there is no bot-to-owner resolution
+/// to redo: the session's own user *is* the effective user.
+pub fn fresh_identity(
+    user: &crate::db::models::User,
+    transport: crate::actor::Transport,
+) -> crate::resolve_caller::ResolvedIdentity {
+    crate::resolve_caller::ResolvedIdentity {
+        user: fresh_auth_user(user),
+        transport,
+    }
+}
+
+/// Re-read the calling user inside a transaction, and refuse if the account
+/// can no longer authenticate.
+///
+/// The destructive routes (revoke a key, disconnect or delete a tool, demote,
+/// deactivate) deliberately do NOT require a recent sign-in: they only ever
+/// take access away, and they are what an admin reaches for mid-incident. They
+/// do still need their *authorization* to be current, because
+/// `AuthUser.is_admin` came off a snapshot taken before the request was
+/// routed, and "can this caller act on somebody else's credential" is decided
+/// by that flag.
+pub fn fresh_caller(
+    conn: &rusqlite::Connection,
+    caller_id: i64,
+) -> Result<crate::db::models::User, crate::error::LificError> {
+    let user = crate::db::queries::users::get_user_by_id(conn, caller_id)
+        .map_err(|_| crate::error::LificError::Forbidden("authentication required".into()))?;
+    if !crate::db::queries::users::credential_is_live(conn, &user)? {
+        return Err(crate::error::LificError::Forbidden(
+            "authentication required".into(),
+        ));
+    }
+    Ok(user)
+}
+
+/// Inside a granting transaction, require that the freshly-read session user
+/// still holds instance admin.
+///
+/// The handler's `require_admin` preflight runs on the middleware's snapshot so
+/// an unauthorized caller gets a clean 403 without touching the writer. This is
+/// the authoritative one.
+pub fn require_fresh_admin(user: &crate::db::models::User) -> Result<(), crate::error::LificError> {
+    if user.is_admin {
+        Ok(())
+    } else {
+        Err(crate::error::LificError::Forbidden(
+            "only an admin can do this".into(),
+        ))
+    }
 }
 
 /// List all API keys (never returns the key itself, just metadata).
@@ -160,28 +402,39 @@ pub fn rotate_api_key_bound(
     name: &str,
     user_id: Option<i64>,
 ) -> Result<String, crate::error::LificError> {
-    // Capture the user binding before deleting so it can be re-applied.
-    // If multiple rows share the name (revoked leftovers), prefer the
-    // binding of an active row.
-    let conn = db.write()?;
-    let previous_user_id: Option<i64> = conn
-        .query_row(
-            "SELECT user_id FROM api_keys WHERE name = ?1 ORDER BY revoked ASC, id DESC LIMIT 1",
-            params![name],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                crate::error::LificError::NotFound(format!("no key named '{name}'"))
-            }
-            other => other.into(),
-        })?;
+    // Draw the material first, outside any lock, then do the lookup, the
+    // delete and the insert in ONE transaction. This used to be a `write()`
+    // guard that read and deleted, then dropped the guard and called
+    // `create_api_key`, which took the writer again: two commits with a gap in
+    // between where the key simply did not exist. A crash or a competing write
+    // landing in that gap left the tool with no credential at all and no way
+    // to tell that from a rotation that had not started.
+    let prepared = PreparedApiKey::generate(manager)?;
+    db.transaction(|tx| {
+        // Capture the user binding before deleting so it can be re-applied.
+        // If multiple rows share the name (revoked leftovers), prefer the
+        // binding of an active row.
+        let previous_user_id: Option<i64> = tx
+            .query_row(
+                "SELECT user_id FROM api_keys WHERE name = ?1 ORDER BY revoked ASC, id DESC LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    crate::error::LificError::NotFound(format!("no key named '{name}'"))
+                }
+                other => other.into(),
+            })?;
 
-    // Delete old key entirely (not just revoke) so the name can be reused
-    conn.execute("DELETE FROM api_keys WHERE name = ?1", params![name])?;
-    drop(conn);
+        // Delete old key entirely (not just revoke) so the name can be reused.
+        // This clears every row for the name, so `insert`'s active-name and
+        // owner checks see a free name: rotation is explicitly allowed to
+        // replace a live key, which is the whole point of it.
+        tx.execute("DELETE FROM api_keys WHERE name = ?1", params![name])?;
 
-    create_api_key(db, manager, name, user_id.or(previous_user_id))
+        prepared.insert(tx, name, None, user_id.or(previous_user_id))
+    })
 }
 
 /// Check if any API keys exist.
@@ -329,7 +582,14 @@ fn oauth_blocked_reason(method: &Method, path: &str) -> Option<&'static str> {
     // Password change and "sign every session out". A tool token acts for a
     // bot; rewriting the human's login credential, or logging them out
     // everywhere, is not within its remit.
-    if path == "/api/auth/me/password" || path == "/api/auth/me/sessions" {
+    // `/me/refresh` joins them: it mints a browser session, which is the one
+    // credential shape allowed to perform the granting actions an OAuth token
+    // is kept out of. The handler refuses non-session bearers on its own; this
+    // is the same rule stated where the rest of the credential surface is.
+    if path == "/api/auth/me/password"
+        || path == "/api/auth/me/sessions"
+        || path == "/api/auth/me/refresh"
+    {
         return Some("account credential changes are not available to OAuth-token callers");
     }
 
@@ -596,103 +856,97 @@ pub async fn require_api_key(
 
     // ── OAuth tokens (lific_at_ prefix) ──────────────────────────
     if token.starts_with("lific_at_") {
-        if crate::oauth::validate_oauth_token(&auth.db, &token) {
-            if is_mcp_request {
-                info!("/mcp authorized: OAuth token accepted");
-            }
-            // Resolve the user bound to this token at approval time (LIF-79).
-            // Tokens issued before user binding existed have no user_id and
-            // stay anonymous (None), preserving the previous behavior. A token
-            // that IS bound must resolve its user: a dangling binding (the bot
-            // was deleted, or the lookup failed) is a dead credential, not an
-            // anonymous one. Falling through as None would hand the caller the
-            // first-admin fallback — deleting an agent must never escalate its
-            // leftover token to operator (PR #23 review).
-            let auth_user = match crate::oauth::oauth_token_user_id(&auth.db, &token) {
-                None => None,
-                Some(uid) => {
-                    // LIF-214 follow-up: `get_live_user_by_id` also rejects a
-                    // deactivated account and a bot whose owner is
-                    // deactivated. A bot's authority is its owner's authority,
-                    // so an owner switched off must not keep acting through
-                    // the tool token they approved earlier. Same 401 as a
-                    // dangling binding, and for the same reason: falling
-                    // through as None would promote it to the operator.
-                    let user = auth.db.read().ok().and_then(|conn| {
-                        crate::db::queries::users::get_live_user_by_id(&conn, uid).ok()
-                    });
-                    match user {
-                        Some(u) => Some(crate::db::models::AuthUser {
-                            id: u.id,
-                            username: u.username,
-                            display_name: u.display_name,
-                            is_admin: u.is_admin,
-                        }),
-                        None => {
-                            if is_mcp_request {
-                                warn!(
-                                    "/mcp rejected: OAuth token bound to a missing or deactivated user"
-                                );
-                            }
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                [("WWW-Authenticate", www_auth.as_str())],
-                                "OAuth token bound to a missing or deactivated user",
-                            )
-                                .into_response();
-                        }
-                    }
+        // One resolution, one database snapshot (`resolve_oauth_credential`).
+        // This used to be three calls on three pooled connections: is it
+        // valid, whose is it, is that user live. A token revoked between the
+        // first two answered "valid" and then "unbound", and an unbound OAuth
+        // token takes the operator fallback, so revoking a tool's credential
+        // could promote it. The typed outcome makes that state unrepresentable.
+        match crate::oauth::resolve_oauth_credential(&auth.db, &token) {
+            Ok(credential) => {
+                if is_mcp_request {
+                    info!("/mcp authorized: OAuth token accepted");
                 }
-            };
-            // LIF-403: the credential authenticates, but it may not be
-            // pointed at credential management or account administration.
-            // Enforced here, in the middleware, rather than in the handlers:
-            // one list next to the credential check beats a gate per route
-            // that a new route can be added without.
-            if let Some(reason) = oauth_blocked_reason(request.method(), request.uri().path()) {
-                warn!(
-                    method = %request.method(),
-                    path = %request.uri().path(),
-                    "OAuth token refused on a credential-management route"
+                // A bound token carries its user. `LegacyUnbound` is a
+                // pre-LIF-79 row with genuinely no binding, and keeps the
+                // documented operator fallback (`None`); nothing issued since
+                // can be in that state.
+                let auth_user = match credential {
+                    crate::oauth::OAuthCredential::Bound(user) => Some(user),
+                    crate::oauth::OAuthCredential::LegacyUnbound => None,
+                };
+                // LIF-403: the credential authenticates, but it may not be
+                // pointed at credential management or account administration.
+                // Enforced here, in the middleware, rather than in the handlers:
+                // one list next to the credential check beats a gate per route
+                // that a new route can be added without.
+                if let Some(reason) = oauth_blocked_reason(request.method(), request.uri().path()) {
+                    warn!(
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        "OAuth token refused on a credential-management route"
+                    );
+                    return (
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "{reason}. Authenticate with a session or API key for this endpoint."
+                        ),
+                    )
+                        .into_response();
+                }
+                // LIF-155: OAuth tokens are programmatic access — 'mcp' when
+                // aimed at /mcp (the normal case), 'api' against REST.
+                let actor = crate::actor::ActorCtx {
+                    user_id: auth_user.as_ref().map(|u| u.id),
+                    transport: if is_mcp_request {
+                        crate::actor::Transport::Mcp
+                    } else {
+                        crate::actor::Transport::Api
+                    },
+                };
+                insert_identity_extensions(
+                    &mut request,
+                    &auth.db,
+                    auth_user.clone(),
+                    is_mcp_request,
+                    crate::actor::Transport::Api,
+                    CredentialKind::Oauth,
                 );
+                request.extensions_mut().insert(auth_user);
+                return crate::actor::scope(actor, next.run(request)).await;
+            }
+            Err(crate::oauth::OAuthReject::DeadBinding) => {
+                // Bound to an identity that may not authenticate: the user is
+                // gone, deactivated, or is a bot whose owner is deactivated. A
+                // bot's authority is its owner's, so an owner switched off must
+                // not keep acting through the tool token they approved
+                // earlier. Rejected outright, never degraded to unbound, which
+                // would hand it the operator fallback (PR #23 review).
+                if is_mcp_request {
+                    warn!("/mcp rejected: OAuth token bound to a missing or deactivated user");
+                }
                 return (
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "{reason}. Authenticate with a session or API key for this endpoint."
-                    ),
+                    StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())],
+                    "OAuth token bound to a missing or deactivated user",
                 )
                     .into_response();
             }
-            // LIF-155: OAuth tokens are programmatic access — 'mcp' when
-            // aimed at /mcp (the normal case), 'api' against REST.
-            let actor = crate::actor::ActorCtx {
-                user_id: auth_user.as_ref().map(|u| u.id),
-                transport: if is_mcp_request {
-                    crate::actor::Transport::Mcp
-                } else {
-                    crate::actor::Transport::Api
-                },
-            };
-            insert_identity_extensions(
-                &mut request,
-                &auth.db,
-                auth_user.clone(),
-                is_mcp_request,
-                crate::actor::Transport::Api,
-                CredentialKind::Oauth,
-            );
-            request.extensions_mut().insert(auth_user);
-            return crate::actor::scope(actor, next.run(request)).await;
+            Err(crate::oauth::OAuthReject::Unavailable) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+            }
+            Err(crate::oauth::OAuthReject::Invalid) => {
+                if is_mcp_request {
+                    warn!("/mcp rejected: OAuth token invalid or expired");
+                }
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", www_auth.as_str())],
+                    "Invalid or expired OAuth token",
+                )
+                    .into_response();
+            }
         }
-        if is_mcp_request {
-            warn!("/mcp rejected: OAuth token invalid or expired");
-        }
-        return (
-            StatusCode::UNAUTHORIZED,
-            [("WWW-Authenticate", www_auth.as_str())],
-            "Invalid or expired OAuth token",
-        )
-            .into_response();
     }
 
     // ── API keys (lific_sk- prefix) ──────────────────────────────
@@ -814,7 +1068,7 @@ fn validate_api_key(
         let conn = db.read().map_err(|_| ApiKeyReject::Db)?;
         conn.query_row(
             "SELECT id, key_hash, user_id FROM api_keys WHERE key_id = ?1 AND revoked = 0 \
-             AND (expires_at IS NULL OR expires_at > datetime('now'))",
+             AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))",
             params![key_id],
             |row| {
                 Ok(ApiKeyRow {
@@ -833,7 +1087,7 @@ fn validate_api_key(
         let mut stmt = conn
             .prepare(
                 "SELECT id, key_hash, user_id FROM api_keys WHERE key_id IS NULL AND revoked = 0 \
-                 AND (expires_at IS NULL OR expires_at > datetime('now'))",
+                 AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))",
             )
             .ok()?;
         let rows: Vec<ApiKeyRow> = stmt
@@ -963,12 +1217,633 @@ mod tests {
     // lock, not declare its own.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // ── Expiry is compared as a datetime, not as text ────────
+    //
+    // `expires_at` accepts ISO 8601, and `chrono`'s `to_rfc3339` writes
+    // '2026-08-20T12:00:00+00:00'. SQLite's `datetime('now')` produces
+    // '2026-08-20 12:00:00'. Compared as raw text those disagree within the
+    // same day, because 'T' (0x54) sorts after every digit: a same-day RFC
+    // 3339 timestamp reads as *later* than any SQLite-format one, so an
+    // expired key looked live and a live one could look expired. Wrapping the
+    // column in `datetime()` normalizes both sides.
+    //
+    // Times are a minute either side of now, never seconds, so the tests do
+    // not sit on a boundary.
+
+    fn rfc3339_from_now(minutes: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
+    }
+
+    /// The indexed lookup path (`key_id` present).
+    #[test]
+    fn an_iso8601_expiry_is_honoured_on_the_indexed_lookup() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+
+        let live = create_api_key_with_expiry(
+            &pool,
+            &manager,
+            "live",
+            Some(&rfc3339_from_now(1)),
+            None,
+        )
+        .unwrap();
+        let dead = create_api_key_with_expiry(
+            &pool,
+            &manager,
+            "dead",
+            Some(&rfc3339_from_now(-1)),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            validate_api_key(&pool, &manager, &live).is_ok(),
+            "a key expiring in a minute must still authenticate"
+        );
+        assert!(
+            validate_api_key(&pool, &manager, &dead).is_err(),
+            "a key that expired a minute ago must not authenticate"
+        );
+    }
+
+    /// The pre-migration-010 fallback path, which scans rows with a NULL
+    /// `key_id`. It carries its own copy of the predicate, so it needs its own
+    /// proof.
+    #[test]
+    fn an_iso8601_expiry_is_honoured_on_the_legacy_null_key_id_path() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+
+        let live = create_api_key_with_expiry(
+            &pool,
+            &manager,
+            "legacy-live",
+            Some(&rfc3339_from_now(1)),
+            None,
+        )
+        .unwrap();
+        let dead = create_api_key_with_expiry(
+            &pool,
+            &manager,
+            "legacy-dead",
+            Some(&rfc3339_from_now(-1)),
+            None,
+        )
+        .unwrap();
+        // Make both look like pre-010 rows so the scan is the only way in.
+        pool.write()
+            .unwrap()
+            .execute("UPDATE api_keys SET key_id = NULL", [])
+            .unwrap();
+
+        assert!(
+            validate_api_key(&pool, &manager, &live).is_ok(),
+            "the legacy scan must honour a live ISO 8601 expiry"
+        );
+        assert!(
+            validate_api_key(&pool, &manager, &dead).is_err(),
+            "the legacy scan must reject an expired ISO 8601 key"
+        );
+    }
+
+    /// A key with no expiry is unaffected either way.
+    #[test]
+    fn a_key_without_an_expiry_still_authenticates() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let key = create_api_key(&pool, &manager, "forever", None).unwrap();
+        assert!(validate_api_key(&pool, &manager, &key).is_ok());
+    }
+
     #[test]
     fn create_key_returns_valid_format() {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
         let key = create_api_key(&pool, &manager, "test-key", None).unwrap();
         assert!(key.starts_with("lific_sk-live-"));
+    }
+
+    // ── Name reuse after revocation, scoped to the owner ────────
+    //
+    // `api_keys.name` is globally UNIQUE, so a revoked row keeps its name
+    // reserved. An account lockdown revokes `opencode-blake`; without reuse in
+    // `PreparedApiKey::insert`, reconnecting that tool hits the UNIQUE
+    // constraint and the account cannot get its tools back.
+    //
+    // Reuse is owner-scoped, so the matrix below is the actual contract: same
+    // owner reuses, any other owner is refused and the tombstone is left
+    // exactly as it was. `NULL` (the unbound operator key) is its own owner in
+    // both directions.
+
+    /// `api_keys.user_id` is a real foreign key, so a binding needs a real row.
+    fn seed_key_owner(pool: &db::DbPool, username: &str) -> i64 {
+        let conn = pool.write().unwrap();
+        crate::db::queries::users::create_user(
+            &conn,
+            &crate::db::models::CreateUser {
+                username: username.into(),
+                email: format!("{username}@test.local"),
+                password: "testpassword1".into(),
+                display_name: None,
+                is_admin: false,
+                is_bot: false,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    /// Full snapshot of a name's row, so a refusal can be shown to have
+    /// changed nothing at all: not the id, not the stored hash, not the owner,
+    /// not the creation timestamp.
+    #[derive(Debug, PartialEq)]
+    struct KeyRow {
+        id: i64,
+        user_id: Option<i64>,
+        revoked: bool,
+        key_hash: String,
+        created_at: String,
+    }
+
+    fn key_rows(pool: &db::DbPool, name: &str) -> Vec<KeyRow> {
+        let conn = pool.read().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, user_id, revoked, key_hash, created_at
+                 FROM api_keys WHERE name = ?1 ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(params![name], |r| {
+                Ok(KeyRow {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    revoked: r.get(2)?,
+                    key_hash: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    fn revoke_all(pool: &db::DbPool) {
+        pool.write()
+            .unwrap()
+            .execute("UPDATE api_keys SET revoked = 1", [])
+            .unwrap();
+    }
+
+    /// The reconnect case this whole rule exists for: a lockdown revoked the
+    /// bot's key, and the bot claims its own derived name back.
+    #[test]
+    fn the_same_bot_reclaims_its_own_revoked_name() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let bot = seed_key_owner(&pool, "opencode-blake");
+        let old = create_api_key(&pool, &manager, "opencode-blake", Some(bot)).unwrap();
+        revoke_all(&pool);
+
+        let fresh = create_api_key(&pool, &manager, "opencode-blake", Some(bot))
+            .expect("a bot reclaims its own revoked name");
+        assert_ne!(fresh, old);
+
+        let rows = key_rows(&pool, "opencode-blake");
+        assert_eq!(rows.len(), 1, "the dead row was swept, not accumulated");
+        assert_eq!(rows[0].user_id, Some(bot));
+        assert!(!rows[0].revoked);
+        // The old plaintext is gone for good; only the new one authenticates.
+        assert!(validate_api_key(&pool, &manager, &old).is_err());
+        assert!(validate_api_key(&pool, &manager, &fresh).is_ok());
+    }
+
+    #[test]
+    fn a_human_reclaims_their_own_revoked_name() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let blake = seed_key_owner(&pool, "blake");
+        create_api_key(&pool, &manager, "laptop", Some(blake)).unwrap();
+        revoke_all(&pool);
+
+        let fresh = create_api_key(&pool, &manager, "laptop", Some(blake))
+            .expect("the same human reuses their own name");
+        assert!(validate_api_key(&pool, &manager, &fresh).is_ok());
+        assert_eq!(key_rows(&pool, "laptop")[0].user_id, Some(blake));
+    }
+
+    #[test]
+    fn an_unbound_key_reclaims_its_own_revoked_name() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        create_api_key(&pool, &manager, "default", None).unwrap();
+        revoke_all(&pool);
+
+        let fresh = create_api_key(&pool, &manager, "default", None)
+            .expect("the operator key reuses its own name");
+        assert!(validate_api_key(&pool, &manager, &fresh).is_ok());
+        let rows = key_rows(&pool, "default");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, None);
+    }
+
+    /// Every way one owner could try to take a name another owner's tombstone
+    /// still holds. In each case the refusal must leave the tombstone byte for
+    /// byte as it was and write no new row.
+    #[test]
+    fn a_revoked_name_belonging_to_another_owner_is_refused_untouched() {
+        for claimant in ["different-human", "unbound", "bound"] {
+            let pool = test_db();
+            let manager = create_key_manager().unwrap();
+            let blake = seed_key_owner(&pool, "blake");
+            let mallory = seed_key_owner(&pool, "mallory");
+
+            // Who holds the tombstone, and who tries to take it.
+            let (holder, claimer) = match claimant {
+                // A second human cannot displace Blake's revoked key.
+                "different-human" => (Some(blake), Some(mallory)),
+                // A human cannot displace the unbound operator key's name,
+                // which would hand them a name the operator still owns.
+                "unbound" => (None, Some(mallory)),
+                // Nor the reverse: minting an unbound operator key must not
+                // consume a name a real account is still holding.
+                "bound" => (Some(blake), None),
+                _ => unreachable!(),
+            };
+
+            create_api_key(&pool, &manager, "contested", holder).unwrap();
+            revoke_all(&pool);
+            let before = key_rows(&pool, "contested");
+
+            let err = match create_api_key(&pool, &manager, "contested", claimer) {
+                Ok(_) => panic!("{claimant}: another owner's tombstone must not be claimable"),
+                Err(err) => err,
+            };
+            match err {
+                crate::error::LificError::BadRequest(message) => assert!(
+                    message.contains("reserved by another owner"),
+                    "{claimant}: {message}"
+                ),
+                other => panic!("{claimant}: expected BadRequest, got {other:?}"),
+            }
+
+            assert_eq!(
+                key_rows(&pool, "contested"),
+                before,
+                "{claimant}: the refusal must not touch the row or add one"
+            );
+        }
+    }
+
+    #[test]
+    fn an_active_name_is_still_refused_and_leaves_the_live_key_alone() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let owner = seed_key_owner(&pool, "blake");
+        let other = seed_key_owner(&pool, "mallory");
+        let live = create_api_key(&pool, &manager, "opencode-blake", Some(owner)).unwrap();
+        let before = key_rows(&pool, "opencode-blake");
+
+        // Refused for both a different owner and the same one: an active name
+        // is taken regardless of who is asking, and the message says only that.
+        for claimer in [Some(other), Some(owner), None] {
+            let err = create_api_key(&pool, &manager, "opencode-blake", claimer)
+                .expect_err("an active name is taken");
+            match err {
+                crate::error::LificError::BadRequest(message) => {
+                    assert!(message.contains("already exists"), "{message}");
+                }
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            key_rows(&pool, "opencode-blake"),
+            before,
+            "the refusal wrote nothing and did not rebind the live key"
+        );
+        assert!(
+            validate_api_key(&pool, &manager, &live).is_ok(),
+            "the live key still authenticates"
+        );
+    }
+
+    #[test]
+    fn reuse_matches_the_exact_name_only() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let owner = seed_key_owner(&pool, "blake");
+        create_api_key(&pool, &manager, "opencode-blake", Some(owner)).unwrap();
+        create_api_key(&pool, &manager, "opencode-blake-laptop", Some(owner)).unwrap();
+        let neighbour = create_api_key(&pool, &manager, "cursor-blake", Some(owner)).unwrap();
+        pool.write()
+            .unwrap()
+            .execute(
+                "UPDATE api_keys SET revoked = 1 WHERE name = 'opencode-blake'",
+                [],
+            )
+            .unwrap();
+
+        create_api_key(&pool, &manager, "opencode-blake", Some(owner)).unwrap();
+
+        assert_eq!(key_rows(&pool, "opencode-blake").len(), 1);
+        assert_eq!(
+            key_rows(&pool, "opencode-blake-laptop").len(),
+            1,
+            "a name this one is a prefix of is untouched"
+        );
+        assert!(validate_api_key(&pool, &manager, &neighbour).is_ok());
+    }
+
+    /// The revocation is a historical fact and stays in the log after the row
+    /// it described is swept. Nothing joins the two, so nothing breaks, and no
+    /// key material was ever in the log to leak.
+    #[test]
+    fn sweeping_a_revoked_row_leaves_its_audit_trail_intact() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let user_id = {
+            let conn = pool.write().unwrap();
+            let user = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "blake".into(),
+                    email: "blake@test.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            user.id
+        };
+        create_api_key(&pool, &manager, "opencode-blake", Some(user_id)).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::lock_down_account(&conn, user_id).unwrap();
+        }
+
+        create_api_key(&pool, &manager, "opencode-blake", Some(user_id)).unwrap();
+
+        let conn = pool.read().unwrap();
+        let audited: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log
+                 WHERE entity_type = 'api_key' AND action = 'revoke'
+                   AND entity_label = 'opencode-blake'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1, "the revocation is still on the record");
+        let leaked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE new_value LIKE 'lific_sk%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0);
+    }
+
+    /// Rotation is the one path allowed to replace a *live* key, and it must
+    /// still carry the owner over. It is now one transaction, so the name is
+    /// never briefly absent.
+    #[test]
+    fn rotation_replaces_a_live_key_and_keeps_its_owner() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let bot = seed_key_owner(&pool, "opencode-blake");
+        let old = create_api_key(&pool, &manager, "opencode-blake", Some(bot)).unwrap();
+
+        let fresh = rotate_api_key(&pool, &manager, "opencode-blake").unwrap();
+        assert_ne!(fresh, old);
+        let rows = key_rows(&pool, "opencode-blake");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, Some(bot), "the binding carried over");
+        assert!(validate_api_key(&pool, &manager, &old).is_err());
+        assert!(validate_api_key(&pool, &manager, &fresh).is_ok());
+    }
+
+    #[test]
+    fn rotation_of_a_missing_name_is_not_found_and_writes_nothing() {
+        let pool = test_db();
+        let manager = create_key_manager().unwrap();
+        let err = rotate_api_key(&pool, &manager, "never-existed").expect_err("nothing to rotate");
+        assert!(matches!(err, crate::error::LificError::NotFound(_)));
+        assert!(key_rows(&pool, "never-existed").is_empty());
+    }
+
+    /// Credential creation and account lockdown, actually racing.
+    ///
+    /// Everything else about this interaction is asserted sequentially, which
+    /// can only show that each order produces the right outcome. What is
+    /// claimed on top of that is *linearizability*: that no interleaving
+    /// exists, because both sides run as one SQLite `BEGIN IMMEDIATE`
+    /// transaction and SQLite admits one writer at a time. That claim needs
+    /// two real connections to a real file, and this is where it is tested.
+    ///
+    /// Setup: two `DbPool`s opened separately on one tempfile database, which
+    /// is the same separation two processes have (the CLI resetting a password
+    /// while the server is running). Sequencing is by channel; there are no
+    /// sleeps and no timing assumptions anywhere.
+    ///
+    /// Exclusion is observed rather than assumed. While one pool holds its
+    /// transaction open, a third raw connection with `busy_timeout = 0` tries
+    /// `BEGIN IMMEDIATE` and must be refused *now* rather than made to wait.
+    /// That is SQLite telling us directly that the writer is held.
+    mod lockdown_race {
+        use super::*;
+        use std::sync::mpsc;
+
+        /// A human with a fresh session, the shape a REST credential mint
+        /// authorizes against.
+        fn seed(pool: &db::DbPool) -> (i64, String) {
+            let conn = pool.write().unwrap();
+            let user = crate::db::queries::users::create_user(
+                &conn,
+                &crate::db::models::CreateUser {
+                    username: "blake".into(),
+                    email: "blake@test.local".into(),
+                    password: "testpassword1".into(),
+                    display_name: None,
+                    is_admin: true,
+                    is_bot: false,
+                },
+            )
+            .unwrap();
+            let session = crate::db::queries::users::create_session(&conn, user.id, None).unwrap();
+            (user.id, session.token)
+        }
+
+        /// Whether the database's single write slot is currently taken.
+        ///
+        /// Opens its own connection and disables the busy handler, so
+        /// `BEGIN IMMEDIATE` resolves immediately either way: it takes the
+        /// lock (nobody is writing) or returns SQLITE_BUSY (somebody is). No
+        /// waiting, so no flakiness.
+        fn writer_is_held(path: &std::path::Path) -> bool {
+            let probe = rusqlite::Connection::open(path).expect("probe connection");
+            probe
+                .busy_timeout(std::time::Duration::ZERO)
+                .expect("disable the busy handler");
+            match probe.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => {
+                    probe.execute_batch("ROLLBACK").expect("release the probe");
+                    false
+                }
+                // Only contention counts. Any other failure means the probe
+                // itself is broken (a missing file, a corrupt database), and
+                // reading that as "somebody is writing" would let this whole
+                // test pass for the wrong reason.
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if matches!(
+                        error.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) =>
+                {
+                    true
+                }
+                Err(other) => panic!("probe failed for a reason other than contention: {other:?}"),
+            }
+        }
+
+        fn active_keys(pool: &db::DbPool, name: &str) -> i64 {
+            pool.read()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM api_keys WHERE name = ?1 AND revoked = 0",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        /// Mint first: the lockdown cannot begin until the mint commits, and
+        /// then it revokes the key the mint made. No interleaving leaves a
+        /// live key behind a locked-down account.
+        #[test]
+        fn a_lockdown_cannot_slip_inside_a_credential_mint() {
+            let dir = tempfile::tempdir().expect("scratch dir");
+            let path = dir.path().join("lific.db");
+            let minting = db::open(&path).expect("minting pool");
+            let recovering = db::open(&path).expect("recovering pool");
+            let (user_id, session) = seed(&minting);
+            let manager = create_key_manager().unwrap();
+            let prepared = PreparedApiKey::generate(&manager).unwrap();
+            assert!(
+                !writer_is_held(&path),
+                "control: with nobody writing, the probe must be able to take the lock"
+            );
+
+            let (inserted_tx, inserted_rx) = mpsc::channel::<()>();
+            let (probe_tx, probe_rx) = mpsc::channel::<bool>();
+
+            let (minting, session) = (&minting, &session);
+            let (key, held_during_mint) = std::thread::scope(|scope| {
+                let mint = scope.spawn(move || {
+                    let held = std::cell::Cell::new(false);
+                    // Exactly the transaction `POST /api/auth/keys` runs.
+                    let key = minting.transaction(|tx| {
+                        revalidate_recent_session(tx, session, user_id)?;
+                        let plaintext = prepared.insert(tx, "racing", None, Some(user_id))?;
+                        inserted_tx.send(()).expect("announce the insert");
+                        // Still inside the transaction: hold it open until the
+                        // other side has been told it cannot get in.
+                        held.set(probe_rx.recv().expect("probe result"));
+                        Ok(plaintext)
+                    });
+                    (key.expect("the mint commits"), held.get())
+                });
+
+                inserted_rx.recv().expect("the mint reached its insert");
+                probe_tx
+                    .send(writer_is_held(&path))
+                    .expect("hand the probe result back");
+                mint.join().expect("mint thread")
+            });
+
+            assert!(
+                held_during_mint,
+                "the write slot must be taken for the whole mint transaction"
+            );
+            assert_eq!(active_keys(minting, "racing"), 1, "the mint committed");
+
+            // Only now, on the other pool, can the recovery run.
+            recovering
+                .transaction(|tx| crate::db::queries::users::lock_down_account(tx, user_id))
+                .expect("the lockdown commits once the writer is free");
+
+            assert!(
+                validate_api_key(&recovering, &manager, &key).is_err(),
+                "a key minted immediately before a lockdown is inside its blast radius"
+            );
+            assert_eq!(active_keys(&recovering, "racing"), 0);
+        }
+
+        /// Lockdown first: the mint cannot begin until the lockdown commits,
+        /// and then its in-transaction revalidation finds no session and
+        /// refuses. No interleaving lets a key through on a dead session.
+        #[test]
+        fn a_credential_mint_cannot_slip_inside_a_lockdown() {
+            let dir = tempfile::tempdir().expect("scratch dir");
+            let path = dir.path().join("lific.db");
+            let minting = db::open(&path).expect("minting pool");
+            let recovering = db::open(&path).expect("recovering pool");
+            let (user_id, session) = seed(&minting);
+            let manager = create_key_manager().unwrap();
+            let prepared = PreparedApiKey::generate(&manager).unwrap();
+            assert!(
+                !writer_is_held(&path),
+                "control: with nobody writing, the probe must be able to take the lock"
+            );
+
+            let (locked_tx, locked_rx) = mpsc::channel::<()>();
+            let (probe_tx, probe_rx) = mpsc::channel::<bool>();
+
+            let recovering_ref = &recovering;
+            let held_during_lockdown = std::thread::scope(|scope| {
+                let recovery = scope.spawn(move || {
+                    let held = std::cell::Cell::new(false);
+                    recovering_ref
+                        .transaction(|tx| {
+                            crate::db::queries::users::lock_down_account(tx, user_id)?;
+                            locked_tx.send(()).expect("announce the lockdown");
+                            held.set(probe_rx.recv().expect("probe result"));
+                            Ok(())
+                        })
+                        .expect("the lockdown commits");
+                    held.get()
+                });
+
+                locked_rx.recv().expect("the lockdown reached its writes");
+                probe_tx
+                    .send(writer_is_held(&path))
+                    .expect("hand the probe result back");
+                recovery.join().expect("recovery thread")
+            });
+
+            assert!(
+                held_during_lockdown,
+                "the write slot must be taken for the whole lockdown transaction"
+            );
+
+            // The mint now runs against the committed post-lockdown state.
+            let outcome = minting.transaction(|tx| {
+                revalidate_recent_session(tx, &session, user_id)?;
+                prepared.insert(tx, "racing", None, Some(user_id))
+            });
+            assert!(
+                matches!(outcome, Err(crate::error::LificError::Forbidden(_))),
+                "revalidation must refuse a session the lockdown deleted: {outcome:?}"
+            );
+            assert_eq!(
+                active_keys(&minting, "racing"),
+                0,
+                "the refused mint wrote nothing"
+            );
+        }
     }
 
     #[test]
@@ -2673,14 +3548,25 @@ mod tests {
         }
     }
 
-    // Only the OAuth credential kind is affected: an API key on the same
-    // route still mints.
+    // An API key authenticates ordinary REST routes but may no longer mint a
+    // second credential. Previously it could, which made one leaked key a key
+    // factory: the attacker minted a spare, and the account lockdown the
+    // victim then ran revoked a credential the attacker had already replaced.
+    // Minting now belongs to a browser session the human authenticated
+    // recently, and nothing else.
     #[tokio::test]
-    async fn api_key_credential_can_still_mint_a_key() {
+    async fn api_key_credential_may_no_longer_mint_a_key() {
         let pool = test_db();
         let uid = seed_user(&pool, "keyholder");
         let manager = create_key_manager().unwrap();
         let key = create_api_key(&pool, &manager, "existing", Some(uid)).unwrap();
+
+        let (status, body) = send(real_api_app(&pool), "GET", "/api/auth/me", None, &key).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the key still authenticates: {body}"
+        );
 
         let (status, body) = send(
             real_api_app(&pool),
@@ -2690,8 +3576,8 @@ mod tests {
             &key,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "API key path unaffected: {body}");
-        assert!(body.contains("lific_sk"), "a key was returned: {body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(!body.contains("lific_sk"), "no key was returned: {body}");
     }
 
     #[tokio::test]
@@ -2793,6 +3679,7 @@ mod tests {
             (Method::DELETE, "/api/auth/bots/7"),
             (Method::POST, "/api/auth/me/password"),
             (Method::DELETE, "/api/auth/me/sessions"),
+            (Method::POST, "/api/auth/me/refresh"),
             (Method::PATCH, "/api/auth/me"),
             (Method::POST, "/api/users"),
             (Method::POST, "/api/users/3/promote"),

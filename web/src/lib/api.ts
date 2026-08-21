@@ -164,9 +164,32 @@ export async function login(identity: string, password: string) {
 }
 
 /** Single-user mode (LIF-215): mint an admin session without a password when
- *  the instance has `web_auto_login` enabled. Returns 403 when it's off. */
+ *  the instance has `web_auto_login` enabled. Returns 403 when it's off.
+ *
+ *  Only the sign-in screen should use this. It mints a session for *the
+ *  instance's first admin*, which on a multi-admin instance is not necessarily
+ *  whoever is already using the tab. To freshen an existing session, use
+ *  `refreshSession`, whose entire contract is "same user". */
 export async function autoLogin() {
   return request<AuthResponse>("/auth/auto-login", { method: "POST" });
+}
+
+/** Swap this browser's session for a fresh one, for the same account.
+ *
+ *  This is how the recent-authentication rule on granting actions is satisfied
+ *  from a tab that has been open a while. Unlike `login` (which signs in as
+ *  whoever the credentials name) and `autoLogin` (which signs in as the first
+ *  admin), this can only ever return a session for the account already signed
+ *  in here, and the server sets no cookie until it has established that.
+ *
+ *  `password` is required on a password instance and may be omitted on a
+ *  passwordless one. A failure changes nothing: the current token and cookie
+ *  keep working. */
+export async function refreshSession(password?: string) {
+  return request<AuthResponse>("/auth/me/refresh", {
+    method: "POST",
+    body: JSON.stringify(password === undefined ? {} : { password }),
+  });
 }
 
 export async function logout() {
@@ -187,17 +210,46 @@ export async function updateProfile(input: { display_name?: string; email?: stri
   });
 }
 
+export interface ChangePasswordResponse {
+  ok: boolean;
+  /** The replacement session token. See below. */
+  token: string;
+  expires_at: string;
+}
+
+/** Change the password, and adopt the replacement session it returns.
+ *
+ *  A password change is a full account lockdown on the server: every session,
+ *  API key, OAuth session and connected tool belonging to this account is
+ *  revoked, including the session that made this very request. The server
+ *  mints exactly one replacement so the person who just typed their password
+ *  is not thrown back to the login screen, and returns it here.
+ *
+ *  Saving it is not optional. This helper used to ignore the field, which left
+ *  the tab holding a token the server had just killed: every later request
+ *  401'd and the UI looked like the password change had broken the account. */
 export async function changePassword(input: { current_password: string; new_password: string }) {
-  return request<{ ok: boolean }>("/auth/me/password", {
+  const result = await request<ChangePasswordResponse>("/auth/me/password", {
     method: "POST",
     body: JSON.stringify(input),
   });
+  if (result.ok && result.data.token) {
+    saveSession(result.data.token);
+  }
+  return result;
 }
 
-/** Sign out of every session (this one too). Clears the local token. */
+/** Sign out everywhere and revoke access: every session, API key, OAuth
+ *  session and connected tool for this account, with no replacement.
+ *
+ *  The local token is cleared only when the server confirms it. Clearing it on
+ *  a failed request (a network drop, a 500) would log the tab out of a session
+ *  that is still perfectly valid, and leave nothing to retry with. */
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
-  localStorage.removeItem("lific_token");
+  if (result.ok) {
+    localStorage.removeItem("lific_token");
+  }
   return result;
 }
 

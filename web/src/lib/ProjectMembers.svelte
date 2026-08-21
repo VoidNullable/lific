@@ -13,6 +13,7 @@
     me,
     listUsers,
     listProjectMembers,
+    getInstance,
     addProjectMember,
     changeProjectMemberRole,
     removeProjectMember,
@@ -21,7 +22,14 @@
     type ProjectMember,
     type ProjectRole,
   } from "./api";
-  import { UsersRound, UserPlus, Trash2 } from "lucide-svelte";
+  import {
+    RECENT_AUTH_ERROR,
+    needsReauth,
+    reauthenticateWithoutPassword,
+    reauthenticateWithPassword,
+    retryOnceAfterReauth,
+  } from "./reauth";
+  import { UsersRound, UserPlus, Trash2, Lock } from "lucide-svelte";
   import Select from "./Select.svelte";
   import Skeleton from "./Skeleton.svelte";
   import { formatDate } from "./format";
@@ -68,6 +76,9 @@
     if (amLead && !usersLoaded) {
       usersLoaded = true;
       listUsers().then((res) => { if (res.ok) allUsers = res.data; });
+      // Whether this instance signs in without a password decides how a stale
+      // session is recovered when a grant is refused.
+      getInstance().then((res) => { if (res.ok) webAutoLogin = res.data.web_auto_login; });
     }
   });
 
@@ -106,21 +117,94 @@
       .map((u) => ({ value: u.id, label: u.display_name || u.username, username: u.username })),
   );
 
+  // ── Re-authentication for grants ────────────────────────────
+  //
+  // Adding a member, or raising an existing member's role, hands out standing
+  // access to the project, so the server wants a sign-in from the last 15
+  // minutes. Lowering a role and removing a member are reductions and are
+  // never gated, so containment stays one click.
+  //
+  // One prompt serves both grants and remembers exactly which was interrupted,
+  // so confirming resumes that operation with its own arguments rather than
+  // whatever the pickers happen to show by then.
+  // Snapshots, not references. `projectId` is a prop that changes when the
+  // user navigates, and `member.role` is mutated optimistically, so a retry
+  // that read either back off the live state could act on the wrong project or
+  // the wrong previous role.
+  type PendingGrant =
+    | { kind: "add"; projectId: number; userId: number; role: ProjectRole }
+    | {
+        kind: "role";
+        projectId: number;
+        userId: number;
+        username: string;
+        role: ProjectRole;
+        previousRole: ProjectRole;
+      };
+  let pendingGrant = $state<PendingGrant | null>(null);
+  let grantPassword = $state("");
+  let grantBusy = $state(false);
+  let grantError = $state("");
+  let autoGrantNote = $state("");
+  let webAutoLogin = $state(false);
+
+  /** The automatic route out of a staleness refusal, where one exists.
+   *  A failure or a session belonging to another account is *recoverable*:
+   *  note it and let the password prompt take over. */
+  async function autoReauth() {
+    if (!webAutoLogin || !currentUser) {
+      return { ok: false as const, error: RECENT_AUTH_ERROR, recoverable: true };
+    }
+    const auto = await reauthenticateWithoutPassword(currentUser.id);
+    if (!auto.ok) autoGrantNote = auto.error;
+    return auto;
+  }
+
+  function noRecovery() {
+    return Promise.resolve({
+      ok: false as const,
+      error: RECENT_AUTH_ERROR,
+      recoverable: false,
+    });
+  }
+
+  async function attemptAdd(
+    target: number,
+    userId: number,
+    role: ProjectRole,
+    recover = true,
+  ) {
+    const res = await retryOnceAfterReauth(
+      () => addProjectMember(target, { user_id: userId, role }),
+      () => (recover ? autoReauth() : noRecovery()),
+    );
+    if (res.ok) {
+      // POST returns the bare ProjectMember row (no joined username/
+      // display_name), so reload to render the joined identity. Only if the
+      // user is still looking at the project this landed on.
+      if (target === projectId) {
+        await load(projectId);
+        addUserId = null;
+        addRole = "viewer";
+      }
+      return true;
+    }
+    if (needsReauth(res)) {
+      // Hold the arguments, and leave the picker showing them.
+      pendingGrant = { kind: "add", projectId: target, userId, role };
+      return false;
+    }
+    addError = res.error;
+    return false;
+  }
+
   async function addMember() {
     if (addUserId == null || adding) return;
     adding = true;
     addError = "";
-    const res = await addProjectMember(projectId, { user_id: addUserId, role: addRole });
+    grantError = "";
+    await attemptAdd(projectId, addUserId, addRole);
     adding = false;
-    if (res.ok) {
-      // POST returns the bare ProjectMember row (no joined username/
-      // display_name) — reload so the new row renders the joined identity.
-      await load(projectId);
-      addUserId = null;
-      addRole = "viewer";
-    } else {
-      addError = res.error;
-    }
   }
 
   // ── Change role ─────────────────────────────────────────────
@@ -132,18 +216,91 @@
   // explicit nudge to snap back rather than staying stuck on the choice.
   let roleResyncTick = $state(0);
 
+  async function attemptSetRole(
+    grant: Extract<PendingGrant, { kind: "role" }>,
+    recover = true,
+  ) {
+    const res = await retryOnceAfterReauth(
+      () => changeProjectMemberRole(grant.projectId, grant.userId, grant.role),
+      () => (recover ? autoReauth() : noRecovery()),
+    );
+    if (res.ok) {
+      if (grant.projectId === projectId) {
+        members = members.map((x) =>
+          x.user_id === grant.userId ? { ...x, role: grant.role } : x,
+        );
+      }
+      return true;
+    }
+    if (needsReauth(res)) {
+      // The Select is showing the requested role optimistically. Leave it
+      // there while the prompt is up so the pending change stays visible; it
+      // is snapped back only if the operation is abandoned or genuinely fails.
+      pendingGrant = grant;
+      return false;
+    }
+    roleError = { userId: grant.userId, message: res.error };
+    roleResyncTick++;
+    return false;
+  }
+
   async function setRole(m: ProjectMember, role: ProjectRole) {
     if (role === m.role || roleBusy != null) return;
     roleBusy = m.user_id;
     roleError = null;
-    const res = await changeProjectMemberRole(projectId, m.user_id, role);
+    grantError = "";
+    await attemptSetRole({
+      kind: "role",
+      projectId,
+      userId: m.user_id,
+      username: m.username,
+      role,
+      previousRole: m.role,
+    });
     roleBusy = null;
-    if (res.ok) {
-      members = members.map((x) => (x.user_id === m.user_id ? { ...x, role } : x));
-    } else {
-      roleError = { userId: m.user_id, message: res.error };
-      roleResyncTick++;
+  }
+
+  /** Verify, then resume the interrupted grant exactly once. */
+  async function submitGrantReauth() {
+    const target = pendingGrant;
+    if (!target || !currentUser || grantBusy || !grantPassword) return;
+    grantBusy = true;
+    grantError = "";
+    const refreshed = await reauthenticateWithPassword(grantPassword, currentUser.id);
+    grantPassword = "";
+    if (!refreshed.ok) {
+      grantError = refreshed.error;
+      grantBusy = false;
+      return;
     }
+    autoGrantNote = "";
+    if (target.projectId !== projectId) {
+      // They navigated away while the prompt was up. Retrying would act on a
+      // project that is no longer on screen, with no way to show the result.
+      grantError = "You moved to another project, so that change was not applied.";
+      pendingGrant = null;
+      grantBusy = false;
+      return;
+    }
+    const landed =
+      target.kind === "add"
+        ? await attemptAdd(target.projectId, target.userId, target.role, false)
+        : await attemptSetRole(target, false);
+    if (landed) pendingGrant = null;
+    else if (!grantError) {
+      grantError = "That still was not accepted. Sign out and sign back in, then try again.";
+    }
+    grantBusy = false;
+  }
+
+  function cancelGrantReauth() {
+    // An abandoned role change must not leave the Select showing a role the
+    // server never accepted: remount it so it re-reads the stored role.
+    if (pendingGrant?.kind === "role") roleResyncTick++;
+    pendingGrant = null;
+    grantPassword = "";
+    grantError = "";
+    autoGrantNote = "";
   }
 
   // ── Remove ──────────────────────────────────────────────────
@@ -210,8 +367,68 @@
           {adding ? "Adding…" : "Add"}
         </button>
       </div>
+      <!-- Shared "verify it's you" prompt for the two granting actions. It
+           names which one is waiting, so confirming is never ambiguous. -->
+      {#if pendingGrant}
+        <div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--bg-subtle)] flex flex-col gap-2">
+          <div class="flex items-start gap-2 text-caption text-[var(--text)]">
+            <Lock size={13} class="shrink-0 mt-0.5 text-[var(--text-muted)]" />
+            <p class="leading-relaxed">
+              Verify it's you to
+              {#if pendingGrant.kind === "add"}
+                add this person as {ROLE_LABEL[pendingGrant.role].toLowerCase()}.
+              {:else}
+                make <span class="font-mono">@{pendingGrant.username}</span>
+                {ROLE_LABEL[pendingGrant.role].toLowerCase()}.
+              {/if}
+              Granting project access needs a recent sign-in, and you have been signed in for a
+              while.
+            </p>
+          </div>
+          {#if autoGrantNote}
+            <p class="text-caption text-[var(--text-muted)]" role="status">
+              Signing you in automatically did not work ({autoGrantNote}).
+            </p>
+          {/if}
+          {#if grantError}
+            <p class="text-caption text-[var(--error)]" role="alert">{grantError}</p>
+          {/if}
+          <div class="flex items-center gap-2 flex-wrap">
+            <label class="flex-1 min-w-[180px]">
+              <span class="sr-only">Your current password</span>
+              <input
+                bind:value={grantPassword}
+                type="password"
+                placeholder="your current password"
+                autocomplete="current-password"
+                disabled={grantBusy}
+                class="w-full px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
+                       bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2
+                       focus-visible:ring-[var(--accent)] disabled:opacity-50"
+                onkeydown={(e) => { if (e.key === 'Enter') submitGrantReauth(); }}
+              />
+            </label>
+            <button
+              class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
+                     px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
+                     disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              disabled={grantBusy || !grantPassword}
+              onclick={submitGrantReauth}
+            >
+              {grantBusy ? "Verifying…" : "Confirm and continue"}
+            </button>
+            <button
+              class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--surface)] transition-colors disabled:opacity-50 shrink-0"
+              disabled={grantBusy}
+              onclick={cancelGrantReauth}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      {/if}
       {#if addError}
-        <div class="px-4 py-2 text-caption text-[var(--error)] bg-[var(--error-bg)]">{addError}</div>
+        <div class="px-4 py-2 text-caption text-[var(--error)] bg-[var(--error-bg)]" role="alert">{addError}</div>
       {/if}
     {/if}
 

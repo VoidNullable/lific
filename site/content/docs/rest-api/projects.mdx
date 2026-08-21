@@ -15,6 +15,8 @@ Response: a `Project` array.
 
 Creates a project. This endpoint has no path or query parameters.
 
+Creating a project also gives its lead a `lead` membership on it. Omitting `lead_user_id`, or setting it to yourself, is unchanged and needs no recent sign-in: an API key can still create its own projects. Naming **somebody else** as the lead is a lasting access grant, so it requires a browser session created within the last 15 minutes, and an API key or OAuth token gets `403 recent authentication required`. For a connected tool, "yourself" is the human it acts for, which is the identity the project would resolve to in any case.
+
 Request body fields are `name` (string), `identifier` (string), `description` (string, optional, defaults to an empty string), `emoji` (string or null, optional), and `lead_user_id` (integer or null, optional). When no lead is supplied and the request has an authenticated user, the creator becomes the lead.
 
 Response: a `Project` object.
@@ -49,6 +51,8 @@ Response: a `Project` object.
 ### PUT `/api/projects/{id}`
 
 Updates supplied project fields. Path parameter: `id` (integer project ID). It has no query parameters.
+
+Lead-gated. Setting `lead_user_id` to a user also grants that user a `lead` membership on the project, so a request that does so **requires a recent browser session** on the same terms as `POST /api/projects/{id}/members`, and an API key or OAuth token gets `403 recent authentication required`. Every other field, and clearing `lead_user_id` to `null`, is ungated.
 
 Request body fields are `name` (string, optional), `identifier` (string, optional), `description` (string, optional), `emoji` (string, null, or omitted), and `lead_user_id` (integer, null, or omitted). An omitted nullable field is unchanged. A `null` nullable field clears its value.
 
@@ -161,13 +165,15 @@ Response: an array of objects with `project_id` (integer), `user_id` (integer), 
 
 Adds a project member. Path parameter: `id` (integer project ID). It has no query parameters.
 
+Lead-gated, and **requires a recent browser session**: the `Authorization` header must carry a `lific_sess_` token created within the last 15 minutes. API keys and OAuth tokens get `403 recent authentication required` even when they do lead the project. Adding a member hands out standing access that no lockdown on the granter's own credentials takes back, so it is gated like credential minting. Both the session check and the lead check run inside the transaction that writes the row.
+
 Request body fields are `user_id` (integer) and `role` (string, optional). `role` defaults to `viewer`. Valid roles are `viewer`, `maintainer`, and `lead`.
 
 Response: an object with `project_id` (integer), `user_id` (integer), `role` (string), and `created_at` (string).
 
 ```bash
 curl -X POST https://your-server.example/api/projects/1/members \
-  -H "Authorization: Bearer <API_KEY>" \
+  -H "Authorization: Bearer <SESSION_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"user_id":2,"role":"viewer"}'
 ```
@@ -185,11 +191,15 @@ curl -X POST https://your-server.example/api/projects/1/members \
 
 Changes a member role. Path parameters are `id` (integer project ID) and `user_id` (integer user ID). It has no query parameters.
 
+Lead-gated. **A recent browser session is required only when the new role is higher than the current one** (`viewer` < `maintainer` < `lead`). Raising a role expands access and is gated like `POST`; lowering it, or setting the role it already has, is not, so an API key can still downgrade people while an incident is being contained. The current role is read inside the write transaction, so the comparison is never made against a stale value.
+
 Request body field: `role` (string). Valid roles are `viewer`, `maintainer`, and `lead`. Response: a project member object. Demoting the only lead returns a conflict.
 
 ### DELETE `/api/projects/{id}/members/{user_id}`
 
 Removes a member. Path parameters are `id` (integer project ID) and `user_id` (integer user ID). It has no query parameters or request body.
+
+Lead-gated, with no recency requirement: removal only takes access away. The lead check runs inside the write transaction.
 
 Response: the standard delete response. Removing or demoting the only lead returns a conflict.
 
