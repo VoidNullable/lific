@@ -1785,17 +1785,41 @@ impl LificMcp {
         })?;
         require_role_mcp(&self.db, issue.project_id, models::Role::Viewer)?;
         let context = current_issue_link_context();
-        let comments = self
-            .read(|conn| {
-                queries::comments::list_comments(
-                    conn,
-                    queries::comments::CommentParent::Issue(issue.id),
-                    None,
-                    None,
-                )
-            })
-            .ok()
-            .filter(|comments| !comments.is_empty());
+        // Load exactly the rows the chosen mode renders, never the whole
+        // thread. `none` reads no comment rows at all, `recent` reads three,
+        // and `all` is capped at the shared page limit: a comment body may be
+        // 256 KiB, so "every comment" is not a bounded read and get_issue is
+        // the one tool an agent calls reflexively.
+        let parent = queries::comments::CommentParent::Issue(issue.id);
+        let window = match comment_mode {
+            "none" => None,
+            "recent" => Some(3),
+            _ => Some(queries::MAX_PAGE_LIMIT),
+        };
+        // Authorization already passed, so a failure here is a real database
+        // fault and must surface rather than silently render a comment-less
+        // issue that reads like an issue with no comments.
+        let (total, comments) = self.read(|conn| {
+            let total = queries::comments::count_comments(conn, parent, None)?;
+            let comments = match window {
+                None => Vec::new(),
+                Some(limit) => {
+                    // Newest-first off the index, then flipped: the display
+                    // order is chronological, the *selection* is the tail.
+                    let mut newest = queries::comments::list_comments_paginated(
+                        conn,
+                        parent,
+                        None,
+                        Some("desc"),
+                        Some(limit),
+                        Some(0),
+                    )?;
+                    newest.reverse();
+                    newest
+                }
+            };
+            Ok((total, comments))
+        })?;
         Ok(render_response(|output| {
             writeln!(
                 output,
@@ -1838,45 +1862,44 @@ impl LificMcp {
             (!issue.description.is_empty())
                 .then(|| writeln!(output, "\n{}", issue.description))
                 .transpose()?;
-            comments.as_ref().map_or(Ok(()), |comments| {
-                let total = comments.len();
-                let parent = queries::comments::CommentParent::Issue(issue.id);
-                match comment_mode {
-                    "none" => writeln!(
-                        output,
-                        "\n--- Comments ({total}, omitted — use list_comments) ---"
-                    ),
-                    "recent" if total > 3 => {
-                        writeln!(
-                            output,
-                            "\n--- Comments ({total}, showing last 3 — use list_comments) ---"
-                        )?;
-                        write!(
-                            output,
-                            "{}",
-                            CommentLines {
-                                comments: &comments[total - 3..],
-                                parent_identifier: &issue.identifier,
-                                parent,
-                                context: context.as_deref(),
-                            }
-                        )
-                    }
-                    _ => {
-                        writeln!(output, "\n--- Comments ({total}) ---")?;
-                        write!(
-                            output,
-                            "{}",
-                            CommentLines {
-                                comments,
-                                parent_identifier: &issue.identifier,
-                                parent,
-                                context: context.as_deref(),
-                            }
-                        )
-                    }
+            // `none` is a request for the count, so it answers with the count
+            // even when that count is zero: "0, omitted" is the fact the
+            // caller asked for, and suppressing it means the one mode whose
+            // entire job is reporting the number silently reports nothing.
+            // `recent` and `all` are requests for comments, and an issue with
+            // none of those keeps its clean, header-free output.
+            if total == 0 && comment_mode != "none" {
+                return Ok(());
+            }
+            let shown = comments.len() as i64;
+            match comment_mode {
+                "none" => writeln!(
+                    output,
+                    "\n--- Comments ({total}, omitted — use list_comments) ---"
+                )?,
+                "recent" if shown < total => writeln!(
+                    output,
+                    "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
+                )?,
+                // `all` past the cap. Say plainly that this is a window, not
+                // the thread, and name the tool that pages the rest.
+                _ if shown < total => writeln!(
+                    output,
+                    "\n--- Comments ({total}, showing the most recent {shown}; \
+                     use list_comments to page the rest) ---"
+                )?,
+                _ => writeln!(output, "\n--- Comments ({total}) ---")?,
+            }
+            write!(
+                output,
+                "{}",
+                CommentLines {
+                    comments: &comments,
+                    parent_identifier: &issue.identifier,
+                    parent,
+                    context: context.as_deref(),
                 }
-            })
+            )
         }))
     }
 
@@ -3498,7 +3521,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "List comments on an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages)."
+        description = "List comments on an issue (LIF-42) or page (LIF-DOC-3; DOC-3 for workspace pages). Returns the 50 newest by default; page back with offset, or pass order=asc to read oldest first."
     )]
     fn list_comments(&self, Parameters(input): Parameters<ListCommentsInput>) -> String {
         self.list_comments_inner(input)
@@ -3509,15 +3532,14 @@ impl LificMcp {
         let (parent, parent_identifier, _) = resolve_comment_parent(self, &input.identifier)?;
         self.require_comment_role_mcp(parent, models::Role::Viewer)?;
 
-        // An absent limit still means "every comment"; a present one is
-        // clamped to the shared cap, the same bound the query applies. The
-        // Option survives because the header wording below distinguishes
-        // "you asked for a page" from "you asked for the thread".
-        let limit = input
-            .limit
-            .map(|limit| limit.clamp(1, queries::MAX_PAGE_LIMIT));
-        let offset = input.offset.unwrap_or(0).max(0);
-        let order = input.order.as_deref().unwrap_or("asc");
+        // An omitted limit means the shared default page, not the whole
+        // thread: a comment body may be up to 256 KiB, so an unbounded read
+        // is an unbounded bill against the agent's context window. An omitted
+        // order means newest first for the same reason: if only one page of
+        // a long thread survives the trip, it should be the page that carries
+        // the current state of the conversation.
+        let (limit, offset) = queries::page(input.limit, input.offset);
+        let order = input.order.as_deref().unwrap_or("desc");
         let link_context = current_issue_link_context();
         let parent_kind = match parent {
             queries::comments::CommentParent::Issue(_) => {
@@ -3534,8 +3556,8 @@ impl LificMcp {
                 parent,
                 input.author.as_deref(),
                 Some(order),
-                limit,
-                input.offset.map(|offset| offset.max(0)),
+                Some(limit),
+                Some(offset),
             )?;
             let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
             Ok((comments, total))
@@ -3557,8 +3579,8 @@ impl LificMcp {
         }
         let shown = comments.len() as i64;
         Ok(render_response(|output| {
-            match (limit, offset, shown < total) {
-                (Some(_), 0, true) => {
+            match (offset, shown < total) {
+                (0, true) => {
                     let edge = if order == "desc" {
                         "most recent"
                     } else {
@@ -3570,7 +3592,7 @@ impl LificMcp {
                         reference_with_context(link_context.as_deref(), parent_kind)
                     )?;
                 }
-                (_, offset, _) if offset > 0 => {
+                (offset, _) if offset > 0 => {
                     writeln!(
                         output,
                         "Showing comments {}-{} of {total} on {} ({} first):",
@@ -7393,6 +7415,113 @@ mod tests {
                 "got: {result}"
             );
         }
+        // A short thread renders in reading order, oldest first.
+        let first = result.find("comment number 1").unwrap();
+        let last = result.find("comment number 5").unwrap();
+        assert!(first < last, "comments must read oldest first: {result}");
+    }
+
+    /// Insert `n` comments straight into the table. `add_comment` re-derives
+    /// mentions and attachment links per call, which is far too slow at the
+    /// row counts the cap tests need and irrelevant to what they assert.
+    fn bulk_comments(m: &LificMcp, n: i64) {
+        let conn = m.db.write().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "PRJ-1").unwrap();
+        let user_id = queries::users::list_users(&conn).unwrap()[0].id;
+        for i in 1..=n {
+            conn.execute(
+                "INSERT INTO comments (issue_id, user_id, content) VALUES (?1, ?2, ?3)",
+                rusqlite::params![issue_id, user_id, format!("comment number {i}")],
+            )
+            .unwrap();
+        }
+    }
+
+    /// `include_comments=all` used to mean "every row in the thread", which
+    /// made the tool an agent calls reflexively an unbounded read of bodies
+    /// that may each be 256 KiB. It is now the most recent page, and it says
+    /// so rather than looking like a complete thread.
+    #[test]
+    fn get_issue_all_is_capped_at_the_shared_page_limit() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Very long thread");
+        let _guard = seed_user(&m);
+        let total = queries::MAX_PAGE_LIMIT + 2;
+        bulk_comments(&m, total);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+        assert!(
+            result.contains(&format!(
+                "--- Comments ({total}, showing the most recent {}; \
+                 use list_comments to page the rest) ---",
+                queries::MAX_PAGE_LIMIT
+            )),
+            "got: {result}"
+        );
+        // The window is the newest 500, displayed chronologically: comments
+        // 1 and 2 fell off the front, 3 leads, and the newest closes it.
+        assert!(!result.contains("comment number 1\n"), "got: {result}");
+        assert!(!result.contains("comment number 2\n"), "got: {result}");
+        let first = result.find("comment number 3\n").expect("oldest of the window");
+        let last = result
+            .find(&format!("comment number {total}\n"))
+            .expect("newest comment");
+        assert!(first < last, "the window must read oldest first");
+    }
+
+    /// `none` reports the count and loads no comment rows at all; `recent`
+    /// loads exactly three. Both are pinned by what reaches the output.
+    #[test]
+    fn get_issue_bounded_modes_do_not_materialize_the_thread() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Long thread");
+        let _guard = seed_user(&m);
+        let total = queries::MAX_PAGE_LIMIT + 2;
+        bulk_comments(&m, total);
+
+        let suppressed = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("none".into()),
+        }));
+        assert!(
+            suppressed.contains(&format!(
+                "--- Comments ({total}, omitted — use list_comments) ---"
+            )),
+            "got: {suppressed}"
+        );
+        assert!(!suppressed.contains("comment number"), "got: {suppressed}");
+
+        let recent = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        assert!(
+            recent.contains(&format!(
+                "--- Comments ({total}, showing last 3 — use list_comments) ---"
+            )),
+            "got: {recent}"
+        );
+        for offset in 0..3 {
+            assert!(
+                recent.contains(&format!("comment number {}\n", total - offset)),
+                "got: {recent}"
+            );
+        }
+        assert!(
+            !recent.contains(&format!("comment number {}\n", total - 3)),
+            "got: {recent}"
+        );
+        // Chronological display: the oldest of the three leads.
+        let oldest = recent
+            .find(&format!("comment number {}\n", total - 2))
+            .unwrap();
+        let newest = recent.find(&format!("comment number {total}\n")).unwrap();
+        assert!(oldest < newest, "the trail must read oldest first: {recent}");
     }
 
     #[test]
@@ -7414,8 +7543,12 @@ mod tests {
         assert!(!result.contains("comment number"), "got: {result}");
     }
 
+    /// `include_comments=none` asks for the count, so it reports one even
+    /// when the answer is zero. Suppressing the header there made the only
+    /// mode whose job is the number the one mode that would not tell you it,
+    /// leaving "no comments" and "I did not look" indistinguishable.
     #[test]
-    fn get_issue_none_with_zero_comments_shows_nothing() {
+    fn get_issue_none_reports_a_zero_count_rather_than_staying_silent() {
         let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
         seed_issue(&m, "PRJ", "Quiet");
@@ -7424,7 +7557,27 @@ mod tests {
             identifier: "PRJ-1".into(),
             include_comments: Some("none".into()),
         }));
-        assert!(!result.contains("Comments"), "got: {result}");
+        assert!(
+            result.contains("--- Comments (0, omitted — use list_comments) ---"),
+            "got: {result}"
+        );
+    }
+
+    /// The comment-bearing modes are unchanged: an issue with no comments
+    /// keeps its header-free output rather than growing an empty section.
+    #[test]
+    fn get_issue_recent_and_all_stay_silent_on_a_comment_free_issue() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Quiet");
+
+        for mode in [None, Some("recent".to_string()), Some("all".to_string())] {
+            let result = m.get_issue(Parameters(GetIssueInput {
+                identifier: "PRJ-1".into(),
+                include_comments: mode.clone(),
+            }));
+            assert!(!result.contains("Comments"), "{mode:?} got: {result}");
+        }
     }
 
     #[test]
@@ -7453,6 +7606,7 @@ mod tests {
 
         let result = m.list_comments(Parameters(ListCommentsInput {
             identifier: "PRJ-1".into(),
+            order: Some("asc".into()),
             limit: Some(3),
             ..Default::default()
         }));
@@ -7464,7 +7618,7 @@ mod tests {
             result.contains("call again with the same author/order/limit and offset=3"),
             "got: {result}"
         );
-        // Default order is asc, so the first 3 are the oldest: 1,2,3.
+        // Explicit asc, so the first 3 are the oldest: 1,2,3.
         assert!(result.contains("comment number 1"), "got: {result}");
         assert!(result.contains("comment number 3"), "got: {result}");
         assert!(!result.contains("comment number 4"), "got: {result}");
@@ -7504,6 +7658,7 @@ mod tests {
 
         let result = m.list_comments(Parameters(ListCommentsInput {
             identifier: "PRJ-1".into(),
+            order: Some("asc".into()),
             limit: Some(2),
             offset: Some(2),
             ..Default::default()
@@ -7522,11 +7677,13 @@ mod tests {
         );
     }
 
+    /// A thread shorter than the default page still reads as the whole
+    /// thread: no "Showing N of M" hedge, no paging hint.
     #[test]
-    fn list_comments_no_limit_keeps_plain_header() {
+    fn list_comments_short_thread_keeps_plain_header() {
         let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
-        seed_issue(&m, "PRJ", "Unlimited");
+        seed_issue(&m, "PRJ", "Short thread");
         let _guard = seed_user(&m);
         seed_comment_trail(&m, 9);
 
@@ -7548,11 +7705,53 @@ mod tests {
         assert!(!result.contains("more comment(s)"), "got: {result}");
     }
 
+    /// An omitted limit is the shared 50-row page, and an omitted order is
+    /// desc. Together that means a long thread hands back the *newest* 50 and
+    /// says so, rather than dumping every comment into the agent's context.
     #[test]
-    fn list_comments_offset_without_limit_returns_unbounded_remainder() {
+    fn list_comments_defaults_to_the_newest_shared_page() {
         let (m, _guard) = mcp();
         seed_project(&m, "Proj", "PRJ");
-        seed_issue(&m, "PRJ", "Offset remainder");
+        seed_issue(&m, "PRJ", "Long thread");
+        let _guard = seed_user(&m);
+        let total = queries::DEFAULT_PAGE_LIMIT + 5;
+        seed_comment_trail(&m, total as usize);
+
+        let result = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        assert!(
+            result.starts_with(&format!(
+                "Showing {} most recent of {total} comment(s) on PRJ-1:",
+                queries::DEFAULT_PAGE_LIMIT
+            )),
+            "got: {result}"
+        );
+        // The newest is present; the oldest five fell off the end of the page.
+        assert!(
+            result.contains(&format!("comment number {total}")),
+            "got: {result}"
+        );
+        assert!(!result.contains("comment number 5\n"), "got: {result}");
+        assert!(
+            result.contains(&format!(
+                "call again with the same author/order/limit and offset={}",
+                queries::DEFAULT_PAGE_LIMIT
+            )),
+            "got: {result}"
+        );
+        assert!(result.contains("5 more comment(s)"), "got: {result}");
+    }
+
+    /// An offset with no limit pages *backwards* from the newest, because the
+    /// default order is desc. It is a window into a bounded thread, not the
+    /// unbounded remainder it used to be.
+    #[test]
+    fn list_comments_offset_without_limit_pages_back_from_the_newest() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Offset window");
         let _guard = seed_user(&m);
         seed_comment_trail(&m, 5);
 
@@ -7562,16 +7761,17 @@ mod tests {
             ..Default::default()
         }));
         assert!(
-            result.starts_with("Showing comments 3-5 of 5 on PRJ-1 (oldest first):"),
+            result.starts_with("Showing comments 3-5 of 5 on PRJ-1 (newest first):"),
             "got: {result}"
         );
-        for n in 3..=5 {
+        for n in 1..=3 {
             assert!(
                 result.contains(&format!("comment number {n}")),
                 "got: {result}"
             );
         }
-        assert!(!result.contains("comment number 2"), "got: {result}");
+        assert!(!result.contains("comment number 4\n"), "got: {result}");
+        assert!(!result.contains("comment number 5\n"), "got: {result}");
         assert!(!result.contains("more comment(s)"), "got: {result}");
     }
 
@@ -9238,6 +9438,52 @@ mod tests {
             !listing.contains("original"),
             "old body should be gone: {listing}"
         );
+    }
+
+    /// PR #34's 256 KiB body cap reaches MCP too, on both write paths, and a
+    /// rejected edit must leave the stored comment exactly as it was.
+    #[test]
+    fn oversized_comment_bodies_are_rejected_on_add_and_edit() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Bounded bodies");
+        let author = make_user(&m, "author", false);
+        let _guard = act_as(&author);
+
+        let oversized = "x".repeat(queries::comments::MAX_COMMENT_BYTES + 1);
+        let rejected = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: oversized.clone(),
+        }));
+        assert!(
+            rejected.starts_with("Error:") && rejected.contains("too large"),
+            "got: {rejected}"
+        );
+
+        let added = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: "keep me".into(),
+        }));
+        let cid = comment_id_from(&added);
+
+        let rejected = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            content: oversized,
+        }));
+        assert!(
+            rejected.starts_with("Error:") && rejected.contains("too large"),
+            "got: {rejected}"
+        );
+
+        let listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        assert!(
+            listing.starts_with("1 comment(s) on PRJ-1:"),
+            "the rejected add must not have landed: {listing}"
+        );
+        assert!(listing.contains("keep me"), "got: {listing}");
     }
 
     #[test]

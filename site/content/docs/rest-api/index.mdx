@@ -83,7 +83,11 @@ An endpoint that requires an authenticated user, such as saved views or project 
 
 Most collection endpoints return JSON arrays. Activity endpoints return an object with `items` and `has_more`; board, insights, and count endpoints return objects with their documented fields. Array responses do not include total counts or cursor metadata.
 
-`issues`, `plans`, and `search` default to `limit=50`, `limit=50`, and `limit=20` respectively. Their limits are clamped to `1..=500`. Activity feeds default to `limit=50` and clamp to `1..=200`; they return `has_more`. Comment limits are clamped to `1..=500`. Page lists apply pagination when `limit` or `offset` is supplied, with a maximum limit of `500`.
+`issues`, `plans`, and `search` default to `limit=50`, `limit=50`, and `limit=20` respectively. Their limits are clamped to `1..=500`. Activity feeds default to `limit=50` and clamp to `1..=200`; they return `has_more`. Comment lists default to `limit=50` and clamp to `1..=500`. Page lists apply pagination when `limit` or `offset` is supplied, with a maximum limit of `500`.
+
+Every `offset` is floored at `0`. A comment list array is a page, not a thread: it carries no total and no `has_more`, so a full page can be the end of the thread or the start of the next one. Request the page after it to find out.
+
+Comment lists also accept an optional keyset cursor, `before_created_at` plus `before_id`, which pages backwards from a comment the client has already seen without the drift an `offset` suffers when the thread is written to mid-read. See [comment endpoints](/docs/rest-api/work) for its rules.
 
 `GET /api/plans` supports keyset paging only when `order_by=id`. Pass `before_id` with that ordering. Other paginated endpoints use `limit` and `offset`.
 

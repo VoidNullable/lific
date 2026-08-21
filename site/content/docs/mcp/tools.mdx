@@ -38,9 +38,11 @@ Gets an issue and its details.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue identifier like PRO-42 or ADA-7 |
-| `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all`, or `none`. |
+| `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all` (most recent 500), or `none` (count only). |
 
 Relation lines include the related issue's current status, for example `Blocked by: LIF-42 (done)`.
+
+The comment trail is bounded in every mode, and each mode reads only the rows it renders. `none` loads no comment bodies at all and reports the total. `recent` loads three. `all` loads the most recent 500, the same cap every other comment list uses, and is not a way to retrieve an entire thread: when a thread is longer than that, the header says it is showing the most recent 500 and directs you to `list_comments` for the rest. Every mode prints its comments oldest first.
 
 ### `export`
 
@@ -325,19 +327,21 @@ Adds a comment to an issue, project page, or workspace page.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
-| `content` | `string` | Yes | Comment content (markdown) |
+| `content` | `string` | Yes | Comment content (markdown). Rejected over 262144 bytes after normalization. |
 
 ### `list_comments`
 
-Lists comments on an issue, project page, or workspace page.
+Lists one page of comments on an issue, project page, or workspace page. The defaults are chosen for an agent's context window: the 50 newest comments, not the whole thread.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
 | `author` | `string` | No | Filter to comments by this author username |
-| `order` | `string` | No | Sort direction by creation time: asc (default, oldest first) or desc (newest first) |
-| `limit` | `integer` | No | Optional maximum comments to return (cap 500). Omit to return the full thread. |
-| `offset` | `integer` | No | Zero-indexed offset for paging in the requested order. The output appends a paging hint when more comments exist. |
+| `order` | `string` | No | Sort direction by creation time: desc (default, newest first) or asc (oldest first) |
+| `limit` | `integer` | No | Maximum comments to return (default 50, cap 500) |
+| `offset` | `integer` | No | Zero-indexed offset for paging in the requested order. The output appends a paging hint with the next offset when more comments exist. |
+
+When the page is smaller than the thread, the first line says how many of the total it is showing, and the last line gives the exact `offset` for the next call.
 
 ### `edit_comment`
 
@@ -346,7 +350,7 @@ Updates the content of a comment by its numeric identifier.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `comment_id` | `integer` | Yes | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
-| `content` | `string` | Yes | New comment content (markdown) |
+| `content` | `string` | Yes | New comment content (markdown). Rejected over 262144 bytes after normalization, leaving the stored comment unchanged. |
 
 ### `delete_comment`
 

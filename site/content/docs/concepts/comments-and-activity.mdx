@@ -11,6 +11,27 @@ An author can edit and delete their own comments. Over REST, an administrator ca
 
 Each comment has a stable anchor derived from its numeric id, so a single comment in a thread can be linked to directly.
 
+A comment body is limited to 262144 bytes (256 KiB) after Lific normalizes escaped newlines and tabs. A create or edit over that limit is rejected with a `400` and leaves any existing comment unchanged. Comments already stored above the limit stay readable and editable down to a body within it.
+
+## Reading a thread
+
+No surface returns an unbounded thread. Every comment list is a page of at most 500 comments, and each surface has its own default:
+
+| Surface | Default page | Default order |
+| --- | --- | --- |
+| `GET /api/issues/{id}/comments`, `GET /api/pages/{id}/comments` | 50 | `asc` (oldest first) |
+| `list_comments` MCP tool | 50 | `desc` (newest first) |
+| `lific comment list` | 50 | `desc` (newest first) |
+| Web UI issue and page detail | 50 | newest page, shown oldest first |
+
+The REST default is `asc` for compatibility, so the default REST page of a long thread is its *oldest* 50 comments and says nothing about the newest one. Ask for `order=desc` to read the current end of a conversation. The MCP tool, the CLI, and the web UI all default to newest first for exactly that reason.
+
+Page with `offset`. The MCP tool and the CLI print the offset of the next page when one exists; the web UI offers a "Load older comments" control.
+
+REST comment lists additionally accept a keyset cursor (`before_created_at` plus `before_id`) that pages backwards from a comment already seen. It exists because an offset drifts under a live thread: one comment posted above a reader shifts every offset by one, so the next page repeats a comment or skips one. The web UI uses the cursor for exactly that reason.
+
+`get_issue` carries a comment trail too, and it is bounded the same way: `recent` (the default) shows the last three, `all` shows the most recent 500, and `none` reports only the count, including when that count is zero. A thread longer than the `all` window says so and points at `list_comments`.
+
 ## Mentions
 
 Comment text can include `@username` mentions. A mention token begins with `@` and can contain ASCII letters, digits, underscores, and hyphens.

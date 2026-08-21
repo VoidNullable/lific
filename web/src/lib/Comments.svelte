@@ -36,6 +36,8 @@
     canManageComment,
     commentKeyboardAction,
     commentWasEdited,
+    nextAnchorAttempt,
+    type AnchorPageAttempt,
     type CommentKeyboardContext,
   } from "./commentState";
 
@@ -57,6 +59,17 @@
     // and its body is re-scanned server-side — we pass no id here and let that
     // re-scan record the link.
     attachTo = null,
+    // A long thread arrives one page at a time (newest first, shown oldest
+    // first). `hasOlder` says the server holds comments before the ones on
+    // screen; `onLoadOlder` fetches the next page back. Without them the
+    // count below would quietly read as a total it isn't.
+    hasOlder = false,
+    loadingOlder = false,
+    onLoadOlder = undefined,
+    // Route-scoped identity of the thread's parent. The deep-link walk keys
+    // its budget on it, because two issues can hold the same number of
+    // comments and a walk abandoned on one route must not resume on the next.
+    parentKey = "",
   }: {
     comments: Comment[];
     editable?: boolean;
@@ -67,7 +80,14 @@
     placeholder?: string;
     projectId?: number | null;
     attachTo?: { entity_type: AttachmentEntity; entity_id: number } | null;
+    hasOlder?: boolean;
+    loadingOlder?: boolean;
+    onLoadOlder?: (() => void) | undefined;
+    parentKey?: string;
   } = $props();
+
+  // Only a partial thread may advertise itself as one.
+  let showOlderControl = $derived(hasOlder && onLoadOlder !== undefined);
 
   let draft = $state("");
   let submitting = $state(false);
@@ -89,6 +109,31 @@
     }
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
+  });
+
+  // A deep link can point at a comment older than the newest page, which used
+  // to resolve to nothing at all: the anchor was simply not in the DOM and the
+  // reader was left on the newest page with no sign they were in the wrong
+  // place. Walk back one bounded page at a time instead. The effect re-runs as
+  // each page lands, so it stops the moment the comment appears or the thread
+  // runs out; `loadingOlder` keeps it from stacking a second request on the
+  // first, and `nextAnchorAttempt` owns the rest of the stopping conditions,
+  // including the automatic page budget that keeps a link to a deleted comment
+  // from walking an entire thread. A plain `let`, not `$state`: the effect
+  // writes it, and reactivity here would mean the effect re-triggering itself.
+  let lastAnchorAttempt: AnchorPageAttempt | null = null;
+  $effect(() => {
+    const attempt = nextAnchorAttempt(
+      parentKey,
+      pendingCommentTarget,
+      comments,
+      hasOlder,
+      loadingOlder,
+      lastAnchorAttempt,
+    );
+    if (!attempt) return;
+    lastAnchorAttempt = attempt;
+    onLoadOlder?.();
   });
 
   $effect(() => {
@@ -453,9 +498,28 @@
   <header class="cmt__head">
     <h2 class="cmt__title">Comments</h2>
     {#if comments.length > 0}
-      <span class="cmt__count">{comments.length}</span>
+      <span
+        class="cmt__count"
+        title={showOlderControl
+          ? `${comments.length} newest shown, older comments not loaded yet`
+          : undefined}
+      >{comments.length}{showOlderControl ? "+" : ""}</span>
     {/if}
   </header>
+
+  {#if showOlderControl}
+    <div class="cmt__older">
+      <button
+        type="button"
+        class="cmt__older-button"
+        onclick={onLoadOlder}
+        disabled={loadingOlder}
+        aria-busy={loadingOlder}
+      >
+        {loadingOlder ? "Loading older comments\u2026" : "Load older comments"}
+      </button>
+    </div>
+  {/if}
 
   {#if comments.length > 0}
     <ol class="cmt__thread">
@@ -685,6 +749,35 @@
     font-size: 0.6875rem;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Older-page control ─────────────────────────────── */
+
+  .cmt__older {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1.25rem;
+  }
+  .cmt__older-button {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.3125rem 0.875rem;
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    transition:
+      border-color 0.15s var(--ease-out-expo),
+      color 0.15s var(--ease-out-expo);
+  }
+  .cmt__older-button:hover:not(:disabled),
+  .cmt__older-button:focus-visible:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .cmt__older-button:disabled {
+    opacity: 0.6;
+    cursor: progress;
   }
 
   /* ── Thread ─────────────────────────────────────────── */
@@ -1029,6 +1122,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .cmt__composer,
+    .cmt__older-button,
     .cmt__send {
       transition: none;
     }

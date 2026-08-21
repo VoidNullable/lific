@@ -117,33 +117,53 @@ It has no request body. Response: an activity feed with the shape documented for
 
 ### GET `/api/issues/{issue_id}/comments`
 
-Lists comments on an issue. Path parameter: `issue_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+Lists one page of comments on an issue. Path parameter: `issue_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), `offset` (integer), `before_created_at` (string), and `before_id` (integer). Every query parameter is optional.
 
-It has no request body. Response: a `Comment` array.
+`order` defaults to `asc` (oldest first). `limit` defaults to `50` and is clamped to `1..=500`. `offset` defaults to `0` and is floored at `0`. The default page of a long thread is therefore its oldest comments; pass `order=desc` to read the newest.
+
+`before_created_at` and `before_id` form an optional keyset cursor naming a comment the client has already seen. The response then holds only the comments strictly older than that position under the `(created_at, id)` ordering. Use it to page backwards through a thread that is still being written to: an `offset` shifts by one every time somebody posts above the reader, so the next page repeats a comment or skips one, while a cursor names a position that inserts cannot move.
+
+The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
+
+- Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
+- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
+- `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
+
+It has no request body. Response: a `Comment` array, unchanged in shape whether or not a cursor was used. The array is a page and carries no total or `has_more`, so a full page may be the end of the thread or the start of the next one; request the page after it to find out.
 
 ### POST `/api/issues/{issue_id}/comments`
 
 Creates a comment on an issue. Path parameter: `issue_id` (integer). It has no query parameters.
 
-Request body field: `content` (string). Response: a `Comment` object.
+Request body field: `content` (string). Response: a `Comment` object. A `content` over 262144 bytes after normalization is rejected with `400`.
 
 ### GET `/api/pages/{page_id}/comments`
 
-Lists comments on a page. Path parameter: `page_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+Lists one page of comments on a page. Path parameter: `page_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), `offset` (integer), `before_created_at` (string), and `before_id` (integer). Every query parameter is optional.
 
-It has no request body. Response: a `Comment` array.
+`order` defaults to `asc` (oldest first). `limit` defaults to `50` and is clamped to `1..=500`. `offset` defaults to `0` and is floored at `0`. The default page of a long thread is therefore its oldest comments; pass `order=desc` to read the newest.
+
+`before_created_at` and `before_id` form an optional keyset cursor naming a comment the client has already seen. The response then holds only the comments strictly older than that position under the `(created_at, id)` ordering. Use it to page backwards through a thread that is still being written to: an `offset` shifts by one every time somebody posts above the reader, so the next page repeats a comment or skips one, while a cursor names a position that inserts cannot move.
+
+The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
+
+- Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
+- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
+- `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
+
+It has no request body. Response: a `Comment` array, unchanged in shape whether or not a cursor was used. The array is a page and carries no total or `has_more`, so a full page may be the end of the thread or the start of the next one; request the page after it to find out.
 
 ### POST `/api/pages/{page_id}/comments`
 
 Creates a comment on a page. Path parameter: `page_id` (integer). It has no query parameters.
 
-Request body field: `content` (string). Response: a `Comment` object.
+Request body field: `content` (string). Response: a `Comment` object. A `content` over 262144 bytes after normalization is rejected with `400`.
 
 ### PUT `/api/comments/{id}`
 
 Updates a comment. Path parameter: `id` (integer comment ID). It has no query parameters. Only the comment author or an administrator can update it.
 
-Request body field: `content` (string). Response: a `Comment` object.
+Request body field: `content` (string). Response: a `Comment` object. A `content` over 262144 bytes after normalization is rejected with `400` and the stored comment is left unchanged.
 
 ### DELETE `/api/comments/{id}`
 

@@ -30,10 +30,54 @@ pub(super) struct ListCommentsQuery {
     author: Option<String>,
     /// Creation-time sort direction: asc (default) or desc.
     order: Option<String>,
-    /// Maximum comments to return (clamped by `list_comments_paginated`).
+    /// Maximum comments to return. Absent means the shared default of 50;
+    /// any value is clamped to `1..=500` by `queries::page`.
     limit: Option<i64>,
-    /// Number of matching comments to skip.
+    /// Number of matching comments to skip. Floored at 0.
     offset: Option<i64>,
+    /// Keyset cursor, first half: the `created_at` of the oldest comment the
+    /// caller has already seen. Optional, and only meaningful paired with
+    /// `before_id`.
+    before_created_at: Option<String>,
+    /// Keyset cursor, second half: the id of that same comment.
+    before_id: Option<i64>,
+}
+
+impl ListCommentsQuery {
+    /// Resolve the optional keyset cursor, rejecting the combinations that
+    /// cannot mean anything.
+    ///
+    /// The pair is optional so existing offset clients are untouched, but a
+    /// half-supplied cursor is a client bug rather than a request to ignore:
+    /// `created_at` alone would silently include a comment sharing that
+    /// second, which is the exact case the id half exists to settle. Answering
+    /// it with a plausible-looking page would hide the mistake.
+    fn cursor(&self) -> Result<Option<comments::CommentCursor>, LificError> {
+        match (self.before_created_at.as_deref(), self.before_id) {
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => Err(LificError::BadRequest(
+                "before_created_at and before_id must be supplied together".into(),
+            )),
+            (Some(created_at), Some(id)) => {
+                // Paging "before" a position is a backwards read by
+                // definition, and the ordering has to match the cursor's.
+                if self.order.as_deref() != Some("desc") {
+                    return Err(LificError::BadRequest(
+                        "keyset paging requires order=desc".into(),
+                    ));
+                }
+                if self.offset.is_some_and(|offset| offset != 0) {
+                    return Err(LificError::BadRequest(
+                        "keyset paging cannot be combined with a non-zero offset".into(),
+                    ));
+                }
+                Ok(Some(comments::CommentCursor {
+                    created_at: created_at.to_owned(),
+                    id,
+                }))
+            }
+        }
+    }
 }
 
 fn parent_project_id(db: &DbPool, parent: CommentParent) -> Result<Option<i64>, LificError> {
@@ -50,18 +94,21 @@ fn list_for_parent(
     parent: CommentParent,
     q: &ListCommentsQuery,
 ) -> Result<Json<Vec<Comment>>, LificError> {
+    let cursor = q.cursor()?;
     let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
     require_comment_viewer(db, identity, project_id)?;
     with_read(db, |conn| {
-        crate::db::queries::comments::list_comments_paginated(
+        comments::list_comments_keyset(
             conn,
             parent,
             q.author.as_deref(),
             q.order.as_deref(),
             Some(limit),
             Some(offset),
+            cursor.as_ref(),
         )
+        .map(|page| page.items)
     })
     .map(Json)
 }
@@ -418,10 +465,203 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = parse_json(response).await;
+        let comments = body.as_array().unwrap();
         assert_eq!(
-            parse_json(response).await.as_array().unwrap().len(),
+            comments.len(),
             crate::db::queries::DEFAULT_PAGE_LIMIT as usize
         );
+        // The documented REST default is `asc`, so the default page is the
+        // *oldest* window. Clients that need the newest comment must ask for
+        // it: nothing about this response promises the tail of the thread.
+        assert_eq!(comments[0]["content"], "comment-0");
+        assert_eq!(
+            comments.last().unwrap()["content"],
+            format!("comment-{}", crate::db::queries::DEFAULT_PAGE_LIMIT - 1)
+        );
+        assert!(
+            !comments.iter().any(|comment| comment["content"]
+                == format!("comment-{}", crate::db::queries::DEFAULT_PAGE_LIMIT)),
+            "the asc default page must not be read as containing the newest comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn page_comment_list_defaults_to_shared_page_limit() {
+        let (app, page_id, _) = setup_page_comment_test();
+        for index in 0..=crate::db::queries::DEFAULT_PAGE_LIMIT {
+            json_post(
+                &app,
+                &format!("/api/pages/{page_id}/comments"),
+                serde_json::json!({"content": format!("comment-{index}")}),
+            )
+            .await;
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/pages/{page_id}/comments"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = parse_json(response).await;
+        let comments = body.as_array().unwrap();
+        assert_eq!(
+            comments.len(),
+            crate::db::queries::DEFAULT_PAGE_LIMIT as usize
+        );
+        assert_eq!(comments[0]["content"], "comment-0");
+        assert!(
+            !comments.iter().any(|comment| comment["content"]
+                == format!("comment-{}", crate::db::queries::DEFAULT_PAGE_LIMIT)),
+            "the asc default page must not be read as containing the newest comment"
+        );
+    }
+
+    /// The keyset seam is optional and additive: the response is the same
+    /// bare array, offset clients are untouched, and the cursor pair pages
+    /// backwards from a position that inserts cannot shift.
+    #[tokio::test]
+    async fn issue_comments_support_keyset_paging() {
+        let (app, issue_id, _) = setup_comment_test();
+        for content in ["first", "second", "third", "fourth"] {
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({ "content": content }),
+            )
+            .await;
+        }
+
+        let newest = parse_json(
+            json_get(
+                &app,
+                &format!("/api/issues/{issue_id}/comments?order=desc&limit=2"),
+            )
+            .await,
+        )
+        .await;
+        let newest = newest.as_array().unwrap();
+        assert_eq!(newest[0]["content"], "fourth");
+        assert_eq!(newest[1]["content"], "third");
+
+        // A comment arrives above the reader. An offset of 2 would now hand
+        // back "third" a second time; the cursor still means "before third".
+        json_post(
+            &app,
+            &format!("/api/issues/{issue_id}/comments"),
+            serde_json::json!({"content": "fifth"}),
+        )
+        .await;
+
+        let boundary = &newest[1];
+        let uri = format!(
+            "/api/issues/{issue_id}/comments?order=desc&limit=2&before_created_at={}&before_id={}",
+            urlencoding::encode(boundary["created_at"].as_str().unwrap()),
+            boundary["id"].as_i64().unwrap()
+        );
+        let older = parse_json(json_get(&app, &uri).await).await;
+        let older = older.as_array().unwrap();
+        assert_eq!(older.len(), 2);
+        assert_eq!(older[0]["content"], "second");
+        assert_eq!(older[1]["content"], "first");
+    }
+
+    #[tokio::test]
+    async fn keyset_rejects_incoherent_cursor_combinations() {
+        let (app, issue_id, _) = setup_comment_test();
+        let created = parse_json(
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": "only"}),
+            )
+            .await,
+        )
+        .await;
+        let created_at = urlencoding::encode(created["created_at"].as_str().unwrap()).into_owned();
+        let id = created["id"].as_i64().unwrap();
+        let base = format!("/api/issues/{issue_id}/comments");
+
+        for uri in [
+            // Half a cursor is a client bug, not a request to ignore it.
+            format!("{base}?order=desc&before_created_at={created_at}"),
+            format!("{base}?order=desc&before_id={id}"),
+            // A "before" cursor only describes a backwards read.
+            format!("{base}?before_created_at={created_at}&before_id={id}"),
+            format!("{base}?order=asc&before_created_at={created_at}&before_id={id}"),
+            // Skipping relative to a position that already skipped.
+            format!("{base}?order=desc&offset=3&before_created_at={created_at}&before_id={id}"),
+        ] {
+            let response = json_get(&app, &uri).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "expected a 400 for {uri}"
+            );
+        }
+
+        // An explicit offset=0 is the same request as no offset.
+        let response = json_get(
+            &app,
+            &format!("{base}?order=desc&offset=0&before_created_at={created_at}&before_id={id}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// PR #34 caps a comment body at 256 KiB. The DB test pins the boundary
+    /// itself; these pin what the transport does with a body past it: a 400,
+    /// and on an edit, a row left exactly as it was.
+    #[tokio::test]
+    async fn oversized_comment_create_is_rejected() {
+        let (app, issue_id, _) = setup_comment_test();
+        let oversized = "x".repeat(crate::db::queries::comments::MAX_COMMENT_BYTES + 1);
+
+        let response = json_post(
+            &app,
+            &format!("/api/issues/{issue_id}/comments"),
+            serde_json::json!({ "content": oversized }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let listing = json_get(&app, &format!("/api/issues/{issue_id}/comments")).await;
+        assert!(parse_json(listing).await.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_comment_edit_is_rejected_and_leaves_the_row_alone() {
+        let (app, issue_id, _) = setup_comment_test();
+        let created = parse_json(
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": "Original"}),
+            )
+            .await,
+        )
+        .await;
+        let comment_id = created["id"].as_i64().unwrap();
+
+        let oversized = "x".repeat(crate::db::queries::comments::MAX_COMMENT_BYTES + 1);
+        let response = json_put(
+            &app,
+            &format!("/api/comments/{comment_id}"),
+            serde_json::json!({ "content": oversized }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let listing = parse_json(json_get(&app, &format!("/api/issues/{issue_id}/comments")).await)
+            .await;
+        let comments = listing.as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["content"], "Original");
     }
 
     #[tokio::test]

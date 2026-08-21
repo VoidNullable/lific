@@ -995,10 +995,10 @@ lific label delete --project <PROJECT> --name <NAME>
 
 ### comment list
 
-Lists comments on an issue.
+Lists one page of comments on an issue, newest first.
 
 ```shell
-lific comment list <IDENTIFIER>
+lific comment list <IDENTIFIER> [--limit <LIMIT>] [--offset <OFFSET>] [--order <ORDER>]
 ```
 
 **Arguments**
@@ -1007,11 +1007,27 @@ lific comment list <IDENTIFIER>
 
 **Flags**
 
-- None.
+- `-l, --limit <LIMIT>` sets the page size. Defaults to `50` and is clamped to `1..=500`.
+- `-o, --offset <OFFSET>` skips that many comments. Defaults to `0` and is floored at `0`.
+- `--order <ORDER>` is `desc` (default, newest first) or `asc` (oldest first). Any other value is rejected.
+
+The command never dumps a whole thread. When more comments sit past the page, the last line of human output names the offset to ask for next:
+
+```
+More comments available. Next page: --offset 50
+```
+
+Follow it with `lific comment list LIF-42 --offset 50` to read the next page back. Keep `--order` and `--limit` the same across the calls, or the offsets refer to a different window. JSON output (`--json`) is the plain comment array for the page and carries no paging hint, so a script should track the offset itself.
+
+With `--backend http`, a full page needs one extra request to learn whether anything follows it, because the REST comment list answers with a plain array. If that request fails, the command still succeeds and its JSON is unaffected, and the human output says so instead of implying the thread ended:
+
+```
+Could not check whether more comments exist. If they do, the next page is --offset 50.
+```
 
 ### comment add
 
-Adds a Markdown comment to an issue. If `--user` is omitted, the command uses the first administrator, then the first user.
+Adds a Markdown comment to an issue. If `--user` is omitted, the command uses the first administrator, then the first user. A comment body over 262144 bytes (256 KiB) after normalization is rejected.
 
 ```shell
 lific comment add <IDENTIFIER> --content <MARKDOWN> [--user <USERNAME>]

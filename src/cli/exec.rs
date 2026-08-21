@@ -470,26 +470,60 @@ fn search(
 
 // ── Comment ──────────────────────────────────────────────────
 
+/// One page of an issue's comments, plus what lies past it.
+///
+/// `limit`/`offset` go through the shared clamp (1..=500, offset floored at
+/// 0), and `list_comments_page` over-fetches one row inside the query, so
+/// `has_more` stays right even at the cap. The direct-SQL backend therefore
+/// always *knows* the answer and never returns
+/// [`CommentContinuation::Unknown`].
+fn comment_page(
+    conn: &rusqlite::Connection,
+    issue_id: i64,
+    limit: i64,
+    offset: i64,
+    order: &str,
+) -> Result<(Vec<Comment>, render::CommentContinuation), LificError> {
+    let (limit, offset) = queries::page(Some(limit), Some(offset));
+    let page = queries::comments::list_comments_page(
+        conn,
+        queries::comments::CommentParent::Issue(issue_id),
+        None,
+        Some(order),
+        Some(limit),
+        Some(offset),
+    )?;
+    let continuation = if page.has_more {
+        render::CommentContinuation::Next(offset + page.items.len() as i64)
+    } else {
+        render::CommentContinuation::End
+    };
+    Ok((page.items, continuation))
+}
+
 fn comment(
     pool: &DbPool,
     action: &CommentAction,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        CommentAction::List { identifier } => {
+        CommentAction::List {
+            identifier,
+            limit,
+            offset,
+            order,
+        } => {
             let conn = pool.read()?;
             let id = queries::resolve_identifier(&conn, identifier)?;
-            let comments = queries::comments::list_comments(
-                &conn,
-                queries::comments::CommentParent::Issue(id),
-                None,
-                None,
-            )?;
+            let (comments, continuation) = comment_page(&conn, id, *limit, *offset, order)?;
 
             if json {
                 print_json(&comments);
             } else {
-                print!("{}", render::comment_list(&comments, identifier));
+                print!(
+                    "{}",
+                    render::comment_list(&comments, identifier, continuation)
+                );
             }
         }
 
@@ -1087,9 +1121,142 @@ mod tests {
         let cmd = Command::Comment {
             action: CommentAction::List {
                 identifier: "TST-1".into(),
+                limit: queries::DEFAULT_PAGE_LIMIT,
+                offset: 0,
+                order: "desc".into(),
             },
         };
         run(&pool, &cmd, false).unwrap();
+    }
+
+    /// Seed `n` comments on TST-1 with distinct timestamps, so ordering
+    /// assertions do not depend on `datetime('now')`'s one-second grain.
+    fn seed_comment_trail(pool: &DbPool, n: i64) {
+        let conn = pool.write().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+        let user_id = queries::users::list_users(&conn).unwrap()[0].id;
+        for i in 1..=n {
+            let comment = queries::comments::create_comment(
+                &conn,
+                queries::comments::CommentParent::Issue(issue_id),
+                user_id,
+                &format!("comment {i}"),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE comments SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![format!("2026-01-01 00:{:02}:{:02}", i / 60, i % 60), comment.id],
+            )
+            .unwrap();
+        }
+    }
+
+    /// `comment list` is newest-first and bounded by default. An unbounded
+    /// oldest-first dump is exactly what a long thread cannot afford, and
+    /// the newest comment is the one a reader wants first.
+    #[test]
+    fn comment_list_defaults_to_the_newest_page() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Chatty");
+        seed_user(&pool);
+        let total = queries::DEFAULT_PAGE_LIMIT + 3;
+        seed_comment_trail(&pool, total);
+
+        let conn = pool.read().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+        let (comments, continuation) =
+            comment_page(&conn, issue_id, queries::DEFAULT_PAGE_LIMIT, 0, "desc").unwrap();
+
+        assert_eq!(comments.len(), queries::DEFAULT_PAGE_LIMIT as usize);
+        assert_eq!(comments[0].content, format!("comment {total}"));
+        assert_eq!(
+            continuation,
+            render::CommentContinuation::Next(queries::DEFAULT_PAGE_LIMIT)
+        );
+
+        // The hint is what makes the truncation discoverable at all.
+        let rendered = render::comment_list(&comments, "TST-1", continuation);
+        assert!(
+            rendered.contains(&format!(
+                "More comments available. Next page: --offset {}",
+                queries::DEFAULT_PAGE_LIMIT
+            )),
+            "got: {rendered}"
+        );
+
+        // The next page finishes the thread, so it carries no hint.
+        let (tail, continuation) = comment_page(
+            &conn,
+            issue_id,
+            queries::DEFAULT_PAGE_LIMIT,
+            queries::DEFAULT_PAGE_LIMIT,
+            "desc",
+        )
+        .unwrap();
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail.last().unwrap().content, "comment 1");
+        assert_eq!(continuation, render::CommentContinuation::End);
+        assert!(
+            !render::comment_list(&tail, "TST-1", continuation).contains("More comments"),
+            "a final page must not advertise another one"
+        );
+    }
+
+    #[test]
+    fn comment_list_honours_asc_and_floors_a_negative_offset() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Chatty");
+        seed_user(&pool);
+        seed_comment_trail(&pool, 5);
+
+        let conn = pool.read().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+
+        let (comments, _) = comment_page(&conn, issue_id, 10, 0, "asc").unwrap();
+        assert_eq!(comments.len(), 5);
+        assert_eq!(comments[0].content, "comment 1");
+
+        // A negative offset floors at 0 rather than reaching SQL.
+        let (comments, _) = comment_page(&conn, issue_id, 2, -10, "asc").unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].content, "comment 1");
+
+        assert!(comment_page(&conn, issue_id, 2, 0, "sideways").is_err());
+    }
+
+    /// `--limit 100000` is clamped to the shared 500-row cap, and the page
+    /// still knows a row sits past it.
+    #[test]
+    fn comment_list_clamps_limit_to_the_shared_cap() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Chatty");
+        seed_user(&pool);
+        {
+            let conn = pool.write().unwrap();
+            let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+            let user_id = queries::users::list_users(&conn).unwrap()[0].id;
+            // Inserted directly: this test is about the LIMIT arithmetic,
+            // not about comment creation.
+            for n in 0..=queries::MAX_PAGE_LIMIT {
+                conn.execute(
+                    "INSERT INTO comments (issue_id, user_id, content) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![issue_id, user_id, format!("comment {n}")],
+                )
+                .unwrap();
+            }
+        }
+
+        let conn = pool.read().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+        let (comments, continuation) = comment_page(&conn, issue_id, 100_000, 0, "desc").unwrap();
+        assert_eq!(comments.len() as i64, queries::MAX_PAGE_LIMIT);
+        assert_eq!(
+            continuation,
+            render::CommentContinuation::Next(queries::MAX_PAGE_LIMIT)
+        );
     }
 
     #[test]

@@ -89,6 +89,15 @@
     currentUser = null,
     onUpdateComment,
     onDeleteComment,
+    // Comment paging: `comments` is the newest page of a long thread, not
+    // necessarily the whole thread. The route owns the fetching; this shell
+    // just forwards the "there is more" signal so the thread can say so.
+    hasOlderComments = false,
+    loadingOlderComments = false,
+    onLoadOlderComments,
+    // Route-scoped identity of whatever owns this thread, so the deep-link
+    // walk in Comments cannot carry state across a navigation.
+    commentParentKey = "",
     // LIF-263: project id the comments belong to, used to fetch @mention
     // autocomplete candidates. Null for workspace pages (no member list).
     mentionProjectId = null,
@@ -160,6 +169,10 @@
     currentUser?: AuthUser | null;
     onUpdateComment?: (id: number, content: string) => Promise<Comment | null>;
     onDeleteComment?: (id: number) => Promise<boolean>;
+    hasOlderComments?: boolean;
+    loadingOlderComments?: boolean;
+    onLoadOlderComments?: (() => void) | undefined;
+    commentParentKey?: string;
     mentionProjectId?: number | null;
     activity?: Activity[];
     paletteActions?: PaletteAction[];
@@ -498,6 +511,10 @@
       onUpdate={onUpdateComment}
       onDelete={onDeleteComment}
       projectId={mentionProjectId}
+      hasOlder={hasOlderComments}
+      loadingOlder={loadingOlderComments}
+      onLoadOlder={onLoadOlderComments}
+      parentKey={commentParentKey}
     />
   {/if}
 

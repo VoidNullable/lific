@@ -326,7 +326,35 @@ pub fn search_results(results: &[SearchResult]) -> String {
 
 // ── Comment ──────────────────────────────────────────────────
 
-pub fn comment_list(comments: &[Comment], identifier: &str) -> String {
+/// What the CLI knows about comments sitting past the page it just printed.
+///
+/// This is three states, not an `Option`, because "there is no next page" and
+/// "I could not find out" are different things to tell a user. Collapsing them
+/// meant a failed lookup rendered as a complete thread, which is the one
+/// answer a bounded listing must never give by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentContinuation {
+    /// The page reached the end of the thread.
+    End,
+    /// More comments exist; this offset reads the next page.
+    Next(i64),
+    /// The page came back full and the check for a row past it failed, so
+    /// whether more exist is genuinely unknown. Only the remote backend can
+    /// reach this: the direct-SQL page answers `has_more` from an over-fetch
+    /// inside its own query, which cannot fail on its own.
+    Unknown(i64),
+}
+
+/// Render one page of a comment thread.
+///
+/// Both backends bound `comment list` now, so without the trailing line a
+/// truncated thread would be indistinguishable from a complete one, which is
+/// the failure mode the bound would otherwise introduce.
+pub fn comment_list(
+    comments: &[Comment],
+    identifier: &str,
+    continuation: CommentContinuation,
+) -> String {
     let mut out = String::new();
     if comments.is_empty() {
         w!(out, "No comments on {}.", identifier);
@@ -345,6 +373,19 @@ pub fn comment_list(comments: &[Comment], identifier: &str) -> String {
             w!(out, "    {line}");
         }
         w!(out);
+    }
+    match continuation {
+        CommentContinuation::End => {}
+        CommentContinuation::Next(next) => {
+            w!(out, "More comments available. Next page: --offset {}", next);
+        }
+        CommentContinuation::Unknown(next) => {
+            w!(
+                out,
+                "Could not check whether more comments exist. If they do, the next page is --offset {}.",
+                next
+            );
+        }
     }
     out
 }
@@ -513,6 +554,49 @@ mod tests {
         }
     }
 
+    fn comment(id: i64, content: &str) -> Comment {
+        Comment {
+            id,
+            issue_id: Some(1),
+            page_id: None,
+            user_id: 1,
+            author: "ada".into(),
+            author_display_name: "Ada".into(),
+            content: content.into(),
+            created_at: "2026-01-01 00:00:00".into(),
+            updated_at: "2026-01-01 00:00:00".into(),
+        }
+    }
+
+    /// The three continuation states have to read differently. A page that
+    /// ends the thread says nothing extra, a page with more says where to go,
+    /// and a page whose lookahead failed admits it instead of passing for a
+    /// complete thread.
+    #[test]
+    fn distinguishes_a_finished_thread_from_an_unchecked_one() {
+        let page = [comment(1, "hello")];
+
+        let complete = comment_list(&page, "TST-1", CommentContinuation::End);
+        assert!(!complete.contains("More comments"), "got: {complete}");
+        assert!(!complete.contains("Could not check"), "got: {complete}");
+
+        let more = comment_list(&page, "TST-1", CommentContinuation::Next(50));
+        assert!(
+            more.contains("More comments available. Next page: --offset 50\n"),
+            "got: {more}"
+        );
+
+        let unknown = comment_list(&page, "TST-1", CommentContinuation::Unknown(50));
+        assert!(
+            unknown.contains(
+                "Could not check whether more comments exist. \
+                 If they do, the next page is --offset 50.\n"
+            ),
+            "got: {unknown}"
+        );
+        assert!(!unknown.contains("More comments available"), "got: {unknown}");
+    }
+
     #[test]
     fn marks_statuses_and_priorities_with_indicators() {
         assert_eq!(fmt_status(Status::Active), "[~] active");
@@ -556,7 +640,10 @@ mod tests {
         assert_eq!(project_list(&[]), "No projects.\n");
         assert_eq!(page_list(&[]), "No pages found.\n");
         assert_eq!(search_results(&[]), "No results found.\n");
-        assert_eq!(comment_list(&[], "TST-1"), "No comments on TST-1.\n");
+        assert_eq!(
+            comment_list(&[], "TST-1", CommentContinuation::End),
+            "No comments on TST-1.\n"
+        );
         assert_eq!(module_list(&[], "TST"), "No modules in TST.\n");
         assert_eq!(label_list(&[], "TST"), "No labels in TST.\n");
         assert_eq!(folder_list(&[], "TST"), "No folders in TST.\n");

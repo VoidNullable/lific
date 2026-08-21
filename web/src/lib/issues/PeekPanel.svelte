@@ -62,7 +62,12 @@
   let issue = $state<Issue | null>(null);
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
+  // The preview reads one bounded page of comments, so this is a count of
+  // what that page held, not a thread total. `commentCountIsPartial` says
+  // the real number is higher, and the badge renders "50+" rather than
+  // passing a page length off as a total.
   let commentCount = $state<number | null>(null);
+  let commentCountIsPartial = $state(false);
   let loading = $state(false);
   let error = $state("");
 
@@ -86,6 +91,7 @@
     loading = true;
     error = "";
     commentCount = null;
+    commentCountIsPartial = false;
     const res = await resolveIssue(identifier);
     if (token !== loadToken) return;
     if (!res.ok) {
@@ -107,7 +113,10 @@
     if (token !== loadToken) return;
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
-    if (cmtRes.ok) commentCount = cmtRes.data.length;
+    if (cmtRes.ok) {
+      commentCount = cmtRes.data.items.length;
+      commentCountIsPartial = cmtRes.data.hasMore;
+    }
   }
 
   // ── Mutations ─────────────────────────────────────────
@@ -293,9 +302,14 @@
           {issue.identifier}
         </CopyIdButton>
         {#if commentCount !== null && commentCount > 0}
-          <span class="inline-flex items-center gap-1 text-caption text-[var(--text-faint)]">
+          <span
+            class="inline-flex items-center gap-1 text-caption text-[var(--text-faint)]"
+            title={commentCountIsPartial
+              ? `${commentCount} or more comments`
+              : `${commentCount} comment${commentCount === 1 ? "" : "s"}`}
+          >
             <MessageSquare size={12} />
-            {commentCount}
+            {commentCount}{commentCountIsPartial ? "+" : ""}
           </span>
         {/if}
       {/if}

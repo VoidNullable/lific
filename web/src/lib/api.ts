@@ -18,7 +18,7 @@ export interface ApiError {
   error: string;
 }
 
-type RequestResult<T> =
+export type RequestResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; status: number | null };
 
@@ -933,8 +933,78 @@ export async function listProjectActivityActors(projectId: number) {
   return request<ActorStat[]>(`/projects/${projectId}/activity/actors`);
 }
 
-export async function listComments(issueId: number) {
-  return request<Comment[]>(`/issues/${issueId}/comments`);
+/** Comments shown per request. One page of a thread, not the thread. */
+export const COMMENT_PAGE_SIZE = 50;
+
+/** Server cap on any single list request. The page helper over-fetches one
+ *  row past the page it wants, so the page size itself must stay under it. */
+const COMMENT_MAX_LIMIT = 500;
+
+/** A position in a thread, named by the ordering key `(created_at, id)`.
+ *
+ *  Offsets are the wrong tool here. A thread is written to while it is being
+ *  read: one comment posted above the reader shifts every offset by one, so
+ *  the next page silently repeats a row or skips one. This pair names a row's
+ *  place, and inserts above it change nothing. */
+export interface CommentCursor {
+  created_at: string;
+  id: number;
+}
+
+/** The cursor that pages to the comments *before* this one. */
+export function commentCursor(comment: Comment): CommentCursor {
+  return { created_at: comment.created_at, id: comment.id };
+}
+
+export interface CommentPage {
+  /** The page in chronological order, oldest of the page first. */
+  items: Comment[];
+  /** Whether older comments sit past this page. */
+  hasMore: boolean;
+  /** Cursor for the next, older page. Null when the page came back empty. */
+  nextCursor: CommentCursor | null;
+}
+
+/** Fetch one page of a comment thread, newest first, oldest-first on screen.
+ *
+ *  The REST default is `order=asc` for compatibility, which means the default
+ *  page of a long thread is the *oldest* 50 comments: exactly the ones nobody
+ *  opening an issue wants to see. So the UI always asks for `desc`, takes the
+ *  newest window, and reverses it back into reading order. One extra row is
+ *  requested so `hasMore` is an answer rather than a guess, and the request
+ *  stays inside the server's 500-row cap either way. */
+async function commentPage(
+  path: string,
+  before: CommentCursor | null,
+  pageSize: number,
+): Promise<RequestResult<CommentPage>> {
+  const size = Math.max(1, Math.min(pageSize, COMMENT_MAX_LIMIT - 1));
+  const params = new URLSearchParams({ order: "desc", limit: String(size + 1) });
+  if (before) {
+    params.set("before_created_at", before.created_at);
+    params.set("before_id", String(before.id));
+  }
+  const res = await request<Comment[]>(`${path}?${params}`);
+  if (!res.ok) return res;
+  const hasMore = res.data.length > size;
+  const items = (hasMore ? res.data.slice(0, size) : res.data).slice().reverse();
+  return {
+    ok: true,
+    data: {
+      items,
+      hasMore,
+      // The oldest row of the page is the boundary for the page before it.
+      nextCursor: items.length > 0 ? commentCursor(items[0]) : before,
+    },
+  };
+}
+
+export async function listComments(
+  issueId: number,
+  before: CommentCursor | null = null,
+  pageSize = COMMENT_PAGE_SIZE,
+) {
+  return commentPage(`/issues/${issueId}/comments`, before, pageSize);
 }
 
 export async function createComment(issueId: number, content: string) {
@@ -944,8 +1014,12 @@ export async function createComment(issueId: number, content: string) {
   });
 }
 
-export async function listPageComments(pageId: number) {
-  return request<Comment[]>(`/pages/${pageId}/comments`);
+export async function listPageComments(
+  pageId: number,
+  before: CommentCursor | null = null,
+  pageSize = COMMENT_PAGE_SIZE,
+) {
+  return commentPage(`/pages/${pageId}/comments`, before, pageSize);
 }
 
 export async function createPageComment(pageId: number, content: string) {

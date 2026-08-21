@@ -32,7 +32,17 @@
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
-  import { removeComment, replaceComment } from "../lib/commentState";
+  import {
+    COMMENT_WINDOW_RETRY_LIMIT,
+    commentOpIsCurrent,
+    commentWindowOutcome,
+    loadCommentWindow,
+    olderCursor,
+    prependOlderComments,
+    reconcileCommentWindow,
+    removeComment,
+    upsertComment,
+  } from "../lib/commentState";
   import { ArrowUpRight, ChevronDown } from "lucide-svelte";
 
   let {
@@ -81,10 +91,43 @@
   let modules = $state<Module[]>([]);
   let labels = $state<Label[]>([]);
   let comments = $state<Comment[]>([]);
+  // The thread on screen is a contiguous run ending at the newest comment.
+  // The cursor for the page before it comes from `comments[0]`, never from a
+  // row count: offsets move under a thread that is still being written to.
+  let hasOlderComments = $state(false);
+  let loadingOlderComments = $state(false);
   let currentUser = $state<AuthUser | null>(null);
   let activity = $state<Activity[]>([]);
   let loading = $state(true);
   let error = $state("");
+  // Bumped on every routed navigation. Anything in flight from before the bump
+  // belongs to an issue the reader has already left, and is discarded.
+  let loadGen = 0;
+  // Orders the operations that all replace or extend `comments` within one
+  // route: the initial window, a background refresh, a manual older page, and
+  // the local fold after a mutation. Last started wins; see
+  // `commentOpIsCurrent`.
+  let commentOp = 0;
+
+  // Bumped by every successful local create, edit or delete. A replacement
+  // refresh captures it when it starts and refuses to land if it changed,
+  // because that refresh read the thread before the edit existed and applying
+  // it now would undo work the user just did and watched succeed.
+  let commentMutationEpoch = 0;
+
+  /** Take ownership of the comment window for a new operation.
+   *
+   *  Only the two operations that rewrite or extend the whole window claim it:
+   *  a replacement refresh and a manual older page. Claiming cancels whatever
+   *  held it, which is why the spinner comes down here, since the superseded
+   *  operation is forbidden from touching it. Mutations deliberately do not
+   *  claim: they are surgical, idempotent, and must never cancel a page the
+   *  reader asked for. */
+  function claimCommentOp(): number {
+    loadingOlderComments = false;
+    commentOp += 1;
+    return commentOp;
+  }
 
   void me().then((res) => {
     if (res.ok) currentUser = res.data;
@@ -134,12 +177,27 @@
     moduleOpen = false;
     labelsOpen = false;
     lastSaved = null;
-    loadIssue(id);
+    // Claim the route synchronously, before any await can start. Everything
+    // in flight for the previous issue is now stale, and every field it could
+    // still write into is cleared here rather than left to be overwritten
+    // later: a slow response for LIF-9 must never paint over LIF-10, and the
+    // gap in between must not show LIF-9's comments under LIF-10's title.
+    loadGen += 1;
+    claimCommentOp();
+    issue = null;
+    modules = [];
+    labels = [];
+    comments = [];
+    hasOlderComments = false;
+    activity = [];
+    loadIssue(id, false, loadGen);
   });
 
   $effect(() =>
     startAutoRefresh({
-      refresh: () => loadIssue(issueIdentifier, true),
+      // Rides the current generation rather than claiming a new one, so a
+      // navigation that starts mid-refresh wins and this result is dropped.
+      refresh: () => loadIssue(issueIdentifier, true, loadGen),
       isBusy: () =>
         bodyMode === "edit" ||
         saving ||
@@ -158,10 +216,25 @@
     }),
   );
 
-  async function loadIssue(identifier: string, background = false) {
-    loading = !background;
-    error = "";
+  /// `gen` is the route generation this load belongs to. A navigation bumps
+  /// `loadGen`, which makes every result still in flight stale, so each of
+  /// them is dropped rather than written into the new issue's state. A
+  /// background refresh rides the *current* generation without claiming it:
+  /// it must lose to a navigation that starts while it is running.
+  async function loadIssue(identifier: string, background: boolean, gen: number) {
+    if (!background) {
+      loading = true;
+      error = "";
+    }
+    // A refresh replaces the whole window, so any manual older page in flight
+    // is obsolete from here on. The mutation epoch is captured rather than
+    // claimed: this read reflects the thread as it is now, and any edit the
+    // user makes while it is in flight is newer truth than it holds.
+    const op = claimCommentOp();
+    const epoch = commentMutationEpoch;
+    const loadedRows = comments.length;
     const res = await resolveIssue(identifier);
+    if (gen !== loadGen) return;
     if (!res.ok) {
       error = res.error;
       loading = false;
@@ -171,25 +244,117 @@
     loadProjectRole(issue.project_id); // LIF-234: prime role gating for this project
     recordRecent({ type: "issue", routeId: issue.identifier, identifier: issue.identifier, title: issue.title, project: projectIdentifier }); // LIF-237
 
+    const issueId = issue.id;
     const [modRes, lblRes, cmtRes, actRes] = await Promise.all([
       listModules(issue.project_id),
       listLabels(issue.project_id),
-      listComments(issue.id),
-      listIssueActivity(issue.id),
+      // A background refresh reconciles every page the reader has loaded, not
+      // just the newest, so a comment someone else edited or deleted further
+      // up the thread stops being frozen at the moment it first arrived.
+      loadCommentWindow(
+        (before, size) => listComments(issueId, before, size),
+        background ? loadedRows : 0,
+      ),
+      listIssueActivity(issueId),
     ]);
+    if (gen !== loadGen) return;
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
-    if (cmtRes.ok) comments = cmtRes.data;
+    // The comment window is guarded separately, so the rest of the issue still
+    // updates even when the thread has moved on: a manual older page may have
+    // taken the window over, or a mutation may have landed an edit this read
+    // predates.
+    if (cmtRes.ok) {
+      const outcome = commentWindowOutcome(
+        { route: gen, op, epoch },
+        loadGen,
+        commentOp,
+        commentMutationEpoch,
+      );
+      if (outcome === "apply") {
+        // Anything the reader loaded past the refresh's row budget sits below
+        // the refreshed window and is kept rather than discarded.
+        const merged = reconcileCommentWindow(
+          { items: comments, hasOlder: hasOlderComments },
+          cmtRes.data,
+        );
+        comments = merged.items;
+        hasOlderComments = merged.hasOlder;
+      } else if (outcome === "retry") {
+        // Fired, not awaited: `loading` must come down on schedule below.
+        void restabilizeCommentWindow(issueId, gen);
+      }
+    }
     if (actRes.ok) activity = actRes.data.items;
 
     loading = false;
+  }
+
+  /// Re-read the newest window after a mutation landed while a replacement was
+  /// already in flight.
+  ///
+  /// That read predates the edit, so it cannot be applied, but discarding it
+  /// outright is what leaves a thread showing nothing but the row the mutation
+  /// folded in: navigate away and back with a write still pending and the
+  /// replacement for the second visit is invalidated by that write. Read again
+  /// against the epoch the mutation established.
+  ///
+  /// An async loop, never recursion on the synchronous stack, and capped: if
+  /// mutations keep landing faster than a window can be read, the locally
+  /// folded rows stay visible and the next focus or realtime refresh
+  /// reconciles them. Giving up is the correct end state, storming is not.
+  async function restabilizeCommentWindow(parentId: number, gen: number) {
+    for (let attempt = 0; attempt < COMMENT_WINDOW_RETRY_LIMIT; attempt += 1) {
+      if (gen !== loadGen || issue?.id !== parentId) return;
+      const token = { route: gen, op: claimCommentOp(), epoch: commentMutationEpoch };
+      const loadedRows = comments.length;
+      const res = await loadCommentWindow(
+        (before, size) => listComments(parentId, before, size),
+        loadedRows,
+      );
+      if (!res.ok) return;
+      const outcome = commentWindowOutcome(token, loadGen, commentOp, commentMutationEpoch);
+      if (outcome === "abandon") return;
+      if (outcome === "retry") continue;
+      const merged = reconcileCommentWindow(
+        { items: comments, hasOlder: hasOlderComments },
+        res.data,
+      );
+      comments = merged.items;
+      hasOlderComments = merged.hasOlder;
+      return;
+    }
+  }
+
+  async function loadOlderComments() {
+    const current = issue;
+    if (!current || loadingOlderComments || !hasOlderComments) return;
+    const gen = loadGen;
+    const op = claimCommentOp();
+    loadingOlderComments = true;
+    // Keyed on the oldest comment on screen, so a comment posted while this
+    // request is in flight cannot shift what "the previous page" means.
+    const res = await listComments(current.id, olderCursor(comments));
+    // Token first. A page that arrives after the reader navigated, or after a
+    // refresh took the window over, must not clear the newer operation's
+    // loading flag, let alone prepend this issue's comments to another thread.
+    if (!commentOpIsCurrent({ route: gen, op }, loadGen, commentOp)) return;
+    loadingOlderComments = false;
+    if (!res.ok) {
+      toast(`Couldn't load older comments: ${res.error}`, { kind: "error" });
+      return;
+    }
+    comments = prependOlderComments(comments, res.data.items);
+    hasOlderComments = res.data.hasMore;
   }
 
   // Re-pull the timeline after any mutation so the user's own edit shows
   // up in Activity immediately (it was just audited server-side).
   async function refreshActivity() {
     if (!issue) return;
+    const gen = loadGen;
     const res = await listIssueActivity(issue.id);
+    if (gen !== loadGen) return;
     if (res.ok) activity = res.data.items;
   }
 
@@ -345,37 +510,69 @@
 
   // ── Comments / export / delete ───────────────────────
 
+  // Each mutation captures the thread it belongs to before it sends, by parent
+  // id rather than by route generation. Those differ: a failed load retried,
+  // or a navigation away and back to the same issue, bumps the generation
+  // while leaving the thread on screen exactly the one the write was for.
+  // Gating on identity means such a write still lands, which is the coherent
+  // answer, and a write for a different parent is dropped.
+  //
+  // On success the mutation epoch is bumped and the result folded in
+  // unconditionally, so a comment the user just posted, edited or deleted is
+  // visible immediately. `upsertComment` and `removeComment` are idempotent
+  // and order-preserving, so the same row arriving later through a refresh
+  // cannot duplicate it or move it.
+  //
+  // Bumping the epoch is what protects the fold. A replacement refresh
+  // captured the old epoch when it started, so it can no longer land and undo
+  // this edit; the next refresh captures the new one and reconciles normally.
+  // A manual older page needs no such guard: it returns rows strictly below a
+  // cursor these mutations never touch.
   async function handleNewComment(content: string) {
-    if (!issue) return null;
-    const res = await createComment(issue.id, content);
+    const parentId = issue?.id;
+    if (parentId === undefined) return null;
+    const res = await createComment(parentId, content);
     if (!res.ok) {
       toast(`Couldn't add comment: ${res.error}`, { kind: "error" });
       return null;
     }
-    comments = [...comments, res.data];
-    refreshActivity();
+    if (issue?.id === parentId) {
+      commentMutationEpoch += 1;
+      comments = upsertComment(comments, res.data);
+      refreshActivity();
+    }
     return res.data;
   }
 
   async function handleUpdateComment(id: number, content: string) {
+    const parentId = issue?.id;
+    if (parentId === undefined) return null;
     const res = await updateComment(id, content);
     if (!res.ok) {
       toast(`Couldn't update comment: ${res.error}`, { kind: "error" });
       return null;
     }
-    comments = replaceComment(comments, res.data);
-    refreshActivity();
+    if (issue?.id === parentId) {
+      commentMutationEpoch += 1;
+      comments = upsertComment(comments, res.data);
+      refreshActivity();
+    }
     return res.data;
   }
 
   async function handleDeleteComment(id: number): Promise<boolean> {
+    const parentId = issue?.id;
+    if (parentId === undefined) return false;
     const res = await deleteComment(id);
     if (!res.ok) {
       toast(`Couldn't delete comment: ${res.error}`, { kind: "error" });
       return false;
     }
-    comments = removeComment(comments, id);
-    refreshActivity();
+    if (issue?.id === parentId) {
+      commentMutationEpoch += 1;
+      comments = removeComment(comments, id);
+      refreshActivity();
+    }
     return true;
   }
 
@@ -493,7 +690,7 @@
   {loading}
   {error}
   deleteNounLabel="issue"
-  onRetry={() => loadIssue(issueIdentifier)}
+  onRetry={() => loadIssue(issueIdentifier, false, ++loadGen)}
   identifier={issue?.identifier ?? issueIdentifier}
   attachEntity={issue ? { entity_type: "issue", entity_id: issue.id } : null}
   backRoute={backHref()}
@@ -532,6 +729,10 @@
   {currentUser}
   onUpdateComment={handleUpdateComment}
   onDeleteComment={handleDeleteComment}
+  {hasOlderComments}
+  {loadingOlderComments}
+  onLoadOlderComments={loadOlderComments}
+  commentParentKey={`issue:${issueIdentifier}`}
   mentionProjectId={issue?.project_id ?? null}
   {activity}
   {paletteActions}

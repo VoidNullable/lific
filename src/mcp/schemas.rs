@@ -66,7 +66,9 @@ pub struct ListIssuesInput {
 pub struct GetIssueInput {
     #[schemars(description = "Issue ID like PRO-42 or ADA-7")]
     pub identifier: String,
-    #[schemars(description = "Comment trail: 'recent' (default, last 3), 'all', or 'none'.")]
+    #[schemars(
+        description = "Comment trail: 'recent' (default, last 3), 'all' (most recent 500; page the rest with list_comments), or 'none' (count only)."
+    )]
     pub include_comments: Option<String>,
 }
 
@@ -343,11 +345,11 @@ pub struct ListCommentsInput {
     #[schemars(description = "Filter to comments by this author username")]
     pub author: Option<String>,
     #[schemars(
-        description = "Sort direction by creation time: asc (default, oldest first) or desc (newest first)"
+        description = "Sort direction by creation time: desc (default, newest first) or asc (oldest first)"
     )]
     pub order: Option<String>,
     #[schemars(
-        description = "Optional maximum comments to return (cap 500). Omit to return the full thread."
+        description = "Maximum comments to return (default 50, cap 500). A long thread is paged, never dumped whole."
     )]
     pub limit: Option<i64>,
     #[schemars(description = "Zero-indexed offset for paging")]

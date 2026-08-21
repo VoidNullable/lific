@@ -825,10 +825,22 @@ pub enum ExportAction {
 
 #[derive(Subcommand)]
 pub enum CommentAction {
-    /// List comments on an issue
+    /// List comments on an issue, newest first
     List {
         /// Issue identifier (e.g. LIF-42)
         identifier: String,
+
+        /// Maximum comments to return (max 500)
+        #[arg(short, long, default_value_t = crate::db::queries::DEFAULT_PAGE_LIMIT)]
+        limit: i64,
+
+        /// Number of comments to skip, for reading the next page
+        #[arg(short, long, default_value_t = 0)]
+        offset: i64,
+
+        /// Creation-time sort direction
+        #[arg(long, default_value = "desc", value_parser = ["asc", "desc"])]
+        order: String,
     },
 
     /// Add a comment to an issue
@@ -2312,10 +2324,58 @@ mod tests {
         let cli = Cli::try_parse_from(["lific", "comment", "list", "LIF-42"]).unwrap();
         match cli.command {
             Command::Comment {
-                action: CommentAction::List { identifier },
-            } => assert_eq!(identifier, "LIF-42"),
+                action:
+                    CommentAction::List {
+                        identifier,
+                        limit,
+                        offset,
+                        order,
+                    },
+            } => {
+                assert_eq!(identifier, "LIF-42");
+                // Bounded and newest-first unless the caller says otherwise.
+                assert_eq!(limit, crate::db::queries::DEFAULT_PAGE_LIMIT);
+                assert_eq!(offset, 0);
+                assert_eq!(order, "desc");
+            }
             _ => panic!("expected Comment List"),
         }
+    }
+
+    #[test]
+    fn parse_comment_list_paging_flags() {
+        let cli = Cli::try_parse_from([
+            "lific", "comment", "list", "LIF-42", "--limit", "10", "--offset", "20", "--order",
+            "asc",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Comment {
+                action:
+                    CommentAction::List {
+                        limit,
+                        offset,
+                        order,
+                        ..
+                    },
+            } => {
+                assert_eq!(limit, 10);
+                assert_eq!(offset, 20);
+                assert_eq!(order, "asc");
+            }
+            _ => panic!("expected Comment List"),
+        }
+    }
+
+    /// Only asc and desc are sort directions, and clap says so before any
+    /// backend is reached. The SQL backend would reject it too, but the
+    /// remote backend would otherwise ship the garbage value to the server.
+    #[test]
+    fn parse_comment_list_rejects_an_invalid_order() {
+        assert!(
+            Cli::try_parse_from(["lific", "comment", "list", "LIF-42", "--order", "newest"])
+                .is_err()
+        );
     }
 
     #[test]

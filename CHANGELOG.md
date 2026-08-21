@@ -36,6 +36,15 @@ A project's blocking structure becomes something you can see and edit: the new g
 - **The CLI refuses to send an API key over plaintext HTTP to a remote host.** What used to be a warning is now an error, and the error message never echoes the key. Loopback targets still work over plain HTTP, and unauthenticated plain-HTTP connections still warn rather than fail.
 - **Jira import validates the site name before sending credentials anywhere.** The site slug becomes the hostname of every request, so a hostile value could have steered your Atlassian token to a host an attacker controls. It is now constrained to a single DNS-label-shaped slug, and the canonical slug is used consistently for both requests and imported identities.
 
+### Comments (PR #34 by [@mjc](https://github.com/mjc))
+
+- **A comment body is capped at 256 KiB.** The limit is checked after Lific normalizes escaped newlines and tabs, so it bounds what actually lands in the database rather than what was typed. A create or edit past it is rejected and leaves the stored comment untouched. Comments already larger than the cap stay readable, and editing one down to a smaller body works.
+- **No surface returns an unbounded comment thread any more.** Every comment list is a page of at most 500. REST keeps its documented `order=asc` default and now defaults to `limit=50`; the MCP `list_comments` tool and `lific comment list` default to the 50 *newest*, which is the half of a long thread anyone actually wants. The MCP tool and the CLI print the exact offset for the next page when one exists, and the CLI says so explicitly when a remote lookup could not determine whether more comments follow, rather than letting a full page read as a finished thread.
+- **`get_issue` no longer loads a whole thread to print three comments.** Each comment mode now reads only the rows it renders: `none` loads none and reports the count, `recent` loads three, and `include_comments='all'` is capped at the most recent 500 with a header saying so and pointing at `list_comments`. Given that a single comment can be 256 KiB, the tool an agent calls most often was the worst place for an unbounded read.
+- **Reading a busy issue in the web UI no longer means loading every comment.** Issue and page detail open on the newest 50, still in reading order, with a "Load older comments" control for the rest. Opening a link to a comment further back walks the pages in automatically, up to 250 comments, and scrolls to it; past that the reader continues by hand, so a link to a deleted comment cannot crawl a whole thread. The preview panel's comment count reads `50+` when it is showing a bounded page rather than passing a page length off as a total.
+- **Comment lists accept a keyset cursor.** `before_created_at` plus `before_id` returns the comments strictly older than one you have already seen. Offsets drift under a thread that is being written to: one comment posted above a reader shifts every offset by one, so the next page repeats a comment or skips one. The cursor names a position instead, and the web UI pages with it. The parameters are optional, the response shape is unchanged, and existing `limit`/`offset` clients are untouched.
+- **A background refresh reconciles every comment page on screen**, not just the newest one, so a comment somebody else edited or deleted further up a long thread stops being frozen at the moment you first loaded it. The refresh never fetches more than you already had loaded.
+
 ### API
 
 - **`GET /api/auth/me` now answers 403 `authentication required` when unauthenticated**, like every other endpoint. It was the one endpoint that escaped the v2.6.0 consolidation and still returned a 400.
@@ -53,6 +62,9 @@ A project's blocking structure becomes something you can see and edit: the new g
 - Three migrations run automatically on first start: the bot-identity unique constraint (merging any existing duplicates), case-insensitive project identifiers, and the account active flag behind deactivation. No manual steps.
 - If a script drives `--backend http` with an API key against a remote `http://` URL, it now exits with an error instead of proceeding past a warning. Switch the target to `https://` or a loopback address.
 - Audit retention stays off unless you set `audit_retention_days`; nothing is deleted by default.
+- `lific comment list` is now bounded and newest-first. A script that relied on it printing an entire thread oldest-first needs `--order asc` and its own `--offset` loop.
+- A client reading `GET /api/issues/{id}/comments` without a `limit` now gets 50 comments instead of all of them. The ordering is unchanged (`asc`), so the page is the oldest 50; page with `offset`, or pass `order=desc` for the newest.
+- `get_issue` with `include_comments='all'` returns at most the 500 most recent comments. Threads longer than that need `list_comments` to page the remainder.
 
 ## v2.6.0 (2026-08-15)
 

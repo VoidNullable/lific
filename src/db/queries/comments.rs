@@ -161,9 +161,15 @@ pub fn get_comment(conn: &Connection, id: i64) -> Result<Comment, LificError> {
     })
 }
 
-/// List comments for an issue or page, ordered chronologically (oldest
+/// List *every* comment for an issue or page, ordered chronologically (oldest
 /// first by default; pass `order = Some("desc")` for newest first).
 /// `author` filters by exact username (case-insensitive).
+///
+/// Test-only. No shipped read is unbounded any more: a comment body may be
+/// 256 KiB, so "the whole thread" is not a size anyone can reason about.
+/// Production callers pick a window through [`list_comments_page`] or
+/// [`list_comments_paginated`].
+#[cfg(test)]
 pub fn list_comments(
     conn: &Connection,
     parent: CommentParent,
@@ -221,6 +227,35 @@ pub fn list_comments_paginated(
     Ok(list_comments_page(conn, parent, author, order, limit, offset)?.items)
 }
 
+/// A position in a comment thread, named by the ordering key itself.
+///
+/// Comments are ordered by `(created_at, id)`, so that pair identifies a row's
+/// place in the thread exactly. Unlike an offset it does not move when someone
+/// posts or deletes a comment while a reader is paging: "the rows before this
+/// one" stays the same question no matter what happened above it. The id is
+/// part of the cursor because `created_at` has one-second resolution and
+/// several comments routinely share a timestamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentCursor {
+    pub created_at: String,
+    pub id: i64,
+}
+
+impl CommentCursor {
+    /// The cursor that pages to the rows *before* `comment`.
+    ///
+    /// Test-only in Rust: the shipped consumer is the web client, which
+    /// derives the same pair from the JSON it already holds and sends it back
+    /// as `before_created_at` + `before_id`.
+    #[cfg(test)]
+    pub fn before(comment: &Comment) -> Self {
+        Self {
+            created_at: comment.created_at.clone(),
+            id: comment.id,
+        }
+    }
+}
+
 /// [`list_comments_paginated`] as a [`Page`](super::Page).
 ///
 /// LIF-388: the over-fetch that answers `has_more` happens here, after the
@@ -236,6 +271,25 @@ pub fn list_comments_page(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<super::Page<Comment>, LificError> {
+    list_comments_keyset(conn, parent, author, order, limit, offset, None)
+}
+
+/// [`list_comments_page`] with an optional keyset cursor.
+///
+/// `before` returns only the rows strictly older than that position, which is
+/// what makes "load the previous page" stable while a thread is being written
+/// to. It requires `order = desc` (paging backwards is the only direction a
+/// "before" cursor describes) and no offset, since mixing the two would mean
+/// skipping rows relative to a position that already did the skipping.
+pub fn list_comments_keyset(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    before: Option<&CommentCursor>,
+) -> Result<super::Page<Comment>, LificError> {
     let dir = match order {
         None | Some("asc") => "ASC",
         Some("desc") => "DESC",
@@ -245,6 +299,18 @@ pub fn list_comments_page(
             )));
         }
     };
+    if before.is_some() {
+        if dir != "DESC" {
+            return Err(LificError::BadRequest(
+                "keyset paging requires order=desc".into(),
+            ));
+        }
+        if offset.is_some_and(|offset| offset != 0) {
+            return Err(LificError::BadRequest(
+                "keyset paging cannot be combined with a non-zero offset".into(),
+            ));
+        }
+    }
     let (parent_col, id) = match parent {
         CommentParent::Issue(id) => ("c.issue_id", id),
         CommentParent::Page(id) => ("c.page_id", id),
@@ -263,6 +329,18 @@ pub fn list_comments_page(
             param_values.len() + 1
         ));
         param_values.push(Box::new(username.to_string()));
+    }
+    if let Some(cursor) = before {
+        // Strictly older than the cursor under the same (created_at, id)
+        // ordering the query sorts by. Both halves are bound parameters; the
+        // cursor is caller-supplied and never reaches the SQL text.
+        sql.push_str(&format!(
+            " AND (c.created_at < ?{ts} OR (c.created_at = ?{ts} AND c.id < ?{id}))",
+            ts = param_values.len() + 1,
+            id = param_values.len() + 2
+        ));
+        param_values.push(Box::new(cursor.created_at.clone()));
+        param_values.push(Box::new(cursor.id));
     }
     // `dir` comes from the two-value whitelist above, never raw input.
     sql.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
@@ -886,6 +964,171 @@ mod tests {
 
         let asc = list_comments(&conn, CommentParent::Issue(issue_id), None, Some("asc")).unwrap();
         assert_eq!(asc[0].content, "oldest");
+    }
+
+    /// Keyset paging names a row's place by the ordering key itself, so it
+    /// survives writes that an offset cannot: a comment posted above the
+    /// reader shifts every offset by one, and the reader silently re-reads a
+    /// row or skips one. The cursor asks a question inserts cannot change.
+    #[test]
+    fn keyset_pages_backwards_stably_while_the_thread_grows() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let parent = CommentParent::Issue(issue_id);
+        // Same timestamp on every row, so the id half of the cursor is what
+        // makes the boundary exact. This is the common case in practice:
+        // created_at has one-second resolution.
+        for index in 1..=6 {
+            let comment =
+                create_comment(&conn, parent, user_id, &format!("comment {index}")).unwrap();
+            conn.execute(
+                "UPDATE comments SET created_at = '2026-01-01 00:00:00' WHERE id = ?1",
+                params![comment.id],
+            )
+            .unwrap();
+        }
+
+        let newest =
+            list_comments_keyset(&conn, parent, None, Some("desc"), Some(2), None, None).unwrap();
+        assert_eq!(
+            newest
+                .items
+                .iter()
+                .map(|c| c.content.as_str())
+                .collect::<Vec<_>>(),
+            ["comment 6", "comment 5"]
+        );
+        assert!(newest.has_more);
+
+        // A new comment lands while the reader is paging. With an offset the
+        // next page would repeat "comment 5"; the cursor is unmoved.
+        create_comment(&conn, parent, user_id, "comment 7").unwrap();
+        let cursor = CommentCursor::before(newest.items.last().unwrap());
+        let older = list_comments_keyset(
+            &conn,
+            parent,
+            None,
+            Some("desc"),
+            Some(2),
+            None,
+            Some(&cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            older
+                .items
+                .iter()
+                .map(|c| c.content.as_str())
+                .collect::<Vec<_>>(),
+            ["comment 4", "comment 3"]
+        );
+        assert!(older.has_more);
+
+        // Paging to the start reports no more, and the pages never overlap.
+        let cursor = CommentCursor::before(older.items.last().unwrap());
+        let tail = list_comments_keyset(
+            &conn,
+            parent,
+            None,
+            Some("desc"),
+            Some(2),
+            None,
+            Some(&cursor),
+        )
+        .unwrap();
+        assert_eq!(
+            tail.items
+                .iter()
+                .map(|c| c.content.as_str())
+                .collect::<Vec<_>>(),
+            ["comment 2", "comment 1"]
+        );
+        assert!(!tail.has_more);
+    }
+
+    #[test]
+    fn keyset_requires_desc_and_no_offset() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let parent = CommentParent::Issue(issue_id);
+        let comment = create_comment(&conn, parent, user_id, "only").unwrap();
+        let cursor = CommentCursor::before(&comment);
+
+        // A "before" cursor only describes paging backwards.
+        assert!(matches!(
+            list_comments_keyset(
+                &conn,
+                parent,
+                None,
+                Some("asc"),
+                Some(2),
+                None,
+                Some(&cursor)
+            ),
+            Err(LificError::BadRequest(_))
+        ));
+        assert!(matches!(
+            list_comments_keyset(&conn, parent, None, None, Some(2), None, Some(&cursor)),
+            Err(LificError::BadRequest(_))
+        ));
+        // Skipping relative to a position that already skipped is incoherent.
+        assert!(matches!(
+            list_comments_keyset(
+                &conn,
+                parent,
+                None,
+                Some("desc"),
+                Some(2),
+                Some(5),
+                Some(&cursor)
+            ),
+            Err(LificError::BadRequest(_))
+        ));
+        // An explicit zero offset is the same request as no offset.
+        assert!(
+            list_comments_keyset(
+                &conn,
+                parent,
+                None,
+                Some("desc"),
+                Some(2),
+                Some(0),
+                Some(&cursor)
+            )
+            .is_ok()
+        );
+    }
+
+    /// A cursor is caller-controlled text. It must be a bound parameter, not
+    /// spliced into the statement.
+    #[test]
+    fn keyset_cursor_is_bound_not_interpolated() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let parent = CommentParent::Issue(issue_id);
+        create_comment(&conn, parent, user_id, "survivor").unwrap();
+
+        // Sorts before any real timestamp, so a bound parameter matches
+        // nothing. Interpolated, the trailing `OR '1'='1` would either widen
+        // the predicate to every row or blow up as a syntax error.
+        let hostile = CommentCursor {
+            created_at: "0000-01-01' OR '1'='1".into(),
+            id: i64::MAX,
+        };
+        let page = list_comments_keyset(
+            &conn,
+            parent,
+            None,
+            Some("desc"),
+            Some(10),
+            None,
+            Some(&hostile),
+        )
+        .unwrap();
+        // The literal never matches a real timestamp, so nothing comes back
+        // and, crucially, the row is still there afterwards.
+        assert!(page.items.is_empty());
+        assert_eq!(count_comments(&conn, parent, None).unwrap(), 1);
     }
 
     #[test]

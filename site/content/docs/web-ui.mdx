@@ -43,6 +43,10 @@ Comments on issues and pages are threaded in one list. Your own comments carry a
 
 Each comment has a stable anchor link next to its author, so you can point someone at one comment rather than the whole thread. In Markdown, `#42` becomes a link to comment 42 on the current issue or page, and `LIF-25#comment-42` links to a comment on another issue. Both are skipped inside code spans and code blocks.
 
+A long thread opens on its 50 most recent comments, in reading order, with a "Load older comments" control above them. The comment count next to the heading shows a trailing `+` while older comments are still unloaded, so it never reads as a total it is not.
+
+Opening a link to a comment further back loads the pages between automatically and scrolls to it. The automatic search covers up to 250 older comments. Past that it stops, so a link to a comment that was deleted, or one buried thousands of comments deep, cannot walk an entire thread on its own; use "Load older comments" to keep going by hand.
+
 ## Work with pages and plans
 
 Pages can be project-scoped or workspace-scoped. Browse, Recent, Drafts, and Archived page sub-tabs provide stable homes for each lifecycle state. Move project pages into folders with drag-and-drop on desktop or the Move-to-folder picker on touch devices; a page and its folder must belong to the same project.

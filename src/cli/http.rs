@@ -23,6 +23,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::db::models;
+use crate::db::queries;
 use crate::links::{IssueLinkContext, MarkdownReference, ResourceUrl};
 
 use super::{
@@ -236,9 +237,18 @@ impl HttpBackend {
                 render::search_results(&results)
             }
             Command::Comment { action } => match action {
-                CommentAction::List { identifier } => {
+                CommentAction::List {
+                    identifier,
+                    limit,
+                    offset,
+                    order,
+                } => {
                     let comments: Vec<models::Comment> = decode(value)?;
-                    render::comment_list(&comments, identifier)
+                    let (limit, offset) = queries::page(Some(*limit), Some(*offset));
+                    let continuation = self
+                        .comment_continuation(&comments, limit, offset, order)
+                        .await;
+                    render::comment_list(&comments, identifier, continuation)
                 }
                 CommentAction::Add { identifier, .. } => {
                     let comment: models::Comment = decode(value)?;
@@ -565,9 +575,22 @@ impl HttpBackend {
 
     async fn comment(&self, action: &CommentAction) -> Result<(Value, String)> {
         match action {
-            CommentAction::List { identifier } => {
+            CommentAction::List {
+                identifier,
+                limit,
+                offset,
+                order,
+            } => {
                 let issue = self.issue_identity(identifier).await?;
-                self.get_json(&format!("/api/issues/{}/comments", issue.id), &[])
+                // The server applies the same clamp, but sending the clamped
+                // values keeps the two backends asking the same question.
+                let (limit, offset) = queries::page(Some(*limit), Some(*offset));
+                let params = [
+                    ("limit", Cow::Owned(limit.to_string())),
+                    ("offset", Cow::Owned(offset.to_string())),
+                    ("order", Cow::Borrowed(order.as_str())),
+                ];
+                self.get_json(&format!("/api/issues/{}/comments", issue.id), &params)
                     .await
                     .map(|value| (value, issue.identifier))
             }
@@ -592,6 +615,55 @@ impl HttpBackend {
                 .await
                 .map(|value| (value, issue.identifier))
             }
+        }
+    }
+
+    /// What lies past the comment page just fetched.
+    ///
+    /// `GET /api/issues/{id}/comments` answers with a bare array, so a *full*
+    /// page is ambiguous: it is either the end of the thread or the start of
+    /// the next one. Only that case costs a request, a one-row probe just
+    /// past the page. A short page is self-evidently the end. Doing it this
+    /// way rather than over-fetching `limit + 1` keeps the answer correct at
+    /// `limit = 500`, where the extra row would be clamped away (LIF-388).
+    ///
+    /// The probe is a *rendering* nicety, so a failed one must not fail the
+    /// command or change its JSON. It reports
+    /// [`CommentContinuation::Unknown`](render::CommentContinuation::Unknown)
+    /// instead, and the human output says it could not tell rather than
+    /// implying the thread ended here.
+    async fn comment_continuation(
+        &self,
+        comments: &[models::Comment],
+        limit: i64,
+        offset: i64,
+        order: &str,
+    ) -> render::CommentContinuation {
+        use render::CommentContinuation;
+        if (comments.len() as i64) < limit {
+            return CommentContinuation::End;
+        }
+        let next = offset + comments.len() as i64;
+        // No parent id means the server sent a shape this binary does not
+        // recognize, which is exactly the "cannot tell" case.
+        let Some(issue_id) = comments.last().and_then(|comment| comment.issue_id) else {
+            return CommentContinuation::Unknown(next);
+        };
+        let params = [
+            ("limit", Cow::Borrowed("1")),
+            ("offset", Cow::Owned(next.to_string())),
+            ("order", Cow::Borrowed(order)),
+        ];
+        match self
+            .get_json(&format!("/api/issues/{issue_id}/comments"), &params)
+            .await
+        {
+            Ok(probe) => match probe.as_array() {
+                Some(rows) if rows.is_empty() => CommentContinuation::End,
+                Some(_) => CommentContinuation::Next(next),
+                None => CommentContinuation::Unknown(next),
+            },
+            Err(_) => CommentContinuation::Unknown(next),
         }
     }
 
@@ -2158,6 +2230,9 @@ mod tests {
             Command::Comment {
                 action: CommentAction::List {
                     identifier: issue.clone(),
+                    limit: queries::DEFAULT_PAGE_LIMIT,
+                    offset: 0,
+                    order: "desc".into(),
                 },
             },
             Command::Module {
@@ -2222,14 +2297,17 @@ mod tests {
                 .unwrap(),
             ),
             render::comment_list(
-                &queries::comments::list_comments(
+                &queries::comments::list_comments_paginated(
                     &conn,
                     queries::comments::CommentParent::Issue(issue_id),
                     None,
-                    None,
+                    Some("desc"),
+                    Some(queries::DEFAULT_PAGE_LIMIT),
+                    Some(0),
                 )
                 .unwrap(),
                 &issue,
+                render::CommentContinuation::End,
             ),
             render::module_list(&queries::list_modules(&conn, project_id).unwrap(), "TST"),
             render::label_list(&queries::list_labels(&conn, project_id).unwrap(), "TST"),
@@ -2258,6 +2336,173 @@ mod tests {
         }
 
         fixture.server.abort();
+    }
+
+    /// The remote backend pages comments the way the local one does: it sends
+    /// the clamped limit/offset/order the user asked for, renders the newest
+    /// page, and says so when the thread runs past it. The REST list answers
+    /// with a bare array, so that last part is a one-row probe past the page.
+    #[tokio::test]
+    async fn pages_comments_over_http_with_a_truncation_hint() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let issue = fixture.issue_identifier.clone();
+        for content in ["oldest", "middle", "newest"] {
+            backend
+                .execute(
+                    &Command::Comment {
+                        action: CommentAction::Add {
+                            identifier: issue.clone(),
+                            content: content.into(),
+                            user: None,
+                        },
+                    },
+                    IssueLinkOutput::Url,
+                )
+                .await
+                .unwrap();
+        }
+
+        let command = Command::Comment {
+            action: CommentAction::List {
+                identifier: issue.clone(),
+                limit: 2,
+                offset: 0,
+                order: "desc".into(),
+            },
+        };
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
+        // JSON output stays the plain comment array the server sent.
+        let rows = value.as_array().expect("a comment array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["content"], "newest");
+        assert_eq!(rows[1]["content"], "middle");
+
+        let human = backend.human(&command, &value).await;
+        assert!(human.starts_with("2 comment(s) on "), "got: {human}");
+        assert!(!human.contains("oldest"), "got: {human}");
+        assert!(
+            human.contains("More comments available. Next page: --offset 2"),
+            "got: {human}"
+        );
+
+        // Asking for that next page gets the remainder, with no hint past it.
+        let command = Command::Comment {
+            action: CommentAction::List {
+                identifier: issue.clone(),
+                limit: 2,
+                offset: 2,
+                order: "desc".into(),
+            },
+        };
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
+        let human = backend.human(&command, &value).await;
+        assert!(human.contains("oldest"), "got: {human}");
+        assert!(!human.contains("More comments available"), "got: {human}");
+
+        // An explicit asc reaches the server intact and flips the page.
+        let command = Command::Comment {
+            action: CommentAction::List {
+                identifier: issue,
+                limit: 1,
+                offset: 0,
+                order: "asc".into(),
+            },
+        };
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
+        assert_eq!(value.as_array().unwrap()[0]["content"], "oldest");
+
+        fixture.server.abort();
+    }
+
+    /// A server that answers the first comment page and then refuses the
+    /// one-row probe that would say whether more comments follow.
+    fn comment_probe_failure_router() -> Router {
+        async fn resolve() -> Json<serde_json::Value> {
+            Json(json!({"id": 7, "identifier": "TST-1"}))
+        }
+        async fn comments(request: Request) -> Response {
+            use axum::response::IntoResponse;
+
+            let probing = request
+                .uri()
+                .query()
+                .is_some_and(|query| query.contains("offset=1"));
+            if probing {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "probe exploded"})),
+                )
+                    .into_response();
+            }
+            Json(json!([{
+                "id": 3,
+                "issue_id": 7,
+                "page_id": null,
+                "user_id": 1,
+                "author": "ada",
+                "author_display_name": "Ada",
+                "content": "only row of a full page",
+                "created_at": "2026-01-01 00:00:00",
+                "updated_at": "2026-01-01 00:00:00",
+            }]))
+            .into_response()
+        }
+        Router::new()
+            .route("/api/issues/resolve/{identifier}", get(resolve))
+            .route("/api/issues/{id}/comments", get(comments))
+    }
+
+    /// "There is no next page" and "I could not find out" are different
+    /// answers. The probe is a rendering nicety, so its failure must not fail
+    /// the command or touch its JSON, but the human output has to say it does
+    /// not know rather than letting a full page read as a finished thread.
+    #[tokio::test]
+    async fn a_failed_probe_reports_an_unknown_continuation() {
+        let (url, server) = spawn_server(comment_probe_failure_router()).await;
+        let backend = HttpBackend::new(&url, None).unwrap();
+        let command = Command::Comment {
+            action: CommentAction::List {
+                identifier: "TST-1".into(),
+                limit: 1,
+                offset: 0,
+                order: "desc".into(),
+            },
+        };
+
+        // The command itself succeeds and the JSON is the page the server
+        // sent, untouched by the probe's fate.
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .expect("a failed probe must not fail the command");
+        let rows = value.as_array().expect("a comment array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["content"], "only row of a full page");
+
+        let human = backend.human(&command, &value).await;
+        assert!(
+            human.contains(
+                "Could not check whether more comments exist. \
+                 If they do, the next page is --offset 1."
+            ),
+            "got: {human}"
+        );
+        assert!(
+            !human.contains("More comments available"),
+            "an unknown answer must not be dressed up as a known one: {human}"
+        );
+
+        server.abort();
     }
 
     /// LIF-341: a delete reports the same JSON either way. The SQL backend
