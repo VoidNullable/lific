@@ -3,6 +3,7 @@
   // A pure leaf: it renders one issue and emits a click; all drag behavior
   // is owned by the dndzone in the parent, which wraps this component.
   import type { Issue, Label } from "../api";
+  import { safeLabelColor } from "../labelColors";
   import PriorityIcon from "../PriorityIcon.svelte";
   import Tooltip from "../Tooltip.svelte";
   import TimeAgo from "../TimeAgo.svelte";
@@ -158,7 +159,7 @@
         class="text-micro font-medium px-1.5 py-0.5
                rounded-full border border-[var(--border)]"
         style={labelObj
-          ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;`
+          ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;`
           : ""}
       >
         {lbl}

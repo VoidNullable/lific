@@ -372,10 +372,8 @@ pub(super) async fn list_project_orphans(
 ///
 /// Three layers keep a hostile upload from executing on our origin:
 /// - `X-Content-Type-Options: nosniff`, so a browser never re-guesses the type.
-/// - `Content-Disposition: inline` only for the raster formats in
-///   [`storage::is_inline_safe_mime`]; everything else, SVG included, is
-///   forced to `attachment`. An SVG is an image that can carry `<script>`,
-///   and browsers run it when the file is navigated to directly.
+/// - `Content-Disposition: inline` only for safe raster and media formats;
+///   active SVG documents are forced to `attachment`.
 /// - `Content-Security-Policy: default-src 'none'; sandbox`, which neuters
 ///   script, fetch and form submission even if a future MIME slips through
 ///   the disposition rule.
@@ -404,6 +402,11 @@ pub(super) async fn download_attachment(
     let bytes = store.read(&attachment.sha256)?;
     let total = bytes.len() as u64;
     let inline_safe = storage::is_inline_safe_mime(&attachment.mime);
+    let content_type = if attachment.mime == "image/svg+xml" {
+        "application/octet-stream"
+    } else {
+        &attachment.mime
+    };
 
     // Force download for anything that isn't a plain raster image or a media
     // container. Either way the filename is offered for the "Save as" dialog.
@@ -447,7 +450,7 @@ pub(super) async fn download_attachment(
 
     let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, &attachment.mime)
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, body.len())
         .header(header::ACCEPT_RANGES, "bytes")
         // Content-addressed: the same id always returns the same bytes.
@@ -1561,6 +1564,30 @@ mod api_tests {
             assert!(csp.contains("default-src 'none'"), "{name}: {csp}");
             assert!(csp.contains("sandbox"), "{name}: {csp}");
         }
+    }
+
+    #[tokio::test]
+    async fn svg_download_uses_an_inert_content_type() {
+        let app = test_app();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
+        let resp = upload(&app, "diagram.svg", "image/svg+xml", svg, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let id = parse_json(resp).await["id"].as_i64().unwrap();
+
+        let resp = json_get(&app, &format!("/api/attachments/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            resp.headers().get("content-disposition").unwrap(),
+            "attachment; filename=\"diagram.svg\""
+        );
+        assert_eq!(
+            resp.headers().get("content-security-policy").unwrap(),
+            "default-src 'none'; sandbox"
+        );
     }
 
     #[tokio::test]

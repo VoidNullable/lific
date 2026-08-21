@@ -22,6 +22,7 @@
   } from "./grouping";
   import type { IssueListState } from "./state.svelte";
   import type { Label, Module } from "../api";
+  import { safeLabelColor } from "../labelColors";
 
   let {
     view,
@@ -247,7 +248,7 @@
                          {active ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--bg-subtle)]'}"
                   onclick={() => view.toggleLabelFilter(l.name)}
                 >
-                  <span class="size-2.5 rounded-full shrink-0" style="background: {l.color}"></span>
+                  <span class="size-2.5 rounded-full shrink-0" style="background: {safeLabelColor(l.color)}"></span>
                   <span class="flex-1 min-w-0 truncate text-body-sm font-medium text-[var(--text)]">{l.name}</span>
                   {#if active}<Check size={14} class="shrink-0 text-[var(--accent)]" />{/if}
                 </button>

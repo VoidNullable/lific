@@ -32,6 +32,11 @@ export const LABEL_COLORS: string[] = LABEL_PALETTE.map((c) => c.value);
 /** Server's default label color (mirrors `default_label_color()` in Rust). */
 export const DEFAULT_LABEL_COLOR = "#6B7280";
 
+/** Defense in depth for legacy/imported rows that predate server validation. */
+export function safeLabelColor(color: string): string {
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? color : DEFAULT_LABEL_COLOR;
+}
+
 /** Human name for a hex (nearest by exact match, else "Custom"). */
 export function colorName(hex: string): string {
   const found = LABEL_PALETTE.find(

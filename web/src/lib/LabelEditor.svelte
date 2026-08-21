@@ -18,7 +18,7 @@
 
   import { Plus, X, Check } from "lucide-svelte";
   import type { Label } from "./api";
-  import { colorForName } from "./labelColors";
+  import { colorForName, safeLabelColor } from "./labelColors";
   import ColorPicker from "./ColorPicker.svelte";
 
   let {
@@ -129,7 +129,7 @@
           class="inline-flex items-center gap-1 text-caption
                  font-medium px-2 py-0.5 rounded-full border"
           style={obj
-            ? `color: ${obj.color}; border-color: ${obj.color}40; background: ${obj.color}10;`
+            ? `color: ${safeLabelColor(obj.color)}; border-color: ${safeLabelColor(obj.color)}40; background: ${safeLabelColor(obj.color)}10;`
             : ""}
         >
           {name}
@@ -208,7 +208,7 @@
             >
               <span
                 class="size-2.5 rounded-full shrink-0"
-                style="background: {label.color};"
+                style="background: {safeLabelColor(label.color)};"
               ></span>
               <span class="flex-1 min-w-0 truncate {isAttached ? 'font-medium' : ''}">
                 {label.name}

@@ -12,6 +12,7 @@
   // CommentThread with no other changes.
 
   import Markdown from "./Markdown.svelte";
+  import { createMermaidBudget } from "./mermaidLimits";
   import TimeAgo from "./TimeAgo.svelte";
   import {
     listMentionCandidates,
@@ -98,6 +99,10 @@
   let updatingId = $state<number | null>(null);
   let deletingId = $state<number | null>(null);
   let menuId = $state<number | null>(null);
+  let mermaidBudget = $derived.by(() => {
+    comments;
+    return createMermaidBudget();
+  });
   let confirmDeleteId = $state<number | null>(null);
 
   let pendingCommentTarget = $state(commentTargetFromHash(window.location.hash));
@@ -585,7 +590,7 @@
               </div>
             {:else}
               <div class="cmt__md">
-                <Markdown content={comment.content} mentions={candidates} class="text-sm" />
+                <Markdown content={comment.content} mentions={candidates} class="text-sm" {mermaidBudget} />
               </div>
             {/if}
           </div>

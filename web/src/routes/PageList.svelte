@@ -49,6 +49,7 @@
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
   import { loadSubTab, saveSubTab } from "../lib/subtab";
   import { toast } from "../lib/toast/toast.svelte";
+  import { safeLabelColor } from "../lib/labelColors";
 
   // LIF-234: pages are content — create/edit/delete + folder management are
   // maintainer-gated. A viewer browses the tree read-only.
@@ -770,7 +771,7 @@
           {#snippet renderSelected(opt)}
             <span class="flex items-center gap-1.5 text-body-sm">
               {#if opt.value && opt.color}
-                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="size-2.5 rounded-full shrink-0" style="background: {safeLabelColor(String(opt.color))}"></span>
                 <span class="text-[var(--text)]">{opt.label}</span>
               {:else}
                 <span class="text-[var(--text-muted)]">{opt.label}</span>
@@ -780,7 +781,7 @@
           {#snippet renderOption(opt, isSelected)}
             <span class="flex items-center gap-2 text-body-sm {isSelected ? 'font-medium' : ''}">
               {#if opt.value && opt.color}
-                <span class="size-2.5 rounded-full shrink-0" style="background: {opt.color}"></span>
+                <span class="size-2.5 rounded-full shrink-0" style="background: {safeLabelColor(String(opt.color))}"></span>
                 <span class="{isSelected ? 'text-[var(--accent)]' : 'text-[var(--text)]'}">{opt.label}</span>
               {:else}
                 <span class="text-[var(--text-muted)]">{opt.label}</span>
@@ -1178,7 +1179,7 @@
                       <span
                         class="text-micro font-medium px-1.5 py-0.5 rounded-full
                                border border-[var(--border)]"
-                        style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+                        style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
                       >
                         {lbl}
                       </span>
@@ -1679,7 +1680,7 @@
                 <span
                   class="text-micro font-medium px-1.5 py-0.5 rounded-full
                          border border-[var(--border)]"
-                  style={labelObj ? `color: ${labelObj.color}; border-color: ${labelObj.color}40;` : ""}
+                  style={labelObj ? `color: ${safeLabelColor(labelObj.color)}; border-color: ${safeLabelColor(labelObj.color)}40;` : ""}
                 >
                   {lbl}
                 </span>
