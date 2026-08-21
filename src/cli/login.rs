@@ -54,6 +54,11 @@ pub struct DeviceAuthResponse {
     pub interval: u64,
 }
 
+#[derive(Deserialize)]
+struct ClientRegistrationResponse {
+    client_id: String,
+}
+
 /// Terminal outcome of a token poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PollOutcome {
@@ -163,11 +168,29 @@ impl HttpDeviceFlow {
 
 impl DeviceFlow for HttpDeviceFlow {
     fn request_device_code(&self, label: Option<&str>) -> Result<DeviceAuthResponse, String> {
-        let url = format!("{}/oauth/device_authorization", self.base);
-        let mut form: Vec<(&str, &str)> = Vec::new();
-        if let Some(l) = label {
-            form.push(("client_name", l));
+        let registration = serde_json::json!({
+            "redirect_uris": [],
+            "client_name": label.unwrap_or("Lific CLI"),
+            "grant_types": [DEVICE_CODE_GRANT],
+            "response_types": [],
+        });
+        let response = self
+            .client
+            .post(format!("{}/oauth/register", self.base))
+            .json(&registration)
+            .send()
+            .map_err(|e| format!("client registration failed: {e}"))?;
+        if !response.status().is_success() {
+            let code = response.status().as_u16();
+            let body = response.text().unwrap_or_default();
+            return Err(format!("client registration failed (HTTP {code}): {body}"));
         }
+        let registration: ClientRegistrationResponse = response
+            .json()
+            .map_err(|e| format!("invalid client registration response: {e}"))?;
+
+        let url = format!("{}/oauth/device_authorization", self.base);
+        let form = [("scope", "mcp"), ("client_id", registration.client_id.as_str())];
         let resp = self
             .client
             .post(&url)

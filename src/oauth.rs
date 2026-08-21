@@ -74,6 +74,46 @@ fn validate_csrf_token(token: &str, binding: &str) -> bool {
     mac.verify_slice(&sig_bytes).is_ok()
 }
 
+struct AuthorizationRequest<'a> {
+    client_id: &'a str,
+    redirect_uri: &'a str,
+    response_type: &'a str,
+    state: Option<&'a str>,
+    code_challenge: Option<&'a str>,
+    code_challenge_method: Option<&'a str>,
+    scope: Option<&'a str>,
+}
+
+impl AuthorizationRequest<'_> {
+    fn csrf_binding(&self, session: &str) -> String {
+        let mut binding = String::new();
+        for value in [
+            Some(session),
+            Some(self.client_id),
+            Some(self.redirect_uri),
+            Some(self.response_type),
+            self.state,
+            self.code_challenge,
+            self.code_challenge_method,
+            self.scope,
+        ] {
+            let value = value.unwrap_or_default();
+            binding.push_str(&value.len().to_string());
+            binding.push(':');
+            binding.push_str(value);
+        }
+        binding
+    }
+
+    fn csrf_token(&self, session: &str) -> String {
+        generate_csrf_token(&self.csrf_binding(session))
+    }
+
+    fn validates_csrf_token(&self, token: &str, session: &str) -> bool {
+        validate_csrf_token(token, &self.csrf_binding(session))
+    }
+}
+
 /// Extract the session credential a browser would present: the `Authorization:
 /// Bearer` header first, then the `lific_token` cookie. Returns an empty string
 /// when neither is present, so the CSRF binding is still well-defined for the
@@ -98,6 +138,37 @@ fn session_credential(headers: &HeaderMap) -> String {
                 })
         })
         .unwrap_or_default()
+}
+
+fn authenticated_user_id(db: &DbPool, headers: &HeaderMap) -> Option<i64> {
+    let token = session_credential(headers);
+    token.starts_with("lific_sess_").then_some(())?;
+    db.read()
+        .ok()
+        .and_then(|conn| crate::db::queries::users::validate_session(&conn, &token).ok())
+        .map(|user| user.id)
+}
+
+fn authenticated_user_identity(db: &DbPool, headers: &HeaderMap) -> Option<String> {
+    let user_id = authenticated_user_id(db, headers)?;
+    let conn = db.read().ok()?;
+    conn.query_row(
+        "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = ?1",
+        params![user_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn device_confirmation_token(session: &str, user_code: &str) -> String {
+    generate_csrf_token(&format!("device-confirmation:{session}:{user_code}"))
+}
+
+fn validate_device_confirmation_token(token: &str, session: &str, user_code: &str) -> bool {
+    validate_csrf_token(
+        token,
+        &format!("device-confirmation:{session}:{user_code}"),
+    )
 }
 
 #[derive(Clone)]
@@ -303,6 +374,7 @@ async fn authorization_server_metadata(
 
 #[derive(Deserialize)]
 struct RegisterRequest {
+    #[serde(default)]
     redirect_uris: Vec<String>,
     client_name: Option<String>,
     // LIF-415: a submitted `token_endpoint_auth_method` is deliberately not
@@ -346,7 +418,10 @@ async fn register_client(
         return resp;
     }
 
-    if req.redirect_uris.is_empty() {
+    let device_only =
+        matches!(req.grant_types.as_deref(), Some([grant]) if grant == DEVICE_CODE_GRANT)
+        && req.response_types.as_deref().is_none_or(<[String]>::is_empty);
+    if req.redirect_uris.is_empty() && !device_only {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -430,6 +505,17 @@ fn client_tool_id(db: &DbPool, client_id: &str) -> Option<String> {
 
 // ── Authorization ────────────────────────────────────────────────────────
 
+const OAUTH_SCOPE: &str = "mcp";
+const ACCESS_TOKEN_EXPIRES_IN: u64 = 3600 * 24 * 30;
+const ACCESS_TOKEN_LIFETIME_LABEL: &str = "30 days";
+
+fn oauth_scope_label(scope: &str) -> &str {
+    match scope {
+        OAUTH_SCOPE => "MCP issue-tracker access",
+        _ => scope,
+    }
+}
+
 #[derive(Deserialize)]
 struct AuthorizeParams {
     client_id: String,
@@ -451,8 +537,8 @@ fn valid_authorize_request(
     code_challenge_method: Option<&str>,
 ) -> bool {
     response_type == "code"
-        && scope == Some("mcp")
-        && code_challenge.is_some_and(|challenge| !challenge.is_empty())
+        && scope == Some(OAUTH_SCOPE)
+        && code_challenge.is_some_and(valid_s256_challenge)
         && code_challenge_method == Some("S256")
 }
 
@@ -512,7 +598,24 @@ async fn authorize_page(
     // Bind the CSRF token to the session the browser presents when loading this
     // page (sent on the top-level GET navigation under SameSite=Lax). The POST
     // approval must carry the same session for the token to validate.
-    let csrf_token = generate_csrf_token(&session_credential(&headers));
+    let session = session_credential(&headers);
+    let request = AuthorizationRequest {
+        client_id: &params.client_id,
+        redirect_uri: &params.redirect_uri,
+        response_type: &params.response_type,
+        state: params.state.as_deref(),
+        code_challenge: params.code_challenge.as_deref(),
+        code_challenge_method: params.code_challenge_method.as_deref(),
+        scope: params.scope.as_deref(),
+    };
+    let csrf_token = request.csrf_token(&session);
+    let Some(approving_identity) = authenticated_user_identity(&oauth.db, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html("<h1>Authentication required</h1><p>Sign in before reviewing OAuth access.</p>".to_string()),
+        )
+            .into_response();
+    };
     // LIFIC-13: the approval screen asks which tool is connecting so the audit
     // log can attribute requests to a per-tool bot. Options come from the same
     // Connected Tools registry `lific connect` uses; a free-text field covers
@@ -547,6 +650,8 @@ async fn authorize_page(
     <p><span class="client">{client_name}</span> wants access to your Lific issue tracker.</p>
     <p>Capability requested: <span class="client">MCP issue-tracker access</span>.</p>
     <p>After approval, you will be redirected to:<br><span class="destination">{redirect_uri}</span></p>
+    <p>Token lifetime: <span class="client">{token_lifetime}</span>.</p>
+    <p>Approving identity: <span class="client">{approving_identity}</span>.</p>
     <form method="POST" action="/oauth/authorize">
         <input type="hidden" name="client_id" value="{client_id}">
         <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -572,6 +677,8 @@ async fn authorize_page(
             html_escape(params.code_challenge_method.as_deref().unwrap_or("S256")),
         scope = html_escape(requested_scope),
         csrf_token = html_escape(&csrf_token),
+        token_lifetime = ACCESS_TOKEN_LIFETIME_LABEL,
+        approving_identity = html_escape(&approving_identity),
         tool_pick_list = tool_pick_list,
         )),
     )
@@ -597,6 +704,30 @@ struct ApproveForm {
     /// Free-text tool name when `tool` is unset (an unrecognized tool).
     tool_custom: Option<String>,
     decision: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ConsentDecision {
+    Approve,
+    Deny,
+}
+
+impl ConsentDecision {
+    fn parse(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("approve") => Some(Self::Approve),
+            Some("deny") => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+fn invalid_decision_page() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Html("<h1>Invalid decision</h1><p>Choose Approve or Deny.</p>".to_string()),
+    )
+        .into_response()
 }
 
 /// The one page both approval handlers render when the presented credential is
@@ -717,6 +848,11 @@ async fn authorize_approve(
             .into_response();
     }
 
+    let decision = match ConsentDecision::parse(form.decision.as_deref()) {
+        Some(decision) => decision,
+        None => return invalid_decision_page(),
+    };
+
     // The credential presented on this POST (Bearer header or lific_token
     // cookie). The CSRF token must have been minted for this same credential.
     let credential = session_credential(&headers);
@@ -725,8 +861,17 @@ async fn authorize_approve(
     // cross-site form submission attacks. A token harvested from the
     // unauthenticated authorize page (bound to no/attacker session) will not
     // match a victim's session presented here.
+    let request = AuthorizationRequest {
+        client_id: &form.client_id,
+        redirect_uri: &form.redirect_uri,
+        response_type: &form.response_type,
+        state: form.state.as_deref(),
+        code_challenge: form.code_challenge.as_deref(),
+        code_challenge_method: form.code_challenge_method.as_deref(),
+        scope: form.scope.as_deref(),
+    };
     match &form.csrf_token {
-        Some(token) if validate_csrf_token(token, &credential) => {}
+        Some(token) if request.validates_csrf_token(token, &credential) => {}
         _ => {
             return (
                 StatusCode::FORBIDDEN,
@@ -737,8 +882,6 @@ async fn authorize_approve(
     }
 
     // Require authentication -- the person approving must be identified.
-    // `credential` is the session token from the Authorization header or cookie;
-    // it is validated against the database below to ensure it's real and unexpired.
     let Some(token) = (!credential.is_empty()).then_some(credential) else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -784,18 +927,21 @@ async fn authorize_approve(
     // Denial must never create an authorization code. The redirect was already
     // checked against the registered client, and the CSRF check above binds
     // the browser action to the session that rendered the consent page.
-    if form.decision.as_deref() == Some("deny") {
-        let mut redirect_url = form.redirect_uri.clone();
-        redirect_url.push_str(if redirect_url.contains('?') { "&" } else { "?" });
-        redirect_url.push_str("error=access_denied");
-        if let Some(state) = &form.state
-            && !state.is_empty()
-        {
-            let encoded = urlencoding::encode(state);
-            redirect_url.push_str(&format!("&state={encoded}"));
+    match decision {
+        ConsentDecision::Deny => {
+            let mut redirect_url = form.redirect_uri.clone();
+            redirect_url.push_str(if redirect_url.contains('?') { "&" } else { "?" });
+            redirect_url.push_str("error=access_denied");
+            if let Some(state) = &form.state
+                && !state.is_empty()
+            {
+                let encoded = urlencoding::encode(state);
+                redirect_url.push_str(&format!("&state={encoded}"));
+            }
+            info!(client_id = %form.client_id, "OAuth authorization denied");
+            return Redirect::to(&redirect_url).into_response();
         }
-        info!(client_id = %form.client_id, "OAuth authorization denied");
-        return Redirect::to(&redirect_url).into_response();
+        ConsentDecision::Approve => {}
     }
 
     let code = uuid_v4();
@@ -1135,12 +1281,10 @@ fn cleanup_expired_device_codes(db: &DbPool) {
 
 #[derive(Deserialize)]
 struct DeviceAuthRequest {
+    client_id: Option<String>,
+    /// Lific supports one device capability and rejects omitted or expanded
+    /// scopes instead of silently upgrading the request.
     #[serde(default)]
-    client_name: Option<String>,
-    /// Accepted per RFC 8628 so conforming clients are not rejected, but
-    /// device grants always issue the fixed `mcp` scope.
-    #[serde(default)]
-    #[allow(dead_code)]
     scope: Option<String>,
 }
 
@@ -1182,15 +1326,57 @@ async fn device_authorization(
         .unwrap_or("");
     let req: DeviceAuthRequest = if content_type.contains("application/json") {
         serde_json::from_slice(&body).unwrap_or(DeviceAuthRequest {
-            client_name: None,
+            client_id: None,
             scope: None,
         })
     } else {
         // application/x-www-form-urlencoded (default)
         serde_urlencoded::from_bytes(&body).unwrap_or(DeviceAuthRequest {
-            client_name: None,
+            client_id: None,
             scope: None,
         })
+    };
+
+    if req.scope.as_deref() != Some(OAUTH_SCOPE) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_scope",
+                "error_description": "only the mcp capability is supported"
+            })),
+        )
+            .into_response();
+    }
+
+    let Some(client_id) = req.client_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "missing client_id"
+            })),
+        )
+            .into_response();
+    };
+    let client_name: String = match state.db.read().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT client_name FROM oauth_clients WHERE client_id = ?1",
+            params![client_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }) {
+        Some(name) => name,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "unknown client_id"
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Opportunistic housekeeping.
@@ -1212,14 +1398,16 @@ async fn device_authorization(
     for _ in 0..5 {
         let res = conn.execute(
             "INSERT INTO oauth_device_codes
-                (device_code_hash, user_code, client_name, expires_at, interval_seconds, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                (device_code_hash, user_code, client_name, expires_at, interval_seconds, status, scope, client_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
             params![
                 device_code_hash,
                 user_code,
-                req.client_name,
+                client_name,
                 expires_at.to_rfc3339(),
                 DEVICE_CODE_INTERVAL,
+                OAUTH_SCOPE,
+                client_id,
             ],
         );
         match res {
@@ -1255,6 +1443,7 @@ async fn device_authorization(
             "user_code": user_code,
             "verification_uri": verification_uri,
             "verification_uri_complete": verification_uri_complete,
+            "scope": OAUTH_SCOPE,
             "expires_in": DEVICE_CODE_EXPIRES_IN,
             "interval": DEVICE_CODE_INTERVAL,
         })),
@@ -1262,16 +1451,64 @@ async fn device_authorization(
         .into_response()
 }
 
-#[derive(Deserialize)]
-struct DevicePageQuery {
-    #[serde(default)]
-    user_code: Option<String>,
+struct DeviceConsent {
+    client_id: String,
+    client_name: String,
+    scope: String,
 }
 
-/// `GET /oauth/device` — server-rendered verification page. Mirrors
-/// `authorize_page`'s style + CSRF pattern. The page is served regardless of
-/// auth state (matching `authorize_page`, which also renders unauthenticated);
-/// the POST handler is what enforces a valid session before approving.
+fn pending_device_consent(db: &DbPool, user_code: &str) -> Option<DeviceConsent> {
+    let conn = db.read().ok()?;
+    let (client_id, client_name, scope, expires_at, status): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT dc.client_id, clients.client_name, dc.scope, dc.expires_at, dc.status
+             FROM oauth_device_codes dc
+             JOIN oauth_clients clients ON clients.client_id = dc.client_id
+             WHERE dc.user_code = ?1",
+            params![user_code],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .ok()?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&expires_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    if status != "pending" || chrono::Utc::now() >= expires_at {
+        return None;
+    }
+    Some(DeviceConsent {
+        client_id,
+        client_name,
+        scope,
+    })
+}
+
+fn user_identity(db: &DbPool, user_id: i64) -> Option<String> {
+    let conn = db.read().ok()?;
+    conn.query_row(
+        "SELECT COALESCE(NULLIF(display_name, ''), username) FROM users WHERE id = ?1",
+        params![user_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// `GET /oauth/device` — server-rendered code-entry page. It deliberately does
+/// not look up the supplied code; the authenticated POST does that and renders
+/// the client confirmation as a separate step.
 async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Html<String> {
     let csrf_token = generate_csrf_token(&session_credential(&headers));
     let prefill = q
@@ -1326,10 +1563,17 @@ async fn device_page(headers: HeaderMap, Query(q): Query<DevicePageQuery>) -> Ht
 }
 
 #[derive(Deserialize)]
+struct DevicePageQuery {
+    #[serde(default)]
+    user_code: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct DeviceApproveForm {
     user_code: String,
     decision: Option<String>,
     csrf_token: Option<String>,
+    confirmation_token: Option<String>,
     /// LIFIC-13: which tool is connecting — a registry id, or empty meaning
     /// `tool_custom` holds a free-text name.
     tool: Option<String>,
@@ -1337,8 +1581,65 @@ struct DeviceApproveForm {
     tool_custom: Option<String>,
 }
 
-/// `POST /oauth/device` — validate CSRF + session, then mark the device code
-/// approved (binding the approving user) or denied.
+/// Render the second, authenticated device-consent step.
+fn device_confirmation_page(
+    user_code: &str,
+    csrf_token: &str,
+    confirmation_token: &str,
+    consent: &DeviceConsent,
+    approving_identity: &str,
+) -> Html<String> {
+    let tool_pick_list = tool_pick_list_html(None);
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Lific - Confirm Device Access</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: system-ui, sans-serif; max-width: 400px; margin: 80px auto; padding: 0 20px; background: #0a0a0a; color: #e0e0e0; }}
+        h1 {{ font-size: 1.4em; margin-bottom: 0.5em; }}
+        p {{ color: #888; line-height: 1.5; }}
+        .value {{ color: #fff; font-weight: 600; overflow-wrap: anywhere; }}
+        label {{ display: block; margin-top: 1em; color: #aaa; font-size: 0.9em; }}
+        select, input {{ width: 100%%; padding: 10px; margin-top: 4px; border-radius: 6px; border: 1px solid #333; background: #141414; color: #e0e0e0; box-sizing: border-box; }}
+        form {{ margin-top: 2em; }}
+        button {{ color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 1em; cursor: pointer; width: 100%%; margin-top: 1em; }}
+        button.approve {{ background: #2563eb; }}
+        button.deny {{ background: #444; }}
+    </style>
+</head>
+<body>
+    <h1>Confirm device access</h1>
+    <p><span class="value">{client_name}</span> is requesting access to Lific.</p>
+    <p>Registered client ID: <span class="value">{client_id}</span>.</p>
+    <p>Capability: <span class="value">{scope}</span>.</p>
+    <p>Token lifetime: <span class="value">{token_lifetime}</span>.</p>
+    <p>Approving identity: <span class="value">{approving_identity}</span>.</p>
+    <form method="POST" action="/oauth/device">
+        <input type="hidden" name="user_code" value="{user_code}">
+        <input type="hidden" name="csrf_token" value="{csrf_token}">
+        <input type="hidden" name="confirmation_token" value="{confirmation_token}">
+        {tool_pick_list}
+        <button type="submit" name="decision" value="approve" class="approve">Approve</button>
+        <button type="submit" name="decision" value="deny" class="deny">Deny</button>
+    </form>
+</body>
+</html>"#,
+        client_name = html_escape(&consent.client_name),
+        client_id = html_escape(&consent.client_id),
+        scope = html_escape(oauth_scope_label(&consent.scope)),
+        token_lifetime = ACCESS_TOKEN_LIFETIME_LABEL,
+        approving_identity = html_escape(approving_identity),
+        user_code = html_escape(user_code),
+        csrf_token = html_escape(csrf_token),
+        confirmation_token = html_escape(confirmation_token),
+        tool_pick_list = tool_pick_list,
+    ))
+}
+
+/// `POST /oauth/device` — authenticate and look up the code first, then require
+/// a separate confirmation submission before changing its status.
 async fn device_approve(
     State(oauth): State<OAuthState>,
     headers: HeaderMap,
@@ -1375,8 +1676,49 @@ async fn device_approve(
     }
 
     let normalized = normalize_user_code(&form.user_code);
-    let deny = form.decision.as_deref() == Some("deny");
-    let new_status = if deny { "denied" } else { "approved" };
+    let decision = match ConsentDecision::parse(form.decision.as_deref()) {
+        Some(decision) => decision,
+        None => return invalid_decision_page(),
+    };
+
+    match (decision, form.confirmation_token.as_deref()) {
+        (ConsentDecision::Approve, None) => {
+            let Some(approving_user_id) = authenticated_user_id(&oauth.db, &headers) else {
+                return invalid_session_page();
+            };
+            let Some(consent) = pending_device_consent(&oauth.db, &normalized) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Html(format!(
+                        "<h1>Unknown or expired code</h1><p>The code <code>{}</code> was not found, has expired, or was already used. <a href=\"/oauth/device\">Try again</a></p>",
+                        html_escape(&normalized)
+                    )),
+                )
+                    .into_response();
+            };
+            let confirmation_token = device_confirmation_token(&token, &normalized);
+            let approving_identity = user_identity(&oauth.db, approving_user_id)
+                .unwrap_or_else(|| "Unknown authenticated identity".into());
+            return device_confirmation_page(
+                &normalized,
+                form.csrf_token.as_deref().unwrap_or_default(),
+                &confirmation_token,
+                &consent,
+                &approving_identity,
+            )
+            .into_response();
+        }
+        (ConsentDecision::Approve, Some(confirmation))
+            if !validate_device_confirmation_token(confirmation, &token, &normalized) =>
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Html("<h1>Invalid or expired confirmation</h1><p>Start the device approval again.</p>".to_string()),
+            )
+                .into_response();
+        }
+        (ConsentDecision::Approve, Some(_)) | (ConsentDecision::Deny, _) => {}
+    }
 
     // One transaction: revalidate the approving session, resolve the tool's
     // bot, and move the device code out of `pending`. `resolve_approval_bot`
@@ -1400,29 +1742,30 @@ async fn device_approve(
     // recognise is asking for access, which is exactly the moment not to make
     // them sign in again first. So a *live* session is required either way,
     // and the 15-minute freshness rule applies only to approval.
-    let approver = if deny {
-        match crate::db::queries::users::validate_session(&tx, &token) {
-            Ok(user) => user,
-            Err(_) => return invalid_session_page(),
+    let (new_status, target_user_id) = match decision {
+        ConsentDecision::Deny => {
+            let approver = match crate::db::queries::users::validate_session(&tx, &token) {
+                Ok(user) => user,
+                Err(_) => return invalid_session_page(),
+            };
+            ("denied", approver.id)
         }
-    } else {
-        match recent_approver(&tx, &token) {
-            Ok(user) => user,
-            Err(refusal) => return refusal.into_response(),
-        }
-    };
-
-    // LIFIC-13: on approval, pick which tool is connecting and mint (or reuse)
-    // its bot, binding the device code to the bot so the exchanged token
-    // attributes to the tool. Deny resolves no tool and mints no bot: a
-    // refused device must not leave a connected-tool identity behind as a
-    // side effect of refusing it.
-    let target_user_id: Option<i64> = if deny {
-        Some(approver.id)
-    } else {
-        match resolve_approval_bot(&tx, &form.tool, &form.tool_custom, Some(approver.id), None) {
-            Ok(id) => Some(id),
-            Err((status, msg)) => return (status, Html(msg)).into_response(),
+        ConsentDecision::Approve => {
+            let approver = match recent_approver(&tx, &token) {
+                Ok(user) => user,
+                Err(refusal) => return refusal.into_response(),
+            };
+            let target_user_id = match resolve_approval_bot(
+                &tx,
+                &form.tool,
+                &form.tool_custom,
+                Some(approver.id),
+                None,
+            ) {
+                Ok(id) => id,
+                Err((status, msg)) => return (status, Html(msg)).into_response(),
+            };
+            ("approved", target_user_id)
         }
     };
 
@@ -1454,18 +1797,17 @@ async fn device_approve(
 
     info!(user_code = %normalized, decision = %new_status, "OAuth device verification");
 
-    if deny {
-        (
+    match decision {
+        ConsentDecision::Deny => (
             StatusCode::OK,
             Html("<h1>Access denied</h1><p>The device will not be connected. You can close this page.</p>".to_string()),
         )
-            .into_response()
-    } else {
-        (
+            .into_response(),
+        ConsentDecision::Approve => (
             StatusCode::OK,
             Html("<h1>Device approved</h1><p>You're all set. Return to the device or terminal — it will finish signing in automatically.</p>".to_string()),
         )
-            .into_response()
+            .into_response(),
     }
 }
 
@@ -1691,7 +2033,7 @@ async fn token_exchange(
     // Generate access token — store SHA-256 hash, return raw token only once
     let access_token = format!("lific_at_{}", uuid_v4());
     let token_hash = sha256_hex(access_token.as_bytes());
-    let expires_in: u64 = 3600 * 24 * 30; // 30 days
+    let expires_in = ACCESS_TOKEN_EXPIRES_IN;
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
     if let Err(e) = conn.execute(
@@ -1759,24 +2101,28 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     }
 
     struct DeviceRow {
+        client_id: Option<String>,
         status: String,
         user_id: Option<i64>,
+        scope: String,
         expires_at: String,
         interval_seconds: i64,
         last_polled_at: Option<String>,
     }
 
     let row: Result<DeviceRow, _> = conn.query_row(
-        "SELECT status, user_id, expires_at, interval_seconds, last_polled_at
+        "SELECT client_id, status, user_id, scope, expires_at, interval_seconds, last_polled_at
          FROM oauth_device_codes WHERE device_code_hash = ?1",
         params![device_code_hash],
         |r| {
             Ok(DeviceRow {
-                status: r.get(0)?,
-                user_id: r.get(1)?,
-                expires_at: r.get(2)?,
-                interval_seconds: r.get(3)?,
-                last_polled_at: r.get(4)?,
+                client_id: r.get(0)?,
+                status: r.get(1)?,
+                user_id: r.get(2)?,
+                scope: r.get(3)?,
+                expires_at: r.get(4)?,
+                interval_seconds: r.get(5)?,
+                last_polled_at: r.get(6)?,
             })
         },
     );
@@ -1886,12 +2232,21 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
                     )
                 );
             }
-            let scope = "mcp";
-            let client_id = "device";
+            let scope = row.scope.as_str();
+            let Some(client_id) = row.client_id.as_deref() else {
+                finish!(
+                    conn,
+                    device_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        Some("device authorization has no registered client"),
+                    )
+                );
+            };
 
             let access_token = format!("lific_at_{}", uuid_v4());
             let token_hash = sha256_hex(access_token.as_bytes());
-            let expires_in: u64 = 3600 * 24 * 30; // 30 days
+            let expires_in = ACCESS_TOKEN_EXPIRES_IN;
             let expires_at = now + chrono::Duration::seconds(expires_in as i64);
 
             // LIF-370: minting the token and burning the device code are one
@@ -1903,13 +2258,6 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
             // a denial that lands first wins cleanly instead of being read
             // stale.
             let tx = conn;
-
-            // Ensure a client row exists so the FK on oauth_tokens is satisfied.
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO oauth_clients (client_id, client_name, redirect_uris)
-                 VALUES ('device', 'Device Authorization', '[]')",
-                [],
-            );
 
             if let Err(e) = tx.execute(
                 "INSERT INTO oauth_tokens (access_token, client_id, expires_at, scope, user_id)
@@ -2046,9 +2394,20 @@ async fn revoke_token(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+fn valid_s256_challenge(challenge: &str) -> bool {
+    challenge.len() == 43
+        && challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn validate_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
-    // OAuth 2.1 requires S256 only. Reject empty challenges/verifiers.
-    if verifier.is_empty() || challenge.is_empty() {
+    if !(43..=128).contains(&verifier.len())
+        || !verifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+        || challenge.is_empty()
+    {
         return false;
     }
     match method {
@@ -2058,6 +2417,27 @@ fn validate_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
             computed == challenge
         }
         _ => false, // Only S256 is accepted per OAuth 2.1
+    }
+}
+
+#[cfg(test)]
+mod pkce_tests {
+    use super::*;
+
+    #[test]
+    fn verifier_must_use_rfc7636_length_and_characters() {
+        for verifier in [
+            "a".repeat(42),
+            "a".repeat(129),
+            format!("{}:", "a".repeat(42)),
+        ] {
+            let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
+            assert!(!validate_pkce(&verifier, &challenge, "S256"));
+        }
+
+        let verifier = format!("{}-._~", "a".repeat(39));
+        let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
+        assert!(validate_pkce(&verifier, &challenge, "S256"));
     }
 }
 
@@ -2318,10 +2698,14 @@ mod tests {
     }
 
     /// Register a client, returning the client_id.
-    async fn register_client_helper(app: &Router, redirect_uri: &str) -> String {
+    async fn register_named_client_helper(
+        app: &Router,
+        redirect_uri: &str,
+        client_name: &str,
+    ) -> String {
         let body = serde_json::json!({
             "redirect_uris": [redirect_uri],
-            "client_name": "Test Client"
+            "client_name": client_name
         });
         let resp = app
             .clone()
@@ -2339,6 +2723,10 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         val["client_id"].as_str().unwrap().to_string()
+    }
+
+    async fn register_client_helper(app: &Router, redirect_uri: &str) -> String {
+        register_named_client_helper(app, redirect_uri, "Test Client").await
     }
 
     /// The user an access token resolves to, or `None` for anything that does
@@ -2370,19 +2758,35 @@ mod tests {
     }
 
     /// Build the form body for an authorize POST, including a CSRF token bound
-    /// to `binding` (the session credential the POST will carry: a Bearer token,
-    /// a cookie value, or "" for the unauthenticated case).
+    /// to the complete authorization request and `binding` (the session
+    /// credential the POST will carry: a Bearer token, a cookie value, or ""
+    /// for the unauthenticated case).
     fn authorize_body(client_id: &str, redirect_uri: &str, binding: &str) -> String {
-        let csrf = generate_csrf_token(binding);
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id,
+            redirect_uri,
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some("mcp"),
+        };
+        let csrf = request.csrf_token(binding);
         format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code&decision=approve",
             client_id,
             urlencoding::encode(redirect_uri),
+            urlencoding::encode(&challenge),
             urlencoding::encode(&csrf),
         )
     }
 
-    // ── LIF-48: authorize_approve validates tokens ───────────
+    fn test_code_challenge() -> String {
+        base64_url_encode(&Sha256::digest(b"test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789"))
+    }
+
+    // ── Authorization approval validates tokens ─────────────
 
     #[tokio::test]
     async fn authorize_rejects_missing_auth() {
@@ -2406,15 +2810,23 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_consent_identifies_client_and_capability() {
-        let (app, _db) = test_oauth_app();
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
         let uri = format!(
-            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256",
-            urlencoding::encode("http://localhost/callback")
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256",
+            urlencoding::encode("http://localhost/callback"),
         );
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2423,6 +2835,8 @@ mod tests {
         assert!(body.contains("Test Client"));
         assert!(body.contains("MCP issue-tracker access"));
         assert!(body.contains("http://localhost/callback"));
+        assert!(body.contains("30 days"));
+        assert!(body.contains("oauthtest"));
         assert!(!body.contains("An application wants"));
     }
 
@@ -2430,9 +2844,10 @@ mod tests {
     async fn authorize_consent_rejects_unknown_capability_or_client() {
         let (app, _db) = test_oauth_app();
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
         let bad_scope = format!(
-            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=admin",
-            urlencoding::encode("http://localhost/callback")
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=admin&code_challenge={challenge}&code_challenge_method=S256",
+            urlencoding::encode("http://localhost/callback"),
         );
         let resp = app
             .clone()
@@ -2441,7 +2856,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        let unknown = "/oauth/authorize?client_id=unknown&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&response_type=code&scope=mcp";
+        let unknown = format!(
+            "/oauth/authorize?client_id=unknown&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256"
+        );
         let resp = app
             .oneshot(Request::builder().uri(unknown).body(axum::body::Body::empty()).unwrap())
             .await
@@ -2453,18 +2870,20 @@ mod tests {
     async fn authorize_consent_rejects_missing_scope_or_pkce() {
         let (app, _db) = test_oauth_app();
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
         let base = format!(
             "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code",
             urlencoding::encode("http://localhost/callback")
         );
 
         for suffix in [
-            "&code_challenge=abc&code_challenge_method=S256",
+            "&code_challenge={challenge}&code_challenge_method=S256",
             "&scope=mcp&code_challenge_method=S256",
-            "&scope=mcp&code_challenge=abc",
+            "&scope=mcp&code_challenge={challenge}",
             "&scope=mcp&code_challenge=&code_challenge_method=S256",
-            "&scope=mcp&code_challenge=abc&code_challenge_method=plain",
+            "&scope=mcp&code_challenge={challenge}&code_challenge_method=plain",
         ] {
+            let suffix = suffix.replace("{challenge}", &challenge);
             let resp = app
                 .clone()
                 .oneshot(
@@ -2484,9 +2903,19 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let csrf = generate_csrf_token(&session_token);
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: Some("opaque-state"),
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some("mcp"),
+        };
+        let csrf = request.csrf_token(&session_token);
         let body = format!(
-            "client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256&state=opaque-state&csrf_token={csrf}&decision=deny",
+            "client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256&state=opaque-state&csrf_token={csrf}&decision=deny",
             urlencoding::encode("http://localhost/callback"),
         );
         let resp = app
@@ -2515,6 +2944,86 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM oauth_codes", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0, "denial must not mint an authorization code");
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_a_tampered_request_binding() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let original_client = register_client_helper(&app, "http://localhost/original").await;
+        let tampered_client = register_client_helper(&app, "http://localhost/tampered").await;
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &original_client,
+            redirect_uri: "http://localhost/original",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some("mcp"),
+        };
+        let csrf = request.csrf_token(&session_token);
+        let body = format!(
+            "client_id={tampered_client}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256&csrf_token={csrf}&decision=approve",
+            urlencoding::encode("http://localhost/tampered")
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/authorize")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_malformed_pkce_challenge() {
+        let (app, _db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let uri = format!(
+            "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256",
+            urlencoding::encode("http://localhost/callback")
+        );
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_requires_an_explicit_approval_decision() {
+        let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        for decision in [None, Some("maybe")] {
+            let mut body = authorize_body(&client_id, "http://localhost/callback", &session_token);
+            body = body.replace("&decision=approve", "");
+            if let Some(decision) = decision {
+                body.push_str(&format!("&decision={decision}"));
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/authorize")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session_token}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]
@@ -2785,6 +3294,43 @@ mod tests {
             !grants.iter().any(|g| g == "refresh_token"),
             "client registration should not default to refresh_token"
         );
+    }
+
+    #[tokio::test]
+    async fn registration_allows_no_redirect_only_for_device_clients() {
+        let (app, _) = test_oauth_app();
+        for (body, expected) in [
+            (
+                serde_json::json!({
+                    "redirect_uris": [],
+                    "client_name": "Device Client",
+                    "grant_types": [DEVICE_CODE_GRANT],
+                    "response_types": [],
+                }),
+                StatusCode::CREATED,
+            ),
+            (
+                serde_json::json!({
+                    "redirect_uris": [],
+                    "client_name": "Authorization Client",
+                }),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/register")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected, "body={body}");
+        }
     }
 
     // ── LIF-415: only public-client auth is advertised ──────────
@@ -3328,10 +3874,19 @@ mod tests {
         // A real PKCE pair so the later token exchange passes verification.
         let verifier = "test_verifier_abcdefghijklmnopqrstuvwxyz_0123456789";
         let challenge = base64_url_encode(&Sha256::digest(verifier.as_bytes()));
-        // CSRF bound to the session presented on the approval (cookie below).
-        let csrf = generate_csrf_token(&session_token);
+        // CSRF bound to the complete request and session presented on approval.
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session_token);
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code&decision=approve",
             client_id,
             urlencoding::encode("http://localhost/callback"),
             urlencoding::encode(&challenge),
@@ -3440,13 +3995,25 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db); // user "oauthtest"
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
 
-        let approve = |app: Router, csrf: &str| {
+        let approve = |app: Router| {
+            let request = AuthorizationRequest {
+                client_id: &client_id,
+                redirect_uri: "http://localhost/callback",
+                response_type: "code",
+                state: None,
+                code_challenge: Some(&challenge),
+                code_challenge_method: Some("S256"),
+                scope: Some(OAUTH_SCOPE),
+            };
+            let csrf = request.csrf_token(&session_token);
             let body = format!(
-                "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=opencode",
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=opencode&decision=approve",
                 client_id,
                 urlencoding::encode("http://localhost/callback"),
-                urlencoding::encode(csrf),
+                urlencoding::encode(&challenge),
+                urlencoding::encode(&csrf),
             );
             app.oneshot(
                 Request::builder()
@@ -3459,7 +4026,7 @@ mod tests {
             )
         };
 
-        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
+        assert!(approve(app.clone())
             .await
             .unwrap()
             .status()
@@ -3474,7 +4041,7 @@ mod tests {
             .unwrap()
         };
         // Re-approval of the same tool+owner must reuse the same bot.
-        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
+        assert!(approve(app.clone())
             .await
             .unwrap()
             .status()
@@ -3534,7 +4101,9 @@ mod tests {
     #[tokio::test]
     async fn authorize_page_prefills_remembered_known_tool() {
         let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
 
         // Remember the tool on the client directly (as an approval would).
         {
@@ -3550,7 +4119,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
+                    .header("cookie", format!("lific_token={session_token}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3574,7 +4144,9 @@ mod tests {
     #[tokio::test]
     async fn authorize_page_prefills_remembered_custom_tool() {
         let (app, db) = test_oauth_app();
+        let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
+        let challenge = test_code_challenge();
 
         // A free-text tool: stored tool_id is a slug not in the registry.
         {
@@ -3590,7 +4162,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge=abc&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code&scope=mcp&code_challenge={challenge}&code_challenge_method=S256", urlencoding::encode("http://localhost/callback")))
+                    .header("cookie", format!("lific_token={session_token}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3615,12 +4188,23 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let csrf = generate_csrf_token(&session_token);
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session_token);
         // No tool, no tool_custom → must be rejected, not silently attributed.
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&decision=approve",
             client_id,
             urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
             urlencoding::encode(&csrf),
         );
         let resp = app
@@ -3644,11 +4228,22 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let csrf = generate_csrf_token(&session_token);
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session_token);
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=admin",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=admin&decision=approve",
             client_id,
             urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
             urlencoding::encode(&csrf),
         );
         let resp = app
@@ -3674,11 +4269,22 @@ mod tests {
         let (app, db) = test_oauth_app();
         let session_token = create_test_session(&db);
         let client_id = register_client_helper(&app, "http://localhost/callback").await;
-        let csrf = generate_csrf_token(&session_token);
+        let challenge = test_code_challenge();
+        let request = AuthorizationRequest {
+            client_id: &client_id,
+            redirect_uri: "http://localhost/callback",
+            response_type: "code",
+            state: None,
+            code_challenge: Some(&challenge),
+            code_challenge_method: Some("S256"),
+            scope: Some(OAUTH_SCOPE),
+        };
+        let csrf = request.csrf_token(&session_token);
         let body = format!(
-            "client_id={}&redirect_uri={}&response_type=code&code_challenge=abc&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=My Editor",
+            "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=__custom__&tool_custom=My Editor&decision=approve",
             client_id,
             urlencoding::encode("http://localhost/callback"),
+            urlencoding::encode(&challenge),
             urlencoding::encode(&csrf),
         );
         let resp = app
@@ -3749,10 +4355,13 @@ mod tests {
 
     /// POST /oauth/device_authorization and return the parsed JSON.
     async fn request_device_code(app: &Router, client_name: Option<&str>) -> serde_json::Value {
-        let body = match client_name {
-            Some(n) => format!("client_name={}", urlencoding::encode(n)),
-            None => String::new(),
-        };
+        let client_id = register_named_client_helper(
+            app,
+            "http://localhost/callback",
+            client_name.unwrap_or("Test Device Client"),
+        )
+        .await;
+        let body = format!("scope=mcp&client_id={}", urlencoding::encode(&client_id));
         let resp = app
             .clone()
             .oneshot(
@@ -3815,10 +4424,83 @@ mod tests {
         }
         assert_eq!(v["expires_in"], 900);
         assert_eq!(v["interval"], 5);
+        assert_eq!(v["scope"], OAUTH_SCOPE);
         let vuri = v["verification_uri"].as_str().unwrap();
         assert!(vuri.ends_with("/oauth/device"));
         let vuc = v["verification_uri_complete"].as_str().unwrap();
         assert!(vuc.contains("user_code="));
+    }
+
+    #[tokio::test]
+    async fn device_authorization_rejects_missing_or_unsupported_scope() {
+        let (app, _db) = test_oauth_app();
+        for body in [
+            "client_name=cli",
+            "client_name=cli&scope=admin",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device_authorization")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn device_authorization_requires_a_registered_client() {
+        let (app, db) = test_oauth_app();
+        let client_id = register_client_helper(&app, "http://localhost/callback").await;
+
+        for body in [
+            "scope=mcp".to_string(),
+            "scope=mcp&client_id=unknown".to_string(),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device_authorization")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let body = format!(
+            "scope=mcp&client_id={}&client_name=Impostor",
+            urlencoding::encode(&client_id)
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device_authorization")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let response: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let user_code = response["user_code"].as_str().unwrap();
+        let consent = pending_device_consent(&db, user_code).unwrap();
+        assert_eq!(consent.client_name, "Test Client");
+        assert_eq!(consent.client_id, client_id);
     }
 
     #[tokio::test]
@@ -3891,7 +4573,7 @@ mod tests {
             .unwrap()
         };
 
-        let v = request_device_code(&app, Some("laptop")).await;
+        let v = request_device_code(&app, Some("laptop <img>")).await;
         let device_code = v["device_code"].as_str().unwrap().to_string();
         let user_code = v["user_code"].as_str().unwrap().to_string();
 
@@ -3914,7 +4596,8 @@ mod tests {
             .unwrap();
         };
 
-        // Approve via the verification page (signed-in session, CSRF-bound).
+        // The first approval submission only resolves the code and renders a
+        // confirmation page; it must not approve the device yet.
         let csrf = generate_csrf_token(&session_token);
         let approve_body = format!(
             "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
@@ -3935,6 +4618,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "approval should succeed");
+        let confirmation_page = String::from_utf8(
+            resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        )
+        .unwrap();
+        let status: String = db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM oauth_device_codes WHERE user_code = ?1",
+                params![user_code],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "looking up a device must not approve it");
+        assert!(confirmation_page.contains("laptop &lt;img&gt;"));
+        assert!(!confirmation_page.contains("laptop <img>"));
+        assert!(confirmation_page.contains("MCP issue-tracker access"));
+        assert!(confirmation_page.contains("30 days"));
+        assert!(confirmation_page.contains("oauthtest"));
+        assert!(confirmation_page.contains("name=\"confirmation_token\""));
+
+        let confirmation_token = confirmation_page
+            .split("name=\"confirmation_token\" value=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("confirmation token")
+            .to_string();
+        let confirm_body = format!(
+            "user_code={}&decision=approve&csrf_token={}&confirmation_token={}&tool=claude-code",
+            urlencoding::encode(&user_code),
+            urlencoding::encode(&csrf),
+            urlencoding::encode(&confirmation_token),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/device")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("lific_token={session_token}"))
+                    .body(axum::body::Body::from(confirm_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "confirmation should approve");
 
         // LIFIC-13: the device row binds the per-tool BOT, not the approver.
         let bot_id: i64 = {
@@ -4046,6 +4776,51 @@ mod tests {
         let (status, body) = poll_device_token(&app, &device_code).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "access_denied");
+    }
+
+    #[tokio::test]
+    async fn device_requires_an_explicit_approval_decision() {
+        let (app, db) = test_oauth_app();
+        let session = create_test_session(&db);
+        let response = request_device_code(&app, None).await;
+        let user_code = response["user_code"].as_str().unwrap();
+        let csrf = generate_csrf_token(&session);
+
+        for decision in [None, Some("maybe")] {
+            let mut body = format!(
+                "user_code={}&csrf_token={}",
+                urlencoding::encode(user_code),
+                urlencoding::encode(&csrf),
+            );
+            if let Some(decision) = decision {
+                body.push_str(&format!("&decision={decision}"));
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let status: String = db
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM oauth_device_codes WHERE user_code = ?1",
+                params![user_code],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[tokio::test]
@@ -4735,6 +5510,27 @@ mod tests {
             base64_url_encode(&Sha256::digest(VERIFIER.as_bytes()))
         }
 
+        fn authorization_approval_body(client_id: &str, credential: &str) -> String {
+            let challenge = challenge();
+            let csrf = AuthorizationRequest {
+                client_id,
+                redirect_uri: "http://localhost/callback",
+                response_type: "code",
+                state: None,
+                code_challenge: Some(&challenge),
+                code_challenge_method: Some("S256"),
+                scope: Some(OAUTH_SCOPE),
+            }
+            .csrf_token(credential);
+            format!(
+                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code&decision=approve",
+                client_id,
+                urlencoding::encode("http://localhost/callback"),
+                urlencoding::encode(&challenge),
+                urlencoding::encode(&csrf),
+            )
+        }
+
         fn owner_id(db: &DbPool) -> i64 {
             db.read()
                 .unwrap()
@@ -4749,13 +5545,7 @@ mod tests {
         /// Run the authorize POST with a live session cookie and return the
         /// issued code from the redirect.
         async fn approve_code(app: &Router, client_id: &str, session: &str) -> String {
-            let body = format!(
-                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
-                client_id,
-                urlencoding::encode("http://localhost/callback"),
-                urlencoding::encode(&challenge()),
-                urlencoding::encode(&generate_csrf_token(session)),
-            );
+            let body = authorization_approval_body(client_id, session);
             let resp = app
                 .clone()
                 .oneshot(
@@ -4989,13 +5779,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let body = format!(
-                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
-                client_id,
-                urlencoding::encode("http://localhost/callback"),
-                urlencoding::encode(&challenge()),
-                urlencoding::encode(&generate_csrf_token(&session)),
-            );
+            let body = authorization_approval_body(&client_id, &session);
             let resp = app
                 .clone()
                 .oneshot(
@@ -5070,10 +5854,13 @@ mod tests {
                 )
                 .unwrap();
 
+            let user_code = v["user_code"].as_str().unwrap();
+            let (csrf, confirmation_token) = device_confirmation(&app, &session, user_code).await;
             let body = format!(
-                "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
-                urlencoding::encode(v["user_code"].as_str().unwrap()),
-                urlencoding::encode(&generate_csrf_token(&session)),
+                "user_code={}&decision=approve&csrf_token={}&confirmation_token={}&tool=claude-code",
+                urlencoding::encode(user_code),
+                urlencoding::encode(&csrf),
+                urlencoding::encode(&confirmation_token),
             );
             let resp = app
                 .clone()
@@ -5106,8 +5893,6 @@ mod tests {
                 .unwrap();
             assert_eq!(bots, 0);
         }
-
-
         /// Refusing a device is not a grant, so it must not be made harder
         /// than approving one. Someone who sees a code they do not recognise
         /// should be able to deny it immediately, from whatever session they
@@ -5237,13 +6022,7 @@ mod tests {
             };
             let _ = session;
 
-            let body = format!(
-                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
-                client_id,
-                urlencoding::encode("http://localhost/callback"),
-                urlencoding::encode(&challenge()),
-                urlencoding::encode(&generate_csrf_token(&access_token)),
-            );
+            let body = authorization_approval_body(&client_id, &access_token);
             let resp = app
                 .clone()
                 .oneshot(
@@ -5277,13 +6056,7 @@ mod tests {
                 .execute("DELETE FROM sessions", [])
                 .unwrap();
 
-            let body = format!(
-                "client_id={}&redirect_uri={}&response_type=code&code_challenge={}&code_challenge_method=S256&scope=mcp&csrf_token={}&tool=claude-code",
-                client_id,
-                urlencoding::encode("http://localhost/callback"),
-                urlencoding::encode(&challenge()),
-                urlencoding::encode(&generate_csrf_token(&session)),
-            );
+            let body = authorization_approval_body(&client_id, &session);
             let resp = app
                 .clone()
                 .oneshot(
@@ -5314,14 +6087,18 @@ mod tests {
 
         // ── Device grant ────────────────────────────────────────
 
-        /// Approve a device code through the real verification page, bound to
-        /// the tool bot, then clear `last_polled_at` so the next poll is not
-        /// answered with `slow_down`.
-        async fn approve_device(app: &Router, db: &DbPool, session: &str, user_code: &str) {
-            let body = format!(
+        /// Resolve a device code through the first verification step and
+        /// return the fields needed for the explicit confirmation step.
+        async fn device_confirmation(
+            app: &Router,
+            session: &str,
+            user_code: &str,
+        ) -> (String, String) {
+            let csrf = generate_csrf_token(session);
+            let lookup_body = format!(
                 "user_code={}&decision=approve&csrf_token={}&tool=claude-code",
                 urlencoding::encode(user_code),
-                urlencoding::encode(&generate_csrf_token(session)),
+                urlencoding::encode(&csrf),
             );
             let resp = app
                 .clone()
@@ -5331,7 +6108,49 @@ mod tests {
                         .uri("/oauth/device")
                         .header("content-type", "application/x-www-form-urlencoded")
                         .header("cookie", format!("lific_token={session}"))
-                        .body(axum::body::Body::from(body))
+                        .body(axum::body::Body::from(lookup_body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let page = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            let confirmation_token = page
+                .split("name=\"confirmation_token\" value=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .expect("confirmation token")
+                .to_string();
+            (csrf, confirmation_token)
+        }
+
+        /// Confirm a device approval, then clear `last_polled_at` so the next
+        /// poll is not answered with `slow_down`.
+        async fn approve_device(app: &Router, db: &DbPool, session: &str, user_code: &str) {
+            let (csrf, confirmation_token) = device_confirmation(app, session, user_code).await;
+            let confirm_body = format!(
+                "user_code={}&decision=approve&csrf_token={}&confirmation_token={}&tool=claude-code",
+                urlencoding::encode(user_code),
+                urlencoding::encode(&csrf),
+                urlencoding::encode(&confirmation_token),
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/oauth/device")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("cookie", format!("lific_token={session}"))
+                        .body(axum::body::Body::from(confirm_body))
                         .unwrap(),
                 )
                 .await
@@ -5348,6 +6167,15 @@ mod tests {
             let (app, db) = test_oauth_app();
             let session = create_test_session(&db);
             let v = request_device_code(&app, Some("My CLI")).await;
+            let client_id: String = db
+                .read()
+                .unwrap()
+                .query_row(
+                    "SELECT client_id FROM oauth_device_codes WHERE user_code = ?1",
+                    params![v["user_code"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
             approve_device(&app, &db, &session, v["user_code"].as_str().unwrap()).await;
 
             let (status, body) = poll_device_token(&app, v["device_code"].as_str().unwrap()).await;
@@ -5358,6 +6186,12 @@ mod tests {
                     .unwrap()
                     .starts_with("lific_at_")
             );
+            let token_client_id: String = db
+                .read()
+                .unwrap()
+                .query_row("SELECT client_id FROM oauth_tokens", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(token_client_id, client_id);
         }
 
         #[tokio::test]

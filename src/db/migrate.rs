@@ -206,6 +206,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "attachment search",
         include_str!("../../migrations/042_attachment_search.sql"),
     ),
+    (
+        43,
+        "oauth device scope",
+        include_str!("../../migrations/043_oauth_device_scope.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
