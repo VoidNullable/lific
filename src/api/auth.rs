@@ -599,35 +599,40 @@ pub(super) struct ChangePasswordRequest {
 /// POST /api/auth/me/password — change password after verifying the current
 /// one. LIF-190.
 ///
-/// LIF-205: a password change invalidates **all** of the user's sessions
-/// (the "I've been compromised, lock it down" expectation), then mints a
-/// fresh session for the current browser so the legitimate caller stays
-/// logged in instead of being bounced to /login. Any stolen `lific_sess_`
-/// token is dead the moment this returns.
+/// LIF-205: a password change invalidates **all** of the user's sessions and
+/// durable credentials (the "I've been compromised, lock it down" expectation),
+/// then mints a fresh session for the current browser so the legitimate caller
+/// stays logged in instead of being bounced to /login. Any stolen
+/// `lific_sess_` token is dead when this returns.
 pub(super) async fn change_password(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Extension(realtime): Extension<crate::realtime::RealtimeHub>,
     Json(input): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, LificError> {
     let user = require_user(&identity)?;
     let session = with_write(&db, |conn| {
-        let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
-        let ok = crate::db::queries::users::verify_password(
-            &input.current_password,
-            &full.password_hash,
-        )?;
-        if !ok {
-            return Err(LificError::BadRequest(
-                "current password is incorrect".into(),
-            ));
-        }
-        crate::db::queries::users::update_password(conn, user.id, &input.new_password)?;
-        // Kill every existing session (including any an attacker holds), then
-        // issue a fresh one for this browser.
-        crate::db::queries::users::delete_all_sessions(conn, user.id)?;
-        crate::db::queries::users::create_session(conn, user.id, None)
+        crate::db::queries::savepoint(conn, "change_password", || {
+            let full = crate::db::queries::users::get_user_by_id(conn, user.id)?;
+            let ok = crate::db::queries::users::verify_password(
+                &input.current_password,
+                &full.password_hash,
+            )?;
+            if !ok {
+                return Err(LificError::BadRequest(
+                    "current password is incorrect".into(),
+                ));
+            }
+            crate::db::queries::users::update_password(conn, user.id, &input.new_password)?;
+            // Kill every existing session (including any an attacker holds), then
+            // issue a fresh one for this browser.
+            crate::db::queries::users::delete_all_sessions(conn, user.id)?;
+            crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)?;
+            crate::db::queries::users::create_session(conn, user.id, None)
+        })
     })?;
+    realtime.revoke_user(user.id);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -647,17 +652,23 @@ pub(super) async fn change_password(
     ))
 }
 
-/// DELETE /api/auth/me/sessions — sign out of every session (this one too).
-/// Clears the cookie so the current browser drops to logged-out. LIF-190.
+/// DELETE /api/auth/me/sessions — sign out of every session and revoke the
+/// account's durable credentials. Clears the cookie so the current browser
+/// drops to logged-out. LIF-190.
 pub(super) async fn revoke_all_sessions(
     State(db): State<DbPool>,
     Extension(auth_cfg): Extension<crate::config::AuthConfig>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Extension(realtime): Extension<crate::realtime::RealtimeHub>,
 ) -> Result<impl IntoResponse, LificError> {
     let user = require_user(&identity)?;
     with_write(&db, |conn| {
-        crate::db::queries::users::delete_all_sessions(conn, user.id)
+        crate::db::queries::savepoint(conn, "revoke_all_sessions", || {
+            crate::db::queries::users::delete_all_sessions(conn, user.id)?;
+            crate::db::queries::users::revoke_all_durable_credentials(conn, user.id)
+        })
     })?;
+    realtime.revoke_user(user.id);
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "set-cookie",
@@ -685,13 +696,50 @@ pub(super) struct CreateKeyRequest {
     name: String,
 }
 
+fn require_recent_session(db: &DbPool, headers: &HeaderMap) -> Result<(), LificError> {
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+    else {
+        return Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ));
+    };
+
+    // API keys already passed the authentication middleware, which preserves
+    // their existing credential-management permissions. OAuth tokens are
+    // denied on these routes by that middleware; reject every other bearer
+    // shape here as defense in depth.
+    if token.starts_with("lific_sk") {
+        return Ok(());
+    }
+    if !token.starts_with("lific_sess_") {
+        return Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ));
+    }
+
+    let conn = db.read()?;
+    if crate::db::queries::users::session_is_recent(&conn, token)? {
+        Ok(())
+    } else {
+        Err(LificError::Forbidden(
+            "recent authentication required".into(),
+        ))
+    }
+}
+
 pub(super) async fn create_key(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    headers: HeaderMap,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
+    require_recent_session(&db, &headers)?;
 
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -745,9 +793,11 @@ pub(super) async fn create_bot(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    headers: HeaderMap,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
+    require_recent_session(&db, &headers)?;
 
     let tool = input.tool.trim().to_lowercase();
     let display_name = match tool.as_str() {
@@ -998,7 +1048,43 @@ pub(super) async fn reactivate_user(
 #[cfg(test)]
 mod tests {
     use crate::api::test_helpers::*;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, StatusCode};
+
+    #[test]
+    fn durable_credential_creation_requires_recent_session() {
+        let db = crate::db::open_memory().unwrap();
+        let session = {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES ('recent', 'recent@test', 'x')",
+                [],
+            )
+            .unwrap();
+            let user_id = conn.last_insert_rowid();
+            crate::db::queries::users::create_session(&conn, user_id, None).unwrap()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", session.token).parse().unwrap(),
+        );
+
+        assert!(super::require_recent_session(&db, &headers).is_ok());
+
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(super::require_recent_session(&db, &headers).is_err());
+
+        let mut api_headers = HeaderMap::new();
+        api_headers.insert("authorization", "Bearer lific_sk_test".parse().unwrap());
+        assert!(super::require_recent_session(&db, &api_headers).is_ok());
+    }
 
     // LIF-207: the Secure attribute is gated; everything else stays constant.
     #[test]

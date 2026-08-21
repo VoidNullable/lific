@@ -657,6 +657,20 @@ pub fn validate_session(conn: &Connection, token: &str) -> Result<User, LificErr
     Ok(user)
 }
 
+/// Whether a session was created within the recent-authentication window.
+pub fn session_is_recent(conn: &Connection, token: &str) -> Result<bool, LificError> {
+    let token_hash = hash_session_token(token);
+    Ok(conn
+        .query_row(
+            "SELECT created_at >= datetime('now', '-15 minutes')
+             FROM sessions WHERE token = ?1",
+            params![token_hash],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
 /// Delete a session (logout). Hashes the plaintext token before lookup.
 pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> {
     let token_hash = hash_session_token(token);
@@ -670,6 +684,68 @@ pub fn delete_session(conn: &Connection, token: &str) -> Result<(), LificError> 
 pub fn delete_all_sessions(conn: &Connection, user_id: i64) -> Result<(), LificError> {
     conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
     Ok(())
+}
+
+/// Revoke every durable credential owned by a user during a lockdown action:
+/// the user's API keys, keys for connected-tool bots they own, and user-bound
+/// OAuth access tokens. Password changes and sign-out-all call this together
+/// with session deletion so the recovery state is committed atomically.
+pub fn revoke_all_durable_credentials(conn: &Connection, user_id: i64) -> Result<(), LificError> {
+    crate::db::queries::savepoint(conn, "revoke_durable_credentials", || {
+        let mut api_keys = conn.prepare(
+            "SELECT id, name FROM api_keys
+             WHERE revoked = 0
+               AND (user_id = ?1 OR user_id IN (
+                   SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1
+               ))",
+        )?;
+        let api_keys = api_keys
+            .query_map(params![user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<(i64, String)>, _>>()?;
+        conn.execute(
+            "UPDATE api_keys SET revoked = 1
+             WHERE revoked = 0
+               AND (user_id = ?1 OR user_id IN (
+                   SELECT id FROM users WHERE is_bot = 1 AND owner_id = ?1
+               ))",
+            params![user_id],
+        )?;
+        for (id, name) in api_keys {
+            conn.execute(
+                "INSERT INTO audit_log
+                    (actor_user_id, transport, entity_type, entity_id, entity_label,
+                     action, field, old_value, new_value)
+                 SELECT user_id, transport, 'api_key', ?1, ?2,
+                        'revoke', 'revoked', '0', '1'
+                 FROM _actor_state WHERE id = 1",
+                params![id, name],
+            )?;
+        }
+
+        let mut oauth_tokens = conn.prepare(
+            "SELECT rowid, client_id FROM oauth_tokens
+             WHERE user_id = ?1 AND revoked = 0",
+        )?;
+        let oauth_tokens = oauth_tokens
+            .query_map(params![user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<(i64, String)>, _>>()?;
+        conn.execute(
+            "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ?1 AND revoked = 0",
+            params![user_id],
+        )?;
+        for (id, client_id) in oauth_tokens {
+            conn.execute(
+                "INSERT INTO audit_log
+                    (actor_user_id, transport, entity_type, entity_id, entity_label,
+                     action, field, old_value, new_value)
+                 SELECT user_id, transport, 'oauth_token', ?1, ?2,
+                        'revoke', 'revoked', '0', '1'
+                 FROM _actor_state WHERE id = 1",
+                params![id, client_id],
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// Generate a session token with the lific_sess_ prefix.
@@ -2740,6 +2816,80 @@ mod tests {
         delete_all_sessions(&conn, user.id).unwrap();
         assert!(validate_session(&conn, &s1.token).is_err());
         assert!(validate_session(&conn, &s2.token).is_err());
+    }
+
+    #[test]
+    fn recent_session_window_rejects_old_sessions() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let session = create_session(&conn, user.id, None).unwrap();
+
+        assert!(session_is_recent(&conn, &session.token).unwrap());
+        conn.execute(
+            "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+            [],
+        )
+        .unwrap();
+        assert!(!session_is_recent(&conn, &session.token).unwrap());
+    }
+
+    #[test]
+    fn compromised_recovery_revokes_user_bot_and_oauth_credentials() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = test_create_user(&conn);
+        let bot = create_bot_user(&conn, user.id, "bot", "Bot", Some("bot")).unwrap();
+        conn.execute(
+            "INSERT INTO api_keys (name, key_hash, user_id) VALUES
+             ('human-recovery-key', 'hash-human', ?1),
+             ('bot-recovery-key', 'hash-bot', ?2),
+             ('operator-recovery-key', 'hash-operator', NULL)",
+            params![user.id, bot.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+             VALUES ('recovery-client', 'Recovery', '[\"http://localhost\"]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oauth_tokens (access_token, client_id, expires_at, user_id)
+             VALUES ('oauth-hash', 'recovery-client', '2099-01-01T00:00:00Z', ?1)",
+            params![user.id],
+        )
+        .unwrap();
+
+        revoke_all_durable_credentials(&conn, user.id).unwrap();
+        let active_keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_keys WHERE revoked = 0", [], |r| r.get(0))
+            .unwrap();
+        let active_tokens: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_tokens WHERE revoked = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(active_keys, 1, "unbound operator keys are not this user's");
+        assert_eq!(active_tokens, 0);
+
+        let operator_key_active: i64 = conn
+            .query_row(
+                "SELECT revoked = 0 FROM api_keys WHERE name = 'operator-recovery-key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(operator_key_active, 1);
+
+        let audited: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log
+                 WHERE entity_type IN ('api_key', 'oauth_token')
+                   AND action = 'revoke'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 3, "each revoked credential has an audit row");
     }
 
     // ── API key ownership tests ──────────────────────────────

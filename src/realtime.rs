@@ -60,6 +60,7 @@ struct SocketCounts {
 #[derive(Debug, Clone)]
 pub struct RealtimeHub {
     tx: broadcast::Sender<RealtimeMessage>,
+    revocations: broadcast::Sender<i64>,
     connections: Arc<Mutex<SocketCounts>>,
 }
 
@@ -70,8 +71,10 @@ impl RealtimeHub {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
+        let (revocations, _) = broadcast::channel(capacity);
         Self {
             tx,
+            revocations,
             connections: Arc::new(Mutex::new(SocketCounts::default())),
         }
     }
@@ -107,6 +110,13 @@ impl RealtimeHub {
 
     pub fn send_to_users(&self, event: RealtimeEvent, user_ids: Vec<i64>) {
         self.send_message(event, RealtimeAudience::Users(user_ids));
+    }
+
+    /// Immediately terminate every live socket for a user after account
+    /// recovery. The normal periodic session check remains as a defense in
+    /// depth for revocations made by other processes.
+    pub fn revoke_user(&self, user_id: i64) {
+        let _ = self.revocations.send(user_id);
     }
 
     fn send_message(&self, event: RealtimeEvent, audience: RealtimeAudience) {
@@ -222,6 +232,7 @@ pub async fn serve_socket(
     let connected_at = Instant::now();
     let mut client = ClientState::new(connected_at);
     let mut rx = hub.subscribe();
+    let mut revocations = hub.revocations.subscribe();
     let mut revalidate = time::interval_at(
         connected_at + SESSION_REVALIDATE_INTERVAL,
         SESSION_REVALIDATE_INTERVAL,
@@ -238,6 +249,7 @@ pub async fn serve_socket(
             _ = revalidate.tick() => SocketInput::Revalidate,
             _ = ping.tick() => SocketInput::Ping,
             event = rx.recv() => SocketInput::Event(event),
+            revoked = revocations.recv() => SocketInput::Revocation(revoked),
             message = socket.recv() => SocketInput::Message(message),
         };
         let flow = match input {
@@ -250,6 +262,19 @@ pub async fn serve_socket(
                 }
                 flow
             }
+            SocketInput::Revocation(revoked) => match revocation_flow(revoked, auth_user.id) {
+                RevocationFlow::Ignore => SocketFlow::Open,
+                RevocationFlow::Revalidate => {
+                    let flow =
+                        revalidate_session(&mut socket, &db, &session_token, &mut auth_user).await;
+                    if flow == SocketFlow::Open {
+                        visible_projects = visible_projects_for(&db, &auth_user).await;
+                        client.invalidate_activity_baseline();
+                    }
+                    flow
+                }
+                RevocationFlow::Close => close_socket(&mut socket).await,
+            },
             SocketInput::Ping => send_bounded(&mut socket, Message::Ping(Vec::new().into())).await,
             SocketInput::Event(event) => {
                 forward_event(
@@ -275,10 +300,26 @@ pub async fn serve_socket(
 
 enum SocketInput {
     Revalidate,
+    Revocation(Result<i64, RecvError>),
     Ping,
     Event(Result<RealtimeMessage, RecvError>),
     Message(Option<Result<Message, axum::Error>>),
     ProgressDeadline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevocationFlow {
+    Ignore,
+    Revalidate,
+    Close,
+}
+
+fn revocation_flow(revoked: Result<i64, RecvError>, user_id: i64) -> RevocationFlow {
+    match revoked {
+        Ok(id) if id != user_id => RevocationFlow::Ignore,
+        Ok(_) | Err(RecvError::Closed) => RevocationFlow::Close,
+        Err(RecvError::Lagged(_)) => RevocationFlow::Revalidate,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1019,6 +1060,28 @@ mod tests {
             baseline_response(Err(crate::error::LificError::Internal("test".into()))),
             RealtimeEvent::ResyncRequired
         );
+    }
+
+    #[test]
+    fn revoke_user_broadcasts_immediately_to_socket_tasks() {
+        let hub = RealtimeHub::new();
+        let mut rx = hub.revocations.subscribe();
+        hub.revoke_user(42);
+        assert_eq!(rx.try_recv().unwrap(), 42);
+    }
+
+    #[test]
+    fn revocation_receiver_lag_revalidates_and_closure_fails_closed() {
+        assert_eq!(
+            revocation_flow(Err(RecvError::Lagged(1)), 42),
+            RevocationFlow::Revalidate
+        );
+        assert_eq!(
+            revocation_flow(Err(RecvError::Closed), 42),
+            RevocationFlow::Close
+        );
+        assert_eq!(revocation_flow(Ok(7), 42), RevocationFlow::Ignore);
+        assert_eq!(revocation_flow(Ok(42), 42), RevocationFlow::Close);
     }
 
     #[test]
