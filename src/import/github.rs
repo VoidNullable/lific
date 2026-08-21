@@ -14,9 +14,16 @@
 //! tested against fixture JSON; the network lives behind [`GithubFetcher`].
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use std::io::Read;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel, StatusMap};
 use crate::db::models::{Priority, Status};
+
+pub const MAX_GITHUB_ISSUES: usize = 10_000;
+pub const MAX_GITHUB_COMMENTS_PER_ISSUE: usize = 1_000;
+pub const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_GITHUB_NORMALIZED_BYTES: usize = 128 * 1024 * 1024;
 
 /// One issue as returned by the GitHub REST API (fields we use).
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +192,7 @@ pub fn collect(
     map: &StatusMap,
 ) -> Result<super::FetchedIssues, String> {
     let mut out = super::FetchedIssues::default();
+    let mut total_normalized_bytes = 0usize;
     let mut page = 1u32;
     loop {
         let (issues, has_next) = fetcher.fetch_issues_page(page, state)?;
@@ -193,12 +201,46 @@ pub fn collect(
                 out.skipped_non_issues += 1;
                 continue;
             }
+            if out.issues.len() >= MAX_GITHUB_ISSUES {
+                return Err(format!(
+                    "GitHub repository has too many issues (more than {})",
+                    MAX_GITHUB_ISSUES
+                ));
+            }
             out.skipped_assignees += issue.assignees.len();
             if issue.milestone.is_some() {
                 out.skipped_other += 1;
             }
             let comments = fetcher.fetch_comments(issue.number)?;
-            out.issues.push(map_issue(slug, issue, &comments, map));
+            if comments.len() > MAX_GITHUB_COMMENTS_PER_ISSUE {
+                return Err(format!(
+                    "GitHub issue #{} has too many comments ({} > {})",
+                    issue.number,
+                    comments.len(),
+                    MAX_GITHUB_COMMENTS_PER_ISSUE
+                ));
+            }
+            let normalized = map_issue(slug, issue, &comments, map);
+            let previous_capacity = out.issues.capacity();
+            out.issues
+                .try_reserve(1)
+                .map_err(|_| "GitHub import normalized allocation failed".to_string())?;
+            let issue_slots = out
+                .issues
+                .capacity()
+                .saturating_sub(previous_capacity)
+                .saturating_mul(std::mem::size_of::<NormalizedIssue>());
+            total_normalized_bytes = total_normalized_bytes
+                .checked_add(issue_slots)
+                .and_then(|bytes| bytes.checked_add(normalized_retained_bytes(&normalized)))
+                .ok_or_else(|| "GitHub import content size overflow".to_string())?;
+            if total_normalized_bytes > MAX_GITHUB_NORMALIZED_BYTES {
+                return Err(format!(
+                    "GitHub import normalized data exceeds {} byte limit",
+                    MAX_GITHUB_NORMALIZED_BYTES
+                ));
+            }
+            out.issues.push(normalized);
         }
         if !has_next {
             break;
@@ -210,6 +252,40 @@ pub fn collect(
         }
     }
     Ok(out)
+}
+
+fn normalized_retained_bytes(issue: &NormalizedIssue) -> usize {
+    let label_bytes = issue.labels.iter().fold(
+        issue
+            .labels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<NormalizedLabel>()),
+        |bytes, label| {
+            bytes
+                .saturating_add(label.name.capacity())
+                .saturating_add(label.color.as_ref().map_or(0, String::capacity))
+        },
+    );
+    let comment_bytes = issue.comments.iter().fold(
+        issue
+            .comments
+            .capacity()
+            .saturating_mul(std::mem::size_of::<NormalizedComment>()),
+        |bytes, comment| {
+            bytes
+                .saturating_add(comment.author.capacity())
+                .saturating_add(comment.body.capacity())
+                .saturating_add(comment.created_at.as_ref().map_or(0, String::capacity))
+        },
+    );
+
+    issue
+        .source
+        .capacity()
+        .saturating_add(issue.title.capacity())
+        .saturating_add(issue.description.capacity())
+        .saturating_add(label_bytes)
+        .saturating_add(comment_bytes)
 }
 
 /// Parse the RFC 5988 `Link` header to decide whether a next page exists.
@@ -290,6 +366,25 @@ impl LiveGithub {
         }
         Ok(resp)
     }
+
+    fn json_bounded<T: DeserializeOwned>(
+        resp: reqwest::blocking::Response,
+        label: &str,
+    ) -> Result<T, String> {
+        let mut bytes = Vec::new();
+        let mut reader = resp.take((MAX_GITHUB_RESPONSE_BYTES + 1) as u64);
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read GitHub {label} response: {e}"))?;
+        if bytes.len() > MAX_GITHUB_RESPONSE_BYTES {
+            return Err(format!(
+                "GitHub {label} response exceeds {} byte limit",
+                MAX_GITHUB_RESPONSE_BYTES
+            ));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("failed to parse GitHub {label} JSON: {e}"))
+    }
 }
 
 impl GithubFetcher for LiveGithub {
@@ -310,9 +405,10 @@ impl GithubFetcher for LiveGithub {
             .get("link")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let issues: Vec<GithubIssue> = resp
-            .json()
-            .map_err(|e| format!("failed to parse issues JSON: {e}"))?;
+        let issues: Vec<GithubIssue> = Self::json_bounded(resp, "issues")?;
+        if issues.len() > 100 {
+            return Err("GitHub issues response exceeds the per-page item limit".into());
+        }
         Ok((issues, has_next_page(link.as_deref())))
     }
 
@@ -330,9 +426,13 @@ impl GithubFetcher for LiveGithub {
                 .get("link")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            let batch: Vec<GithubComment> = resp
-                .json()
-                .map_err(|e| format!("failed to parse comments JSON: {e}"))?;
+            let batch: Vec<GithubComment> = Self::json_bounded(resp, "comments")?;
+            if batch.len() > 100 || all.len() + batch.len() > MAX_GITHUB_COMMENTS_PER_ISSUE {
+                return Err(format!(
+                    "GitHub comments exceed the {} per-issue limit",
+                    MAX_GITHUB_COMMENTS_PER_ISSUE
+                ));
+            }
             all.extend(batch);
             if !has_next_page(link.as_deref()) {
                 break;
@@ -443,6 +543,7 @@ mod tests {
     struct FakeGithub {
         pages: Vec<Vec<GithubIssue>>,
         comments: Vec<GithubComment>,
+        comment_fetches: std::cell::Cell<usize>,
     }
     impl GithubFetcher for FakeGithub {
         fn fetch_issues_page(
@@ -456,6 +557,7 @@ mod tests {
             Ok((issues, has_next))
         }
         fn fetch_comments(&self, _n: i64) -> Result<Vec<GithubComment>, String> {
+            self.comment_fetches.set(self.comment_fetches.get() + 1);
             Ok(self.comments.clone())
         }
     }
@@ -474,14 +576,84 @@ mod tests {
                 body: Some("a comment".into()),
                 created_at: Some("2024-01-01T00:00:00Z".into()),
             }],
+            comment_fetches: std::cell::Cell::new(0),
         };
-        let fetched =
-            collect(&fetcher, "octocat/hello", StateFilter::All, &StatusMap::default()).unwrap();
+        let fetched = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap();
         // Fixture: 3 real issues + 1 PR.
         assert_eq!(fetched.issues.len(), 3);
         assert_eq!(fetched.skipped_non_issues, 1);
         // Each real issue got one comment from the fake.
         assert!(fetched.issues.iter().all(|i| i.comments.len() == 1));
         assert_eq!(fetched.issues[0].comments[0].author, "octocat");
+    }
+
+    #[test]
+    fn collect_rejects_comment_blowup() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let fetcher = FakeGithub {
+            pages: vec![vec![issue]],
+            comments: vec![
+                GithubComment {
+                    user: None,
+                    body: Some("x".into()),
+                    created_at: None,
+                };
+                MAX_GITHUB_COMMENTS_PER_ISSUE + 1
+            ],
+            comment_fetches: std::cell::Cell::new(0),
+        };
+        let error = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("too many comments"));
+    }
+
+    #[test]
+    fn collect_rejects_issue_limit_before_fetching_comments() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let fetcher = FakeGithub {
+            pages: vec![vec![issue; MAX_GITHUB_ISSUES + 1]],
+            comments: Vec::new(),
+            comment_fetches: std::cell::Cell::new(0),
+        };
+        let error = collect(
+            &fetcher,
+            "octocat/hello",
+            StateFilter::All,
+            &StatusMap::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("too many issues"));
+        assert_eq!(fetcher.comment_fetches.get(), MAX_GITHUB_ISSUES);
+    }
+
+    #[test]
+    fn normalized_size_counts_empty_comment_allocations() {
+        let issue = fixture_issues().into_iter().next().unwrap();
+        let comments = vec![
+            GithubComment {
+                user: None,
+                body: None,
+                created_at: None,
+            };
+            MAX_GITHUB_COMMENTS_PER_ISSUE
+        ];
+        let normalized = map_issue("octocat/hello", &issue, &comments, &StatusMap::default());
+
+        assert!(
+            normalized_retained_bytes(&normalized)
+                >= comments.len() * std::mem::size_of::<super::super::NormalizedComment>()
+        );
     }
 }
