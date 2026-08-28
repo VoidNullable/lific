@@ -12,7 +12,8 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = term::wants_json(json_flag);
     let pool = db::open(&cfg.database.path)?;
-    let manager = auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
+    let manager =
+        auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
 
     match action {
         KeyAction::Create {
@@ -46,7 +47,9 @@ pub fn run(
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 let title = if let Some(ref username) = assigned {
-                    format!("API key '{name}' created (assigned to {username}) — save it now, it will not be shown again")
+                    format!(
+                        "API key '{name}' created (assigned to {username}) — save it now, it will not be shown again"
+                    )
                 } else {
                     format!("API key '{name}' created — save it now, it will not be shown again")
                 };

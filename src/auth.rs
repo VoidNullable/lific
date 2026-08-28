@@ -611,7 +611,9 @@ fn oauth_blocked_reason(method: &Method, path: &str) -> Option<&'static str> {
     // nothing reaches here; the rule is here so moving them behind auth later
     // cannot hand a token authority over the flow that issued it.
     if path == "/oauth" || path.starts_with("/oauth/") {
-        return Some("OAuth client and token administration is not available to OAuth-token callers");
+        return Some(
+            "OAuth client and token administration is not available to OAuth-token callers",
+        );
     }
 
     None
@@ -957,21 +959,33 @@ pub async fn require_api_key(
         Ok(user) => user,
         Err(ApiKeyReject::BadChecksum) => {
             warn!("rejected API key with invalid checksum");
-            return (StatusCode::UNAUTHORIZED,
-                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Invalid API key",
+            )
+                .into_response();
         }
         Err(ApiKeyReject::Db) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
         }
         Err(ApiKeyReject::NotFound) => {
             warn!("rejected invalid API key");
-            return (StatusCode::UNAUTHORIZED,
-                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Invalid API key",
+            )
+                .into_response();
         }
         Err(ApiKeyReject::HashMismatch) => {
             warn!("API key hash verification failed");
-            return (StatusCode::UNAUTHORIZED,
-                    [("WWW-Authenticate", www_auth.as_str())], "Invalid API key").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", www_auth.as_str())],
+                "Invalid API key",
+            )
+                .into_response();
         }
         Err(ApiKeyReject::Inactive) => {
             warn!("rejected API key: deactivated account, or a bot with a deactivated owner");
@@ -1242,22 +1256,12 @@ mod tests {
         let pool = test_db();
         let manager = create_key_manager().unwrap();
 
-        let live = create_api_key_with_expiry(
-            &pool,
-            &manager,
-            "live",
-            Some(&rfc3339_from_now(1)),
-            None,
-        )
-        .unwrap();
-        let dead = create_api_key_with_expiry(
-            &pool,
-            &manager,
-            "dead",
-            Some(&rfc3339_from_now(-1)),
-            None,
-        )
-        .unwrap();
+        let live =
+            create_api_key_with_expiry(&pool, &manager, "live", Some(&rfc3339_from_now(1)), None)
+                .unwrap();
+        let dead =
+            create_api_key_with_expiry(&pool, &manager, "dead", Some(&rfc3339_from_now(-1)), None)
+                .unwrap();
 
         assert!(
             validate_api_key(&pool, &manager, &live).is_ok(),
@@ -2560,7 +2564,12 @@ mod tests {
         state.required = false;
 
         let resp = operator_probe_app(state, pool.clone())
-            .oneshot(Request::builder().uri("/probe").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2575,10 +2584,11 @@ mod tests {
     #[tokio::test]
     async fn auth_required_default_credentialless_request_still_401s() {
         let pool = test_db();
-        let resp = echo_app(test_auth_state(&pool)) // required: true
-            .oneshot(Request::builder().uri("/echo").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let resp =
+            echo_app(test_auth_state(&pool)) // required: true
+                .oneshot(Request::builder().uri("/echo").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -2593,9 +2603,9 @@ mod tests {
         state.required = false;
 
         for bad in [
-            "lific_sk-garbage",          // malformed API key
-            "lific_sess_expiredorfake",  // unknown session
-            "lific_at_neverissued",      // unknown OAuth token
+            "lific_sk-garbage",         // malformed API key
+            "lific_sess_expiredorfake", // unknown session
+            "lific_at_neverissued",     // unknown OAuth token
         ] {
             let resp = echo_app(state.clone())
                 .oneshot(
@@ -2654,7 +2664,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(bytes.as_ref(), format!("user:{user_id}:optionaluser:false").as_bytes());
+        assert_eq!(
+            bytes.as_ref(),
+            format!("user:{user_id}:optionaluser:false").as_bytes()
+        );
     }
 
     #[tokio::test]
@@ -2971,10 +2984,7 @@ mod tests {
 
     #[test]
     fn is_attachment_download_matches_numeric_id_get() {
-        assert!(is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5"
-        ));
+        assert!(is_attachment_download(&Method::GET, "/api/attachments/5"));
         assert!(is_attachment_download(
             &Method::GET,
             "/api/attachments/12345"
@@ -2983,10 +2993,7 @@ mod tests {
 
     #[test]
     fn is_attachment_download_tolerates_trailing_slash() {
-        assert!(is_attachment_download(
-            &Method::GET,
-            "/api/attachments/7/"
-        ));
+        assert!(is_attachment_download(&Method::GET, "/api/attachments/7/"));
     }
 
     #[test]
@@ -3006,10 +3013,7 @@ mod tests {
             &Method::GET,
             "/api/attachments/5/extra"
         ));
-        assert!(!is_attachment_download(
-            &Method::GET,
-            "/api/attachments/5x"
-        ));
+        assert!(!is_attachment_download(&Method::GET, "/api/attachments/5x"));
     }
 
     /// LIF-418: a thumbnail is loaded by an `<img>` exactly like the full
@@ -3049,10 +3053,7 @@ mod tests {
             &Method::DELETE,
             "/api/attachments/5"
         ));
-        assert!(!is_attachment_download(
-            &Method::POST,
-            "/api/attachments/5"
-        ));
+        assert!(!is_attachment_download(&Method::POST, "/api/attachments/5"));
     }
 
     #[test]
@@ -3060,7 +3061,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "cookie",
-            "foo=bar; lific_token=lific_sess_abc123; baz=qux".parse().unwrap(),
+            "foo=bar; lific_token=lific_sess_abc123; baz=qux"
+                .parse()
+                .unwrap(),
         );
         assert_eq!(
             session_cookie_token(&headers).as_deref(),
@@ -3512,11 +3515,7 @@ mod tests {
             ("POST", "/api/auth/bots", Some(serde_json::json!({}))),
             ("POST", "/api/auth/bots/1/disconnect", None),
             ("DELETE", "/api/auth/bots/1", None),
-            (
-                "POST",
-                "/api/auth/me/password",
-                Some(serde_json::json!({})),
-            ),
+            ("POST", "/api/auth/me/password", Some(serde_json::json!({}))),
             ("DELETE", "/api/auth/me/sessions", None),
             ("POST", "/api/users/1/promote", None),
         ];

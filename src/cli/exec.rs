@@ -1145,7 +1145,10 @@ mod tests {
             .unwrap();
             conn.execute(
                 "UPDATE comments SET created_at = ?1 WHERE id = ?2",
-                rusqlite::params![format!("2026-01-01 00:{:02}:{:02}", i / 60, i % 60), comment.id],
+                rusqlite::params![
+                    format!("2026-01-01 00:{:02}:{:02}", i / 60, i % 60),
+                    comment.id
+                ],
             )
             .unwrap();
         }

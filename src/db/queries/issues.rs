@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -928,15 +928,17 @@ mod tests {
                     "module {module_id} does not belong to project {issue_project_id}"
                 )
         ));
-        assert!(list_issues(
-            &conn,
-            &ListIssuesQuery {
-                project_id: Some(issue_project_id),
-                ..Default::default()
-            }
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            list_issues(
+                &conn,
+                &ListIssuesQuery {
+                    project_id: Some(issue_project_id),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     // LIF-130: the issue INSERT and its label attaches are one atomic unit.

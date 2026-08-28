@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -21,9 +21,9 @@ pub struct StepDoneEffect {
 
 /// Resolve "PROJ-PLAN-7" to a plan id.
 pub fn resolve_plan_identifier(conn: &Connection, identifier: &str) -> Result<i64, LificError> {
-    let idx = identifier.rfind("-PLAN-").ok_or_else(|| {
-        LificError::BadRequest(format!("invalid plan identifier: {identifier}"))
-    })?;
+    let idx = identifier
+        .rfind("-PLAN-")
+        .ok_or_else(|| LificError::BadRequest(format!("invalid plan identifier: {identifier}")))?;
     let project_ident = &identifier[..idx];
     let sequence: i64 = identifier[idx + 6..]
         .parse()
@@ -79,7 +79,9 @@ fn read_plan_row(conn: &Connection, id: i64) -> Result<Plan, LificError> {
         },
     )
     .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LificError::NotFound(format!("plan {id} not found")),
+        rusqlite::Error::QueryReturnedNoRows => {
+            LificError::NotFound(format!("plan {id} not found"))
+        }
         _ => e.into(),
     })
 }
@@ -134,7 +136,10 @@ fn assemble_tree(flat: Vec<PlanStepNode>) -> Vec<PlanStepNode> {
     use std::collections::HashMap;
     let mut children_of: HashMap<Option<i64>, Vec<PlanStepNode>> = HashMap::new();
     for node in flat {
-        children_of.entry(node.parent_step_id).or_default().push(node);
+        children_of
+            .entry(node.parent_step_id)
+            .or_default()
+            .push(node);
     }
     fn build(
         parent: Option<i64>,
@@ -206,7 +211,11 @@ pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, Li
         inner.push_str(&format!(" LIMIT ?{}", pv.len() + 1));
         pv.push(Box::new(limit));
     } else {
-        inner.push_str(&format!(" LIMIT ?{} OFFSET ?{}", pv.len() + 1, pv.len() + 2));
+        inner.push_str(&format!(
+            " LIMIT ?{} OFFSET ?{}",
+            pv.len() + 1,
+            pv.len() + 2
+        ));
         pv.push(Box::new(limit));
         pv.push(Box::new(offset));
     }
@@ -307,7 +316,10 @@ pub fn update_plan(conn: &Connection, id: i64, input: &UpdatePlan) -> Result<Pla
     read_plan_row(conn, id)?;
     savepoint(conn, "update_plan", || {
         if let Some(ref title) = input.title {
-            conn.execute("UPDATE plans SET title = ?1 WHERE id = ?2", params![title, id])?;
+            conn.execute(
+                "UPDATE plans SET title = ?1 WHERE id = ?2",
+                params![title, id],
+            )?;
         }
         if let Some(ref status) = input.status {
             if !["active", "done", "archived"].contains(&status.as_str()) {
@@ -374,7 +386,9 @@ pub fn set_step_title(conn: &Connection, step_id: i64, title: &str) -> Result<()
         params![title, step_id],
     )?;
     if changed == 0 {
-        return Err(LificError::NotFound(format!("plan step {step_id} not found")));
+        return Err(LificError::NotFound(format!(
+            "plan step {step_id} not found"
+        )));
     }
     Ok(())
 }
@@ -390,7 +404,9 @@ pub fn set_step_description(
         params![unescape_text(description), step_id],
     )?;
     if changed == 0 {
-        return Err(LificError::NotFound(format!("plan step {step_id} not found")));
+        return Err(LificError::NotFound(format!(
+            "plan step {step_id} not found"
+        )));
     }
     Ok(())
 }
@@ -461,7 +477,7 @@ pub fn edit_step_text(
         other => {
             return Err(LificError::BadRequest(format!(
                 "invalid field '{other}'. Use title or description."
-            )))
+            )));
         }
     };
     let current: String = conn
@@ -589,7 +605,9 @@ pub fn set_step_issue(
         params![issue_id, step_id],
     )?;
     if changed == 0 {
-        return Err(LificError::NotFound(format!("plan step {step_id} not found")));
+        return Err(LificError::NotFound(format!(
+            "plan step {step_id} not found"
+        )));
     }
     Ok(())
 }
@@ -606,7 +624,9 @@ pub fn move_step(
 
     if let Some(parent) = new_parent {
         if parent == step_id {
-            return Err(LificError::BadRequest("a step cannot be its own parent".into()));
+            return Err(LificError::BadRequest(
+                "a step cannot be its own parent".into(),
+            ));
         }
         // Walk up from the proposed parent; if we reach step_id, the parent is
         // a descendant of the step → cycle.
@@ -659,7 +679,9 @@ pub fn move_step(
 pub fn delete_step(conn: &Connection, step_id: i64) -> Result<(), LificError> {
     let changed = conn.execute("DELETE FROM plan_steps WHERE id = ?1", params![step_id])?;
     if changed == 0 {
-        return Err(LificError::NotFound(format!("plan step {step_id} not found")));
+        return Err(LificError::NotFound(format!(
+            "plan step {step_id} not found"
+        )));
     }
     Ok(())
 }
@@ -752,8 +774,26 @@ mod tests {
         let conn = pool.write().unwrap();
         let a = seed_project(&conn, "AAA");
         let b = seed_project(&conn, "BBB");
-        let p1 = create_plan(&conn, &CreatePlan { project_id: a, title: "a".into(), issue_id: None, steps: vec![] }).unwrap();
-        let p2 = create_plan(&conn, &CreatePlan { project_id: b, title: "b".into(), issue_id: None, steps: vec![] }).unwrap();
+        let p1 = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: a,
+                title: "a".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        let p2 = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: b,
+                title: "b".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
         assert_eq!(p1.identifier, "AAA-PLAN-1");
         assert_eq!(p2.identifier, "BBB-PLAN-1");
         assert_eq!(resolve_plan_identifier(&conn, "AAA-PLAN-1").unwrap(), p1.id);
@@ -813,7 +853,10 @@ mod tests {
         .unwrap();
 
         let refreshed = get_plan(&conn, plan.id).unwrap();
-        assert!(refreshed.steps[0].done, "issue close should complete the step");
+        assert!(
+            refreshed.steps[0].done,
+            "issue close should complete the step"
+        );
         let _ = step_id;
     }
 
@@ -852,7 +895,10 @@ mod tests {
         .unwrap();
 
         let refreshed = get_plan(&conn, plan.id).unwrap();
-        assert!(!refreshed.steps[0].done, "reopen should un-complete the step");
+        assert!(
+            !refreshed.steps[0].done,
+            "reopen should un-complete the step"
+        );
         assert!(
             refreshed.steps[0].reopened_via_issue_at.is_some(),
             "reopen should stamp the reason"
@@ -876,7 +922,15 @@ mod tests {
         )
         .unwrap();
         // Archive the plan → frozen.
-        update_plan(&conn, plan.id, &UpdatePlan { status: Some("archived".into()), ..Default::default() }).unwrap();
+        update_plan(
+            &conn,
+            plan.id,
+            &UpdatePlan {
+                status: Some("archived".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         issues::update_issue(
             &conn,
@@ -889,7 +943,10 @@ mod tests {
         .unwrap();
 
         let refreshed = get_plan(&conn, plan.id).unwrap();
-        assert!(!refreshed.steps[0].done, "archived plan steps must not cascade");
+        assert!(
+            !refreshed.steps[0].done,
+            "archived plan steps must not cascade"
+        );
     }
 
     #[test]
@@ -930,12 +987,33 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let anchor = seed_issue(&conn, pid, "Epic", Status::Active);
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: Some(anchor.id), steps: vec![] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: Some(anchor.id),
+                steps: vec![],
+            },
+        )
+        .unwrap();
 
-        update_plan(&conn, plan.id, &UpdatePlan { status: Some("done".into()), ..Default::default() }).unwrap();
+        update_plan(
+            &conn,
+            plan.id,
+            &UpdatePlan {
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let got = issues::get_issue(&conn, anchor.id).unwrap();
-        assert_eq!(got.status, Status::Active, "plan completion must not close the anchor issue");
+        assert_eq!(
+            got.status,
+            Status::Active,
+            "plan completion must not close the anchor issue"
+        );
     }
 
     #[test]
@@ -943,7 +1021,16 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("root", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("root", None)],
+            },
+        )
+        .unwrap();
         let root_id = plan.steps[0].id;
 
         let child = add_step(&conn, plan.id, Some(root_id), "child", "desc", None).unwrap();
@@ -966,10 +1053,25 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("s", None)],
+            },
+        )
+        .unwrap();
         delete_plan(&conn, plan.id).unwrap();
         assert!(get_plan(&conn, plan.id).is_err());
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM plan_steps WHERE plan_id = ?1", params![plan.id], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM plan_steps WHERE plan_id = ?1",
+                params![plan.id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -978,12 +1080,46 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let p = create_plan(&conn, &CreatePlan { project_id: pid, title: "Active".into(), issue_id: None, steps: vec![simple_step("a", None), simple_step("b", None)] }).unwrap();
+        let p = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Active".into(),
+                issue_id: None,
+                steps: vec![simple_step("a", None), simple_step("b", None)],
+            },
+        )
+        .unwrap();
         set_step_done(&conn, p.steps[0].id, true).unwrap();
-        let archived = create_plan(&conn, &CreatePlan { project_id: pid, title: "Old".into(), issue_id: None, steps: vec![] }).unwrap();
-        update_plan(&conn, archived.id, &UpdatePlan { status: Some("archived".into()), ..Default::default() }).unwrap();
+        let archived = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Old".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        update_plan(
+            &conn,
+            archived.id,
+            &UpdatePlan {
+                status: Some("archived".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let active = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), status: Some("active".into()), ..Default::default() }).unwrap();
+        let active = list_plans(
+            &conn,
+            &ListPlansQuery {
+                project_id: Some(pid),
+                status: Some("active".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].title, "Active");
         assert_eq!(active[0].step_count, 2);
@@ -999,9 +1135,25 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        create_plan(&conn, &CreatePlan { project_id: pid, title: "Empty".into(), issue_id: None, steps: vec![] }).unwrap();
+        create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Empty".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
 
-        let plans = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), ..Default::default() }).unwrap();
+        let plans = list_plans(
+            &conn,
+            &ListPlansQuery {
+                project_id: Some(pid),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].step_count, 0, "stepless plan must count 0, not 1");
         assert_eq!(plans[0].done_count, 0);
@@ -1015,16 +1167,45 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         for i in 0..5 {
-            create_plan(&conn, &CreatePlan { project_id: pid, title: format!("Plan {i}"), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+            create_plan(
+                &conn,
+                &CreatePlan {
+                    project_id: pid,
+                    title: format!("Plan {i}"),
+                    issue_id: None,
+                    steps: vec![simple_step("s", None)],
+                },
+            )
+            .unwrap();
         }
-        let page = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), status: None, limit: Some(2), offset: Some(0), ..Default::default() }).unwrap();
+        let page = list_plans(
+            &conn,
+            &ListPlansQuery {
+                project_id: Some(pid),
+                status: None,
+                limit: Some(2),
+                offset: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(page.len(), 2);
         // Newest (highest id / latest updated_at) first.
         assert_eq!(page[0].title, "Plan 4");
         assert_eq!(page[1].title, "Plan 3");
         assert_eq!(page[0].step_count, 1);
 
-        let next = list_plans(&conn, &ListPlansQuery { project_id: Some(pid), status: None, limit: Some(2), offset: Some(2), ..Default::default() }).unwrap();
+        let next = list_plans(
+            &conn,
+            &ListPlansQuery {
+                project_id: Some(pid),
+                status: None,
+                limit: Some(2),
+                offset: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(next.len(), 2);
         assert_eq!(next[0].title, "Plan 2");
     }
@@ -1034,10 +1215,46 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let first_created = create_plan(&conn, &CreatePlan { project_id: pid, title: "First".into(), issue_id: None, steps: vec![] }).unwrap();
-        let second_created = create_plan(&conn, &CreatePlan { project_id: pid, title: "Second".into(), issue_id: None, steps: vec![] }).unwrap();
-        let third_created = create_plan(&conn, &CreatePlan { project_id: pid, title: "Third".into(), issue_id: None, steps: vec![] }).unwrap();
-        let fourth_created = create_plan(&conn, &CreatePlan { project_id: pid, title: "Fourth".into(), issue_id: None, steps: vec![] }).unwrap();
+        let first_created = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "First".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        let second_created = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Second".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        let third_created = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Third".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
+        let fourth_created = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "Fourth".into(),
+                issue_id: None,
+                steps: vec![],
+            },
+        )
+        .unwrap();
         conn.execute("DROP TRIGGER plans_updated", []).unwrap();
         conn.execute(
             "UPDATE plans SET updated_at = '2020-01-01 00:00:00' WHERE project_id = ?1",
@@ -1055,7 +1272,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(first.iter().map(|plan| plan.id).collect::<Vec<_>>(), vec![fourth_created.id, third_created.id]);
+        assert_eq!(
+            first.iter().map(|plan| plan.id).collect::<Vec<_>>(),
+            vec![fourth_created.id, third_created.id]
+        );
 
         // An unseen row can move in updated-at order between requests without
         // crossing an immutable id cursor boundary.
@@ -1077,14 +1297,23 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(second.iter().map(|plan| plan.id).collect::<Vec<_>>(), vec![second_created.id, first_created.id]);
+        assert_eq!(
+            second.iter().map(|plan| plan.id).collect::<Vec<_>>(),
+            vec![second_created.id, first_created.id]
+        );
 
         let default_order = list_plans(
             &conn,
-            &ListPlansQuery { project_id: Some(pid), ..Default::default() },
+            &ListPlansQuery {
+                project_id: Some(pid),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!(default_order[0].id, second_created.id, "default ordering remains updated_at DESC, id DESC");
+        assert_eq!(
+            default_order[0].id, second_created.id,
+            "default ordering remains updated_at DESC, id DESC"
+        );
     }
 
     #[test]
@@ -1129,12 +1358,21 @@ mod tests {
 
     // ── Audit coverage (LIF-176) ──
 
-    fn audit_rows(conn: &Connection, entity_type: &str) -> Vec<(String, Option<String>, Option<String>)> {
+    fn audit_rows(
+        conn: &Connection,
+        entity_type: &str,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
         let mut stmt = conn
-            .prepare("SELECT action, field, new_value FROM audit_log WHERE entity_type = ?1 ORDER BY id")
+            .prepare(
+                "SELECT action, field, new_value FROM audit_log WHERE entity_type = ?1 ORDER BY id",
+            )
             .unwrap();
         stmt.query_map(params![entity_type], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
@@ -1146,17 +1384,35 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("s", None)],
+            },
+        )
+        .unwrap();
         let step_id = plan.steps[0].id;
         set_step_done(&conn, step_id, true).unwrap();
 
-        let plan_actions: Vec<String> = audit_rows(&conn, "plan").into_iter().map(|r| r.0).collect();
-        assert!(plan_actions.contains(&"create".to_string()), "plan create must be audited: {plan_actions:?}");
+        let plan_actions: Vec<String> =
+            audit_rows(&conn, "plan").into_iter().map(|r| r.0).collect();
+        assert!(
+            plan_actions.contains(&"create".to_string()),
+            "plan create must be audited: {plan_actions:?}"
+        );
 
         let step_audit = audit_rows(&conn, "plan_step");
-        assert!(step_audit.iter().any(|(a, _, _)| a == "create"), "step create audited");
         assert!(
-            step_audit.iter().any(|(a, f, _)| a == "update" && f.as_deref() == Some("done")),
+            step_audit.iter().any(|(a, _, _)| a == "create"),
+            "step create audited"
+        );
+        assert!(
+            step_audit
+                .iter()
+                .any(|(a, f, _)| a == "update" && f.as_deref() == Some("done")),
             "step done audited: {step_audit:?}"
         );
     }
@@ -1167,12 +1423,26 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let issue = seed_issue(&conn, pid, "Work", Status::Todo);
-        create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("mirror", Some(issue.id))] }).unwrap();
+        create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("mirror", Some(issue.id))],
+            },
+        )
+        .unwrap();
 
-        issues::update_issue(&conn, issue.id, &UpdateIssue {
-            status: Some(Status::Done),
-            ..Default::default()
-        }).unwrap();
+        issues::update_issue(
+            &conn,
+            issue.id,
+            &UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let step_audit = audit_rows(&conn, "plan_step");
         assert!(
@@ -1191,15 +1461,36 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan_a = create_plan(&conn, &CreatePlan { project_id: pid, title: "A".into(), issue_id: None, steps: vec![simple_step("a-step", None)] }).unwrap();
-        let plan_b = create_plan(&conn, &CreatePlan { project_id: pid, title: "B".into(), issue_id: None, steps: vec![simple_step("b-step", None)] }).unwrap();
+        let plan_a = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "A".into(),
+                issue_id: None,
+                steps: vec![simple_step("a-step", None)],
+            },
+        )
+        .unwrap();
+        let plan_b = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "B".into(),
+                issue_id: None,
+                steps: vec![simple_step("b-step", None)],
+            },
+        )
+        .unwrap();
         let a_step = plan_a.steps[0].id;
         let b_step = plan_b.steps[0].id;
 
         assert!(assert_step_in_plan(&conn, plan_a.id, a_step).is_ok());
         // a_step belongs to plan_a, not plan_b → BadRequest.
         let err = assert_step_in_plan(&conn, plan_b.id, a_step).unwrap_err();
-        assert!(matches!(err, LificError::BadRequest(_)), "foreign step must be rejected, got {err:?}");
+        assert!(
+            matches!(err, LificError::BadRequest(_)),
+            "foreign step must be rejected, got {err:?}"
+        );
         assert!(assert_step_in_plan(&conn, plan_b.id, b_step).is_ok());
     }
 
@@ -1208,7 +1499,16 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("old title", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("old title", None)],
+            },
+        )
+        .unwrap();
         let step_id = plan.steps[0].id;
 
         set_step_title(&conn, step_id, "new title").unwrap();
@@ -1216,7 +1516,10 @@ mod tests {
         assert_eq!(reread.steps[0].title, "new title");
 
         let err = set_step_title(&conn, 999_999, "ghost").unwrap_err();
-        assert!(matches!(err, LificError::NotFound(_)), "missing step must 404, got {err:?}");
+        assert!(
+            matches!(err, LificError::NotFound(_)),
+            "missing step must 404, got {err:?}"
+        );
     }
 
     // set_step_description runs unescape_text (LIF-177): literal \n from JSON
@@ -1226,12 +1529,24 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("s", None)],
+            },
+        )
+        .unwrap();
         let step_id = plan.steps[0].id;
 
         set_step_description(&conn, step_id, "line one\\nline two").unwrap();
         let reread = get_plan(&conn, plan.id).unwrap();
-        assert_eq!(reread.steps[0].description, "line one\nline two", "\\n must be unescaped to a newline");
+        assert_eq!(
+            reread.steps[0].description, "line one\nline two",
+            "\\n must be unescaped to a newline"
+        );
 
         let err = set_step_description(&conn, 999_999, "x").unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)));
@@ -1243,11 +1558,23 @@ mod tests {
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn, "TST");
         let issue = seed_issue(&conn, pid, "Linkable", Status::Todo);
-        let plan = create_plan(&conn, &CreatePlan { project_id: pid, title: "P".into(), issue_id: None, steps: vec![simple_step("s", None)] }).unwrap();
+        let plan = create_plan(
+            &conn,
+            &CreatePlan {
+                project_id: pid,
+                title: "P".into(),
+                issue_id: None,
+                steps: vec![simple_step("s", None)],
+            },
+        )
+        .unwrap();
         let step_id = plan.steps[0].id;
 
         set_step_issue(&conn, step_id, Some(issue.id)).unwrap();
-        assert_eq!(get_plan(&conn, plan.id).unwrap().steps[0].issue_id, Some(issue.id));
+        assert_eq!(
+            get_plan(&conn, plan.id).unwrap().steps[0].issue_id,
+            Some(issue.id)
+        );
 
         // Passing None must clear the link back to NULL.
         set_step_issue(&conn, step_id, None).unwrap();
@@ -1281,7 +1608,11 @@ mod tests {
         let parent_id = plan.steps[0].id;
         let child_id = plan.steps[0].children[0].id;
 
-        assert_eq!(step_parent(&conn, parent_id).unwrap(), None, "root step has no parent");
+        assert_eq!(
+            step_parent(&conn, parent_id).unwrap(),
+            None,
+            "root step has no parent"
+        );
         assert_eq!(step_parent(&conn, child_id).unwrap(), Some(parent_id));
 
         let err = step_parent(&conn, 999_999).unwrap_err();

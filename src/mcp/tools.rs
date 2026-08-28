@@ -10,12 +10,12 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
     authz::filter_visible,
-    db::{models, queries, DbPool},
+    db::{DbPool, models, queries},
     links::{IssueLinkContext, MarkdownReference},
 };
 
 use super::schemas::*;
-use super::{current_issue_link_context, sanitize_error, LificMcp};
+use super::{LificMcp, current_issue_link_context, sanitize_error};
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
 /// **zero** projects, so the first agent connecting to a fresh install learns
@@ -3235,7 +3235,11 @@ impl LificMcp {
                 let lead_user_id = super::current_auth_user().and_then(|u| {
                     self.read(|conn| {
                         Ok(conn
-                            .query_row("SELECT 1 FROM users WHERE id = ?1", rusqlite::params![u.id], |_| Ok(()))
+                            .query_row(
+                                "SELECT 1 FROM users WHERE id = ?1",
+                                rusqlite::params![u.id],
+                                |_| Ok(()),
+                            )
                             .is_ok())
                     })
                     .ok()
@@ -7503,7 +7507,9 @@ mod tests {
         // 1 and 2 fell off the front, 3 leads, and the newest closes it.
         assert!(!result.contains("comment number 1\n"), "got: {result}");
         assert!(!result.contains("comment number 2\n"), "got: {result}");
-        let first = result.find("comment number 3\n").expect("oldest of the window");
+        let first = result
+            .find("comment number 3\n")
+            .expect("oldest of the window");
         let last = result
             .find(&format!("comment number {total}\n"))
             .expect("newest comment");
@@ -7558,7 +7564,10 @@ mod tests {
             .find(&format!("comment number {}\n", total - 2))
             .unwrap();
         let newest = recent.find(&format!("comment number {total}\n")).unwrap();
-        assert!(oldest < newest, "the trail must read oldest first: {recent}");
+        assert!(
+            oldest < newest,
+            "the trail must read oldest first: {recent}"
+        );
     }
 
     #[test]
@@ -9591,7 +9600,9 @@ mod tests {
         );
         assert_eq!(
             deleted,
-            format!("Comment #{comment_id} deleted from [PRJ-1](https://tracker.example/PRJ/issues/PRJ-1)")
+            format!(
+                "Comment #{comment_id} deleted from [PRJ-1](https://tracker.example/PRJ/issues/PRJ-1)"
+            )
         );
     }
 
@@ -10302,10 +10313,7 @@ mod tests {
             got.contains("    Second line survives too."),
             "multi-line descriptions keep tree indentation: {got}"
         );
-        assert!(
-            !got.contains('…'),
-            "no ellipsis in the rehydrate: {got}"
-        );
+        assert!(!got.contains('…'), "no ellipsis in the rehydrate: {got}");
     }
 
     #[tokio::test]
@@ -11261,7 +11269,12 @@ mod tests {
             offset: None,
             limit: None,
         }));
-        assert!(result.content.iter().all(|content| content.as_image().is_none()));
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|content| content.as_image().is_none())
+        );
         assert!(text_of(&result).contains("Binary, download at"));
     }
 
@@ -12117,7 +12130,12 @@ mod authz_gating_tests {
         });
         assert!(created.starts_with("Created"), "got: {created}");
 
-        let [edit_comment_id, delete_comment_id, foreign_edit_id, foreign_delete_id] = [
+        let [
+            edit_comment_id,
+            delete_comment_id,
+            foreign_edit_id,
+            foreign_delete_id,
+        ] = [
             (&viewer, "Keep this comment"),
             (&viewer, "Keep this one too"),
             (&lead, "Do not disclose ownership"),

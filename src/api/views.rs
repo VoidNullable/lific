@@ -443,8 +443,8 @@ mod tests {
                 &non_member_app,
                 &format!("/api/projects/{project_id}/views/{view_id}")
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
     }

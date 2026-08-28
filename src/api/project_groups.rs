@@ -313,7 +313,11 @@ mod tests {
 
         let resp = json_get(&app, "/api/project-groups").await;
         let groups = parse_json(resp).await;
-        assert_eq!(groups.as_array().unwrap().len(), 1, "the group itself stays");
+        assert_eq!(
+            groups.as_array().unwrap().len(),
+            1,
+            "the group itself stays"
+        );
         assert!(
             groups[0]["project_ids"].as_array().unwrap().is_empty(),
             "a project the caller can no longer see must not be listed"

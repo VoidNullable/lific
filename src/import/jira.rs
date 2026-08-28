@@ -421,8 +421,10 @@ pub fn map_issue(
 pub trait JiraFetcher {
     /// Fetch one page of issues. `next_token` is the opaque page token (`None`
     /// for the first page). Returns `(issues, next_token)`.
-    fn fetch_page(&self, next_token: Option<&str>)
-    -> Result<(Vec<JiraIssue>, Option<String>), String>;
+    fn fetch_page(
+        &self,
+        next_token: Option<&str>,
+    ) -> Result<(Vec<JiraIssue>, Option<String>), String>;
 
     /// Fetch all comments for one issue key.
     fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>, String>;
@@ -553,7 +555,10 @@ impl JiraFetcher for LiveJira {
             .query(&[
                 ("jql", jql.as_str()),
                 ("maxResults", "50"),
-                ("fields", "summary,description,status,priority,labels,assignee,issuetype"),
+                (
+                    "fields",
+                    "summary,description,status,priority,labels,assignee,issuetype",
+                ),
             ]);
         if let Some(t) = next_token {
             req = req.query(&[("nextPageToken", t)]);

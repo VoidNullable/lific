@@ -204,9 +204,7 @@ pub struct CreatePageInput {
     pub folder: Option<String>,
     #[schemars(description = "Status: draft, active, complete, archived")]
     pub status: Option<String>,
-    #[schemars(
-        description = "Label names to attach (project-scoped; ignored on workspace pages)"
-    )]
+    #[schemars(description = "Label names to attach (project-scoped; ignored on workspace pages)")]
     pub labels: Option<Vec<String>>,
 }
 
@@ -274,9 +272,13 @@ pub struct DeleteInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListResourcesInput {
-    #[schemars(description = "Resource type: project, module, label, folder, page, issue, or plan")]
+    #[schemars(
+        description = "Resource type: project, module, label, folder, page, issue, or plan"
+    )]
     pub resource_type: String,
-    #[schemars(description = "Project ID (required for issues, plans, modules, labels, and folders; optional for pages and projects)")]
+    #[schemars(
+        description = "Project ID (required for issues, plans, modules, labels, and folders; optional for pages and projects)"
+    )]
     pub project: Option<String>,
     #[schemars(description = "Folder name (for pages)")]
     pub folder: Option<String>,
@@ -292,7 +294,9 @@ pub struct ListResourcesInput {
     pub order_by: Option<String>,
     #[schemars(description = "Sort direction (for page lists): asc (default) or desc")]
     pub order: Option<String>,
-    #[schemars(description = "Max results (plans default to 50 and cap at 500; issues and pages default to 100; other lists ignore this field)")]
+    #[schemars(
+        description = "Max results (plans default to 50 and cap at 500; issues and pages default to 100; other lists ignore this field)"
+    )]
     pub limit: Option<i64>,
     #[schemars(description = "Zero-indexed offset for issue, page, or plan paging")]
     pub offset: Option<i64>,
@@ -332,7 +336,9 @@ pub struct ManageResourceInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AddCommentInput {
-    #[schemars(description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)")]
+    #[schemars(
+        description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
+    )]
     pub identifier: String,
     #[schemars(description = "Comment content (markdown)")]
     pub content: String,
@@ -340,7 +346,9 @@ pub struct AddCommentInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListCommentsInput {
-    #[schemars(description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)")]
+    #[schemars(
+        description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
+    )]
     pub identifier: String,
     #[schemars(description = "Filter to comments by this author username")]
     pub author: Option<String>,
@@ -462,7 +470,9 @@ pub struct UpdatePlanStepInput {
     pub move_position: Option<i64>,
     #[schemars(description = "Delete the step and its subtree")]
     pub delete: Option<bool>,
-    #[schemars(description = "Return the full re-rendered tree instead of the delta (default false)")]
+    #[schemars(
+        description = "Return the full re-rendered tree instead of the delta (default false)"
+    )]
     pub echo_tree: Option<bool>,
 }
 

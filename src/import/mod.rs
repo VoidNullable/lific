@@ -205,10 +205,7 @@ pub fn ensure_label(
     if queries::resolve_label_name(conn, project_id, &label.name).is_ok() {
         return Ok(false);
     }
-    let color = label
-        .color
-        .clone()
-        .unwrap_or_else(|| "#6B7280".to_string());
+    let color = label.color.clone().unwrap_or_else(|| "#6B7280".to_string());
     queries::create_label(
         conn,
         &CreateLabel {
@@ -315,7 +312,8 @@ pub fn run_import(
         // once across the whole batch even if several issues carry it and it
         // doesn't already exist.
         let conn = pool.read()?;
-        let mut planned_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut planned_labels: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for issue in &fetched.issues {
             if source_exists(&conn, &issue.source)? {
                 summary.issues_skipped_existing += 1;

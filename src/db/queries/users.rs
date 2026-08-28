@@ -1,8 +1,8 @@
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -316,7 +316,9 @@ pub fn update_profile(
     if let Some(dn) = display_name {
         let dn = dn.trim();
         if dn.is_empty() {
-            return Err(LificError::BadRequest("display name cannot be empty".into()));
+            return Err(LificError::BadRequest(
+                "display name cannot be empty".into(),
+            ));
         }
         if dn.chars().count() > 100 {
             return Err(LificError::BadRequest(
@@ -333,15 +335,18 @@ pub fn update_profile(
         if em.is_empty() || !em.contains('@') {
             return Err(LificError::BadRequest("invalid email address".into()));
         }
-        conn.execute("UPDATE users SET email = ?1 WHERE id = ?2", params![em, user_id])
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(err, _)
-                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    LificError::BadRequest("that email is already in use".into())
-                }
-                other => other.into(),
-            })?;
+        conn.execute(
+            "UPDATE users SET email = ?1 WHERE id = ?2",
+            params![em, user_id],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(err, _)
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                LificError::BadRequest("that email is already in use".into())
+            }
+            other => other.into(),
+        })?;
     }
     get_user_by_id(conn, user_id)
 }
@@ -471,7 +476,11 @@ fn derive_username(conn: &Connection, display_name: &str) -> Result<String, Lifi
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let base = if slug.is_empty() { "admin".to_string() } else { slug };
+    let base = if slug.is_empty() {
+        "admin".to_string()
+    } else {
+        slug
+    };
     let mut candidate = base.clone();
     let mut n = 1;
     while get_user_by_username(conn, &candidate).is_ok() {
@@ -901,7 +910,6 @@ pub fn assign_key_to_user(
     }
     Ok(())
 }
-
 
 // ── Bots (connected tools) ───────────────────────────────────
 
@@ -1384,14 +1392,20 @@ pub fn delete_bot(
     conn.execute("DELETE FROM api_keys WHERE user_id = ?1", params![bot_id])?;
     // Delete the bot's OAuth tokens (LIFIC-13 follow-up): leaves no dangling
     // rows pointing at a removed identity.
-    conn.execute("DELETE FROM oauth_tokens WHERE user_id = ?1", params![bot_id])?;
+    conn.execute(
+        "DELETE FROM oauth_tokens WHERE user_id = ?1",
+        params![bot_id],
+    )?;
     // And its in-flight OAuth handshakes (PR #23 review): a pending device or
     // auth code bound to a deleted identity must not stay exchangeable.
     conn.execute(
         "DELETE FROM oauth_device_codes WHERE user_id = ?1",
         params![bot_id],
     )?;
-    conn.execute("DELETE FROM oauth_codes WHERE user_id = ?1", params![bot_id])?;
+    conn.execute(
+        "DELETE FROM oauth_codes WHERE user_id = ?1",
+        params![bot_id],
+    )?;
 
     // Delete any comments made by this bot (or reassign — deleting for now)
     conn.execute("DELETE FROM comments WHERE user_id = ?1", params![bot_id])?;
@@ -1491,7 +1505,10 @@ mod tests {
         assert!(!has_human_users(&conn).unwrap(), "fresh db has no humans");
 
         test_create_user(&conn);
-        assert!(has_human_users(&conn).unwrap(), "human signup flips it true");
+        assert!(
+            has_human_users(&conn).unwrap(),
+            "human signup flips it true"
+        );
     }
 
     #[test]
@@ -1543,8 +1560,12 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn);
 
-        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
-        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
         assert_eq!(first, second, "re-approval must reuse, not duplicate");
     }
 
@@ -1566,8 +1587,12 @@ mod tests {
         )
         .unwrap();
 
-        let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode").unwrap().id;
-        let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode").unwrap().id;
+        let a = ensure_bot(&conn, owner_a.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
+        let b = ensure_bot(&conn, owner_b.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
         assert_ne!(a, b, "each owner gets its own bot for the same tool");
     }
 
@@ -1583,7 +1608,9 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn); // username "blake"
 
-        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
+        let first = ensure_bot(&conn, owner.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
 
         // Simulate the owner renaming their account: username changes, id stays.
         conn.execute(
@@ -1592,8 +1619,13 @@ mod tests {
         )
         .unwrap();
 
-        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap().id;
-        assert_eq!(first, second, "renaming the owner must not orphan the agent");
+        let second = ensure_bot(&conn, owner.id, "opencode", "OpenCode")
+            .unwrap()
+            .id;
+        assert_eq!(
+            first, second,
+            "renaming the owner must not orphan the agent"
+        );
     }
 
     // Bots minted before the tool_id column existed (tool_id NULL) are still
@@ -1606,8 +1638,7 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn); // username "blake"
         // A pre-migration bot: username "opencode-blake", tool_id NULL.
-        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode", None)
-            .unwrap();
+        let legacy = create_bot_user(&conn, owner.id, "opencode-blake", "OpenCode", None).unwrap();
 
         let reused = ensure_bot(&conn, owner.id, "opencode", "OpenCode").unwrap();
         assert_eq!(
@@ -1621,7 +1652,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(stored.as_deref(), Some("opencode"), "legacy bot tool_id backfilled");
+        assert_eq!(
+            stored.as_deref(),
+            Some("opencode"),
+            "legacy bot tool_id backfilled"
+        );
     }
 
     // The legacy backfill holds even when the owner renamed *before* the
@@ -1633,8 +1668,8 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = test_create_user(&conn); // username "blake"
         // A pre-migration bot whose username still has the old owner name.
-        let legacy = create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode", None)
-            .unwrap();
+        let legacy =
+            create_bot_user(&conn, owner.id, "opencode-oldname", "OpenCode", None).unwrap();
         // The owner renames before ever reconnecting.
         conn.execute(
             "UPDATE users SET username = ?1 WHERE id = ?2",
@@ -1824,7 +1859,8 @@ mod tests {
     fn migration_038_keeps_the_oldest_bot_and_repoints_every_reference() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        conn.execute_batch("DROP INDEX idx_users_owner_tool;").unwrap();
+        conn.execute_batch("DROP INDEX idx_users_owner_tool;")
+            .unwrap();
 
         let owner = test_create_user(&conn);
         raw_insert_bot(&conn, "opencode-blake", owner.id, Some("opencode")).unwrap();
@@ -1927,8 +1963,10 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute_batch(include_str!("../../../migrations/038_bot_identity_unique.sql"))
-            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../../migrations/038_bot_identity_unique.sql"
+        ))
+        .unwrap();
 
         // The loser is gone, the survivor and the unrelated bot are not.
         let remaining: Vec<i64> = conn
@@ -1989,7 +2027,8 @@ mod tests {
     fn migration_038_merges_colliding_rows_instead_of_dropping_them() {
         let pool = test_db();
         let conn = pool.write().unwrap();
-        conn.execute_batch("DROP INDEX idx_users_owner_tool;").unwrap();
+        conn.execute_batch("DROP INDEX idx_users_owner_tool;")
+            .unwrap();
 
         let owner = test_create_user(&conn);
         raw_insert_bot(&conn, "opencode-blake", owner.id, Some("opencode")).unwrap();
@@ -2053,8 +2092,10 @@ mod tests {
             .unwrap();
         }
 
-        conn.execute_batch(include_str!("../../../migrations/038_bot_identity_unique.sql"))
-            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../../migrations/038_bot_identity_unique.sql"
+        ))
+        .unwrap();
 
         // The strongest role wins per project; nothing is dropped.
         let members: Vec<(i64, i64, String)> = conn
@@ -2638,7 +2679,11 @@ mod tests {
         test_create_user(&conn);
 
         let known = password_challenge(&conn, "blake");
-        assert_ne!(known.hash(), DUMMY_HASH, "a real user verifies their own hash");
+        assert_ne!(
+            known.hash(),
+            DUMMY_HASH,
+            "a real user verifies their own hash"
+        );
         assert!(verify_password("securepassword123", known.hash()).unwrap());
 
         let unknown = password_challenge(&conn, "nobody");
@@ -2672,8 +2717,11 @@ mod tests {
                 .to_string()
         );
 
-        conn.execute("UPDATE users SET is_active = 0 WHERE id = ?1", params![user.id])
-            .unwrap();
+        conn.execute(
+            "UPDATE users SET is_active = 0 WHERE id = ?1",
+            params![user.id],
+        )
+        .unwrap();
         let challenge = password_challenge(&conn, "blake");
         let ok = verify_password("securepassword123", challenge.hash()).unwrap();
         let err = challenge.finish(ok).unwrap_err().to_string();
@@ -2706,7 +2754,9 @@ mod tests {
         assert_eq!(user.email, "mixedcase@example.com", "email is lowercased");
         assert_eq!(user.display_name, "spaced");
         assert_eq!(
-            authenticate(&conn, "spaced", "securepassword123").unwrap().id,
+            authenticate(&conn, "spaced", "securepassword123")
+                .unwrap()
+                .id,
             user.id,
             "the externally-hashed password still logs in"
         );
@@ -3382,7 +3432,10 @@ mod tests {
         let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
 
         assert!(admin.is_admin, "first admin is an admin");
-        assert!(!admin.is_bot, "first admin is a person, not a connected tool");
+        assert!(
+            !admin.is_bot,
+            "first admin is a person, not a connected tool"
+        );
         assert_eq!(admin.display_name, "Operator Blake");
     }
 
@@ -3392,7 +3445,9 @@ mod tests {
         let conn = pool.write().unwrap();
         let admin = create_passwordless_admin(&conn, "Operator Blake").unwrap();
 
-        let resolved = first_admin(&conn).unwrap().expect("resolves as first admin");
+        let resolved = first_admin(&conn)
+            .unwrap()
+            .expect("resolves as first admin");
         assert_eq!(resolved.id, admin.id);
         assert_eq!(resolved.username, admin.username);
     }
@@ -3412,7 +3467,10 @@ mod tests {
         let first = create_passwordless_admin(&conn, "Blake").unwrap();
         let second = create_passwordless_admin(&conn, "blake!").unwrap();
 
-        assert_ne!(first.username, second.username, "usernames must not collide");
+        assert_ne!(
+            first.username, second.username,
+            "usernames must not collide"
+        );
         assert!(!first.username.is_empty());
         assert!(!second.username.is_empty());
     }

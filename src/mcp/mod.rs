@@ -535,9 +535,9 @@ mod tests {
         use crate::error::LificError;
 
         assert_eq!(
-            sanitize_error(LificError::Database(
-                rusqlite::Error::InvalidColumnName("secret_column".into())
-            )),
+            sanitize_error(LificError::Database(rusqlite::Error::InvalidColumnName(
+                "secret_column".into()
+            ))),
             "internal server error"
         );
         assert_eq!(
@@ -555,7 +555,9 @@ mod tests {
                 "Bad request: invalid status 'nope'",
             ),
             (
-                LificError::Forbidden("requires at least 'maintainer' access to this project".into()),
+                LificError::Forbidden(
+                    "requires at least 'maintainer' access to this project".into(),
+                ),
                 "Forbidden: requires at least 'maintainer' access to this project",
             ),
             (

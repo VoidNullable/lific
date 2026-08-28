@@ -118,7 +118,11 @@ pub fn update_alt_text(
 /// screenshot into two projects produces two rows over one blob, and this is
 /// how `GET /api/attachments/{id}/links` finds the twin so a caller can see
 /// the file is already in the tracker before uploading a third copy.
-pub fn duplicates_of(conn: &Connection, id: i64, sha256: &str) -> Result<Vec<Attachment>, LificError> {
+pub fn duplicates_of(
+    conn: &Connection,
+    id: i64,
+    sha256: &str,
+) -> Result<Vec<Attachment>, LificError> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {ATTACHMENT_COLUMNS} FROM attachments
          WHERE sha256 = ?1 AND id != ?2 ORDER BY id"
@@ -151,10 +155,7 @@ pub fn delete_attachment(conn: &Connection, id: i64) -> Result<bool, LificError>
 /// Delete an unlinked attachment only if it is still unlinked on this writer
 /// connection. The returned hash is safe for the caller to garbage-collect
 /// after checking whether another row still shares it.
-pub fn delete_orphan_attachment(
-    conn: &Connection,
-    id: i64,
-) -> Result<Option<String>, LificError> {
+pub fn delete_orphan_attachment(conn: &Connection, id: i64) -> Result<Option<String>, LificError> {
     conn.query_row(
         "DELETE FROM attachments
          WHERE id = ?1
@@ -470,9 +471,7 @@ pub fn find_orphans(
         format!("+{} seconds", -grace_seconds)
     };
     let rows = stmt.query_map(params![modifier], |row| {
-        Ok(OrphanAttachment {
-            id: row.get(0)?,
-        })
+        Ok(OrphanAttachment { id: row.get(0)? })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -658,11 +657,10 @@ pub fn list_project_attachments(
          WHERE {where_clause}"
     );
     let totals_params = base_params();
-    let (total_count, total_bytes): (i64, i64) = conn.query_row(
-        &totals_sql,
-        bind(&totals_params).as_slice(),
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (total_count, total_bytes): (i64, i64) =
+        conn.query_row(&totals_sql, bind(&totals_params).as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
 
     let ids: Vec<i64> = items.iter().map(|item| item.id).collect();
     let mut entities = linked_entities_in_project(conn, project_id, &ids)?;
@@ -1607,7 +1605,10 @@ mod tests {
             create_attachment(&conn, &test_sha("race"), "a.png", "image/png", 1, None).unwrap();
         link_attachment(&conn, attachment.id, AttachmentEntity::Issue, issue).unwrap();
 
-        assert_eq!(delete_orphan_attachment(&conn, attachment.id).unwrap(), None);
+        assert_eq!(
+            delete_orphan_attachment(&conn, attachment.id).unwrap(),
+            None
+        );
         assert!(get_attachment(&conn, attachment.id).is_ok());
     }
 

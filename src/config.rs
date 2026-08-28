@@ -347,7 +347,7 @@ impl Default for BackupConfig {
             enabled: true,
             dir: PathBuf::from("backups"),
             interval_minutes: 60,
-            retain: 24, // keep 24 hourly backups = 1 day of history
+            retain: 24,                 // keep 24 hourly backups = 1 day of history
             audit_retention_days: None, // keep audit history forever
         }
     }
@@ -570,10 +570,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 3456);
-        assert_eq!(
-            config.server.trusted_proxies,
-            Vec::<String>::new()
-        );
+        assert_eq!(config.server.trusted_proxies, Vec::<String>::new());
         assert_eq!(config.database.path, PathBuf::from("lific.db"));
         assert!(config.backup.enabled);
         assert_eq!(config.backup.retain, 24);
@@ -622,7 +619,10 @@ enabled = false
 
         Config::load(Some(&path)).unwrap();
 
-        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[cfg(unix)]
@@ -755,7 +755,11 @@ enabled = false
     fn absolute_db_path_is_untouched_by_anchoring() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("lific.toml");
-        std::fs::write(&path, format!("[database]\npath = \"{ABSOLUTE_DB_PATH}\"\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("[database]\npath = \"{ABSOLUTE_DB_PATH}\"\n"),
+        )
+        .unwrap();
 
         let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
@@ -1032,17 +1036,14 @@ enabled = false
     // LIFIC-24: the startup guard's bind-host check.
     #[test]
     fn is_localhost_host_accepts_only_loopback() {
-        for host in [
-            "127.0.0.1",
-            "127.5.5.5",
-            "::1",
-            "localhost",
-            "LOCALHOST",
-        ] {
+        for host in ["127.0.0.1", "127.5.5.5", "::1", "localhost", "LOCALHOST"] {
             assert!(is_localhost_host(host), "{host} should count as loopback");
         }
         for host in ["0.0.0.0", "::", "[::]", "192.168.1.10", "lific.example", ""] {
-            assert!(!is_localhost_host(host), "{host} must NOT count as loopback");
+            assert!(
+                !is_localhost_host(host),
+                "{host} must NOT count as loopback"
+            );
         }
     }
 

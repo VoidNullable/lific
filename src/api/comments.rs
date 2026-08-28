@@ -657,8 +657,8 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        let listing = parse_json(json_get(&app, &format!("/api/issues/{issue_id}/comments")).await)
-            .await;
+        let listing =
+            parse_json(json_get(&app, &format!("/api/issues/{issue_id}/comments")).await).await;
         let comments = listing.as_array().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0]["content"], "Original");

@@ -22,7 +22,8 @@ fn require_issue_project_role(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     issue_id: i64,
 ) -> Result<(), LificError> {
-    let project_id = with_read(db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
+    let project_id =
+        with_read(db, |conn| crate::db::queries::get_issue(conn, issue_id))?.project_id;
     authz::require_role(db, identity, project_id, Role::Maintainer)
 }
 
@@ -96,7 +97,9 @@ pub(super) async fn create_plan(
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     require_create_plan_issue_roles(&db, &identity, &input)?;
     let plan = with_write(&db, |conn| plans::create_plan(conn, &input))?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id: plan.project_id });
+    realtime.send(RealtimeEvent::ProjectUpdated {
+        project_id: plan.project_id,
+    });
     Ok(Json(plan))
 }
 
@@ -396,10 +399,20 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
 
-        let first = body_json(json_get(&app, &format!("/api/plans?project_id={project_id}&order_by=id&limit=2")).await).await;
+        let first = body_json(
+            json_get(
+                &app,
+                &format!("/api/plans?project_id={project_id}&order_by=id&limit=2"),
+            )
+            .await,
+        )
+        .await;
         let first = first.as_array().unwrap();
         assert_eq!(first.len(), 2);
-        let first_ids = first.iter().map(|plan| plan["id"].as_i64().unwrap()).collect::<Vec<_>>();
+        let first_ids = first
+            .iter()
+            .map(|plan| plan["id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
         let cursor_id = first[1]["id"].as_i64().unwrap();
 
         let response = json_get(

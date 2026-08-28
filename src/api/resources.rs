@@ -44,8 +44,7 @@ pub(super) trait Structure: 'static {
 
     fn list(conn: &Connection, project_id: i64) -> Result<Vec<Self::Model>, LificError>;
     fn create(conn: &Connection, input: &Self::Create) -> Result<Self::Model, LificError>;
-    fn update(conn: &Connection, id: i64, input: &Self::Update)
-    -> Result<Self::Model, LificError>;
+    fn update(conn: &Connection, id: i64, input: &Self::Update) -> Result<Self::Model, LificError>;
     fn delete(conn: &Connection, id: i64) -> Result<(), LificError>;
 }
 
@@ -250,7 +249,9 @@ pub(super) async fn merge_label_handler(
     let label = with_write(&db, |conn| {
         crate::db::queries::merge_label(conn, id, input.into)
     })?;
-    realtime.send(RealtimeEvent::ProjectUpdated { project_id: source_project });
+    realtime.send(RealtimeEvent::ProjectUpdated {
+        project_id: source_project,
+    });
     Ok(Json(label))
 }
 

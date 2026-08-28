@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -137,16 +137,18 @@ pub fn get_module(conn: &Connection, id: i64) -> Result<Module, LificError> {
         "SELECT id, project_id, name, description, status, emoji, created_at, updated_at
          FROM modules WHERE id = ?1",
         params![id],
-        |row| Ok(Module {
-            id: row.get(0)?,
-            project_id: row.get(1)?,
-            name: row.get(2)?,
-            description: row.get(3)?,
-            status: row.get(4)?,
-            emoji: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
-        }),
+        |row| {
+            Ok(Module {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                status: row.get(4)?,
+                emoji: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        },
     )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => {
@@ -182,7 +184,14 @@ pub fn list_modules(conn: &Connection, project_id: i64) -> Result<Vec<Module>, L
 /// CLI all get the same contract (mirrors how issue status became a real
 /// type in 286d4ac; modules keep the lighter String representation because
 /// nothing branches on module status server-side).
-const MODULE_STATUSES: [&str; 6] = ["backlog", "planned", "active", "paused", "done", "cancelled"];
+const MODULE_STATUSES: [&str; 6] = [
+    "backlog",
+    "planned",
+    "active",
+    "paused",
+    "done",
+    "cancelled",
+];
 
 fn validate_module_status(status: &str) -> Result<(), LificError> {
     if MODULE_STATUSES.contains(&status) {
@@ -573,7 +582,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got: {err:?}");
-        assert!(err.to_string().contains("paused"), "error must list the six: {err}");
+        assert!(
+            err.to_string().contains("paused"),
+            "error must list the six: {err}"
+        );
 
         let module = create_module(
             &conn,
@@ -586,7 +598,14 @@ mod tests {
             },
         )
         .unwrap();
-        for status in ["backlog", "planned", "active", "paused", "done", "cancelled"] {
+        for status in [
+            "backlog",
+            "planned",
+            "active",
+            "paused",
+            "done",
+            "cancelled",
+        ] {
             update_module(
                 &conn,
                 module.id,
@@ -771,12 +790,20 @@ mod tests {
         let pid = seed_project(&conn);
         let bug = create_label(
             &conn,
-            &CreateLabel { project_id: pid, name: "bug".into(), color: "#EF4444".into() },
+            &CreateLabel {
+                project_id: pid,
+                name: "bug".into(),
+                color: "#EF4444".into(),
+            },
         )
         .unwrap();
         let defect = create_label(
             &conn,
-            &CreateLabel { project_id: pid, name: "defect".into(), color: "#F97316".into() },
+            &CreateLabel {
+                project_id: pid,
+                name: "defect".into(),
+                color: "#F97316".into(),
+            },
         )
         .unwrap();
 
@@ -825,7 +852,11 @@ mod tests {
         let pid = seed_project(&conn);
         let l = create_label(
             &conn,
-            &CreateLabel { project_id: pid, name: "bug".into(), color: "#EF4444".into() },
+            &CreateLabel {
+                project_id: pid,
+                name: "bug".into(),
+                color: "#EF4444".into(),
+            },
         )
         .unwrap();
         let err = merge_label(&conn, l.id, l.id).unwrap_err();
@@ -1062,24 +1093,56 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn);
-        let module = create_module(&conn, &CreateModule {
-            project_id: pid, name: "M".into(), description: String::new(),
-            status: "active".into(), emoji: None,
-        }).unwrap();
-        let label = create_label(&conn, &CreateLabel {
-            project_id: pid, name: "bug".into(), color: "#EF4444".into(),
-        }).unwrap();
-        let folder = create_folder(&conn, &CreateFolder {
-            project_id: pid, parent_id: None, name: "Docs".into(),
-        }).unwrap();
+        let module = create_module(
+            &conn,
+            &CreateModule {
+                project_id: pid,
+                name: "M".into(),
+                description: String::new(),
+                status: "active".into(),
+                emoji: None,
+            },
+        )
+        .unwrap();
+        let label = create_label(
+            &conn,
+            &CreateLabel {
+                project_id: pid,
+                name: "bug".into(),
+                color: "#EF4444".into(),
+            },
+        )
+        .unwrap();
+        let folder = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id: pid,
+                parent_id: None,
+                name: "Docs".into(),
+            },
+        )
+        .unwrap();
 
-        assert_eq!(get_resource_project_id(&conn, ResourceTable::Modules, module.id).unwrap(), pid);
-        assert_eq!(get_resource_project_id(&conn, ResourceTable::Labels, label.id).unwrap(), pid);
-        assert_eq!(get_resource_project_id(&conn, ResourceTable::Folders, folder.id).unwrap(), pid);
+        assert_eq!(
+            get_resource_project_id(&conn, ResourceTable::Modules, module.id).unwrap(),
+            pid
+        );
+        assert_eq!(
+            get_resource_project_id(&conn, ResourceTable::Labels, label.id).unwrap(),
+            pid
+        );
+        assert_eq!(
+            get_resource_project_id(&conn, ResourceTable::Folders, folder.id).unwrap(),
+            pid
+        );
 
         // The only table names reachable from the enum are these three bare
         // identifiers, so no call site can smuggle SQL in through the name.
-        for table in [ResourceTable::Modules, ResourceTable::Labels, ResourceTable::Folders] {
+        for table in [
+            ResourceTable::Modules,
+            ResourceTable::Labels,
+            ResourceTable::Folders,
+        ] {
             let name = table.as_table();
             assert!(
                 ["modules", "labels", "folders"].contains(&name),
@@ -1101,9 +1164,15 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let pid = seed_project(&conn);
-        let folder = create_folder(&conn, &CreateFolder {
-            project_id: pid, parent_id: None, name: "Design".into(),
-        }).unwrap();
+        let folder = create_folder(
+            &conn,
+            &CreateFolder {
+                project_id: pid,
+                parent_id: None,
+                name: "Design".into(),
+            },
+        )
+        .unwrap();
 
         assert_eq!(get_folder_name(&conn, folder.id).unwrap(), "Design");
         let err = get_folder_name(&conn, 999_999).unwrap_err();

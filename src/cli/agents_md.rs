@@ -100,7 +100,8 @@ pub fn write(path: &Path, project: Option<&str>) -> Result<AgentsAction, String>
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
-    std::fs::write(path, contents).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     Ok(action)
 }
 
@@ -224,7 +225,10 @@ mod tests {
         std::fs::write(&path, "Top.\n").unwrap();
         write(&path, Some("OLD")).unwrap();
         // Append trailing content after the block to prove it's preserved.
-        let with_trailer = format!("{}\n\nTrailing note.\n", std::fs::read_to_string(&path).unwrap().trim_end());
+        let with_trailer = format!(
+            "{}\n\nTrailing note.\n",
+            std::fs::read_to_string(&path).unwrap().trim_end()
+        );
         std::fs::write(&path, with_trailer).unwrap();
 
         let action = write(&path, Some("NEW")).unwrap();

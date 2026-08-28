@@ -107,9 +107,9 @@ fn le_u32(bytes: &[u8], off: usize) -> Option<u32> {
 }
 
 fn le_u64(bytes: &[u8], off: usize) -> Option<u64> {
-    bytes.get(off..off + 8).map(|s| {
-        u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-    })
+    bytes
+        .get(off..off + 8)
+        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
 }
 
 /// Locate the end-of-central-directory record. It sits at the very end unless
@@ -132,7 +132,10 @@ fn central_directory_location(bytes: &[u8], eocd: usize) -> Option<(usize, usize
     let offset = le_u32(bytes, eocd + 16)? as u64;
 
     if entries != u64::from(u16::MAX) && offset != u64::from(u32::MAX) {
-        return Some((usize::try_from(offset).ok()?, usize::try_from(entries).ok()?));
+        return Some((
+            usize::try_from(offset).ok()?,
+            usize::try_from(entries).ok()?,
+        ));
     }
 
     // Zip64: a 20-byte locator immediately precedes the EOCD and points at
@@ -147,7 +150,10 @@ fn central_directory_location(bytes: &[u8], eocd: usize) -> Option<(usize, usize
     }
     let entries = le_u64(bytes, eocd64 + 32)?;
     let offset = le_u64(bytes, eocd64 + 48)?;
-    Some((usize::try_from(offset).ok()?, usize::try_from(entries).ok()?))
+    Some((
+        usize::try_from(offset).ok()?,
+        usize::try_from(entries).ok()?,
+    ))
 }
 
 /// Walk a zip's central directory and list what it contains.
@@ -418,7 +424,9 @@ mod tests {
 
     #[test]
     fn zip_preview_caps_entries_and_flags_truncation() {
-        let names: Vec<String> = (0..MAX_ZIP_ENTRIES + 5).map(|i| format!("f{i}.txt")).collect();
+        let names: Vec<String> = (0..MAX_ZIP_ENTRIES + 5)
+            .map(|i| format!("f{i}.txt"))
+            .collect();
         let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
         let zip = build_zip(&files);
 

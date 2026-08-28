@@ -7,7 +7,7 @@
 //! paths that set it (`queries::projects::create_project` /
 //! `update_project`) call [`upsert_member`] to keep both in sync.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::{MemberWithUser, ProjectMember, Role};
 use crate::error::LificError;
@@ -64,12 +64,10 @@ pub fn get_member_role(
     project_id: i64,
     user_id: i64,
 ) -> Result<Option<Role>, LificError> {
-    conn.prepare_cached(
-        "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
-    )?
-    .query_row(params![project_id, user_id], |row| row.get(0))
-    .optional()
-    .map_err(Into::into)
+    conn.prepare_cached("SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2")?
+        .query_row(params![project_id, user_id], |row| row.get(0))
+        .optional()
+        .map_err(Into::into)
 }
 
 /// Insert or update a member's role. Idempotent — re-running with the same
@@ -124,9 +122,8 @@ pub fn remove_member(conn: &Connection, project_id: i64, user_id: i64) -> Result
 /// Powers `authz::visible_project_ids` (LIF-196) — the cross-project read
 /// filter for search / project listing once enforcement is wired in.
 pub fn list_project_ids_for_user(conn: &Connection, user_id: i64) -> Result<Vec<i64>, LificError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT project_id FROM project_members WHERE user_id = ?1",
-    )?;
+    let mut stmt =
+        conn.prepare_cached("SELECT project_id FROM project_members WHERE user_id = ?1")?;
     let rows = stmt.query_map(params![user_id], |row| row.get(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -215,7 +212,9 @@ pub fn change_role(
     let new_role: Role = new_role.parse().map_err(LificError::BadRequest)?;
 
     let current = get_member_role(conn, project_id, user_id)?.ok_or_else(|| {
-        LificError::NotFound(format!("user {user_id} is not a member of project {project_id}"))
+        LificError::NotFound(format!(
+            "user {user_id} is not a member of project {project_id}"
+        ))
     })?;
 
     if current == Role::Lead && new_role != Role::Lead && count_leads(conn, project_id)? <= 1 {
@@ -245,7 +244,9 @@ pub fn remove_member_guarded(
     user_id: i64,
 ) -> Result<(), LificError> {
     let current = get_member_role(conn, project_id, user_id)?.ok_or_else(|| {
-        LificError::NotFound(format!("user {user_id} is not a member of project {project_id}"))
+        LificError::NotFound(format!(
+            "user {user_id} is not a member of project {project_id}"
+        ))
     })?;
 
     if current == Role::Lead && count_leads(conn, project_id)? <= 1 {
@@ -275,8 +276,8 @@ pub fn remove_member_guarded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, queries::projects};
     use crate::db::models::{CreateProject, UpdateProject};
+    use crate::db::{self, queries::projects};
 
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
@@ -622,7 +623,10 @@ mod tests {
         let err = add_member(&conn, project_id, alice, "maintainer").unwrap_err();
         assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
         // The conflicting call must not have overwritten the role.
-        assert_eq!(get_member_role(&conn, project_id, alice).unwrap(), Some(Role::Viewer));
+        assert_eq!(
+            get_member_role(&conn, project_id, alice).unwrap(),
+            Some(Role::Viewer)
+        );
     }
 
     #[test]
@@ -680,7 +684,10 @@ mod tests {
 
         let err = change_role(&conn, project_id, alice, "maintainer").unwrap_err();
         assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
-        assert_eq!(get_member_role(&conn, project_id, alice).unwrap(), Some(Role::Lead));
+        assert_eq!(
+            get_member_role(&conn, project_id, alice).unwrap(),
+            Some(Role::Lead)
+        );
 
         // Re-affirming the same role is not a demotion — always fine.
         assert!(change_role(&conn, project_id, alice, "lead").is_ok());
@@ -697,7 +704,10 @@ mod tests {
         upsert_member(&conn, project_id, bob, Role::Lead).unwrap();
 
         change_role(&conn, project_id, alice, "maintainer").unwrap();
-        assert_eq!(get_member_role(&conn, project_id, alice).unwrap(), Some(Role::Maintainer));
+        assert_eq!(
+            get_member_role(&conn, project_id, alice).unwrap(),
+            Some(Role::Maintainer)
+        );
     }
 
     #[test]
@@ -710,7 +720,10 @@ mod tests {
 
         let err = remove_member_guarded(&conn, project_id, alice).unwrap_err();
         assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
-        assert_eq!(get_member_role(&conn, project_id, alice).unwrap(), Some(Role::Lead));
+        assert_eq!(
+            get_member_role(&conn, project_id, alice).unwrap(),
+            Some(Role::Lead)
+        );
     }
 
     #[test]
@@ -811,6 +824,10 @@ mod tests {
         remove_member_guarded(&conn, project.id, bob).unwrap();
 
         let updated = projects::get_project(&conn, project.id).unwrap();
-        assert_eq!(updated.lead_user_id, Some(alice), "unrelated removal must not touch the pointer");
+        assert_eq!(
+            updated.lead_user_id,
+            Some(alice),
+            "unrelated removal must not touch the pointer"
+        );
     }
 }

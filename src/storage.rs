@@ -72,7 +72,7 @@ fn existing_regular_file(path: &Path, label: &str) -> Result<bool, LificError> {
         Err(error) => {
             return Err(LificError::Internal(format!(
                 "inspect {label} path: {error}"
-            )))
+            )));
         }
     };
     if !metadata.file_type().is_file() {
@@ -84,9 +84,7 @@ fn existing_regular_file(path: &Path, label: &str) -> Result<bool, LificError> {
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() != 1 {
-            return Err(LificError::Internal(format!(
-                "{label} path is hard-linked"
-            )));
+            return Err(LificError::Internal(format!("{label} path is hard-linked")));
         }
     }
     Ok(true)
@@ -1402,10 +1400,7 @@ mod tests {
             Some(7),
             "and must proceed once the store is free"
         );
-        assert_eq!(
-            requester.try_with_string_lock(|_| Ok(8)).unwrap(),
-            Some(8)
-        );
+        assert_eq!(requester.try_with_string_lock(|_| Ok(8)).unwrap(), Some(8));
     }
 
     #[test]
@@ -1767,7 +1762,9 @@ mod tests {
             match (&in_memory, &streamed) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "disagreement on {declared:?} {bytes:?}"),
                 (Err(_), Err(_)) => {}
-                _ => panic!("streamed and in-memory sniffing disagree: {in_memory:?} vs {streamed:?}"),
+                _ => panic!(
+                    "streamed and in-memory sniffing disagree: {in_memory:?} vs {streamed:?}"
+                ),
             }
         }
     }

@@ -298,9 +298,7 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         (
             ("PUT", "/api/projects/reorder"),
-            Exempt(
-                "require_user only; instance-wide sidebar chrome, not a project edit — LIF-233",
-            ),
+            Exempt("require_user only; instance-wide sidebar chrome, not a project edit — LIF-233"),
         ),
         (("GET", "/api/projects/{id}"), Gated(Viewer)),
         (("PUT", "/api/projects/{id}"), Gated(Lead)),

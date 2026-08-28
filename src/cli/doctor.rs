@@ -161,10 +161,7 @@ pub async fn run(
     let report = build_report_with_config_path(cfg, explicit_config, key.as_deref()).await;
     print_report(&report, json);
     if report.fail_count() > 0 {
-        Err(format!(
-            "doctor: {} check(s) failed",
-            report.fail_count()
-        ))
+        Err(format!("doctor: {} check(s) failed", report.fail_count()))
     } else {
         Ok(())
     }
@@ -201,14 +198,16 @@ pub async fn build_report_with_config_path(
     // credential store keyed by the server's public_url when set, else the
     // loopback base, since that's how `lific login` would have keyed it.
     let cred_base = cfg.server.public_url.as_deref().unwrap_or(&base);
-    let (effective_key, key_source): (Option<String>, Option<crate::cli::credentials::TokenSource>) =
-        match key {
-            Some(k) => (Some(k.to_string()), None),
-            None => match crate::cli::credentials::load_with_source(cred_base) {
-                Some((tok, src)) => (Some(tok), Some(src)),
-                None => (None, None),
-            },
-        };
+    let (effective_key, key_source): (
+        Option<String>,
+        Option<crate::cli::credentials::TokenSource>,
+    ) = match key {
+        Some(k) => (Some(k.to_string()), None),
+        None => match crate::cli::credentials::load_with_source(cred_base) {
+            Some((tok, src)) => (Some(tok), Some(src)),
+            None => (None, None),
+        },
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -382,10 +381,7 @@ fn check_database(cfg: &Config) -> Check {
             Some(v) => Check::new(
                 "database",
                 Status::Pass,
-                format!(
-                    "{} opens; migrations applied (schema v{v})",
-                    path.display()
-                ),
+                format!("{} opens; migrations applied (schema v{v})", path.display()),
             ),
             None => Check::new(
                 "database",
@@ -653,7 +649,9 @@ pub async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) 
     };
 
     let status = resp.status();
-    let has_www_auth = resp.headers().contains_key(reqwest::header::WWW_AUTHENTICATE);
+    let has_www_auth = resp
+        .headers()
+        .contains_key(reqwest::header::WWW_AUTHENTICATE);
 
     match key {
         None => {
@@ -721,11 +719,7 @@ pub async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) 
                             format!("initialize returned a JSON-RPC error: {}", body["error"]),
                         )
                     } else {
-                        Check::new(
-                            "mcp",
-                            Status::Fail,
-                            "200 but result had no serverInfo",
-                        )
+                        Check::new("mcp", Status::Fail, "200 but result had no serverInfo")
                     }
                 }
                 Err(e) => Check::new(
@@ -974,8 +968,7 @@ mod tests {
     fn database_check_fails_when_parent_unwritable() {
         let mut cfg = Config::default();
         // A path under a directory that does not exist → parent not writable.
-        cfg.database.path =
-            std::path::PathBuf::from("/nonexistent-lific-doctor-xyz/deep/lific.db");
+        cfg.database.path = std::path::PathBuf::from("/nonexistent-lific-doctor-xyz/deep/lific.db");
         let c = check_database(&cfg);
         assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
     }
@@ -1167,9 +1160,7 @@ mod tests {
         let app = build_test_app(pool, "http://127.0.0.1");
         let base = serve_ephemeral(app).await;
 
-        let probe = http_server_reachable(&test_client(), &base)
-            .await
-            .unwrap();
+        let probe = http_server_reachable(&test_client(), &base).await.unwrap();
         assert!(probe.reachable);
         assert_eq!(probe.status, Some(200));
     }
@@ -1195,11 +1186,7 @@ mod tests {
 
         let c = check_mcp(&test_client(), &base, None).await;
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        assert!(
-            c.detail.contains("auth enforced"),
-            "detail: {}",
-            c.detail
-        );
+        assert!(c.detail.contains("auth enforced"), "detail: {}", c.detail);
     }
 
     #[tokio::test]
@@ -1251,13 +1238,7 @@ mod tests {
         assert!(report.ok);
 
         // server = warn, oauth_discovery + mcp = skipped
-        let by = |n: &str| {
-            report
-                .checks
-                .iter()
-                .find(|c| c.name == n)
-                .map(|c| c.status)
-        };
+        let by = |n: &str| report.checks.iter().find(|c| c.name == n).map(|c| c.status);
         assert_eq!(by("server"), Some(Status::Warn));
         assert_eq!(by("oauth_discovery"), Some(Status::Skipped));
         assert_eq!(by("mcp"), Some(Status::Skipped));

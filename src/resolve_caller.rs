@@ -81,8 +81,8 @@ pub fn resolve_caller(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, queries};
     use crate::db::models::CreateUser;
+    use crate::db::{self, queries};
 
     fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
@@ -138,7 +138,12 @@ mod tests {
         let conn = pool.read().unwrap();
         let regular = seed_regular(&conn, "alice");
 
-        for transport in [Transport::Web, Transport::Mcp, Transport::Api, Transport::Cli] {
+        for transport in [
+            Transport::Web,
+            Transport::Mcp,
+            Transport::Api,
+            Transport::Cli,
+        ] {
             let id = resolve_caller_conn(&conn, Some(regular.clone()), transport)
                 .unwrap()
                 .expect("Some(credential) always resolves");
@@ -196,9 +201,11 @@ mod tests {
         drop(conn);
 
         let conn = pool.read().unwrap();
-        assert!(resolve_caller_conn(&conn, None, Transport::Api)
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_caller_conn(&conn, None, Transport::Api)
+                .unwrap()
+                .is_none()
+        );
     }
 
     // Zero-user bootstrap: no credential and no users at all → None. This is
@@ -207,9 +214,11 @@ mod tests {
     fn none_credential_zero_users_returns_none() {
         let pool = test_db();
         let conn = pool.read().unwrap();
-        assert!(resolve_caller_conn(&conn, None, Transport::System)
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_caller_conn(&conn, None, Transport::System)
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── DbPool wrapper mirrors the conn core ──────────────────────────────

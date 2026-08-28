@@ -18,7 +18,12 @@
 
 /// Begin a command session: prints the `┌ <title>` header.
 pub fn intro(title: &str) {
-    let _ = cliclack::intro(console::style(format!(" {title} ")).on_cyan().black().to_string());
+    let _ = cliclack::intro(
+        console::style(format!(" {title} "))
+            .on_cyan()
+            .black()
+            .to_string(),
+    );
 }
 
 /// A completed step: `◇ <msg>`.

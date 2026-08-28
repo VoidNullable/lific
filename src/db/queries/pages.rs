@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -314,7 +314,9 @@ fn validate_page_folder(
         Some(folder_project_id) => Err(LificError::BadRequest(format!(
             "folder {folder_id} belongs to project {folder_project_id}, not page project {project_id}"
         ))),
-        None => Err(LificError::BadRequest(format!("folder {folder_id} not found"))),
+        None => Err(LificError::BadRequest(format!(
+            "folder {folder_id} not found"
+        ))),
     }
 }
 
@@ -1301,18 +1303,20 @@ mod tests {
             .is_err(),
             "unknown order_by must error, not be interpolated"
         );
-        assert!(list_pages(
-            &conn,
-            Some(pid),
-            None,
-            None,
-            None,
-            None,
-            Some("up"),
-            None,
-            None
-        )
-        .is_err());
+        assert!(
+            list_pages(
+                &conn,
+                Some(pid),
+                None,
+                None,
+                None,
+                None,
+                Some("up"),
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     // ── LIF-183: page pinning ────────────────────────────────

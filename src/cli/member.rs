@@ -85,7 +85,11 @@ pub fn run(
                         if skipped.is_empty() {
                             String::new()
                         } else {
-                            format!(" ({} already a member: {})", skipped.len(), skipped.join(", "))
+                            format!(
+                                " ({} already a member: {})",
+                                skipped.len(),
+                                skipped.join(", ")
+                            )
                         }
                     ));
                 }
@@ -104,8 +108,7 @@ pub fn run(
                 } else {
                     ui::step(format!(
                         "Added '{}' to {ident} as {}",
-                        u.username,
-                        member.role
+                        u.username, member.role
                     ));
                 }
             }

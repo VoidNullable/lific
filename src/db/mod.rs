@@ -283,9 +283,8 @@ fn ensure_private_file(path: &Path) -> Result<(), LificError> {
     match options.open(path) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-                LificError::Internal(format!("inspect database file: {error}"))
-            })?;
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| LificError::Internal(format!("inspect database file: {error}")))?;
             if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
                 return Err(LificError::Internal(
                     "database path must be a regular file, not a link".into(),
@@ -316,10 +315,9 @@ fn secure_parent(path: &Path) -> Result<(), LificError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let metadata = parent
-            .symlink_metadata()
-            .map_err(|error| LificError::Internal(format!("inspect database directory: {error}")))?
-            ;
+        let metadata = parent.symlink_metadata().map_err(|error| {
+            LificError::Internal(format!("inspect database directory: {error}"))
+        })?;
         if metadata.file_type().is_symlink() {
             return Err(LificError::Internal(
                 "database directory must not be a symlink".into(),

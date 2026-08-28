@@ -1277,7 +1277,10 @@ mod tests {
             resolve_http_credential(None, || Some(" stored ".into())),
             Ok(Some("stored".into()))
         );
-        assert_eq!(resolve_http_credential(None, || Some("  ".into())), Ok(None));
+        assert_eq!(
+            resolve_http_credential(None, || Some("  ".into())),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -1342,22 +1345,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_backend_values() {
-        assert!(
-            Cli::try_parse_from(["lific", "--backend", "remote", "project", "list"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["lific", "--backend", "remote", "project", "list"]).is_err());
     }
 
     #[test]
     fn parses_json_output_alongside_http_backend() {
-        let cli = Cli::try_parse_from([
-            "lific",
-            "--backend",
-            "http",
-            "--json",
-            "project",
-            "list",
-        ])
-        .expect("JSON output should be transport independent");
+        let cli = Cli::try_parse_from(["lific", "--backend", "http", "--json", "project", "list"])
+            .expect("JSON output should be transport independent");
 
         assert_eq!(cli.backend, BackendKind::Http);
         assert!(cli.json);
@@ -1512,8 +1506,7 @@ mod tests {
 
     #[test]
     fn parse_restore_force() {
-        let cli =
-            Cli::try_parse_from(["lific", "restore", "/tmp/b.tar.gz", "--force"]).unwrap();
+        let cli = Cli::try_parse_from(["lific", "restore", "/tmp/b.tar.gz", "--force"]).unwrap();
         match cli.command {
             Command::Restore {
                 archive,
@@ -1530,8 +1523,8 @@ mod tests {
 
     #[test]
     fn parse_restore_allow_large() {
-        let cli = Cli::try_parse_from(["lific", "restore", "/tmp/b.tar.gz", "--allow-large"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["lific", "restore", "/tmp/b.tar.gz", "--allow-large"]).unwrap();
         match cli.command {
             Command::Restore {
                 force, allow_large, ..
@@ -1617,13 +1610,16 @@ mod tests {
     #[test]
     fn parse_login_complete() {
         let cli = Cli::try_parse_from([
-            "lific", "login", "--complete", "abc123def", "--url", "http://h:1",
+            "lific",
+            "login",
+            "--complete",
+            "abc123def",
+            "--url",
+            "http://h:1",
         ])
         .unwrap();
         match cli.command {
-            Command::Login {
-                complete, url, ..
-            } => {
+            Command::Login { complete, url, .. } => {
                 assert_eq!(complete, Some("abc123def".into()));
                 assert_eq!(url, Some("http://h:1".into()));
             }
@@ -1642,7 +1638,8 @@ mod tests {
 
     #[test]
     fn parse_logout_with_url() {
-        let cli = Cli::try_parse_from(["lific", "logout", "--url", "https://lific.example"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["lific", "logout", "--url", "https://lific.example"]).unwrap();
         match cli.command {
             Command::Logout { url } => assert_eq!(url, Some("https://lific.example".into())),
             _ => panic!("expected Logout"),
@@ -1717,14 +1714,21 @@ mod tests {
     #[test]
     fn parse_connect_repeatable_client_and_flags() {
         let cli = Cli::try_parse_from([
-            "lific", "connect",
-            "--client", "opencode",
-            "--client", "codex",
-            "--scope", "project",
+            "lific",
+            "connect",
+            "--client",
+            "opencode",
+            "--client",
+            "codex",
+            "--scope",
+            "project",
             "--stdio",
-            "--url", "http://127.0.0.1:9000/mcp",
-            "--key", "lific_sk-live-K",
-            "--user", "blake",
+            "--url",
+            "http://127.0.0.1:9000/mcp",
+            "--key",
+            "lific_sk-live-K",
+            "--user",
+            "blake",
             "--yes",
             "--dry-run",
             "--skip-agents",
@@ -1773,7 +1777,12 @@ mod tests {
     #[test]
     fn parse_agents_md_with_path_and_project() {
         let cli = Cli::try_parse_from([
-            "lific", "agents-md", "--path", "docs/AGENTS.md", "--project", "LIF",
+            "lific",
+            "agents-md",
+            "--path",
+            "docs/AGENTS.md",
+            "--project",
+            "LIF",
         ])
         .unwrap();
         match cli.command {
@@ -1826,14 +1835,23 @@ mod tests {
     #[test]
     fn parse_instance_set() {
         let cli = Cli::try_parse_from([
-            "lific", "instance", "set",
-            "--name", "Acme Eng",
-            "--signups", "false",
-            "--signup-domains", "acme.com,sub.acme.com",
-            "--session-days", "14",
-            "--login-message", "Ask #it for access",
-            "--auto-login", "true",
-            "--authz-enforced", "true",
+            "lific",
+            "instance",
+            "set",
+            "--name",
+            "Acme Eng",
+            "--signups",
+            "false",
+            "--signup-domains",
+            "acme.com,sub.acme.com",
+            "--session-days",
+            "14",
+            "--login-message",
+            "Ask #it for access",
+            "--auto-login",
+            "true",
+            "--authz-enforced",
+            "true",
         ])
         .unwrap();
         match cli.command {
@@ -1866,11 +1884,12 @@ mod tests {
         let cli = Cli::try_parse_from(["lific", "key", "create", "--name", "test-key"]).unwrap();
         match cli.command {
             Command::Key {
-                action: KeyAction::Create {
-                    name,
-                    user,
-                    expires,
-                },
+                action:
+                    KeyAction::Create {
+                        name,
+                        user,
+                        expires,
+                    },
             } => {
                 assert_eq!(name, "test-key");
                 assert!(user.is_none());
@@ -1888,11 +1907,12 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Key {
-                action: KeyAction::Create {
-                    name,
-                    user,
-                    expires,
-                },
+                action:
+                    KeyAction::Create {
+                        name,
+                        user,
+                        expires,
+                    },
             } => {
                 assert_eq!(name, "my-key");
                 assert_eq!(user, Some("blake".into()));
@@ -1916,11 +1936,12 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Key {
-                action: KeyAction::Create {
-                    name,
-                    user,
-                    expires,
-                },
+                action:
+                    KeyAction::Create {
+                        name,
+                        user,
+                        expires,
+                    },
             } => {
                 assert_eq!(name, "temp-key");
                 assert!(user.is_none());
@@ -2009,10 +2030,8 @@ mod tests {
 
     #[test]
     fn parse_user_set_password() {
-        let cli = Cli::try_parse_from([
-            "lific", "user", "set-password", "--username", "blake",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["lific", "user", "set-password", "--username", "blake"]).unwrap();
         match cli.command {
             Command::User {
                 action: UserAction::SetPassword { username, password },
@@ -2027,7 +2046,13 @@ mod tests {
     #[test]
     fn parse_user_set_password_with_password_flag() {
         let cli = Cli::try_parse_from([
-            "lific", "user", "set-password", "-u", "blake", "-p", "newpass123",
+            "lific",
+            "user",
+            "set-password",
+            "-u",
+            "blake",
+            "-p",
+            "newpass123",
         ])
         .unwrap();
         match cli.command {
@@ -2046,12 +2071,24 @@ mod tests {
     #[test]
     fn parse_member_add_defaults_to_viewer() {
         let cli = Cli::try_parse_from([
-            "lific", "member", "add", "--project", "LIF", "--user", "bob",
+            "lific",
+            "member",
+            "add",
+            "--project",
+            "LIF",
+            "--user",
+            "bob",
         ])
         .unwrap();
         match cli.command {
             Command::Member {
-                action: MemberAction::Add { project, user, role, all },
+                action:
+                    MemberAction::Add {
+                        project,
+                        user,
+                        role,
+                        all,
+                    },
             } => {
                 assert_eq!(project, Some("LIF".into()));
                 assert_eq!(user, "bob");
@@ -2065,12 +2102,25 @@ mod tests {
     #[test]
     fn parse_member_add_all_projects() {
         let cli = Cli::try_parse_from([
-            "lific", "member", "add", "--all", "--user", "bob", "--role", "maintainer",
+            "lific",
+            "member",
+            "add",
+            "--all",
+            "--user",
+            "bob",
+            "--role",
+            "maintainer",
         ])
         .unwrap();
         match cli.command {
             Command::Member {
-                action: MemberAction::Add { project, user, role, all },
+                action:
+                    MemberAction::Add {
+                        project,
+                        user,
+                        role,
+                        all,
+                    },
             } => {
                 assert!(project.is_none());
                 assert_eq!(user, "bob");
@@ -2089,7 +2139,14 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "lific", "member", "add", "--project", "LIF", "--all", "--user", "bob",
+                "lific",
+                "member",
+                "add",
+                "--project",
+                "LIF",
+                "--all",
+                "--user",
+                "bob",
             ])
             .is_err(),
             "--project conflicts with --all"
@@ -2102,7 +2159,9 @@ mod tests {
             Cli::try_parse_from(["lific", "member", "list", "--project", "LIF"])
                 .unwrap()
                 .command,
-            Command::Member { action: MemberAction::List { .. } }
+            Command::Member {
+                action: MemberAction::List { .. }
+            }
         ));
         match Cli::try_parse_from([
             "lific", "member", "role", "-p", "LIF", "-u", "bob", "-r", "lead",
@@ -2111,9 +2170,17 @@ mod tests {
         .command
         {
             Command::Member {
-                action: MemberAction::Role { project, user, role },
+                action:
+                    MemberAction::Role {
+                        project,
+                        user,
+                        role,
+                    },
             } => {
-                assert_eq!((project.as_str(), user.as_str(), role.as_str()), ("LIF", "bob", "lead"));
+                assert_eq!(
+                    (project.as_str(), user.as_str(), role.as_str()),
+                    ("LIF", "bob", "lead")
+                );
             }
             _ => panic!("expected Member Role"),
         }
@@ -2121,7 +2188,9 @@ mod tests {
             Cli::try_parse_from(["lific", "member", "remove", "-p", "LIF", "-u", "bob"])
                 .unwrap()
                 .command,
-            Command::Member { action: MemberAction::Remove { .. } }
+            Command::Member {
+                action: MemberAction::Remove { .. }
+            }
         ));
     }
 

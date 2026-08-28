@@ -132,7 +132,13 @@ pub fn create_view(
         conn.execute(
             "INSERT INTO saved_views (project_id, user_id, name, config, is_default)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![project_id, user_id, input.name, input.config, input.is_default],
+            params![
+                project_id,
+                user_id,
+                input.name,
+                input.config,
+                input.is_default
+            ],
         )
         .map_err(constraint_err(&input.name))?;
         get_view_row(conn, conn.last_insert_rowid())
@@ -356,7 +362,11 @@ mod tests {
             created.id,
             project,
             alice,
-            &UpdateSavedView { name: None, config: Some(r#"{"a":1}"#.into()), is_default: None },
+            &UpdateSavedView {
+                name: None,
+                config: Some(r#"{"a":1}"#.into()),
+                is_default: None,
+            },
         )
         .unwrap();
 
@@ -396,7 +406,11 @@ mod tests {
             alice_view.id,
             project,
             bob,
-            &UpdateSavedView { name: Some("Hijacked".into()), config: None, is_default: None },
+            &UpdateSavedView {
+                name: Some("Hijacked".into()),
+                config: None,
+                is_default: None,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
@@ -438,7 +452,10 @@ mod tests {
         assert!(second.is_default);
 
         let refreshed_first = get_view_row(&conn, first.id).unwrap();
-        assert!(!refreshed_first.is_default, "creating a new default must clear the old one");
+        assert!(
+            !refreshed_first.is_default,
+            "creating a new default must clear the old one"
+        );
 
         let defaults: i64 = conn
             .query_row(
@@ -466,7 +483,11 @@ mod tests {
             b.id,
             project,
             alice,
-            &UpdateSavedView { name: None, config: None, is_default: Some(true) },
+            &UpdateSavedView {
+                name: None,
+                config: None,
+                is_default: Some(true),
+            },
         )
         .unwrap();
         assert!(promoted.is_default);
@@ -483,11 +504,16 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
 
-        let alice_default = create_view(&conn, project, alice, &view_input("Alice default", true)).unwrap();
-        let bob_default = create_view(&conn, project, bob, &view_input("Bob default", true)).unwrap();
+        let alice_default =
+            create_view(&conn, project, alice, &view_input("Alice default", true)).unwrap();
+        let bob_default =
+            create_view(&conn, project, bob, &view_input("Bob default", true)).unwrap();
 
         assert!(alice_default.is_default);
-        assert!(bob_default.is_default, "bob's default must not be cleared by alice's");
+        assert!(
+            bob_default.is_default,
+            "bob's default must not be cleared by alice's"
+        );
     }
 
     // ── Validation ──────────────────────────────────────────────
@@ -503,7 +529,11 @@ mod tests {
             &conn,
             project,
             alice,
-            &CreateSavedView { name: "Bad".into(), config: "{not json".into(), is_default: false },
+            &CreateSavedView {
+                name: "Bad".into(),
+                config: "{not json".into(),
+                is_default: false,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
@@ -521,7 +551,11 @@ mod tests {
             &conn,
             project,
             alice,
-            &CreateSavedView { name: "Too big".into(), config: huge, is_default: false },
+            &CreateSavedView {
+                name: "Too big".into(),
+                config: huge,
+                is_default: false,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
@@ -553,9 +587,16 @@ mod tests {
                 &conn,
                 project,
                 alice,
-                &CreateSavedView { name, config: config.into(), is_default: false },
+                &CreateSavedView {
+                    name,
+                    config: config.into(),
+                    is_default: false,
+                },
             );
-            assert!(result.is_ok(), "expected {config} to be accepted, got {result:?}");
+            assert!(
+                result.is_ok(),
+                "expected {config} to be accepted, got {result:?}"
+            );
         }
     }
 
@@ -603,7 +644,11 @@ mod tests {
             999999,
             project,
             alice,
-            &UpdateSavedView { name: Some("x".into()), config: None, is_default: None },
+            &UpdateSavedView {
+                name: Some("x".into()),
+                config: None,
+                is_default: None,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
@@ -620,14 +665,22 @@ mod tests {
         let conn = pool.write().unwrap();
         let project = seed_project(&conn, "CDP");
         let alice = seed_user(&conn, "alice");
-        create_view(&conn, project, alice, &view_input("Gone with project", false)).unwrap();
+        create_view(
+            &conn,
+            project,
+            alice,
+            &view_input("Gone with project", false),
+        )
+        .unwrap();
 
         queries::delete_project(&conn, project).unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM saved_views WHERE project_id = ?1", params![project], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM saved_views WHERE project_id = ?1",
+                params![project],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -640,10 +693,15 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         create_view(&conn, project, alice, &view_input("Gone with user", false)).unwrap();
 
-        conn.execute("DELETE FROM users WHERE id = ?1", params![alice]).unwrap();
+        conn.execute("DELETE FROM users WHERE id = ?1", params![alice])
+            .unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM saved_views WHERE user_id = ?1", params![alice], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM saved_views WHERE user_id = ?1",
+                params![alice],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }

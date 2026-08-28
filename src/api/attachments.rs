@@ -206,55 +206,57 @@ pub(super) async fn upload_attachment(
     // is inserted.
     // Non-blocking: a REST handler must not park a Tokio worker for the
     // length of a dump. Busy means "retry", not "failed".
-    let (attachment, event) = store.try_with_lock(|store| {
-        // Same definition of "already there" the writer uses, so a path that
-        // is present but not a usable regular file fails here rather than
-        // being read as "this upload created it" during cleanup.
-        let blob_existed = store.blob_exists(&sha)?;
-        let thumb_existed = match thumbnail.as_ref() {
-            Some(_) => store.thumb_exists(&sha)?,
-            None => false,
-        };
-        let result = db.transaction(|conn| {
-            let mut att = q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
-            store.write_unlocked(&bytes)?;
-            if let Some(thumb) = thumbnail.as_deref()
-                && let Err(e) = store.write_thumb(&sha, thumb)
-            {
-                tracing::warn!(error = %e, "failed to cache attachment thumbnail");
-            }
-            if let Some((w, h)) = dimensions {
-                q::set_dimensions(conn, att.id, i64::from(w), i64::from(h))?;
-                att = q::get_attachment(conn, att.id)?;
-            }
-            if q::is_extractable(&mime, size)
-                && let Ok(text) = std::str::from_utf8(&bytes)
-            {
-                q::set_extracted_text(conn, att.id, text)?;
-            }
-            let event = match link {
-                Some((entity, eid)) => {
-                    authorize_link_conn(conn, &identity, entity, eid)?;
-                    q::link_attachment(conn, att.id, entity, eid)?;
-                    linked_entity_event(conn, entity, eid)?
-                }
-                None => None,
+    let (attachment, event) = store
+        .try_with_lock(|store| {
+            // Same definition of "already there" the writer uses, so a path that
+            // is present but not a usable regular file fails here rather than
+            // being read as "this upload created it" during cleanup.
+            let blob_existed = store.blob_exists(&sha)?;
+            let thumb_existed = match thumbnail.as_ref() {
+                Some(_) => store.thumb_exists(&sha)?,
+                None => false,
             };
-            Ok((att, event))
-        });
-        if result.is_err() {
-            discard_failed_upload(
-                &db,
-                store,
-                &sha,
-                blob_existed,
-                thumb_existed,
-                thumbnail.is_some(),
-            );
-        }
-        result
-    })?
-    .ok_or_else(AttachmentStore::busy_error)?;
+            let result = db.transaction(|conn| {
+                let mut att =
+                    q::create_attachment(conn, &sha, &filename, &mime, size, Some(user.id))?;
+                store.write_unlocked(&bytes)?;
+                if let Some(thumb) = thumbnail.as_deref()
+                    && let Err(e) = store.write_thumb(&sha, thumb)
+                {
+                    tracing::warn!(error = %e, "failed to cache attachment thumbnail");
+                }
+                if let Some((w, h)) = dimensions {
+                    q::set_dimensions(conn, att.id, i64::from(w), i64::from(h))?;
+                    att = q::get_attachment(conn, att.id)?;
+                }
+                if q::is_extractable(&mime, size)
+                    && let Ok(text) = std::str::from_utf8(&bytes)
+                {
+                    q::set_extracted_text(conn, att.id, text)?;
+                }
+                let event = match link {
+                    Some((entity, eid)) => {
+                        authorize_link_conn(conn, &identity, entity, eid)?;
+                        q::link_attachment(conn, att.id, entity, eid)?;
+                        linked_entity_event(conn, entity, eid)?
+                    }
+                    None => None,
+                };
+                Ok((att, event))
+            });
+            if result.is_err() {
+                discard_failed_upload(
+                    &db,
+                    store,
+                    &sha,
+                    blob_existed,
+                    thumb_existed,
+                    thumbnail.is_some(),
+                );
+            }
+            result
+        })?
+        .ok_or_else(AttachmentStore::busy_error)?;
     if let Some(event) = event {
         realtime.send(event);
     }
@@ -761,21 +763,22 @@ pub(super) async fn delete_attachment(
 
     authorize_delete(&db, &identity, &user, &attachment)?;
 
-    let events = store.try_with_lock(|store| {
-        let events = with_write(&db, |conn| {
-            let events = linked_attachment_events(conn, id)?;
-            q::delete_attachment(conn, id)?;
-            Ok(events)
-        })?;
+    let events = store
+        .try_with_lock(|store| {
+            let events = with_write(&db, |conn| {
+                let events = linked_attachment_events(conn, id)?;
+                q::delete_attachment(conn, id)?;
+                Ok(events)
+            })?;
 
-        // GC the sidecar only when no remaining row references the same bytes.
-        let remaining = with_read(&db, |conn| q::count_rows_for_sha(conn, &attachment.sha256))?;
-        if remaining == 0 {
-            store.delete_unlocked(&attachment.sha256)?;
-        }
-        Ok(events)
-    })?
-    .ok_or_else(AttachmentStore::busy_error)?;
+            // GC the sidecar only when no remaining row references the same bytes.
+            let remaining = with_read(&db, |conn| q::count_rows_for_sha(conn, &attachment.sha256))?;
+            if remaining == 0 {
+                store.delete_unlocked(&attachment.sha256)?;
+            }
+            Ok(events)
+        })?
+        .ok_or_else(AttachmentStore::busy_error)?;
     for event in events {
         realtime.send(event);
     }
@@ -900,34 +903,39 @@ fn describe_entity(
     entity_id: i64,
 ) -> Result<Option<LinkedEntity>, LificError> {
     with_read(db, |conn| {
-        let described = match entity {
-            AttachmentEntity::Issue => queries::get_issue(conn, entity_id).ok().map(|issue| {
-                LinkedEntity {
-                    entity_type: "issue".into(),
-                    entity_id,
-                    identifier: Some(issue.identifier),
-                    title: issue.title,
+        let described =
+            match entity {
+                AttachmentEntity::Issue => {
+                    queries::get_issue(conn, entity_id)
+                        .ok()
+                        .map(|issue| LinkedEntity {
+                            entity_type: "issue".into(),
+                            entity_id,
+                            identifier: Some(issue.identifier),
+                            title: issue.title,
+                        })
                 }
-            }),
-            AttachmentEntity::Page => {
-                queries::get_page(conn, entity_id).ok().map(|page| LinkedEntity {
-                    entity_type: "page".into(),
-                    entity_id,
-                    identifier: Some(page.identifier),
-                    title: page.title,
-                })
-            }
-            AttachmentEntity::Comment => queries::comments::get_comment(conn, entity_id)
-                .ok()
-                .map(|comment| LinkedEntity {
-                    entity_type: "comment".into(),
-                    entity_id,
-                    // A comment is not addressable by identifier; the client
-                    // navigates to it through its parent issue or page.
-                    identifier: None,
-                    title: comment_title(&comment.content),
-                }),
-        };
+                AttachmentEntity::Page => {
+                    queries::get_page(conn, entity_id)
+                        .ok()
+                        .map(|page| LinkedEntity {
+                            entity_type: "page".into(),
+                            entity_id,
+                            identifier: Some(page.identifier),
+                            title: page.title,
+                        })
+                }
+                AttachmentEntity::Comment => queries::comments::get_comment(conn, entity_id)
+                    .ok()
+                    .map(|comment| LinkedEntity {
+                        entity_type: "comment".into(),
+                        entity_id,
+                        // A comment is not addressable by identifier; the client
+                        // navigates to it through its parent issue or page.
+                        identifier: None,
+                        title: comment_title(&comment.content),
+                    }),
+            };
         Ok(described)
     })
 }
@@ -1289,7 +1297,11 @@ mod tests {
         assert!(matches!(error, LificError::Unavailable(_)), "got {error:?}");
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(response.headers().contains_key(axum::http::header::RETRY_AFTER));
+        assert!(
+            response
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER)
+        );
 
         release_tx.send(()).unwrap();
         worker.join().unwrap().unwrap();
@@ -1430,12 +1442,18 @@ mod tests {
 
     #[test]
     fn ranges_outside_the_resource_are_unsatisfiable() {
-        assert_eq!(parse_range("bytes=1000-", 1000), RangeRequest::Unsatisfiable);
+        assert_eq!(
+            parse_range("bytes=1000-", 1000),
+            RangeRequest::Unsatisfiable
+        );
         assert_eq!(
             parse_range("bytes=1500-1600", 1000),
             RangeRequest::Unsatisfiable
         );
-        assert_eq!(parse_range("bytes=50-10", 1000), RangeRequest::Unsatisfiable);
+        assert_eq!(
+            parse_range("bytes=50-10", 1000),
+            RangeRequest::Unsatisfiable
+        );
         assert_eq!(parse_range("bytes=-0", 1000), RangeRequest::Unsatisfiable);
         assert_eq!(parse_range("bytes=0-0", 0), RangeRequest::Unsatisfiable);
     }
@@ -1729,7 +1747,11 @@ mod api_tests {
 
         for (name, mime, bytes) in [
             ("shot.png", "image/png", png_bytes()),
-            ("logo.svg", "image/svg+xml", b"<svg xmlns=\"x\"></svg>".to_vec()),
+            (
+                "logo.svg",
+                "image/svg+xml",
+                b"<svg xmlns=\"x\"></svg>".to_vec(),
+            ),
             ("notes.txt", "text/plain", b"hello\n".to_vec()),
         ] {
             let resp = upload(&app, name, mime, &bytes, None).await;
@@ -1861,15 +1883,17 @@ mod api_tests {
                 display_name: lead.display_name.clone(),
                 is_admin: false,
             })))
-            .layer(axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: lead.id,
-                    username: lead.username.clone(),
-                    display_name: lead.display_name.clone(),
-                    is_admin: false,
+            .layer(axum::Extension(Some(
+                crate::resolve_caller::ResolvedIdentity {
+                    user: AuthUser {
+                        id: lead.id,
+                        username: lead.username.clone(),
+                        display_name: lead.display_name.clone(),
+                        is_admin: false,
+                    },
+                    transport: crate::actor::Transport::Web,
                 },
-                transport: crate::actor::Transport::Web,
-            })));
+            )));
 
         let issue = parse_json(
             json_post(
@@ -2241,15 +2265,17 @@ mod api_tests {
                 display_name: "GC".into(),
                 is_admin: true,
             })))
-            .layer(axum::Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "gc".into(),
-                    display_name: "GC".into(),
-                    is_admin: true,
+            .layer(axum::Extension(Some(
+                crate::resolve_caller::ResolvedIdentity {
+                    user: AuthUser {
+                        id: admin_id,
+                        username: "gc".into(),
+                        display_name: "GC".into(),
+                        is_admin: true,
+                    },
+                    transport: crate::actor::Transport::Web,
                 },
-                transport: crate::actor::Transport::Web,
-            })));
+            )));
         let (project_id2, _) = seed_project(&app).await;
 
         // Upload two: one linked to an issue, one left dangling.
@@ -2350,8 +2376,9 @@ mod api_tests {
         // Unlinked: belongs to no project, so it stays out of the listing.
         upload(&app, "stray.txt", "text/plain", b"nowhere\n", None).await;
 
-        let body = parse_json(json_get(&app, &format!("/api/projects/{project_id}/attachments")).await)
-            .await;
+        let body =
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/attachments")).await)
+                .await;
         assert_eq!(body["total_count"], 2);
         assert_eq!(body["has_more"], false);
         let items = body["items"].as_array().unwrap();
@@ -2455,7 +2482,14 @@ mod api_tests {
             Some(("issue", issue_id)),
         )
         .await;
-        upload(&app, "abandoned.txt", "text/plain", b"draft that never landed\n", None).await;
+        upload(
+            &app,
+            "abandoned.txt",
+            "text/plain",
+            b"draft that never landed\n",
+            None,
+        )
+        .await;
 
         let body = parse_json(
             json_get(
@@ -2623,7 +2657,12 @@ mod media_tests {
     }
 
     async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
     }
 
     fn header(resp: &axum::response::Response, name: &str) -> Option<String> {
@@ -2817,8 +2856,9 @@ mod media_tests {
     #[tokio::test]
     async fn upload_records_raster_dimensions() {
         let app = test_app();
-        let data = parse_json(upload(&app, "big.png", "image/png", &png_image(800, 200), None).await)
-            .await;
+        let data =
+            parse_json(upload(&app, "big.png", "image/png", &png_image(800, 200), None).await)
+                .await;
         assert_eq!(data["width"], 800);
         assert_eq!(data["height"], 200);
         assert_eq!(data["has_thumbnail"], true);
@@ -2834,10 +2874,11 @@ mod media_tests {
     #[tokio::test]
     async fn thumbnail_endpoint_serves_a_downscaled_webp() {
         let app = test_app();
-        let id = parse_json(upload(&app, "big.png", "image/png", &png_image(1200, 600), None).await)
-            .await["id"]
-            .as_i64()
-            .unwrap();
+        let id =
+            parse_json(upload(&app, "big.png", "image/png", &png_image(1200, 600), None).await)
+                .await["id"]
+                .as_i64()
+                .unwrap();
 
         let resp = json_get(&app, &format!("/api/attachments/{id}/thumbnail")).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2872,10 +2913,10 @@ mod media_tests {
         );
 
         // Not a raster image at all.
-        let text = parse_json(upload(&app, "n.txt", "text/plain", b"hello\n", None).await).await
-            ["id"]
-            .as_i64()
-            .unwrap();
+        let text =
+            parse_json(upload(&app, "n.txt", "text/plain", b"hello\n", None).await).await["id"]
+                .as_i64()
+                .unwrap();
         assert_eq!(
             json_get(&app, &format!("/api/attachments/{text}/thumbnail"))
                 .await
@@ -2909,11 +2950,9 @@ mod media_tests {
             .unwrap();
         let sha: String = {
             let conn = db.read().unwrap();
-            conn.query_row(
-                "SELECT sha256 FROM attachments WHERE id = ?1",
-                [id],
-                |r| r.get(0),
-            )
+            conn.query_row("SELECT sha256 FROM attachments WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap()
         };
 
@@ -3068,7 +3107,12 @@ mod media_tests {
         assert_eq!(data["alt_text"], serde_json::Value::Null);
 
         // An empty patch is a no-op rather than a 400.
-        let resp = json_patch(&app, &format!("/api/attachments/{id}"), serde_json::json!({})).await;
+        let resp = json_patch(
+            &app,
+            &format!("/api/attachments/{id}"),
+            serde_json::json!({}),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -3185,7 +3229,14 @@ mod media_tests {
 
         let bytes = png_image(20, 20);
         let id = parse_json(
-            upload(&app, "shot.png", "image/png", &bytes, Some(("issue", issue_id))).await,
+            upload(
+                &app,
+                "shot.png",
+                "image/png",
+                &bytes,
+                Some(("issue", issue_id)),
+            )
+            .await,
         )
         .await["id"]
             .as_i64()
@@ -3219,7 +3270,10 @@ mod media_tests {
         assert_eq!(issue["title"], "Broken export");
         assert!(issue["identifier"].as_str().unwrap().contains('-'));
 
-        let page = entities.iter().find(|e| e["entity_type"] == "page").unwrap();
+        let page = entities
+            .iter()
+            .find(|e| e["entity_type"] == "page")
+            .unwrap();
         assert_eq!(page["title"], "Runbook");
         assert!(page["identifier"].as_str().unwrap().contains("-DOC-"));
 
@@ -3257,7 +3311,14 @@ mod media_tests {
 
         let bytes = png_image(24, 24);
         let first = parse_json(
-            upload(&app, "a.png", "image/png", &bytes, Some(("issue", issue_id))).await,
+            upload(
+                &app,
+                "a.png",
+                "image/png",
+                &bytes,
+                Some(("issue", issue_id)),
+            )
+            .await,
         )
         .await["id"]
             .as_i64()
@@ -3320,10 +3381,9 @@ mod media_tests {
             .as_i64()
             .unwrap();
 
-        let links = parse_json(
-            json_get(&outsider_app, &format!("/api/attachments/{mine}/links")).await,
-        )
-        .await;
+        let links =
+            parse_json(json_get(&outsider_app, &format!("/api/attachments/{mine}/links")).await)
+                .await;
         let dupes = links["duplicates"].as_array().unwrap();
         assert_eq!(dupes.len(), 1);
         assert_eq!(dupes[0]["attachment_id"], hidden);

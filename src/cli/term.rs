@@ -157,7 +157,10 @@ mod tests {
             err.contains("--yes"),
             "error should name the bypass flag, got: {err}"
         );
-        assert!(err.contains("interactive"), "error should explain why: {err}");
+        assert!(
+            err.contains("interactive"),
+            "error should explain why: {err}"
+        );
     }
 
     #[test]
@@ -188,30 +191,49 @@ mod tests {
     #[test]
     fn prompt_text_refuses_without_tty_and_names_bypass_flag() {
         let mut input: &[u8] = b"";
-        let err = prompt_text_inner("What's your name?", "--name", false, &mut input, &mut Vec::new())
-            .expect_err("must refuse when stdin is not a TTY");
+        let err = prompt_text_inner(
+            "What's your name?",
+            "--name",
+            false,
+            &mut input,
+            &mut Vec::new(),
+        )
+        .expect_err("must refuse when stdin is not a TTY");
         assert!(
             err.contains("--name"),
             "error should name the bypass flag, got: {err}"
         );
-        assert!(err.contains("interactive"), "error should explain why: {err}");
+        assert!(
+            err.contains("interactive"),
+            "error should explain why: {err}"
+        );
     }
 
     #[test]
     fn prompt_text_trims_response_on_tty() {
         let mut input: &[u8] = b"  Blake Alston  \n";
-        let value =
-            prompt_text_inner("What's your name?", "--name", true, &mut input, &mut Vec::new())
-                .unwrap();
+        let value = prompt_text_inner(
+            "What's your name?",
+            "--name",
+            true,
+            &mut input,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(value, "Blake Alston");
     }
 
     #[test]
     fn prompt_text_rejects_empty_input() {
         let mut input: &[u8] = b"\n";
-        let err =
-            prompt_text_inner("What's your name?", "--name", true, &mut input, &mut Vec::new())
-                .expect_err("empty input must fail");
+        let err = prompt_text_inner(
+            "What's your name?",
+            "--name",
+            true,
+            &mut input,
+            &mut Vec::new(),
+        )
+        .expect_err("empty input must fail");
         assert!(err.contains("empty"), "error should explain why: {err}");
     }
 }

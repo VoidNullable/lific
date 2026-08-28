@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::db::models::*;
 use crate::error::LificError;
@@ -152,7 +152,9 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
 ///   workspace pages
 fn validate_identifier(identifier: &str) -> Result<(), LificError> {
     if identifier.is_empty() {
-        return Err(LificError::BadRequest("identifier must not be empty".into()));
+        return Err(LificError::BadRequest(
+            "identifier must not be empty".into(),
+        ));
     }
     if identifier.chars().count() > 5 {
         return Err(LificError::BadRequest(
@@ -275,19 +277,16 @@ pub fn update_project(
             // return a 400 with a clear message instead of letting the FK
             // constraint surface as a generic 500.
             if let Some(uid) = lead {
-                let exists = match conn.query_row(
-                    "SELECT 1 FROM users WHERE id = ?1",
-                    params![uid],
-                    |_| Ok(true),
-                ) {
-                    Ok(_) => true,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => false,
-                    Err(e) => return Err(e.into()),
-                };
+                let exists =
+                    match conn.query_row("SELECT 1 FROM users WHERE id = ?1", params![uid], |_| {
+                        Ok(true)
+                    }) {
+                        Ok(_) => true,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                        Err(e) => return Err(e.into()),
+                    };
                 if !exists {
-                    return Err(LificError::BadRequest(format!(
-                        "user {uid} not found"
-                    )));
+                    return Err(LificError::BadRequest(format!("user {uid} not found")));
                 }
             }
             conn.execute(
@@ -716,7 +715,8 @@ mod tests {
         seed_named(&conn, "Gamma", "G");
         seed_named(&conn, "Alpha", "A");
         seed_named(&conn, "Beta", "B");
-        conn.execute("UPDATE projects SET sort_order = 0", []).unwrap();
+        conn.execute("UPDATE projects SET sort_order = 0", [])
+            .unwrap();
 
         let names: Vec<String> = list_projects(&conn)
             .unwrap()

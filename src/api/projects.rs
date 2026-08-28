@@ -805,8 +805,7 @@ mod tests {
     /// filter_visible), not just the authz unit.
     #[tokio::test]
     async fn enforced_admin_sees_all_projects_non_member_sees_none() {
-        let (db, admin, _lead, _maint, _viewer, non_member, project_id) =
-            setup_membership_test();
+        let (db, admin, _lead, _maint, _viewer, non_member, project_id) = setup_membership_test();
 
         let resp = json_get(&app_as_user(db.clone(), &admin), "/api/projects").await;
         assert_eq!(resp.status(), StatusCode::OK);

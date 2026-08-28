@@ -214,8 +214,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
 
-        let created =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let created = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
         assert_eq!(created.name, "Work");
         assert!(created.project_ids.is_empty());
 
@@ -231,14 +237,33 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
 
-        create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
 
-        let err =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap_err();
+        let err = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, LificError::Conflict(_)), "got {err:?}");
 
-        create_group(&conn, bob, &CreateProjectGroup { name: "Work".into() })
-            .expect("a different user may reuse the name");
+        create_group(
+            &conn,
+            bob,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .expect("a different user may reuse the name");
     }
 
     #[test]
@@ -248,7 +273,14 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
 
-        create_group(&conn, alice, &CreateProjectGroup { name: "Personal".into() }).unwrap();
+        create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Personal".into(),
+            },
+        )
+        .unwrap();
 
         assert!(list_groups(&conn, bob).unwrap().is_empty());
     }
@@ -272,10 +304,22 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let project = seed_project(&conn, "APP");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
-        let personal =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Personal".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
+        let personal = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Personal".into(),
+            },
+        )
+        .unwrap();
 
         assign_project(&conn, alice, project, Some(work.id)).unwrap();
         assign_project(&conn, alice, project, Some(personal.id)).unwrap();
@@ -296,8 +340,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let project = seed_project(&conn, "APP");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
 
         assign_project(&conn, alice, project, Some(work.id)).unwrap();
         assign_project(&conn, alice, project, None).unwrap();
@@ -313,10 +363,22 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
         let project = seed_project(&conn, "APP");
-        let alice_work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
-        let bob_side =
-            create_group(&conn, bob, &CreateProjectGroup { name: "Side".into() }).unwrap();
+        let alice_work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
+        let bob_side = create_group(
+            &conn,
+            bob,
+            &CreateProjectGroup {
+                name: "Side".into(),
+            },
+        )
+        .unwrap();
 
         assign_project(&conn, alice, project, Some(alice_work.id)).unwrap();
         assign_project(&conn, bob, project, Some(bob_side.id)).unwrap();
@@ -338,8 +400,14 @@ mod tests {
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
         let project = seed_project(&conn, "APP");
-        let alice_work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let alice_work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
 
         let err = assign_project(&conn, bob, project, Some(alice_work.id)).unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
@@ -353,8 +421,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let project = seed_project(&conn, "APP");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
         assign_project(&conn, alice, project, Some(work.id)).unwrap();
 
         assert!(delete_group(&conn, work.id, alice).unwrap());
@@ -369,8 +443,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let bob = seed_user(&conn, "bob");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
 
         let err = delete_group(&conn, work.id, bob).unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
@@ -382,8 +462,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let project = seed_project(&conn, "APP");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
         assign_project(&conn, alice, project, Some(work.id)).unwrap();
 
         queries::delete_project(&conn, project).unwrap();
@@ -396,7 +482,14 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
-        create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
 
         conn.execute("DELETE FROM users WHERE id = ?1", params![alice])
             .unwrap();
@@ -414,9 +507,22 @@ mod tests {
         let pool = test_db();
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
-        create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
-        let personal =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Personal".into() }).unwrap();
+        create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
+        let personal = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Personal".into(),
+            },
+        )
+        .unwrap();
 
         let err = update_group(
             &conn,
@@ -436,8 +542,14 @@ mod tests {
         let conn = pool.write().unwrap();
         let alice = seed_user(&conn, "alice");
         let project = seed_project(&conn, "APP");
-        let work =
-            create_group(&conn, alice, &CreateProjectGroup { name: "Work".into() }).unwrap();
+        let work = create_group(
+            &conn,
+            alice,
+            &CreateProjectGroup {
+                name: "Work".into(),
+            },
+        )
+        .unwrap();
         assign_project(&conn, alice, project, Some(work.id)).unwrap();
 
         let renamed = update_group(
@@ -450,6 +562,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(renamed.name, "Day job");
-        assert_eq!(list_groups(&conn, alice).unwrap()[0].project_ids, vec![project]);
+        assert_eq!(
+            list_groups(&conn, alice).unwrap()[0].project_ids,
+            vec![project]
+        );
     }
 }

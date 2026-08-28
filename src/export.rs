@@ -1100,14 +1100,18 @@ mod tests {
         let bundle = export_project(&conn, "EXP").unwrap();
         assert_eq!(bundle.root, "EXP");
         assert_eq!(bundle.files.len(), 2);
-        assert!(bundle
-            .files
-            .iter()
-            .any(|file| file.path.starts_with("EXP/issues/exp-1-ship-export")));
-        assert!(bundle
-            .files
-            .iter()
-            .any(|file| file.path == "EXP/pages/docs/guides/exp-doc-1-getting-started.md"));
+        assert!(
+            bundle
+                .files
+                .iter()
+                .any(|file| file.path.starts_with("EXP/issues/exp-1-ship-export"))
+        );
+        assert!(
+            bundle
+                .files
+                .iter()
+                .any(|file| file.path == "EXP/pages/docs/guides/exp-doc-1-getting-started.md")
+        );
         let issue_file = bundle
             .files
             .iter()
@@ -1477,9 +1481,8 @@ mod tests {
             .unwrap();
         }
 
-        let error =
-            ensure_project_preflight(&conn, project.id, 32, MAX_EXPORT_PROJECT_COMMENTS)
-                .unwrap_err();
+        let error = ensure_project_preflight(&conn, project.id, 32, MAX_EXPORT_PROJECT_COMMENTS)
+            .unwrap_err();
         assert!(error.to_string().contains("project source exceeds"));
     }
 
@@ -1536,13 +1539,8 @@ mod tests {
             }
         }
 
-        let error = ensure_project_preflight(
-            &conn,
-            project.id,
-            MAX_EXPORT_TOTAL_BYTES as i64,
-            501,
-        )
-        .unwrap_err();
+        let error = ensure_project_preflight(&conn, project.id, MAX_EXPORT_TOTAL_BYTES as i64, 501)
+            .unwrap_err();
         assert!(error.to_string().contains("too many comments"));
     }
 

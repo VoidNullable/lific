@@ -125,7 +125,11 @@ mod tests {
             user_id: Some(2),
             transport: Transport::Mcp,
         };
-        let seen = scope(outer, async move { scope(inner, async { current() }).await }).await;
+        let seen = scope(
+            outer,
+            async move { scope(inner, async { current() }).await },
+        )
+        .await;
         assert_eq!(seen.user_id, Some(2));
         assert_eq!(seen.transport, Transport::Mcp);
     }

@@ -234,7 +234,11 @@ fn prune_audit_log(pool: &DbPool, audit_retention_days: Option<u32>) {
         rusqlite::params![cutoff],
     ) {
         Ok(0) => {}
-        Ok(deleted) => info!(deleted, retention_days = days, "pruned old audit log entries"),
+        Ok(deleted) => info!(
+            deleted,
+            retention_days = days,
+            "pruned old audit log entries"
+        ),
         Err(e) => warn!(error = %e, "audit log pruning failed"),
     }
 }
@@ -331,8 +335,7 @@ fn rotate_backups(backup_dir: &Path, db_stem: &str, retain: usize) {
                     return false;
                 }
                 // New archives (`.tar.gz`) or legacy snapshots (`.db`).
-                name.ends_with(".tar.gz")
-                    || p.extension().and_then(|e| e.to_str()) == Some("db")
+                name.ends_with(".tar.gz") || p.extension().and_then(|e| e.to_str()) == Some("db")
             })
             .collect(),
         Err(e) => {
@@ -553,7 +556,13 @@ mod tests {
         let other_stem = dir.join("other_20260101_120000.tar.archive.tmp");
         let real_backup = dir.join("lific_20260101_120000.tar.gz");
         let stale_dir = dir.join(".lific-dump-stale");
-        for p in [&stale_snap, &stale_arch, &fresh_arch, &other_stem, &real_backup] {
+        for p in [
+            &stale_snap,
+            &stale_arch,
+            &fresh_arch,
+            &other_stem,
+            &real_backup,
+        ] {
             fs::write(p, "x").unwrap();
         }
         fs::create_dir(&stale_dir).unwrap();
@@ -562,10 +571,7 @@ mod tests {
         backdate(&stale_arch, old);
         backdate(&other_stem, old);
         backdate(&real_backup, old);
-        backdate(
-            &stale_dir.join("activity"),
-            old,
-        );
+        backdate(&stale_dir.join("activity"), old);
 
         sweep_stale_tmps(dir, "lific");
 
@@ -573,8 +579,14 @@ mod tests {
         assert!(!stale_arch.exists(), "stale archive tmp must be swept");
         assert!(fresh_arch.exists(), "fresh staging tmp must survive");
         assert!(other_stem.exists(), "other stems are not ours to sweep");
-        assert!(real_backup.exists(), "real archives are rotation's job, not the sweep's");
-        assert!(!stale_dir.exists(), "stale dump staging directory must be swept");
+        assert!(
+            real_backup.exists(),
+            "real archives are rotation's job, not the sweep's"
+        );
+        assert!(
+            !stale_dir.exists(),
+            "stale dump staging directory must be swept"
+        );
     }
 
     #[test]
@@ -680,8 +692,16 @@ mod tests {
             .map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string())
             .collect();
         assert!(names.iter().any(|n| n == crate::dump::ARCHIVE_DB_NAME));
-        assert!(names.iter().any(|n| n == crate::dump::ARCHIVE_MANIFEST_NAME));
-        assert!(names.iter().any(|n| n == &format!("attachments/{blob_name}")));
+        assert!(
+            names
+                .iter()
+                .any(|n| n == crate::dump::ARCHIVE_MANIFEST_NAME)
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n == &format!("attachments/{blob_name}"))
+        );
         assert!(
             !names.iter().any(|n| n.ends_with(".tmp")),
             "in-progress .tmp writes must not be archived: {names:?}"

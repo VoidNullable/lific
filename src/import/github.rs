@@ -791,7 +791,11 @@ mod tests {
         ));
 
         let error = collect_with(&fetcher).unwrap_err();
-        assert_eq!(error.limit(), None, "a network drop is not a resource limit");
+        assert_eq!(
+            error.limit(),
+            None,
+            "a network drop is not a resource limit"
+        );
         assert!(matches!(error, GithubImportError::Upstream(_)));
     }
 

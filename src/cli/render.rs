@@ -392,7 +392,12 @@ pub fn comment_list(
 
 pub fn comment_added(comment: &Comment, identifier: &str) -> String {
     let mut out = String::new();
-    w!(out, "Added comment to {} by {}:", identifier, comment.author);
+    w!(
+        out,
+        "Added comment to {} by {}:",
+        identifier,
+        comment.author
+    );
     w!(out, "  {}", comment.content);
     out
 }
@@ -498,7 +503,12 @@ pub fn folder_created(folder: &Folder) -> String {
 
 pub fn folder_updated(previous_name: &str, folder: &Folder) -> String {
     let mut out = String::new();
-    w!(out, "Renamed folder '{}' -> '{}'", previous_name, folder.name);
+    w!(
+        out,
+        "Renamed folder '{}' -> '{}'",
+        previous_name,
+        folder.name
+    );
     out
 }
 
@@ -594,7 +604,10 @@ mod tests {
             ),
             "got: {unknown}"
         );
-        assert!(!unknown.contains("More comments available"), "got: {unknown}");
+        assert!(
+            !unknown.contains("More comments available"),
+            "got: {unknown}"
+        );
     }
 
     #[test]

@@ -91,15 +91,31 @@ pub fn run(
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("Instance");
-        println!("  name:          {}", settings.instance_name.as_deref().unwrap_or("(unnamed)"));
+        println!(
+            "  name:          {}",
+            settings.instance_name.as_deref().unwrap_or("(unnamed)")
+        );
         println!("  version:       {version}");
         println!("  database:      {}", cfg.database.path.display());
         println!("  bind:          {}:{}", cfg.server.host, cfg.server.port);
-        println!("  public url:    {}", cfg.server.public_url.as_deref().unwrap_or("(not set)"));
-        println!("  signups:       {}", if settings.allow_signup { "open" } else { "closed" });
+        println!(
+            "  public url:    {}",
+            cfg.server.public_url.as_deref().unwrap_or("(not set)")
+        );
+        println!(
+            "  signups:       {}",
+            if settings.allow_signup {
+                "open"
+            } else {
+                "closed"
+            }
+        );
         println!("  signup domains:{domains}");
         println!("  session days:  {}", settings.session_lifetime_days);
-        println!("  login message: {}", settings.login_message.as_deref().unwrap_or("(none)"));
+        println!(
+            "  login message: {}",
+            settings.login_message.as_deref().unwrap_or("(none)")
+        );
         println!("  users:         {total} ({admins} admin)");
     }
     Ok(())

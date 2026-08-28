@@ -184,9 +184,7 @@ fn sync_parent_dir(_dir: &Path) -> Result<(), WriteError> {
     {
         std::fs::File::open(_dir)
             .and_then(|dir| dir.sync_all())
-            .map_err(|e| {
-                WriteError::new(format!("failed to sync {}: {e}", _dir.display()))
-            })?;
+            .map_err(|e| WriteError::new(format!("failed to sync {}: {e}", _dir.display())))?;
     }
     Ok(())
 }

@@ -669,7 +669,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(has_column, 0, "fixture must start on the pre-checksum shape");
+        assert_eq!(
+            has_column, 0,
+            "fixture must start on the pre-checksum shape"
+        );
 
         run(&conn).expect("a legacy database must upgrade cleanly");
 
@@ -988,7 +991,9 @@ mod tests {
             .unwrap();
         assert_eq!(counts, (3, 2), "no rows may be lost or deduplicated");
         assert!(index_names(&conn, "oauth_codes").contains(&"idx_oauth_codes_client".to_string()));
-        assert!(index_names(&conn, "oauth_tokens").contains(&"idx_oauth_tokens_client".to_string()));
+        assert!(
+            index_names(&conn, "oauth_tokens").contains(&"idx_oauth_tokens_client".to_string())
+        );
 
         // Non-unique: another code for a client that already has two.
         conn.execute(

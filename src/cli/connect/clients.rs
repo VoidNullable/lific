@@ -251,8 +251,12 @@ impl ClientSpec {
         // token into the client's env field as LIFIC_TOKEN so the spawned
         // server resolves the caller as the bound agent. Clients that can't
         // carry an env map get the token silently dropped (i.e. write nothing).
-        if let (Transport::Stdio { token: Some(tok), .. }, Some(env_key)) =
-            (&cfg.transport, self.stdio_env_key)
+        if let (
+            Transport::Stdio {
+                token: Some(tok), ..
+            },
+            Some(env_key),
+        ) = (&cfg.transport, self.stdio_env_key)
         {
             entry.value[env_key] = serde_json::json!({ "LIFIC_TOKEN": tok });
         }
@@ -455,9 +459,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                             "claude_desktop_config.json",
                         ],
                     ),
-                    Os::Windows => {
-                        config_dir(b, &["Claude", "claude_desktop_config.json"])
-                    }
+                    Os::Windows => config_dir(b, &["Claude", "claude_desktop_config.json"]),
                     Os::Linux => config_dir(b, &["Claude", "claude_desktop_config.json"]),
                 })
             },
@@ -1037,7 +1039,10 @@ mod tests {
         assert_eq!(e.top_key, "mcp");
         assert_eq!(e.value["type"], "remote");
         assert_eq!(e.value["url"], "http://127.0.0.1:3456/mcp");
-        assert_eq!(e.value["headers"]["Authorization"], "Bearer lific_sk-live-KEY");
+        assert_eq!(
+            e.value["headers"]["Authorization"],
+            "Bearer lific_sk-live-KEY"
+        );
         assert_eq!(e.value["enabled"], true);
     }
 
@@ -1055,9 +1060,7 @@ mod tests {
 
     #[test]
     fn opencode_stdio_token_writes_into_environment_field() {
-        let e = find_client("opencode")
-            .unwrap()
-            .compile(&stdio_token_cfg());
+        let e = find_client("opencode").unwrap().compile(&stdio_token_cfg());
         assert_eq!(e.value["type"], "local");
         // Command stays unchanged.
         assert_eq!(
@@ -1065,7 +1068,10 @@ mod tests {
             serde_json::json!(["lific", "--db", "/abs/lific.db", "mcp"])
         );
         // opencode names its env field `environment`.
-        assert_eq!(e.value["environment"]["LIFIC_TOKEN"], "lific_sk-live-AGENTTOKEN");
+        assert_eq!(
+            e.value["environment"]["LIFIC_TOKEN"],
+            "lific_sk-live-AGENTTOKEN"
+        );
     }
 
     #[test]
@@ -1147,7 +1153,9 @@ mod tests {
 
     #[test]
     fn claude_desktop_remote_uses_mcp_remote_shim() {
-        let e = find_client("claude-desktop").unwrap().compile(&remote_cfg());
+        let e = find_client("claude-desktop")
+            .unwrap()
+            .compile(&remote_cfg());
         assert_eq!(e.value["command"], "npx");
         let args = e.value["args"].as_array().unwrap();
         assert!(args.iter().any(|a| a == "mcp-remote"));
@@ -1201,9 +1209,7 @@ mod tests {
                 .unwrap()
                 .path_for(&base, Scope::Global)
                 .unwrap(),
-            PathBuf::from(
-                "C:\\Users\\tester\\AppData\\Roaming/Claude/claude_desktop_config.json"
-            )
+            PathBuf::from("C:\\Users\\tester\\AppData\\Roaming/Claude/claude_desktop_config.json")
         );
     }
 

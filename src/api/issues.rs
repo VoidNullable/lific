@@ -492,7 +492,11 @@ mod tests {
             );
         }
         // Numeric ids come along for O(1) node lookup client-side.
-        assert!(edges.iter().all(|e| e["source_id"].is_i64() && e["target_id"].is_i64()));
+        assert!(
+            edges
+                .iter()
+                .all(|e| e["source_id"].is_i64() && e["target_id"].is_i64())
+        );
 
         let resp = json_get(&app, &format!("/api/projects/{other_id}/relations")).await;
         let edges: serde_json::Value = parse_json(resp).await;
@@ -544,7 +548,8 @@ mod tests {
         assert_eq!(body["reversed"], true);
 
         let edges: serde_json::Value =
-            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await)
+                .await;
         let edges = edges.as_array().unwrap();
         assert_eq!(edges.len(), 1, "reversal must not duplicate the edge");
         assert_eq!(edges[0]["source_identifier"], "TST-2");
@@ -585,10 +590,9 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-        let edges: serde_json::Value = parse_json(
-            json_get(&lead_app, &format!("/api/projects/{project_id}/relations")).await,
-        )
-        .await;
+        let edges: serde_json::Value =
+            parse_json(json_get(&lead_app, &format!("/api/projects/{project_id}/relations")).await)
+                .await;
         let edges = edges.as_array().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["source_identifier"], "MEM-1");
@@ -620,7 +624,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let edges: serde_json::Value =
-            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await)
+                .await;
         assert_eq!(edges.as_array().unwrap().len(), 0);
 
         // An edge running the other way is not a match either: reversing
@@ -641,7 +646,8 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let edges: serde_json::Value =
-            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await).await;
+            parse_json(json_get(&app, &format!("/api/projects/{project_id}/relations")).await)
+                .await;
         let edges = edges.as_array().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["source_identifier"], "TST-2");
@@ -679,7 +685,9 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/issues?project_id={project_id}&status=shipped"))
+                    .uri(format!(
+                        "/api/issues?project_id={project_id}&status=shipped"
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

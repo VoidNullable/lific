@@ -48,14 +48,23 @@ The whole suite runs in seconds. Every new MCP tool and REST endpoint ships with
 
 ## What CI runs (run it before pushing)
 
-CI lints with warnings-as-errors, so `cargo test` passing is not enough. Reproduce CI locally with both commands:
+CI checks formatting and lints with warnings-as-errors, so `cargo test` passing is not enough. Reproduce the Rust checks locally with:
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
 If clippy complains, fix it. Don't `#[allow]` a lint without a comment explaining why.
+
+To run the same formatting check before each commit, install the repository's `pre-commit` hook once:
+
+```bash
+pre-commit install
+```
+
+Use `cargo fmt --all` to apply formatting fixes.
 
 ## Commit message style
 

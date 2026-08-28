@@ -348,16 +348,16 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/health", get(health))
         .layer(
             cors.allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
+                axum::http::Method::GET,
+                axum::http::Method::POST,
                 axum::http::Method::PATCH,
-                    axum::http::Method::PUT,
-                    axum::http::Method::DELETE,
-                ])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ]),
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ]),
         )
         .with_state(db)
         .layer(Extension(cors_origins.to_vec()))
@@ -448,7 +448,7 @@ fn websocket_origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> 
         Some(Ok(origin)) => {
             allowed_origins.iter().any(|allowed| allowed == origin)
                 || headers
-                .get(header::HOST)
+                    .get(header::HOST)
                     .and_then(|value| value.to_str().ok())
                     .is_some_and(|host| {
                         websocket_same_origin(origin, host, websocket_request_scheme(headers))
@@ -1133,7 +1133,7 @@ pub(crate) mod test_helpers {
             maintainer.id,
             Role::Maintainer,
         )
-            .unwrap();
+        .unwrap();
         crate::db::queries::members::upsert_member(&conn, project.id, viewer.id, Role::Viewer)
             .unwrap();
 
@@ -1642,8 +1642,8 @@ mod authz_gating_tests {
                 &format!("/api/issues/{issue_id}"),
                 serde_json::json!({"title": "hijack"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
         let non_member_app = app_as_user(db.clone(), &non_member);
@@ -1653,8 +1653,8 @@ mod authz_gating_tests {
                 &format!("/api/issues/{issue_id}"),
                 serde_json::json!({"title": "hijack"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
 
@@ -1665,8 +1665,8 @@ mod authz_gating_tests {
                 &format!("/api/issues/{issue_id}"),
                 serde_json::json!({"title": "renamed"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
 
@@ -1774,8 +1774,8 @@ mod authz_gating_tests {
                 "/api/modules",
                 serde_json::json!({"project_id": project_id, "name": "Nope"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
         let non_member_app = app_as_user(db.clone(), &non_member);
@@ -1785,8 +1785,8 @@ mod authz_gating_tests {
                 "/api/labels",
                 serde_json::json!({"project_id": project_id, "name": "nope"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
 
@@ -1797,8 +1797,8 @@ mod authz_gating_tests {
                 "/api/modules",
                 serde_json::json!({"project_id": project_id, "name": "Backend"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK,
             "maintainer should manage structure once enforcement loosens the gate"
         );
@@ -1808,8 +1808,8 @@ mod authz_gating_tests {
                 "/api/folders",
                 serde_json::json!({"project_id": project_id, "name": "Docs"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
     }
@@ -1828,8 +1828,8 @@ mod authz_gating_tests {
                 &format!("/api/projects/{project_id}"),
                 serde_json::json!({"name": "Nope"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
 
@@ -1840,8 +1840,8 @@ mod authz_gating_tests {
                 &format!("/api/projects/{project_id}"),
                 serde_json::json!({"name": "Renamed"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
     }
@@ -1930,7 +1930,7 @@ mod authz_gating_tests {
                 maintainer.id,
                 Role::Maintainer,
             )
-                .unwrap();
+            .unwrap();
         }
         assert_eq!(
             json_post(&maintainer_app, "/api/issues/link", link_body)
@@ -1955,8 +1955,8 @@ mod authz_gating_tests {
                 "/api/pages",
                 serde_json::json!({"title": "Workspace doc"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
 
@@ -2019,8 +2019,8 @@ mod authz_gating_tests {
                 "/api/issues",
                 serde_json::json!({ "project_id": project_id, "title": "by admin" })
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
         assert_eq!(
@@ -2029,8 +2029,8 @@ mod authz_gating_tests {
                 &format!("/api/issues/{issue_id}"),
                 serde_json::json!({"title": "renamed by admin"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
 
@@ -2253,8 +2253,8 @@ mod authz_gating_tests {
                 "/api/modules",
                 serde_json::json!({"project_id": project_id, "name": "Nope"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
         let lead_app = app_as_user(db.clone(), &lead);
@@ -2264,8 +2264,8 @@ mod authz_gating_tests {
                 "/api/modules",
                 serde_json::json!({"project_id": project_id, "name": "Yes"})
             )
-                .await
-                .status(),
+            .await
+            .status(),
             StatusCode::OK
         );
 
@@ -2306,7 +2306,7 @@ mod authz_gating_tests {
             "/api/instance/settings",
             serde_json::json!({"authz_enforced": true}),
         )
-            .await;
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(parse_json(resp).await["authz_enforced"], true);
 

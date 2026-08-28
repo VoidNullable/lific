@@ -1,15 +1,15 @@
+use axum::Extension;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::IntoResponse;
-use axum::Extension;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::authz;
-use crate::db::models::Role;
 use crate::db::DbPool;
+use crate::db::models::Role;
 use crate::error::LificError;
 
 use super::with_read;
@@ -369,7 +369,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        blocking_export, stream_response, ExportTestGate, PreparedExport, EXPORT_TEST_GATE,
+        EXPORT_TEST_GATE, ExportTestGate, PreparedExport, blocking_export, stream_response,
     };
     use crate::api::test_helpers::{
         json_post, parse_json, seed_project, setup_membership_test, test_app,
@@ -457,10 +457,12 @@ mod tests {
         let bundle = parse_json(resp).await;
         assert_eq!(bundle["root"], "TST");
         assert_eq!(bundle["files"][0]["path"], "TST/issues/tst-1-export-me.md");
-        assert!(bundle["files"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("# Export me"));
+        assert!(
+            bundle["files"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("# Export me")
+        );
     }
 
     #[tokio::test]
@@ -560,10 +562,11 @@ mod tests {
             resp.headers()[axum::http::header::CONTENT_TYPE],
             "application/zip"
         );
-        assert!(resp
-            .headers()
-            .get(axum::http::header::CONTENT_LENGTH)
-            .is_none());
+        assert!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .is_none()
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(!body.is_empty());
         assert_eq!(&body[..2], b"PK");

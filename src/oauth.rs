@@ -35,8 +35,7 @@ const MAX_DYNAMIC_CLIENT_STORAGE_BYTES: i64 = 4 * 1024 * 1024;
 const MAX_DEVICE_CODE_ROWS: i64 = 1024;
 
 /// Per-process CSRF secret, generated randomly on startup.
-static CSRF_SECRET: std::sync::LazyLock<[u8; 32]> =
-    std::sync::LazyLock::new(rand::random);
+static CSRF_SECRET: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
 
 /// Generate a CSRF token bound to the approving session: `timestamp.hmac(ts || binding)`.
 ///
@@ -218,9 +217,7 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
     }
     // Require some host after `://`.
     let rest = &after_scheme[3..];
-    let host_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if rest[..host_end].is_empty() {
         return Err("redirect_uri must include a host");
     }
@@ -247,10 +244,7 @@ pub fn router(state: OAuthState) -> Router {
             "/oauth/authorize",
             get(authorize_page).post(authorize_approve),
         )
-        .route(
-            "/oauth/device_authorization",
-            post(device_authorization),
-        )
+        .route("/oauth/device_authorization", post(device_authorization))
         .route("/oauth/device", get(device_page).post(device_approve))
         .route("/oauth/token", post(token_exchange))
         .route("/oauth/revoke", post(revoke_token))
@@ -359,7 +353,9 @@ async fn register_client(
             })),
         )
             .into_response();
-        if retry > 0 && let Ok(v) = retry.to_string().parse() {
+        if retry > 0
+            && let Ok(v) = retry.to_string().parse()
+        {
             resp.headers_mut().insert("retry-after", v);
         }
         return resp;
@@ -393,9 +389,7 @@ async fn register_client(
     }
 
     let client_name = req.client_name.unwrap_or_else(|| "MCP Client".into());
-    if client_name.len() > MAX_CLIENT_NAME_BYTES
-        || client_name.chars().any(|c| c.is_control())
-    {
+    if client_name.len() > MAX_CLIENT_NAME_BYTES || client_name.chars().any(|c| c.is_control()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1058,18 +1052,17 @@ fn resolve_approval_bot(
 ) -> Result<i64, (StatusCode, String)> {
     let tool_text = match (tool, tool_custom) {
         // A specific known tool chosen from the pick-list.
-        (Some(id), _)
-            if !id.trim().is_empty() && id.trim() != CUSTOM_TOOL_OPTION =>
-        {
-            id.clone()
-        }
+        (Some(id), _) if !id.trim().is_empty() && id.trim() != CUSTOM_TOOL_OPTION => id.clone(),
         // "Custom tool…" chosen — the free-text name is required.
-        (Some(id), Some(name))
-            if id.trim() == CUSTOM_TOOL_OPTION && !name.trim().is_empty() =>
-        {
+        (Some(id), Some(name)) if id.trim() == CUSTOM_TOOL_OPTION && !name.trim().is_empty() => {
             name.clone()
         }
-        _ => return Err((StatusCode::BAD_REQUEST, "Pick which tool is connecting".into())),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Pick which tool is connecting".into(),
+            ));
+        }
     };
     let (tool_id, display_name) = match resolve_tool(&tool_text) {
         Ok(v) => v,
@@ -1162,7 +1155,9 @@ async fn device_authorization(
             })),
         )
             .into_response();
-        if retry > 0 && let Ok(v) = retry.to_string().parse() {
+        if retry > 0
+            && let Ok(v) = retry.to_string().parse()
+        {
             resp.headers_mut().insert("retry-after", v);
         }
         return resp;
@@ -1186,11 +1181,9 @@ async fn device_authorization(
         })
     };
 
-    if req
-        .client_name
-        .as_deref()
-        .is_some_and(|name| name.len() > MAX_CLIENT_NAME_BYTES || name.chars().any(|c| c.is_control()))
-    {
+    if req.client_name.as_deref().is_some_and(|name| {
+        name.len() > MAX_CLIENT_NAME_BYTES || name.chars().any(|c| c.is_control())
+    }) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1217,17 +1210,16 @@ async fn device_authorization(
         warn!(%error, "failed to clean up expired OAuth device codes");
         return (StatusCode::SERVICE_UNAVAILABLE, "database cleanup error").into_response();
     }
-    let device_count: i64 = match conn.query_row(
-        "SELECT COUNT(*) FROM oauth_device_codes",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(count) => count,
-        Err(error) => {
-            warn!(%error, "failed to inspect OAuth device-code storage");
-            return (StatusCode::SERVICE_UNAVAILABLE, "database error").into_response();
-        }
-    };
+    let device_count: i64 =
+        match conn.query_row("SELECT COUNT(*) FROM oauth_device_codes", [], |row| {
+            row.get(0)
+        }) {
+            Ok(count) => count,
+            Err(error) => {
+                warn!(%error, "failed to inspect OAuth device-code storage");
+                return (StatusCode::SERVICE_UNAVAILABLE, "database error").into_response();
+            }
+        };
     if device_count >= MAX_DEVICE_CODE_ROWS {
         warn!("OAuth device-code storage limit reached");
         return (
@@ -1755,7 +1747,11 @@ async fn token_exchange(
 /// `expired_token`) or, on approval, mints and returns an access token.
 fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     let Some(device_code) = req.device_code.as_deref().filter(|c| !c.is_empty()) else {
-        return device_error(StatusCode::BAD_REQUEST, "invalid_request", Some("missing device_code"));
+        return device_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some("missing device_code"),
+        );
     };
     let device_code_hash = sha256_hex(device_code.as_bytes());
 
@@ -2034,12 +2030,10 @@ async fn revoke_token(
         .map(|s| s.trim().to_string());
 
     let is_authenticated = match &caller_token {
-        Some(t) if t.starts_with("lific_sess_") => {
-            match state.db.read() {
-                Ok(conn) => crate::db::queries::users::validate_session(&conn, t).is_ok(),
-                Err(_) => false,
-            }
-        }
+        Some(t) if t.starts_with("lific_sess_") => match state.db.read() {
+            Ok(conn) => crate::db::queries::users::validate_session(&conn, t).is_ok(),
+            Err(_) => false,
+        },
         Some(t) if t.starts_with("lific_at_") => authenticate_oauth_token(&state.db, t).is_some(),
         // LIF-208: default-deny unknown bearer shapes. The previous
         // `Some(_) => true` treated *any* other string (including arbitrary
@@ -2234,14 +2228,22 @@ pub fn resolve_oauth_credential(db: &DbPool, token: &str) -> Result<OAuthCredent
     let Some(bound_user_id) = row.bound_user_id else {
         return Ok(OAuthCredential::LegacyUnbound);
     };
-    let (Some(user_id), Some(username), Some(display_name), Some(is_admin), Some(is_active), Some(is_bot)) = (
+    let (
+        Some(user_id),
+        Some(username),
+        Some(display_name),
+        Some(is_admin),
+        Some(is_active),
+        Some(is_bot),
+    ) = (
         row.user_id,
         row.username,
         row.display_name,
         row.is_admin,
         row.is_active,
         row.is_bot,
-    ) else {
+    )
+    else {
         return Err(OAuthReject::DeadBinding);
     };
     debug_assert_eq!(user_id, bound_user_id);
@@ -2619,7 +2621,10 @@ mod tests {
     #[test]
     fn csrf_rejects_tampered_and_malformed_signatures() {
         let t = generate_csrf_token("sess");
-        assert!(validate_csrf_token(&t, "sess"), "honest token must validate");
+        assert!(
+            validate_csrf_token(&t, "sess"),
+            "honest token must validate"
+        );
 
         let (ts, sig) = t.split_once('.').unwrap();
 
@@ -2811,11 +2816,7 @@ mod tests {
     // public_url is never overridden, and forwarded headers are ignored.
 
     /// GET a metadata path and parse the JSON body.
-    async fn get_metadata(
-        app: &Router,
-        path: &str,
-        headers: &[(&str, &str)],
-    ) -> serde_json::Value {
+    async fn get_metadata(app: &Router, path: &str, headers: &[(&str, &str)]) -> serde_json::Value {
         let mut builder = Request::builder().uri(path);
         for (name, value) in headers {
             builder = builder.header(*name, *value);
@@ -2841,10 +2842,7 @@ mod tests {
         )
         .await;
         assert_eq!(val["issuer"], "http://localhost:3456");
-        assert_eq!(
-            val["token_endpoint"],
-            "http://localhost:3456/oauth/token"
-        );
+        assert_eq!(val["token_endpoint"], "http://localhost:3456/oauth/token");
 
         let val = get_metadata(
             &app,
@@ -3555,11 +3553,13 @@ mod tests {
             )
         };
 
-        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
-            .await
-            .unwrap()
-            .status()
-            .is_redirection());
+        assert!(
+            approve(app.clone(), &generate_csrf_token(&session_token))
+                .await
+                .unwrap()
+                .status()
+                .is_redirection()
+        );
         let first_id: i64 = {
             let conn = db.read().unwrap();
             conn.query_row(
@@ -3570,11 +3570,13 @@ mod tests {
             .unwrap()
         };
         // Re-approval of the same tool+owner must reuse the same bot.
-        assert!(approve(app.clone(), &generate_csrf_token(&session_token))
-            .await
-            .unwrap()
-            .status()
-            .is_redirection());
+        assert!(
+            approve(app.clone(), &generate_csrf_token(&session_token))
+                .await
+                .unwrap()
+                .status()
+                .is_redirection()
+        );
         let second_id: i64 = {
             let conn = db.read().unwrap();
             conn.query_row(
@@ -3646,7 +3648,10 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!(
+                        "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code",
+                        urlencoding::encode("http://localhost/callback")
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3686,7 +3691,10 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code", urlencoding::encode("http://localhost/callback")))
+                    .uri(format!(
+                        "/oauth/authorize?client_id={client_id}&redirect_uri={}&response_type=code",
+                        urlencoding::encode("http://localhost/callback")
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3867,10 +3875,7 @@ mod tests {
     }
 
     /// POST the device grant to /oauth/token and return (status, json).
-    async fn poll_device_token(
-        app: &Router,
-        device_code: &str,
-    ) -> (StatusCode, serde_json::Value) {
+    async fn poll_device_token(app: &Router, device_code: &str) -> (StatusCode, serde_json::Value) {
         let body = format!(
             "grant_type={}&device_code={}",
             urlencoding::encode("urn:ietf:params:oauth:grant-type:device_code"),
@@ -4361,7 +4366,10 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8_lossy(&bytes);
         // Normalized + uppercased + dash-inserted into the input value.
-        assert!(html.contains("value=\"BCDF-GHJK\""), "prefill missing: {html}");
+        assert!(
+            html.contains("value=\"BCDF-GHJK\""),
+            "prefill missing: {html}"
+        );
     }
 
     #[test]
@@ -5203,7 +5211,6 @@ mod tests {
                 .unwrap();
             assert_eq!(bots, 0);
         }
-
 
         /// Refusing a device is not a grant, so it must not be made harder
         /// than approving one. Someone who sees a code they do not recognise

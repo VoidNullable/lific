@@ -329,9 +329,7 @@ fn interactive_picker(detected: &[DetectedClient], target: &str) -> Result<Vec<S
     let mut prompt = cliclack::multiselect(if any_installed {
         format!("Which clients should connect to {target}?")
     } else {
-        format!(
-            "No installed clients detected in this scope — pick any to configure for {target}:"
-        )
+        format!("No installed clients detected in this scope — pick any to configure for {target}:")
     })
     .required(true);
     for c in &ordered {
@@ -742,7 +740,10 @@ fn write_all_clients(
                 id: id.clone(),
                 display: spec.display.to_string(),
                 format: spec.format.as_str().to_string(),
-                error: Some(format!("{} does not support --oauth; skipped", spec.display)),
+                error: Some(format!(
+                    "{} does not support --oauth; skipped",
+                    spec.display
+                )),
                 notes: vec![reason.to_string()],
                 ..Default::default()
             });
@@ -880,8 +881,7 @@ fn maybe_write_agents_md(
         return Ok(None);
     }
 
-    let looks_like_project =
-        args.scope == Scope::Project || base.project.join(".git").exists();
+    let looks_like_project = args.scope == Scope::Project || base.project.join(".git").exists();
     if !looks_like_project {
         return Ok(None);
     }
@@ -1171,14 +1171,8 @@ mod tests {
         let guard = tmp();
         let dir = guard.path();
         let b = base(dir);
-        let err = resolve_clients_inner(
-            &["nope".into()],
-            true,
-            &b,
-            Scope::Global,
-            no_picker,
-        )
-        .unwrap_err();
+        let err = resolve_clients_inner(&["nope".into()], true, &b, Scope::Global, no_picker)
+            .unwrap_err();
         assert!(err.contains("unknown client"));
     }
 
@@ -1197,10 +1191,9 @@ mod tests {
         let guard = tmp();
         let dir = guard.path();
         let b = base(dir);
-        let got = resolve_clients_inner(&[], true, &b, Scope::Global, |_| {
-            Ok(vec!["cursor".into()])
-        })
-        .unwrap();
+        let got =
+            resolve_clients_inner(&[], true, &b, Scope::Global, |_| Ok(vec!["cursor".into()]))
+                .unwrap();
         assert_eq!(got, vec!["cursor".to_string()]);
     }
 
@@ -1241,14 +1234,12 @@ mod tests {
 
     #[test]
     fn transport_tty_no_flag_calls_picker() {
-        let got =
-            resolve_transport_inner(false, false, true, || Ok(TransportMode::Stdio)).unwrap();
+        let got = resolve_transport_inner(false, false, true, || Ok(TransportMode::Stdio)).unwrap();
         assert_eq!(got, TransportMode::Stdio);
         let got =
             resolve_transport_inner(false, false, true, || Ok(TransportMode::Remote)).unwrap();
         assert_eq!(got, TransportMode::Remote);
-        let got =
-            resolve_transport_inner(false, false, true, || Ok(TransportMode::Oauth)).unwrap();
+        let got = resolve_transport_inner(false, false, true, || Ok(TransportMode::Oauth)).unwrap();
         assert_eq!(got, TransportMode::Oauth);
     }
 
@@ -1383,8 +1374,7 @@ mod tests {
             "stdio needs no key"
         );
 
-        let written =
-            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let written = std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["mcp"]["lific"]["type"], "local");
         let cmd = v["mcp"]["lific"]["command"].as_array().unwrap();
@@ -1417,8 +1407,7 @@ mod tests {
         // config MUST carry the minted agent token in the env field.
         assert!(result.outcomes.iter().all(|o| o.key.is_none()));
 
-        let written =
-            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let written = std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["mcp"]["lific"]["type"], "local");
         let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
@@ -1461,8 +1450,7 @@ mod tests {
         let result = run(&a, &cfg, &pool, &b).unwrap();
         assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
 
-        let written =
-            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let written = std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         // Unrelated entries survive.
         assert_eq!(v["mcp"]["other"]["url"], "http://other");
@@ -1506,14 +1494,20 @@ mod tests {
         let result = run(&a, &cfg, &pool, &b).unwrap();
         assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
 
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.project.join("opencode.json")).unwrap(),
+        )
+        .unwrap();
         // Lific entry healed: command kept, token env added.
         assert_eq!(v["mcp"]["lific"]["type"], "local");
         assert_eq!(
             v["mcp"]["lific"]["command"],
-            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+            serde_json::json!([
+                "lific",
+                "--db",
+                dir.join("mydb.db").display().to_string(),
+                "mcp"
+            ])
         );
         let token = v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
             .as_str()
@@ -1555,7 +1549,11 @@ mod tests {
         let _ = run(&a, &cfg, &pool, &b).unwrap();
         let conn = pool.read().unwrap();
         let bots: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE username = 'opencode-solo'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let keys: i64 = conn
             .query_row(
@@ -1569,9 +1567,10 @@ mod tests {
 
         // The config remains well-formed and carries a live token after run #2
         // (a re-connect may rotate the key — that is a valid fresh plaintext).
-        let second_v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(b.project.join("opencode.json")).unwrap())
-                .unwrap();
+        let second_v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(b.project.join("opencode.json")).unwrap(),
+        )
+        .unwrap();
         let second_token = second_v["mcp"]["lific"]["environment"]["LIFIC_TOKEN"]
             .as_str()
             .expect("token must be present after rerun");
@@ -1601,8 +1600,7 @@ mod tests {
             outcome.error
         );
 
-        let written =
-            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        let written = std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
         // The stdio command and the env table with LIFIC_TOKEN both land.
         assert!(
             written.contains("command = \"lific\""),
@@ -1647,8 +1645,7 @@ mod tests {
         let result = run(&a, &cfg, &pool, &b).unwrap();
         assert_eq!(result.outcomes[0].action.as_deref(), Some("updated"));
 
-        let written =
-            std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
+        let written = std::fs::read_to_string(b.project.join(".codex/config.toml")).unwrap();
         // Unrelated config survives.
         assert!(
             written.contains("model = \"gpt-5\""),
@@ -1769,10 +1766,8 @@ mod tests {
             assert_eq!(uid, None, "{name} key must be unassigned");
         }
         // Each config file contains its own key.
-        let oc_body = std::fs::read_to_string(
-            b.home.join(".config/opencode/opencode.json"),
-        )
-        .unwrap();
+        let oc_body =
+            std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap();
         assert!(oc_body.contains(&ock));
         let cur_body = std::fs::read_to_string(b.home.join(".cursor/mcp.json")).unwrap();
         assert!(cur_body.contains(&curk));
@@ -2028,13 +2023,17 @@ mod tests {
 
         // Plain stdio config: command present, but NO token (no env field,
         // because no owner resolved → no LIFIC_TOKEN to bind).
-        let written =
-            std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
+        let written = std::fs::read_to_string(b.project.join("opencode.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["mcp"]["lific"]["type"], "local");
         assert_eq!(
             v["mcp"]["lific"]["command"],
-            serde_json::json!(["lific", "--db", dir.join("mydb.db").display().to_string(), "mcp"])
+            serde_json::json!([
+                "lific",
+                "--db",
+                dir.join("mydb.db").display().to_string(),
+                "mcp"
+            ])
         );
         assert!(
             v["mcp"]["lific"].get("environment").is_none(),
@@ -2065,8 +2064,7 @@ mod tests {
         assert_eq!(oc.auth_hint.as_deref(), Some("opencode mcp auth lific"));
 
         // The written config has a url and NO headers key at all.
-        let body =
-            std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap();
+        let body = std::fs::read_to_string(b.home.join(".config/opencode/opencode.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["mcp"]["lific"]["url"], "http://127.0.0.1:3456/mcp");
         assert!(
@@ -2080,7 +2078,9 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM api_keys", [], |r| r.get(0))
             .unwrap();
         let bots: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM users WHERE is_bot = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(keys, 0, "oauth mints no keys");
         assert_eq!(bots, 0, "oauth creates no bots");
@@ -2105,7 +2105,9 @@ mod tests {
             Some("http://127.0.0.1:3456/mcp")
         );
         assert!(
-            doc["mcp_servers"]["lific"].get("bearer_token_env_var").is_none(),
+            doc["mcp_servers"]["lific"]
+                .get("bearer_token_env_var")
+                .is_none(),
             "oauth codex must not set bearer_token_env_var: {body}"
         );
     }
@@ -2126,7 +2128,10 @@ mod tests {
             let oc = result.outcomes.iter().find(|o| o.id == id).unwrap();
             assert!(oc.action.is_none(), "{id} must be skipped, not written");
             assert!(
-                oc.error.as_ref().unwrap().contains("does not support --oauth"),
+                oc.error
+                    .as_ref()
+                    .unwrap()
+                    .contains("does not support --oauth"),
                 "{id} skip must explain why"
             );
             assert!(!oc.notes.is_empty(), "{id} must carry an explanatory note");

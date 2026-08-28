@@ -100,7 +100,11 @@ impl HttpBackend {
                 parsed.host_str().unwrap_or_default()
             );
         }
-        if parsed.scheme() == "http" && parsed.host_str().is_some_and(|host| !is_loopback_host(host)) {
+        if parsed.scheme() == "http"
+            && parsed
+                .host_str()
+                .is_some_and(|host| !is_loopback_host(host))
+        {
             eprintln!(
                 "warning: connecting over unencrypted http to {}",
                 parsed.host_str().unwrap_or_default()
@@ -1473,24 +1477,24 @@ mod tests {
             display_name: "Test Admin".into(),
             is_admin: true,
         })))
-            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "test-admin".into(),
-                    display_name: "Test Admin".into(),
-                    is_admin: true,
-                },
-                transport: crate::actor::Transport::Web,
-            })))
-            .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
-                user: AuthUser {
-                    id: admin_id,
-                    username: "test-admin".into(),
-                    display_name: "Test Admin".into(),
-                    is_admin: true,
-                },
-                transport: crate::actor::Transport::Web,
-            })));
+        .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
+                id: admin_id,
+                username: "test-admin".into(),
+                display_name: "Test Admin".into(),
+                is_admin: true,
+            },
+            transport: crate::actor::Transport::Web,
+        })))
+        .layer(Extension(Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
+                id: admin_id,
+                username: "test-admin".into(),
+                display_name: "Test Admin".into(),
+                is_admin: true,
+            },
+            transport: crate::actor::Transport::Web,
+        })));
         let (project_id, _) = seed_project(&app).await;
         let project_page = parse_json(
             json_post(
@@ -3192,7 +3196,10 @@ mod tests {
             .await
             .unwrap();
 
-        let value = backend.execute(&command, IssueLinkOutput::Url).await.unwrap();
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
         let remote = backend.human(&command, &value).await;
 
         let pool = crate::db::open_memory().expect("test db");

@@ -7,10 +7,10 @@
 
 use crate::config::Config;
 use crate::db::{self, DbPool};
-use crate::import::{self, ImportSummary};
 use crate::import::github::{self, StateFilter};
 use crate::import::jira::{self, JiraStatusMap};
 use crate::import::linear::{self, LinearStatusMap};
+use crate::import::{self, ImportSummary};
 
 /// Dispatch an `ImportAction` to the right source runner.
 pub fn run(
@@ -35,8 +35,15 @@ pub fn run(
             user,
             dry_run,
         } => run_github(
-            &pool, repo, project, state, token.as_deref(), map_open, map_closed,
-            user.as_deref(), *dry_run,
+            &pool,
+            repo,
+            project,
+            state,
+            token.as_deref(),
+            map_open,
+            map_closed,
+            user.as_deref(),
+            *dry_run,
         )?,
         ImportAction::Linear {
             team,
@@ -44,7 +51,14 @@ pub fn run(
             token,
             user,
             dry_run,
-        } => run_linear(&pool, team, project, token.as_deref(), user.as_deref(), *dry_run)?,
+        } => run_linear(
+            &pool,
+            team,
+            project,
+            token.as_deref(),
+            user.as_deref(),
+            *dry_run,
+        )?,
         ImportAction::Jira {
             site,
             jira_project,
@@ -54,8 +68,14 @@ pub fn run(
             user,
             dry_run,
         } => run_jira(
-            &pool, site, jira_project, project, email.as_deref(), token.as_deref(),
-            user.as_deref(), *dry_run,
+            &pool,
+            site,
+            jira_project,
+            project,
+            email.as_deref(),
+            token.as_deref(),
+            user.as_deref(),
+            *dry_run,
         )?,
     };
 
@@ -80,7 +100,12 @@ fn resolve_bot(
     user: Option<&str>,
 ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
     match import::resolve_owner(pool, user)? {
-        Some(owner) => Ok(Some(import::ensure_import_bot(pool, owner, source_slug, display)?)),
+        Some(owner) => Ok(Some(import::ensure_import_bot(
+            pool,
+            owner,
+            source_slug,
+            display,
+        )?)),
         None => Ok(None),
     }
 }
@@ -208,11 +233,7 @@ pub fn print_summary(summary: &ImportSummary, json: bool) {
         }
     }
     // What didn't come across.
-    if summary.skipped_non_issues
-        + summary.skipped_assignees
-        + summary.skipped_other
-        > 0
-    {
+    if summary.skipped_non_issues + summary.skipped_assignees + summary.skipped_other > 0 {
         println!();
         println!("  Not imported (by design):");
         if summary.skipped_non_issues > 0 {

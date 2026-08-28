@@ -91,7 +91,10 @@ fn bucket_weekly(
         .map(|d| {
             let key = d.format("%Y-%m-%d").to_string();
             let count = counts.get(&key).copied().unwrap_or(0);
-            WeekPoint { week_start: key, count }
+            WeekPoint {
+                week_start: key,
+                count,
+            }
         })
         .collect())
 }
@@ -225,7 +228,8 @@ fn top_actors(
             top_transport: row.get(6)?,
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(LificError::Database)
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(LificError::Database)
 }
 
 /// Compute the full Insights payload for a project. `weeks` should already
@@ -331,7 +335,11 @@ mod tests {
         let conn = pool.read().unwrap();
         let payload = get_insights(&conn, pid, 4).unwrap();
         assert_eq!(payload.weeks, 4);
-        assert_eq!(payload.created_per_week.len(), 4, "dense — one point per week");
+        assert_eq!(
+            payload.created_per_week.len(),
+            4,
+            "dense — one point per week"
+        );
         // Every bucket is Monday-aligned.
         for pt in &payload.created_per_week {
             let d = NaiveDate::parse_from_str(&pt.week_start, "%Y-%m-%d").unwrap();
@@ -355,7 +363,10 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
         )
         .unwrap();
         drop(conn);
@@ -374,14 +385,20 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
         )
         .unwrap();
         // Reopen: latest status transition is no longer terminal.
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Todo), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Todo),
+                ..Default::default()
+            },
         )
         .unwrap();
         drop(conn);
@@ -389,7 +406,10 @@ mod tests {
         let conn = pool.read().unwrap();
         let payload = get_insights(&conn, pid, 4).unwrap();
         let total: i64 = payload.closed_per_week.iter().map(|p| p.count).sum();
-        assert_eq!(total, 0, "currently-open issue must not appear in closed_per_week");
+        assert_eq!(
+            total, 0,
+            "currently-open issue must not appear in closed_per_week"
+        );
     }
 
     #[test]
@@ -400,19 +420,28 @@ mod tests {
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Todo), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Todo),
+                ..Default::default()
+            },
         )
         .unwrap();
         queries::update_issue(
             &conn,
             issue.id,
-            &UpdateIssue { status: Some(Status::Cancelled), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Cancelled),
+                ..Default::default()
+            },
         )
         .unwrap();
         drop(conn);
@@ -438,7 +467,10 @@ mod tests {
         queries::update_issue(
             &conn,
             c.id,
-            &UpdateIssue { status: Some(Status::Done), ..Default::default() },
+            &UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
         )
         .unwrap();
         drop(conn);
@@ -473,7 +505,10 @@ mod tests {
         queries::update_issue(
             &conn,
             a.id,
-            &UpdateIssue { module_id: Some(Some(module.id)), ..Default::default() },
+            &UpdateIssue {
+                module_id: Some(Some(module.id)),
+                ..Default::default()
+            },
         )
         .unwrap();
         quick_issue(&conn, pid, "B", Priority::None);
@@ -489,7 +524,11 @@ mod tests {
             .unwrap();
         assert_eq!(backend.name, "Backend");
         assert_eq!(backend.count, 1);
-        let unassigned = payload.module_counts.iter().find(|m| m.module_id.is_none()).unwrap();
+        let unassigned = payload
+            .module_counts
+            .iter()
+            .find(|m| m.module_id.is_none())
+            .unwrap();
         assert_eq!(unassigned.name, "No module");
         assert_eq!(unassigned.count, 1);
     }
@@ -511,7 +550,10 @@ mod tests {
         };
         crate::actor::stamp(
             &conn,
-            &crate::actor::ActorCtx { user_id: Some(alice), transport: crate::actor::Transport::Web },
+            &crate::actor::ActorCtx {
+                user_id: Some(alice),
+                transport: crate::actor::Transport::Web,
+            },
         );
         quick_issue(&conn, pid, "A1", Priority::None);
         quick_issue(&conn, pid, "A2", Priority::None);

@@ -163,7 +163,11 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
         .nodes
         .iter()
         .map(|c| NormalizedComment {
-            author: c.user.as_ref().map(|u| u.handle()).unwrap_or_else(|| "unknown".into()),
+            author: c
+                .user
+                .as_ref()
+                .map(|u| u.handle())
+                .unwrap_or_else(|| "unknown".into()),
             created_at: c.created_at.clone(),
             body: c.body.clone().unwrap_or_default(),
         })
@@ -183,7 +187,8 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
 /// Abstraction over Linear's GraphQL endpoint for testability. Returns one page
 /// of issues plus the next cursor (`None` when exhausted).
 pub trait LinearFetcher {
-    fn fetch_page(&self, after: Option<&str>) -> Result<(Vec<LinearIssue>, Option<String>), String>;
+    fn fetch_page(&self, after: Option<&str>)
+    -> Result<(Vec<LinearIssue>, Option<String>), String>;
 }
 
 /// Walk all cursor pages and normalize. Assignee/estimate are counted as
@@ -299,7 +304,10 @@ impl LiveLinear {
 }
 
 impl LinearFetcher for LiveLinear {
-    fn fetch_page(&self, after: Option<&str>) -> Result<(Vec<LinearIssue>, Option<String>), String> {
+    fn fetch_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<(Vec<LinearIssue>, Option<String>), String> {
         let body = serde_json::json!({
             "query": ISSUES_QUERY,
             "variables": { "team": self.team, "after": after },
@@ -429,10 +437,7 @@ mod tests {
         let issues = fixture();
         let (a, b) = issues.split_at(1);
         let fetcher = FakeLinear {
-            pages: vec![
-                (a.to_vec(), Some("1".into())),
-                (b.to_vec(), None),
-            ],
+            pages: vec![(a.to_vec(), Some("1".into())), (b.to_vec(), None)],
         };
         let fetched = collect(&fetcher, &LinearStatusMap::default()).unwrap();
         assert_eq!(fetched.issues.len(), issues.len());
