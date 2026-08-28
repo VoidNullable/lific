@@ -184,11 +184,12 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
     }
 }
 
-/// Abstraction over Linear's GraphQL endpoint for testability. Returns one page
-/// of issues plus the next cursor (`None` when exhausted).
+/// One page of Linear issues plus the next cursor (`None` when exhausted).
+pub type LinearPage = (Vec<LinearIssue>, Option<String>);
+
+/// Abstraction over Linear's GraphQL endpoint for testability.
 pub trait LinearFetcher {
-    fn fetch_page(&self, after: Option<&str>)
-    -> Result<(Vec<LinearIssue>, Option<String>), String>;
+    fn fetch_page(&self, after: Option<&str>) -> Result<LinearPage, String>;
 }
 
 /// Walk all cursor pages and normalize. Assignee/estimate are counted as
@@ -304,10 +305,7 @@ impl LiveLinear {
 }
 
 impl LinearFetcher for LiveLinear {
-    fn fetch_page(
-        &self,
-        after: Option<&str>,
-    ) -> Result<(Vec<LinearIssue>, Option<String>), String> {
+    fn fetch_page(&self, after: Option<&str>) -> Result<LinearPage, String> {
         let body = serde_json::json!({
             "query": ISSUES_QUERY,
             "variables": { "team": self.team, "after": after },
@@ -416,13 +414,10 @@ mod tests {
     }
 
     struct FakeLinear {
-        pages: Vec<(Vec<LinearIssue>, Option<String>)>,
+        pages: Vec<LinearPage>,
     }
     impl LinearFetcher for FakeLinear {
-        fn fetch_page(
-            &self,
-            after: Option<&str>,
-        ) -> Result<(Vec<LinearIssue>, Option<String>), String> {
+        fn fetch_page(&self, after: Option<&str>) -> Result<LinearPage, String> {
             // Page 0 has after=None; subsequent pages keyed by cursor value.
             let idx = match after {
                 None => 0,
