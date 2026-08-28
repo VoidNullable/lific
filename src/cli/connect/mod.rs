@@ -34,7 +34,7 @@
 //! **Per-tool identities (LIF-259).** `connect` mints ONE bot + key PER SELECTED
 //! CLIENT, named after the tool the way the web UI's Connected Tools page does
 //! (`{tool}-{owner.username}`, e.g. `opencode-blake`). This means the audit log
-//! attributes each change to the specific harness ("OpenCode changed status"),
+//! attributes each change to the specific harness ("`OpenCode` changed status"),
 //! and CLI-connected tools show up on that page indistinguishable from
 //! web-connected ones. On a fresh install (zero human users) it mints one plain
 //! unassigned key per tool named just `{tool}` — still per-tool attribution in
@@ -471,7 +471,7 @@ fn resolve_key_source(args: &ConnectArgs, pool: &DbPool) -> Result<KeySource, St
 ///   the tool's display name, mint-or-rotate a key named after the bot, and
 ///   assign the key to the bot. The bot's `owner_id` points at the human, so
 ///   authz resolves bot → owner (src/authz.rs).
-/// - **FreshInstall:** mint-or-rotate a plain unassigned key named just `{tool}`.
+/// - **`FreshInstall`:** mint-or-rotate a plain unassigned key named just `{tool}`.
 /// - **Provided:** the verbatim `--key` (no DB writes).
 ///
 /// Returns the plaintext key for that tool.
@@ -669,7 +669,7 @@ pub fn run(
     } else {
         None
     };
-    let key_origin = key_source.as_ref().map(|s| s.origin());
+    let key_origin = key_source.as_ref().map(KeySource::origin);
 
     let manager = if needs_minting {
         Some(
@@ -1291,7 +1291,10 @@ mod tests {
 
     fn args(clients: &[&str], scope: Scope) -> ConnectArgs {
         ConnectArgs {
-            clients: clients.iter().map(|s| s.to_string()).collect(),
+            clients: clients
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             scope,
             stdio: false,
             oauth: false,

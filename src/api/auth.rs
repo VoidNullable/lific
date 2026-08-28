@@ -6,7 +6,10 @@ use axum::{
 };
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{Bot, CreateUser, LoginRequest, User, UserApiKey},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -21,12 +24,10 @@ use super::{require_admin, require_user, with_read, with_write};
 fn session_cookie(token: &str, expires_at: &str, secure: bool) -> String {
     use chrono::DateTime;
     // Parse expiry for Max-Age calculation; fall back to 30 days
-    let max_age = DateTime::parse_from_rfc3339(expires_at)
-        .map(|exp| {
-            let exp_utc: DateTime<chrono::Utc> = exp.into();
-            (exp_utc - chrono::Utc::now()).num_seconds().max(0)
-        })
-        .unwrap_or(30 * 24 * 3600);
+    let max_age = DateTime::parse_from_rfc3339(expires_at).map_or(30 * 24 * 3600, |exp| {
+        let exp_utc: DateTime<chrono::Utc> = exp.into();
+        (exp_utc - chrono::Utc::now()).num_seconds().max(0)
+    });
 
     let secure_attr = if secure { "; Secure" } else { "" };
     format!("lific_token={token}; Path=/; Max-Age={max_age}; HttpOnly{secure_attr}; SameSite=Lax")
@@ -41,7 +42,7 @@ fn clear_cookie(secure: bool) -> String {
 
 // ── Auth endpoints ───────────────────────────────────────────
 
-/// Public signup request — intentionally excludes is_admin and is_bot
+/// Public signup request — intentionally excludes `is_admin` and `is_bot`
 /// to prevent privilege escalation. Those can only be set via CLI, with one
 /// carve-out: the first user on a zero-user instance is granted admin by the
 /// handler itself (LIF-364), because a client-supplied flag and a
@@ -297,9 +298,8 @@ pub(super) async fn auth_login(
     let verified_hash = user.password_hash.clone();
     let (user, session) = db.transaction(|tx| {
         let user = crate::db::queries::users::finalize_login(tx, user.id, &verified_hash)?;
-        let lifetime_days = crate::db::queries::settings::get(tx)
-            .map(|s| s.session_lifetime_days)
-            .unwrap_or(30);
+        let lifetime_days =
+            crate::db::queries::settings::get(tx).map_or(30, |s| s.session_lifetime_days);
         let session =
             crate::db::queries::users::create_session(tx, user.id, Some(lifetime_days * 24))?;
         Ok((user, session))
@@ -735,28 +735,25 @@ pub(super) async fn refresh_session(
         _ => None,
     };
 
-    let verified_hash = match supplied_password {
-        Some(password) => {
-            crate::db::queries::users::reject_oversized_password(&password)?;
-            let hash = current_hash.clone();
-            let ok = tokio::task::spawn_blocking(move || {
-                crate::db::queries::users::verify_password(&password, &hash).unwrap_or(false)
-            })
-            .await
-            .map_err(|e| LificError::Internal(format!("password verification task failed: {e}")))?;
-            if !ok {
-                return Err(LificError::BadRequest("incorrect password".into()));
-            }
-            Some(current_hash)
+    let verified_hash = if let Some(password) = supplied_password {
+        crate::db::queries::users::reject_oversized_password(&password)?;
+        let hash = current_hash.clone();
+        let ok = tokio::task::spawn_blocking(move || {
+            crate::db::queries::users::verify_password(&password, &hash).unwrap_or(false)
+        })
+        .await
+        .map_err(|e| LificError::Internal(format!("password verification task failed: {e}")))?;
+        if !ok {
+            return Err(LificError::BadRequest("incorrect password".into()));
         }
-        None => {
-            if !passwordless {
-                return Err(LificError::BadRequest(
-                    "your password is required to confirm this".into(),
-                ));
-            }
-            None
+        Some(current_hash)
+    } else {
+        if !passwordless {
+            return Err(LificError::BadRequest(
+                "your password is required to confirm this".into(),
+            ));
         }
+        None
     };
 
     let (user, session) = db.transaction(|tx| {
@@ -854,7 +851,7 @@ pub(super) async fn refresh_session(
 /// body for clients that hold it outside the cookie.
 ///
 /// Verification, lockdown and replacement all happen under one hold of the
-/// writer, inside one savepoint. SQLite serializes writers, so a credential
+/// writer, inside one savepoint. `SQLite` serializes writers, so a credential
 /// creation racing this either lands entirely before it (and is revoked) or
 /// entirely after it (and revalidates against the post-lockdown state).
 // Axum handlers take their dependencies as extractors; the count is the
@@ -1040,7 +1037,7 @@ pub(super) struct CreateKeyRequest {
 /// the authentication middleware.
 ///
 /// The key material is drawn before the writer is taken, then the session is
-/// revalidated and the key inserted in one transaction. Because SQLite
+/// revalidated and the key inserted in one transaction. Because `SQLite`
 /// serializes writers, an account lockdown either wins the race outright (this
 /// transaction then finds no session and writes nothing) or loses it (and
 /// revokes the key it finds). Neither order can leave a live key behind a
@@ -2073,7 +2070,7 @@ mod tests {
         }
 
         /// The linearizability claim, exercised at the transaction seam rather
-        /// than by racing threads: whichever order SQLite's writer lock picks,
+        /// than by racing threads: whichever order `SQLite`'s writer lock picks,
         /// no live key survives a lockdown.
         ///
         /// Creation-then-lockdown is the order that actually needs proving.
@@ -3629,7 +3626,7 @@ mod tests {
     }
 
     /// LIF-214's deactivation message is produced after the verify, so it
-    /// has to come back through the spawn_blocking path unchanged.
+    /// has to come back through the `spawn_blocking` path unchanged.
     #[tokio::test]
     async fn login_still_reports_a_deactivated_account() {
         let db = crate::db::open_memory().expect("test db");

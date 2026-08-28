@@ -641,7 +641,7 @@ mod tests {
 
         let err = update_view(
             &conn,
-            999999,
+            999_999,
             project,
             alice,
             &UpdateSavedView {
@@ -653,7 +653,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
 
-        let err = delete_view(&conn, 999999, project, alice).unwrap_err();
+        let err = delete_view(&conn, 999_999, project, alice).unwrap_err();
         assert!(matches!(err, LificError::NotFound(_)), "got {err:?}");
     }
 

@@ -21,7 +21,7 @@ pub fn validate_comment_content(content: &str) -> Result<(), LificError> {
 
 /// What a comment is attached to.
 ///
-/// The `comments` table allows exactly one of (issue_id, page_id) to be set
+/// The `comments` table allows exactly one of (`issue_id`, `page_id`) to be set
 /// (enforced by a CHECK constraint added in migration 012). This enum mirrors
 /// that invariant in Rust so callers can't accidentally construct an
 /// orphan or dual-parent comment.
@@ -358,8 +358,10 @@ pub fn list_comments_keyset(
         param_values.push(Box::new(offset));
     }
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), row_to_comment)?;
     let rows: Vec<Comment> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -624,7 +626,7 @@ mod tests {
     use crate::db::models::*;
     use crate::db::queries;
 
-    /// Seed a user, a project, an issue, and a page. Returns (pool, issue_id, page_id, user_id).
+    /// Seed a user, a project, an issue, and a page. Returns (pool, `issue_id`, `page_id`, `user_id`).
     fn setup() -> (db::DbPool, i64, i64, i64) {
         let pool = db::open_memory().expect("test db");
         let conn = pool.write().unwrap();
@@ -1396,7 +1398,7 @@ mod tests {
         assert!(!tail.has_more);
     }
 
-    /// Read an issue's raw updated_at timestamp directly from the table.
+    /// Read an issue's raw `updated_at` timestamp directly from the table.
     fn issue_updated_at(conn: &Connection, issue_id: i64) -> String {
         conn.query_row(
             "SELECT updated_at FROM issues WHERE id = ?1",

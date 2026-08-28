@@ -38,7 +38,11 @@ const UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
 // `visible_project_ids` that produces its input. Re-exported here so the
 // route modules keep reaching for it through `super::`.
 use crate::authz::filter_visible;
-use crate::db::{DbPool, models::*, queries};
+use crate::db::{
+    DbPool,
+    models::{AuthUser, Role, SearchQuery, SearchResult},
+    queries,
+};
 use crate::error::LificError;
 
 pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
@@ -561,7 +565,7 @@ where
 
 /// Check if the authenticated user can manage a project (update settings, manage structure).
 /// Returns Ok(()) if: user is admin, or user is project lead.
-/// Default-deny: returns Forbidden when auth_user is None (OAuth tokens, legacy keys).
+/// Default-deny: returns Forbidden when `auth_user` is None (OAuth tokens, legacy keys).
 ///
 /// LIF-102: when `project.lead_user_id IS NULL`, only admins can edit. This
 /// prevents the previous behavior where `Some(user.id) == None` was always
@@ -2397,7 +2401,7 @@ mod authz_gating_tests {
                 tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
             match received {
                 Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).unwrap(),
-                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
                 other => panic!("expected a realtime event, got {other:?}"),
             }
         }
@@ -2439,10 +2443,7 @@ mod authz_gating_tests {
                 continue;
             }
             assert!(
-                matches!(
-                    received,
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None)
-                ),
+                matches!(received, Ok(Some(Ok(Message::Close(_)) | Err(_)) | None)),
                 "expected the socket to be closed, got {received:?}"
             );
             return;
@@ -2959,7 +2960,7 @@ mod authz_gating_tests {
     /// LIF-431: a browser talking straight to the server (no reverse proxy)
     /// sends no `x-forwarded-proto`/`forwarded` headers, and the same-origin
     /// check used to fail closed on the missing scheme — every direct
-    /// handshake at http://localhost:3456 got a 403 and realtime never
+    /// handshake at <http://localhost:3456> got a 403 and realtime never
     /// worked outside a proxy. Direct plaintext handshakes must pass; an
     /// https Origin against the plaintext listener must still be rejected.
     #[tokio::test]

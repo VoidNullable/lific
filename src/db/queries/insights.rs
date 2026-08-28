@@ -39,7 +39,9 @@ use std::collections::HashMap;
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use rusqlite::{Connection, params};
 
-use crate::db::models::*;
+use crate::db::models::{
+    ActorStat, InsightsPayload, ModuleCount, Priority, PriorityCounts, WeekPoint,
+};
 use crate::error::LificError;
 
 pub const DEFAULT_WEEKS: i64 = 12;
@@ -56,7 +58,7 @@ pub fn clamp_weeks(weeks: Option<i64>) -> i64 {
 /// `count` entries long.
 fn week_starts(count: i64) -> Vec<NaiveDate> {
     let today = Utc::now().date_naive();
-    let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let this_monday = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
     (0..count)
         .rev()
         .map(|k| this_monday - Duration::days(7 * k))
@@ -255,6 +257,9 @@ pub fn get_insights(
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use super::*;
     use crate::db::queries;
 

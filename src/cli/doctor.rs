@@ -26,13 +26,13 @@
 //!    with the most-recent backup age vs the configured interval.
 //! 4. **server** — HTTP reachability of `http://{host}:{port}/api/health`
 //!    (0.0.0.0 → 127.0.0.1). Not running = warn (doctor must work offline).
-//! 5. **oauth_discovery** — `GET {base}/.well-known/oauth-protected-resource/mcp`
+//! 5. **`oauth_discovery`** — `GET {base}/.well-known/oauth-protected-resource/mcp`
 //!    → 200 + JSON containing `resource`. Skipped when the server is unreachable.
 //! 6. **mcp** — `POST {base}/mcp` JSON-RPC `initialize`. No key → expect 401 with
 //!    a `WWW-Authenticate` header (auth enforced, discovery advertised) = pass.
 //!    With a key → expect 200 + a `serverInfo` result = pass; wrong key = fail.
 //!    Skipped when the server is unreachable.
-//! 7. **public_url** — only when `server.public_url` is set. `GET
+//! 7. **`public_url`** — only when `server.public_url` is set. `GET
 //!    {public_url}/.well-known/oauth-protected-resource/mcp` reachable = pass;
 //!    unreachable = warn (may be firewalled from this vantage point).
 
@@ -219,41 +219,38 @@ pub async fn build_report_with_config_path(
         None => None,
     };
 
-    match (&client, &server_up) {
-        (Some(c), Some(reachable)) => {
-            checks.push(server_check_result(reachable));
-            if reachable.reachable {
-                checks.push(check_oauth_discovery(c, &base).await);
-                let mut mcp_check = check_mcp(c, &base, effective_key.as_deref()).await;
-                // Note where the credential came from when it was a stored
-                // login token rather than an explicit --key/LIFIC_API_KEY.
-                if let Some(src) = key_source {
-                    mcp_check.detail = format!("{} (using {})", mcp_check.detail, src.label());
-                }
-                checks.push(mcp_check);
-            } else {
-                checks.push(Check::new(
-                    "oauth_discovery",
-                    Status::Skipped,
-                    "server not reachable — skipped",
-                ));
-                checks.push(Check::new(
-                    "mcp",
-                    Status::Skipped,
-                    "server not reachable — skipped",
-                ));
+    if let (Some(c), Some(reachable)) = (&client, &server_up) {
+        checks.push(server_check_result(reachable));
+        if reachable.reachable {
+            checks.push(check_oauth_discovery(c, &base).await);
+            let mut mcp_check = check_mcp(c, &base, effective_key.as_deref()).await;
+            // Note where the credential came from when it was a stored
+            // login token rather than an explicit --key/LIFIC_API_KEY.
+            if let Some(src) = key_source {
+                mcp_check.detail = format!("{} (using {})", mcp_check.detail, src.label());
             }
-        }
-        _ => {
-            // Could not even build a client; report all HTTP checks as skipped.
+            checks.push(mcp_check);
+        } else {
             checks.push(Check::new(
-                "server",
-                Status::Warn,
-                "could not build HTTP client — skipped",
+                "oauth_discovery",
+                Status::Skipped,
+                "server not reachable — skipped",
             ));
-            checks.push(Check::new("oauth_discovery", Status::Skipped, "skipped"));
-            checks.push(Check::new("mcp", Status::Skipped, "skipped"));
+            checks.push(Check::new(
+                "mcp",
+                Status::Skipped,
+                "server not reachable — skipped",
+            ));
         }
+    } else {
+        // Could not even build a client; report all HTTP checks as skipped.
+        checks.push(Check::new(
+            "server",
+            Status::Warn,
+            "could not build HTTP client — skipped",
+        ));
+        checks.push(Check::new("oauth_discovery", Status::Skipped, "skipped"));
+        checks.push(Check::new("mcp", Status::Skipped, "skipped"));
     }
 
     // public_url check only when configured.
@@ -653,81 +650,78 @@ pub async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) 
         .headers()
         .contains_key(reqwest::header::WWW_AUTHENTICATE);
 
-    match key {
-        None => {
-            // No key: the correct, healthy behavior is a 401 that advertises
-            // where to discover auth.
-            if status == reqwest::StatusCode::UNAUTHORIZED && has_www_auth {
-                Check::new(
-                    "mcp",
-                    Status::Pass,
-                    "auth enforced (401 + WWW-Authenticate); discovery advertised",
-                )
-            } else if status == reqwest::StatusCode::UNAUTHORIZED {
-                Check::new(
-                    "mcp",
-                    Status::Warn,
-                    "401 but no WWW-Authenticate header — discovery not advertised",
-                )
-            } else {
-                Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!(
-                        "expected 401 without a key, got HTTP {} (auth may be disabled)",
-                        status.as_u16()
-                    ),
-                )
-            }
-        }
-        Some(_) => {
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Check::new(
-                    "mcp",
-                    Status::Fail,
-                    "provided key was rejected (401) — wrong or revoked key",
-                );
-            }
-            if !status.is_success() {
-                return Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!("initialize returned HTTP {}", status.as_u16()),
-                );
-            }
-            // json_response mode: the body is a plain JSON-RPC envelope.
-            match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    if body
-                        .get("result")
-                        .and_then(|r| r.get("serverInfo"))
-                        .is_some()
-                    {
-                        let name = body
-                            .pointer("/result/serverInfo/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("lific");
-                        Check::new(
-                            "mcp",
-                            Status::Pass,
-                            format!("authorized initialize succeeded (serverInfo: {name})"),
-                        )
-                    } else if body.get("error").is_some() {
-                        Check::new(
-                            "mcp",
-                            Status::Fail,
-                            format!("initialize returned a JSON-RPC error: {}", body["error"]),
-                        )
-                    } else {
-                        Check::new("mcp", Status::Fail, "200 but result had no serverInfo")
-                    }
-                }
-                Err(e) => Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!("200 but body was not JSON: {e}"),
+    if key.is_none() {
+        // No key: the correct, healthy behavior is a 401 that advertises
+        // where to discover auth.
+        if status == reqwest::StatusCode::UNAUTHORIZED && has_www_auth {
+            Check::new(
+                "mcp",
+                Status::Pass,
+                "auth enforced (401 + WWW-Authenticate); discovery advertised",
+            )
+        } else if status == reqwest::StatusCode::UNAUTHORIZED {
+            Check::new(
+                "mcp",
+                Status::Warn,
+                "401 but no WWW-Authenticate header — discovery not advertised",
+            )
+        } else {
+            Check::new(
+                "mcp",
+                Status::Fail,
+                format!(
+                    "expected 401 without a key, got HTTP {} (auth may be disabled)",
+                    status.as_u16()
                 ),
+            )
+        }
+    } else {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Check::new(
+                "mcp",
+                Status::Fail,
+                "provided key was rejected (401) — wrong or revoked key",
+            );
+        }
+        if !status.is_success() {
+            return Check::new(
+                "mcp",
+                Status::Fail,
+                format!("initialize returned HTTP {}", status.as_u16()),
+            );
+        }
+        // json_response mode: the body is a plain JSON-RPC envelope.
+        match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                if body
+                    .get("result")
+                    .and_then(|r| r.get("serverInfo"))
+                    .is_some()
+                {
+                    let name = body
+                        .pointer("/result/serverInfo/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("lific");
+                    Check::new(
+                        "mcp",
+                        Status::Pass,
+                        format!("authorized initialize succeeded (serverInfo: {name})"),
+                    )
+                } else if body.get("error").is_some() {
+                    Check::new(
+                        "mcp",
+                        Status::Fail,
+                        format!("initialize returned a JSON-RPC error: {}", body["error"]),
+                    )
+                } else {
+                    Check::new("mcp", Status::Fail, "200 but result had no serverInfo")
+                }
             }
+            Err(e) => Check::new(
+                "mcp",
+                Status::Fail,
+                format!("200 but body was not JSON: {e}"),
+            ),
         }
     }
 }

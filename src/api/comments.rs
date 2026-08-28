@@ -5,7 +5,11 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::comments::{self, CommentContext, CommentParent};
-use crate::db::{DbPool, models::*, queries};
+use crate::db::{
+    DbPool,
+    models::{Comment, CommentActor, CreateComment, MentionCandidate, Role, UpdateComment},
+    queries,
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -310,7 +314,7 @@ mod tests {
     use tower::ServiceExt;
 
     /// Set up a test app with a user, project, and issue pre-seeded.
-    /// Returns (app_with_user_extension, issue_id, user_id).
+    /// Returns (`app_with_user_extension`, `issue_id`, `user_id`).
     fn setup_comment_test() -> (axum::Router, i64, i64) {
         let db = crate::db::open_memory().expect("test db");
         let conn = db.write().unwrap();
@@ -1014,7 +1018,7 @@ mod tests {
     // ── LIF-106: page comments ─────────────────────────────────────────────
 
     /// Set up a test app with a user, project, and page pre-seeded.
-    /// Returns (app, page_id, user_id).
+    /// Returns (app, `page_id`, `user_id`).
     fn setup_page_comment_test() -> (axum::Router, i64, i64) {
         let db = crate::db::open_memory().expect("test db");
 
@@ -1383,7 +1387,7 @@ mod tests {
 
     // ── LIF-263: @mentions ──────────────────────────────────────────
 
-    /// Read the recorded mention user_ids for a comment straight from the DB.
+    /// Read the recorded mention `user_ids` for a comment straight from the DB.
     fn mention_ids(db: &crate::db::DbPool, comment_id: i64) -> Vec<i64> {
         let conn = db.read().unwrap();
         crate::db::queries::comments::list_mention_user_ids(&conn, comment_id).unwrap()

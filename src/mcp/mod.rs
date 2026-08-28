@@ -25,8 +25,8 @@ use crate::storage::AttachmentStore;
 static MCP_HANDLER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Per-request user identity storage.
-/// Protected from races by MCP_HANDLER_LOCK ensuring serial access.
-/// Uses unwrap_or_else to recover from poison (e.g. if a handler panics).
+/// Protected from races by `MCP_HANDLER_LOCK` ensuring serial access.
+/// Uses `unwrap_or_else` to recover from poison (e.g. if a handler panics).
 static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
 
 /// Per-request external origin used for structured resource links.
@@ -81,10 +81,10 @@ where
     };
     *MCP_REQUEST_USER
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = user;
     *MCP_REQUEST_ISSUE_LINKS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = issue_links;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = issue_links;
     // Panic-safe cleanup: clear the globals on scope exit (including if `f`
     // panics), before `_guard` releases MCP_HANDLER_LOCK (reverse declaration
     // order). Without this, a panicking request would leave a stale user in the
@@ -107,10 +107,10 @@ impl Drop for RequestGlobalGuard {
     fn drop(&mut self) {
         *MCP_REQUEST_USER
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *MCP_REQUEST_ISSUE_LINKS
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -118,7 +118,7 @@ impl Drop for RequestGlobalGuard {
 pub(crate) fn current_auth_user() -> Option<AuthUser> {
     MCP_REQUEST_USER
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
@@ -204,7 +204,7 @@ pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
     #[cfg(not(test))]
     MCP_REQUEST_ISSUE_LINKS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
@@ -672,7 +672,7 @@ mod tests {
                 .to_string();
             let global = MCP_REQUEST_ISSUE_LINKS
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
                 .expect("production request context should also be populated")
                 .issue_markdown("LIF-1")
@@ -690,7 +690,7 @@ mod tests {
         assert!(
             MCP_REQUEST_ISSUE_LINKS
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
     }

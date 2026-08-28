@@ -693,7 +693,7 @@ pub fn linked_entities_in_project(
     // database, never caller-supplied text.
     let id_list = attachment_ids
         .iter()
-        .map(|id| id.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
 
@@ -1367,9 +1367,9 @@ mod tests {
             .into_iter()
             .map(|x| x.id)
             .collect();
-        ids.sort();
+        ids.sort_unstable();
         let mut want = vec![b.id, c.id];
-        want.sort();
+        want.sort_unstable();
         assert_eq!(ids, want);
     }
 

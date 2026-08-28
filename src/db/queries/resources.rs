@@ -1,13 +1,16 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::models::*;
+use crate::db::models::{
+    CreateFolder, CreateLabel, CreateModule, Folder, Label, Module, UpdateFolder, UpdateLabel,
+    UpdateModule,
+};
 use crate::error::LificError;
 
 use super::unescape_text;
 
 /// A table [`get_resource_project_id`] can resolve a row in.
 ///
-/// LIF-386: the table name is interpolated into the SQL, because SQLite has
+/// LIF-386: the table name is interpolated into the SQL, because `SQLite` has
 /// no bind parameter for an identifier. The set of legal names is therefore
 /// an enum rather than a string: a caller cannot express an injection in the
 /// first place, so there is nothing to validate at runtime.
@@ -30,7 +33,7 @@ impl ResourceTable {
     }
 }
 
-/// Look up the project_id for a module, label, or folder by its id.
+/// Look up the `project_id` for a module, label, or folder by its id.
 pub fn get_resource_project_id(
     conn: &Connection,
     table: ResourceTable,
@@ -129,8 +132,8 @@ pub fn get_folder_name(conn: &Connection, id: i64) -> Result<String, LificError>
 }
 
 /// Fetch a single module by id. Used by the web detail route and any
-/// client that already knows the id but not the project — list_modules
-/// requires the project_id up front, which makes URL→data resolution
+/// client that already knows the id but not the project — `list_modules`
+/// requires the `project_id` up front, which makes URL→data resolution
 /// awkward when you don't have it in hand.
 pub fn get_module(conn: &Connection, id: i64) -> Result<Module, LificError> {
     conn.query_row(
@@ -498,6 +501,9 @@ pub fn delete_folder(conn: &Connection, id: i64) -> Result<(), LificError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use super::*;
     use crate::db;
     use crate::db::queries::projects;
@@ -561,7 +567,7 @@ mod tests {
 
     /// LIF-397: docs and the MCP schema promise six module statuses, but the
     /// column is TEXT and used to take anything ("bananas" included). The six
-    /// documented values round-trip; everything else is a BadRequest naming
+    /// documented values round-trip; everything else is a `BadRequest` naming
     /// them, on both create and update, and a rejected update leaves the row
     /// untouched.
     #[test]

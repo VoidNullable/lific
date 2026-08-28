@@ -104,8 +104,8 @@ impl PreparedApiKey {
         })?;
         Ok(Self {
             plaintext: api_key.key().expose_secret().to_string(),
-            hash: api_key.expose_hash().hash().to_string(),
-            key_id: api_key.expose_hash().key_id().to_string(),
+            hash: api_key.expose_hash().hash().clone(),
+            key_id: api_key.expose_hash().key_id().clone(),
         })
     }
 
@@ -249,7 +249,7 @@ pub fn session_bearer_token(headers: &HeaderMap) -> Result<String, crate::error:
 /// hand back **the user as the database has them right now**.
 ///
 /// Callers run this as the first statement of the writer transaction that
-/// grants something. SQLite serializes writers, so an account lockdown is
+/// grants something. `SQLite` serializes writers, so an account lockdown is
 /// either wholly before this check (which then fails, because the session row
 /// is gone) or wholly after the write (which then revokes what was granted).
 /// There is no interleaving that leaves a live credential behind a revoked
@@ -658,7 +658,7 @@ fn insert_identity_extensions(
 /// Axum middleware that validates Bearer tokens and resolves user identity.
 ///
 /// After successful auth, inserts `Extension<Option<AuthUser>>` into the request:
-/// - `Some(user)` if the token resolves to a user (session, or API key with user_id)
+/// - `Some(user)` if the token resolves to a user (session, or API key with `user_id`)
 /// - `None` if the token is valid but has no user association (legacy keys, OAuth)
 ///
 /// It also inserts `Extension<CredentialKind>` (LIF-403) so downstream code
@@ -1052,7 +1052,7 @@ enum ApiKeyReject {
 
 /// Shared API-key authentication for both the HTTP middleware and the stdio
 /// `LIFIC_TOKEN` resolver. Verifies the checksum, resolves the key row by
-/// derived key_id (with the pre-migration-010 scan-and-backfill fallback), and
+/// derived `key_id` (with the pre-migration-010 scan-and-backfill fallback), and
 /// verifies the stored hash — exactly one copy of that logic (LIFIC-18 review:
 /// previously duplicated between `require_api_key` and `resolve_api_key_user`).
 ///
@@ -1113,7 +1113,7 @@ fn validate_api_key(
                 })
             })
             .ok()?
-            .filter_map(|r| r.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         for row in rows {
             if let Ok(KeyStatus::Valid) = manager.verify(&secure_token, &row.hash) {
@@ -1646,8 +1646,8 @@ mod tests {
     /// Everything else about this interaction is asserted sequentially, which
     /// can only show that each order produces the right outcome. What is
     /// claimed on top of that is *linearizability*: that no interleaving
-    /// exists, because both sides run as one SQLite `BEGIN IMMEDIATE`
-    /// transaction and SQLite admits one writer at a time. That claim needs
+    /// exists, because both sides run as one `SQLite` `BEGIN IMMEDIATE`
+    /// transaction and `SQLite` admits one writer at a time. That claim needs
     /// two real connections to a real file, and this is where it is tested.
     ///
     /// Setup: two `DbPool`s opened separately on one tempfile database, which
@@ -1658,7 +1658,7 @@ mod tests {
     /// Exclusion is observed rather than assumed. While one pool holds its
     /// transaction open, a third raw connection with `busy_timeout = 0` tries
     /// `BEGIN IMMEDIATE` and must be refused *now* rather than made to wait.
-    /// That is SQLite telling us directly that the writer is held.
+    /// That is `SQLite` telling us directly that the writer is held.
     mod lockdown_race {
         use super::*;
         use std::sync::mpsc;
@@ -1687,7 +1687,7 @@ mod tests {
         ///
         /// Opens its own connection and disables the busy handler, so
         /// `BEGIN IMMEDIATE` resolves immediately either way: it takes the
-        /// lock (nobody is writing) or returns SQLITE_BUSY (somebody is). No
+        /// lock (nobody is writing) or returns `SQLITE_BUSY` (somebody is). No
         /// waiting, so no flakiness.
         fn writer_is_held(path: &std::path::Path) -> bool {
             let probe = rusqlite::Connection::open(path).expect("probe connection");
@@ -2720,7 +2720,7 @@ mod tests {
     // These drive the real `require_api_key` middleware: a 401 means the key
     // was refused, a 200 means it authenticated (body "none" = no bound user).
 
-    /// Overwrite a key's expires_at directly (bypassing the CLI/date parsing)
+    /// Overwrite a key's `expires_at` directly (bypassing the CLI/date parsing)
     /// so enforcement can be exercised deterministically.
     fn set_key_expiry(pool: &db::DbPool, name: &str, expires_at: &str) {
         let conn = pool.write().unwrap();
@@ -3642,9 +3642,7 @@ mod tests {
             format!(
                 "{}|{}",
                 actor.transport.as_str(),
-                identity
-                    .map(|i| i.transport.as_str().to_string())
-                    .unwrap_or_else(|| "none".into())
+                identity.map_or_else(|| "none".into(), |i| i.transport.as_str().to_string())
             )
         }
 

@@ -22,13 +22,16 @@ struct ConfigFile {
 /// was read from. Fails closed on symlinks: [`read_config_file`] opens with
 /// `O_NOFOLLOW`, so a symlinked config never produces a [`ConfigFile`] to
 /// tighten in the first place.
-fn tighten_config_permissions(_config: &ConfigFile) -> std::io::Result<()> {
+fn tighten_config_permissions(config: &ConfigFile) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = config;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let metadata = _config.file.metadata()?;
+        let metadata = config.file.metadata()?;
         if metadata.mode() & 0o077 != 0 {
-            _config
+            config
                 .file
                 .set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
@@ -85,7 +88,7 @@ pub enum ConfigError {
         path: PathBuf,
         /// Boxed to keep `ConfigError` small. `toml::de::Error` is over 100
         /// bytes on its own, which makes every `Result<Config, _>` in the
-        /// program pay for the failure path (clippy::result_large_err).
+        /// program pay for the failure path (`clippy::result_large_err`).
         #[source]
         source: Box<toml::de::Error>,
     },
@@ -147,7 +150,7 @@ impl Default for AuthConfig {
 
 impl AuthConfig {
     /// Build the runtime auth config, deriving `secure_cookies` from the
-    /// server's public URL scheme. Only an explicit `http://` public_url turns
+    /// server's public URL scheme. Only an explicit `http://` `public_url` turns
     /// `Secure` off; everything else (https, or unset) stays secure-by-default.
     pub fn from_server(file: &AuthConfig, public_url: Option<&str>) -> Self {
         let secure_cookies = match public_url {
@@ -253,15 +256,15 @@ pub struct ServerConfig {
     pub host: String,
     /// Port to listen on
     pub port: u16,
-    /// Public URL for OAuth discovery (e.g. https://your-server.example.com/lific)
+    /// Public URL for OAuth discovery (e.g. <https://your-server.example.com/lific>)
     pub public_url: Option<String>,
     /// Allowed CORS origins. If empty, allows all origins (not recommended for production).
-    /// Example: ["https://your-app.example.com"]
+    /// Example: `["https://your-app.example.com"]`
     pub cors_origins: Vec<String>,
     /// IP addresses or CIDR ranges allowed to supply client-IP proxy headers.
     /// Plain IPs are allowed; defaults to no trusted peers. Configure only
     /// isolated reverse-proxy addresses that cannot be reached directly.
-    /// Example: ["10.0.0.0/8"]
+    /// Example: `["10.0.0.0/8"]`
     pub trusted_proxies: Vec<String>,
     /// If set, exposes an authless MCP endpoint at `/mcp/<token>` that skips the
     /// OAuth flow entirely — the path secret itself is the credential. This is an
@@ -279,7 +282,7 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DatabaseConfig {
-    /// Path to the SQLite database file
+    /// Path to the `SQLite` database file
     pub path: PathBuf,
 }
 
@@ -424,12 +427,13 @@ impl Config {
                         });
                     }
                 },
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(source) => {
-                    return Err(ConfigError::Read {
-                        path: path.clone(),
-                        source,
-                    });
+                    if source.kind() != std::io::ErrorKind::NotFound {
+                        return Err(ConfigError::Read {
+                            path: path.clone(),
+                            source,
+                        });
+                    }
                 }
             }
         }
@@ -505,7 +509,7 @@ impl Config {
     /// LIFIC-23: sets `[auth] required` and, when `host` is supplied,
     /// `[server] host`. When `existing` is empty/absent the function builds a
     /// fresh default config carrying the chosen values; otherwise it edits the
-    /// existing TOML in place (formatting and comments survive via toml_edit).
+    /// existing TOML in place (formatting and comments survive via `toml_edit`).
     /// Pure — no filesystem side effects. This is what the `lific init`
     /// auth-mode menu (LIFIC-25) uses to persist the operator's choice.
     ///

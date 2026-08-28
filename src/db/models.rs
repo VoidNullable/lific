@@ -9,7 +9,7 @@ pub struct Project {
     pub emoji: Option<String>,
     pub lead_user_id: Option<i64>,
     /// LIF-233: sidebar ordering rank. Reindexed 0..N on every reorder; new
-    /// projects append at the end. list_projects orders by this then name.
+    /// projects append at the end. `list_projects` orders by this then name.
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -273,7 +273,7 @@ pub struct Issue {
     /// Labels attached to this issue (populated on read)
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Relations (populated on read for get_issue)
+    /// Relations (populated on read for `get_issue`)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -302,7 +302,7 @@ pub struct ProjectRelation {
     pub target_id: i64,
     /// Computed "{project.identifier}-{sequence}" for the target issue.
     pub target_identifier: String,
-    /// blocks | relates_to | duplicate (directional: source→target).
+    /// blocks | `relates_to` | duplicate (directional: source→target).
     pub relation_type: String,
 }
 
@@ -377,7 +377,7 @@ pub struct ListIssuesQuery {
     pub updated_since: Option<String>,
     /// Exclusive upper bound on `updated_at`.
     pub updated_until: Option<String>,
-    /// Sort column: sort_order (default), sequence, created, updated, priority.
+    /// Sort column: `sort_order` (default), sequence, created, updated, priority.
     /// Whitelisted in `list_issues` — never interpolated raw.
     pub order_by: Option<String>,
     /// Sort direction: asc (default) or desc.
@@ -517,7 +517,7 @@ pub struct CreatePage {
     #[serde(default = "default_page_status")]
     pub status: String,
     /// Label names to attach. Silently ignored for workspace pages (no
-    /// project_id), since labels are project-scoped (LIF-105).
+    /// `project_id`), since labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
 }
@@ -1000,7 +1000,7 @@ pub struct Plan {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
-    /// Nested step tree (populated on read for get_plan). Empty in list views.
+    /// Nested step tree (populated on read for `get_plan`). Empty in list views.
     #[serde(default)]
     pub steps: Vec<PlanStepNode>,
     /// Step counts (populated for list views and headers).
@@ -1050,7 +1050,7 @@ pub struct CreatePlan {
     pub steps: Vec<CreatePlanStep>,
 }
 
-/// A step in a create_plan tree. Recursive via `steps`.
+/// A step in a `create_plan` tree. Recursive via `steps`.
 #[derive(Debug, Deserialize)]
 pub struct CreatePlanStep {
     pub title: String,
@@ -1268,9 +1268,9 @@ pub struct ProjectAttachmentQuery {
     /// Restrict to attachments linked via this kind of entity: issue | page |
     /// comment.
     pub entity_type: Option<String>,
-    /// created_at (default) | size | filename
+    /// `created_at` (default) | size | filename
     pub sort: Option<String>,
-    /// asc | desc. Defaults to desc for created_at/size and asc for filename.
+    /// asc | desc. Defaults to desc for `created_at/size` and asc for filename.
     pub order: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,

@@ -70,6 +70,7 @@ use crate::resolve_caller::ResolvedIdentity;
 /// (shouldn't normally happen, but the FK allows `owner_id IS NULL`) is
 /// evaluated as itself. Non-bot users pass through unchanged. Returns `None`
 /// only when `auth_user` itself is `None`.
+#[allow(clippy::ref_option)]
 pub fn effective_user(conn: &Connection, auth_user: &Option<AuthUser>) -> Option<AuthUser> {
     let user = auth_user.as_ref()?;
 
@@ -107,6 +108,7 @@ pub fn effective_user(conn: &Connection, auth_user: &Option<AuthUser>) -> Option
 /// (the type [`resolve_caller`] produces), but `effective_user` still operates
 /// on `AuthUser` — its job (map a bot to its owner) is user-level, not
 /// identity-level. This is the single adapter between the two.
+#[allow(clippy::ref_option)]
 fn user_of(identity: &Option<ResolvedIdentity>) -> Option<AuthUser> {
     identity.as_ref().map(|i| i.user.clone())
 }
@@ -144,6 +146,7 @@ fn insufficient_role(min: Role) -> LificError {
 /// unbound API key now resolves (via [`resolve_caller`]) to the first admin, so
 /// `identity.user.is_admin` catches it in the same `is_admin` short-circuit
 /// below.
+#[allow(clippy::ref_option)]
 pub fn require_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -172,6 +175,7 @@ pub(crate) fn can_view_project(
     ))
 }
 
+#[allow(clippy::ref_option)]
 pub(crate) fn require_role_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
@@ -198,6 +202,7 @@ pub(crate) fn require_role_conn(
 }
 
 /// Default-deny mode: resolve the membership row and compare against `min`.
+#[allow(clippy::ref_option)]
 fn require_role_enforced(
     conn: &Connection,
     effective: &Option<AuthUser>,
@@ -216,6 +221,7 @@ fn require_role_enforced(
 /// Legacy mode: reproduces today's exact behavior. Only `min = Lead` can
 /// ever deny; `Maintainer`/`Viewer` allow any request, matching every
 /// existing (non-lead-gated) REST route today.
+#[allow(clippy::ref_option)]
 fn require_role_legacy(
     conn: &Connection,
     effective: &Option<AuthUser>,
@@ -276,6 +282,7 @@ fn require_lead_legacy(
 /// - enforced: `require_role(.., Maintainer)` — the new, looser bar.
 /// - legacy: `require_role(.., Lead)` — literally what `require_project_lead`
 ///   already does, unchanged.
+#[allow(clippy::ref_option)]
 pub fn require_structure_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -303,7 +310,8 @@ pub fn require_structure_role(
 /// `identity.user.is_admin` — so an unbound API key (which resolves to the
 /// first admin) is admitted, where before it was `None` and denied. That is
 /// the intended operator-works-everywhere fix (AC: "unbound keys resolve via
-/// first_admin"), not a regression: real non-admin users are still denied.
+/// `first_admin`"), not a regression: real non-admin users are still denied.
+#[allow(clippy::ref_option)]
 pub fn require_project_delete_role(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -320,6 +328,7 @@ pub fn require_project_delete_role(
 /// from a role snapshot taken before the request was routed means an admin
 /// demoted, or a lead removed, a moment ago can still do it. The read has to
 /// be inside the transaction that acts on it.
+#[allow(clippy::ref_option)]
 pub(crate) fn require_project_delete_role_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
@@ -345,6 +354,7 @@ pub(crate) fn require_project_delete_role_conn(
 /// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
 /// `identity.user.is_admin` (an unbound key resolves to the first admin),
 /// not a separate carrier signal.
+#[allow(clippy::ref_option)]
 pub fn require_workspace_admin(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -353,6 +363,7 @@ pub fn require_workspace_admin(
     require_workspace_admin_conn(&conn, identity)
 }
 
+#[allow(clippy::ref_option)]
 pub(crate) fn require_workspace_admin_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
@@ -369,6 +380,7 @@ pub(crate) fn require_workspace_admin_conn(
     }
 }
 
+#[allow(clippy::ref_option)]
 pub(crate) fn require_project_or_workspace_role_conn(
     conn: &Connection,
     identity: &Option<ResolvedIdentity>,
@@ -395,6 +407,7 @@ pub(crate) fn require_project_or_workspace_role_conn(
 /// LIFIC-10/14: consumes [`ResolvedIdentity`]; the operator bypass is now
 /// `identity.user.is_admin` (an unbound key resolves to the first admin and
 /// short-circuits below).
+#[allow(clippy::ref_option)]
 pub fn visible_project_ids(
     db: &DbPool,
     identity: &Option<ResolvedIdentity>,
@@ -420,12 +433,13 @@ pub fn visible_project_ids(
 /// list of items. `None` (unrestricted — admin, or enforcement off) keeps
 /// everything. `Some(ids)` keeps only items whose `project_id_of` result is
 /// `Some(pid)` with `pid` in `ids` — a workspace-level item (`None`
-/// project_id) is therefore excluded for any non-admin once enforcement is
+/// `project_id`) is therefore excluded for any non-admin once enforcement is
 /// on, matching design decision #10 (workspace pages are admin-only).
 ///
 /// LIF-377: one implementation for both read surfaces. REST and MCP each had
 /// a byte-identical copy, so "silently absent, never an error" could drift on
 /// one transport without the other noticing.
+#[allow(clippy::ref_option)]
 pub fn filter_visible<T>(
     items: Vec<T>,
     visible: &Option<HashSet<i64>>,
@@ -455,6 +469,7 @@ mod tests {
     /// the gates — only `user` drives membership/admin checks). Mirrors what
     /// [`crate::resolve_caller`] produces in production for a credential that
     /// already names a user.
+    #[allow(clippy::unnecessary_wraps)]
     fn id(user: AuthUser) -> Option<ResolvedIdentity> {
         Some(ResolvedIdentity {
             user,
@@ -507,32 +522,29 @@ mod tests {
 
     /// Seed a bot user owned by `owner_id` (or ownerless when `None`).
     fn seed_bot(conn: &Connection, username: &str, owner_id: Option<i64>) -> AuthUser {
-        match owner_id {
-            Some(owner) => {
-                let bot =
-                    queries::users::create_bot_user(conn, owner, username, username, None).unwrap();
-                AuthUser {
-                    id: bot.id,
-                    username: bot.username,
-                    display_name: bot.display_name,
-                    is_admin: bot.is_admin,
-                }
+        if let Some(owner) = owner_id {
+            let bot =
+                queries::users::create_bot_user(conn, owner, username, username, None).unwrap();
+            AuthUser {
+                id: bot.id,
+                username: bot.username,
+                display_name: bot.display_name,
+                is_admin: bot.is_admin,
             }
-            None => {
-                // create_bot_user requires an owner; insert an ownerless bot directly.
-                conn.execute(
-                    "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id)
-                     VALUES (?1, ?2, 'x', ?1, 0, 1, NULL)",
-                    rusqlite::params![username, format!("{username}@bot.local")],
-                )
-                .unwrap();
-                let id = conn.last_insert_rowid();
-                AuthUser {
-                    id,
-                    username: username.into(),
-                    display_name: username.into(),
-                    is_admin: false,
-                }
+        } else {
+            // create_bot_user requires an owner; insert an ownerless bot directly.
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot, owner_id)
+                 VALUES (?1, ?2, 'x', ?1, 0, 1, NULL)",
+                rusqlite::params![username, format!("{username}@bot.local")],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            AuthUser {
+                id,
+                username: username.into(),
+                display_name: username.into(),
+                is_admin: false,
             }
         }
     }

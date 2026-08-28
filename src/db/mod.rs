@@ -11,12 +11,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::error::LificError;
 
 /// Number of read connections in the pool.
-/// SQLite WAL mode supports unlimited concurrent readers.
+/// `SQLite` WAL mode supports unlimited concurrent readers.
 const READ_POOL_SIZE: usize = 8;
 
 /// Database pool with read/write splitting.
 ///
-/// SQLite allows concurrent reads but only one writer at a time.
+/// `SQLite` allows concurrent reads but only one writer at a time.
 /// - Writes go through a single Mutex-protected connection.
 /// - Reads pull from a lock-free pool of read-only connections.
 /// - Readers never block each other. Readers never block writers.
@@ -70,19 +70,18 @@ impl DbPool {
 
     /// Acquire a read-only connection from the pool.
     pub fn read(&self) -> Result<ReadConn, LificError> {
-        match self.readers.pop() {
-            Some(conn) => Ok(ReadConn {
+        if let Some(conn) = self.readers.pop() {
+            Ok(ReadConn {
                 conn: Some(conn),
                 pool: Arc::clone(&self.readers),
-            }),
-            None => {
-                // Pool exhausted — open a fresh read connection
-                let conn = open_read_connection(&self.path)?;
-                Ok(ReadConn {
-                    conn: Some(conn),
-                    pool: Arc::clone(&self.readers),
-                })
-            }
+            })
+        } else {
+            // Pool exhausted — open a fresh read connection
+            let conn = open_read_connection(&self.path)?;
+            Ok(ReadConn {
+                conn: Some(conn),
+                pool: Arc::clone(&self.readers),
+            })
         }
     }
 
@@ -105,7 +104,7 @@ impl DbPool {
         Ok(connection)
     }
 
-    /// Run a write operation in an immediate SQLite transaction.
+    /// Run a write operation in an immediate `SQLite` transaction.
     ///
     /// The immediate lock serializes the caller's reads and writes with
     /// writers in other processes. Errors roll back on drop.
@@ -138,13 +137,13 @@ fn apply_pragmas(conn: &Connection) -> Result<(), LificError> {
     Ok(())
 }
 
-/// Disable SQLite's memory-usage statistics before the first connection is
+/// Disable `SQLite`'s memory-usage statistics before the first connection is
 /// created. When memstatus is on (the default), every sqlite3 malloc/free in
 /// the entire process serializes on one global mutex (`mem0`) — with many
 /// threads (e.g. the parallel test runner) this becomes a futex storm that
 /// burns more CPU in the kernel than the actual queries. We never read
-/// sqlite3_memory_used(), so the stats are pure overhead. Must run before
-/// SQLite initializes; once it has, the call returns SQLITE_MISUSE and is a
+/// `sqlite3_memory_used()`, so the stats are pure overhead. Must run before
+/// `SQLite` initializes; once it has, the call returns `SQLITE_MISUSE` and is a
 /// harmless no-op.
 fn disable_sqlite_memstatus() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -233,7 +232,7 @@ pub fn open_memory() -> Result<DbPool, LificError> {
     })
 }
 
-/// Open (or create) the SQLite database, run migrations, and return a pool.
+/// Open (or create) the `SQLite` database, run migrations, and return a pool.
 pub fn open(path: &Path) -> Result<DbPool, LificError> {
     disable_sqlite_memstatus();
     secure_parent(path)?;
@@ -339,11 +338,14 @@ fn secure_parent(path: &Path) -> Result<(), LificError> {
     Ok(())
 }
 
-fn secure_file(_path: &Path) -> Result<(), LificError> {
+fn secure_file(path: &Path) -> Result<(), LificError> {
+    #[cfg(not(unix))]
+    let _ = path;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| LificError::Internal(format!("secure database file: {error}")))?;
     }
     Ok(())

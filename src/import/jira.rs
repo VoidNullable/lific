@@ -70,7 +70,7 @@ fn render_block(node: &serde_json::Value, out: &mut String) {
             let level = node
                 .get("attrs")
                 .and_then(|a| a.get("level"))
-                .and_then(|l| l.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1)
                 .clamp(1, 6) as usize;
             out.push_str(&"#".repeat(level));
@@ -178,8 +178,10 @@ fn render_inline_node(node: &serde_json::Value, out: &mut String) {
                 .get("attrs")
                 .and_then(|a| a.get("text"))
                 .and_then(|t| t.as_str())
-                .map(|s| s.trim_start_matches('@').to_string())
-                .unwrap_or_else(|| "someone".to_string());
+                .map_or_else(
+                    || "someone".to_string(),
+                    |s| s.trim_start_matches('@').to_string(),
+                );
             out.push('@');
             out.push_str(&name);
         }
@@ -225,7 +227,7 @@ fn apply_marks(text: &str, node: &serde_json::Value) -> String {
                     .get("attrs")
                     .and_then(|a| a.get("href"))
                     .and_then(|h| h.as_str())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
             }
             // Unknown mark: leave text unwrapped.
             _ => {}
@@ -373,8 +375,7 @@ pub fn map_issue(
         .status
         .as_ref()
         .and_then(|s| s.status_category.as_ref())
-        .map(|c| map_status(&c.key, map))
-        .unwrap_or(map.new);
+        .map_or(map.new, |c| map_status(&c.key, map));
 
     let priority = issue
         .fields

@@ -27,7 +27,7 @@ pub enum Transport {
     },
     /// Local stdio server: the client spawns `lific --db <db> mcp` itself.
     Stdio {
-        /// Absolute path to the SQLite database the spawned server should open.
+        /// Absolute path to the `SQLite` database the spawned server should open.
         db_path: String,
         /// The agent credential carried by this stdio session (LIFIC-18). Written
         /// into the client config's env field as `LIFIC_TOKEN` so the spawned
@@ -217,7 +217,7 @@ pub struct ClientSpec {
     pub oauth: OauthSupport,
     pub format: Format,
     /// The env-field name this client uses for a stdio command's environment
-    /// (LIFIC-18): `environment` for OpenCode, `env` for Claude Code and Codex,
+    /// (LIFIC-18): `environment` for `OpenCode`, `env` for Claude Code and Codex,
     /// per those tools' config schemas. `None` when the client's stdio entry
     /// cannot carry an env map (the token is then simply not written).
     pub stdio_env_key: Option<&'static str>,
@@ -246,7 +246,7 @@ impl ClientSpec {
         let mut entry = (self.compile)(cfg);
         // The mappers don't set `name` themselves; inject the canonical server
         // name here so there's one source of truth (always `"lific"`).
-        entry.name = cfg.name.clone();
+        entry.name.clone_from(&cfg.name);
         // LIFIC-18: for a stdio transport carrying an agent token, write the
         // token into the client's env field as LIFIC_TOKEN so the spawned
         // server resolves the caller as the bound agent. Clients that can't
@@ -279,24 +279,21 @@ impl ClientSpec {
 
 /// `~/.config/<rest>` on Linux/macOS; `%APPDATA%\<rest>` on Windows.
 fn config_dir(base: &PathBase, rest: &[&str]) -> PathBuf {
-    match base.os {
-        Os::Windows => {
-            let mut p = base
-                .appdata
-                .clone()
-                .unwrap_or_else(|| base.home.join("AppData").join("Roaming"));
-            for r in rest {
-                p = p.join(r);
-            }
-            p
+    if base.os == Os::Windows {
+        let mut p = base
+            .appdata
+            .clone()
+            .unwrap_or_else(|| base.home.join("AppData").join("Roaming"));
+        for r in rest {
+            p = p.join(r);
         }
-        _ => {
-            let mut p = base.home.join(".config");
-            for r in rest {
-                p = p.join(r);
-            }
-            p
+        p
+    } else {
+        let mut p = base.home.join(".config");
+        for r in rest {
+            p = p.join(r);
         }
+        p
     }
 }
 
@@ -459,8 +456,9 @@ pub fn all_clients() -> Vec<ClientSpec> {
                             "claude_desktop_config.json",
                         ],
                     ),
-                    Os::Windows => config_dir(b, &["Claude", "claude_desktop_config.json"]),
-                    Os::Linux => config_dir(b, &["Claude", "claude_desktop_config.json"]),
+                    Os::Windows | Os::Linux => {
+                        config_dir(b, &["Claude", "claude_desktop_config.json"])
+                    }
                 })
             },
             project_path: |_| None,
@@ -569,8 +567,7 @@ pub fn all_clients() -> Vec<ClientSpec> {
                         b,
                         &["Library", "Application Support", "Code", "User", "mcp.json"],
                     ),
-                    Os::Windows => config_dir(b, &["Code", "User", "mcp.json"]),
-                    Os::Linux => config_dir(b, &["Code", "User", "mcp.json"]),
+                    Os::Windows | Os::Linux => config_dir(b, &["Code", "User", "mcp.json"]),
                 })
             },
             project_path: |b| Some(project_rel(b, &[".vscode", "mcp.json"])),
@@ -999,7 +996,7 @@ mod tests {
         for id in ["claude-desktop", "goose", "crush"] {
             match find_client(id).unwrap().oauth {
                 OauthSupport::Unsupported { reason } => {
-                    assert!(!reason.is_empty(), "{id} needs a reason")
+                    assert!(!reason.is_empty(), "{id} needs a reason");
                 }
                 OauthSupport::Capable { .. } => panic!("{id} should not be OAuth-capable"),
             }

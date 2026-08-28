@@ -2,7 +2,7 @@
 //!
 //! Some uploads are interesting for what is *inside* them rather than for
 //! their bytes. A zip attached to a bug report is usually a set of logs, and a
-//! SQLite file attached to one is usually a reproduction database. Downloading
+//! `SQLite` file attached to one is usually a reproduction database. Downloading
 //! either just to see what it holds is friction, so this module answers that
 //! question server-side and the API returns it as JSON.
 //!
@@ -15,7 +15,7 @@
 //! costs us the same handful of microseconds as an empty one, and the
 //! declared size is reported as the untrusted number it is.
 //!
-//! The SQLite reader opens a *copy* of the file with `immutable=1`, `mode=ro`
+//! The `SQLite` reader opens a *copy* of the file with `immutable=1`, `mode=ro`
 //! and `query_only`, and runs exactly two shapes of query: a `sqlite_master`
 //! scan restricted to `type='table'`, and a `COUNT(*)` per table. Views and
 //! triggers are skipped on purpose, since evaluating a view means executing
@@ -43,7 +43,7 @@ pub struct ZipEntry {
     pub compressed: u64,
 }
 
-/// One table in a SQLite database, with its real row count.
+/// One table in a `SQLite` database, with its real row count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SqliteTable {
     pub name: String,
@@ -70,7 +70,7 @@ pub enum Preview {
 
 /// Build the preview for a blob, choosing the parser by magic bytes.
 ///
-/// The stored MIME is deliberately not consulted. A SQLite file uploaded
+/// The stored MIME is deliberately not consulted. A `SQLite` file uploaded
 /// before `application/vnd.sqlite3` joined the allowlist may be recorded as
 /// something else entirely, and the header is the authoritative answer either
 /// way.
@@ -128,8 +128,8 @@ fn find_eocd(bytes: &[u8]) -> Option<usize> {
 /// Resolve `(central directory offset, declared entry count)`, following the
 /// Zip64 locator when the classic 16-bit / 32-bit fields are saturated.
 fn central_directory_location(bytes: &[u8], eocd: usize) -> Option<(usize, usize)> {
-    let entries = le_u16(bytes, eocd + 10)? as u64;
-    let offset = le_u32(bytes, eocd + 16)? as u64;
+    let entries = u64::from(le_u16(bytes, eocd + 10)?);
+    let offset = u64::from(le_u32(bytes, eocd + 16)?);
 
     if entries != u64::from(u16::MAX) && offset != u64::from(u32::MAX) {
         return Some((
@@ -239,10 +239,10 @@ fn sanitize_entry_name(raw: &[u8]) -> String {
 
 // ── SQLite ───────────────────────────────────────────────────
 
-/// Open a copy of `bytes` as a read-only SQLite database and list its tables
+/// Open a copy of `bytes` as a read-only `SQLite` database and list its tables
 /// with row counts.
 ///
-/// The copy is the point. `immutable=1` already promises SQLite the file will
+/// The copy is the point. `immutable=1` already promises `SQLite` the file will
 /// not change, which suppresses WAL and journal creation, but writing the copy
 /// into a fresh temporary directory means the stored, content-addressed blob
 /// is not even reachable from the connection.
@@ -369,7 +369,7 @@ pub(crate) mod fixtures {
         out
     }
 
-    /// Serialize a tiny real SQLite database to bytes.
+    /// Serialize a tiny real `SQLite` database to bytes.
     pub(crate) fn build_sqlite() -> Vec<u8> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.sqlite3");

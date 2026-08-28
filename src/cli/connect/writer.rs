@@ -96,7 +96,7 @@ fn render_from(
     } else {
         Action::Created
     };
-    let existing_str = existing.map(|e| e.contents.as_str()).unwrap_or("");
+    let existing_str = existing.map_or("", |e| e.contents.as_str());
     let contents = match format {
         Format::Json => render_json(existing_str, entry)?,
         Format::Toml => render_toml(existing_str, entry)?,
@@ -110,7 +110,7 @@ fn render_from(
 pub fn write(path: &Path, format: Format, entry: &CompiledEntry) -> Result<Action, WriteError> {
     let existing = read_existing(path)?;
     let rendered = render_from(existing.as_ref(), format, entry)?;
-    let parent_existed = path.parent().map(|parent| parent.exists()).unwrap_or(true);
+    let parent_existed = path.parent().is_none_or(std::path::Path::exists);
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -179,39 +179,47 @@ pub fn write(path: &Path, format: Format, entry: &CompiledEntry) -> Result<Actio
 /// `connect` cannot leave the config missing even though the write reported
 /// success. Unix only: Windows exposes no directory handle to sync, and
 /// `fsync` on a directory has no meaning there.
-fn sync_parent_dir(_dir: &Path) -> Result<(), WriteError> {
+fn sync_parent_dir(dir: &Path) -> Result<(), WriteError> {
+    #[cfg(not(unix))]
+    let _ = dir;
+
     #[cfg(unix)]
     {
-        std::fs::File::open(_dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| WriteError::new(format!("failed to sync {}: {e}", _dir.display())))?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| WriteError::new(format!("failed to sync {}: {e}", dir.display())))?;
     }
     Ok(())
 }
 
-fn set_private_file(_file: &std::fs::File) -> Result<(), WriteError> {
+fn set_private_file(file: &std::fs::File) -> Result<(), WriteError> {
+    #[cfg(not(unix))]
+    let _ = file;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        _file
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|e| WriteError::new(format!("failed to tighten config staging file: {e}")))?;
     }
     Ok(())
 }
 
-fn set_private_dir(_path: &Path) -> Result<(), WriteError> {
+fn set_private_dir(path: &Path) -> Result<(), WriteError> {
+    #[cfg(not(unix))]
+    let _ = path;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let mode = std::fs::metadata(_path)
-            .map_err(|e| WriteError::new(format!("failed to inspect {}: {e}", _path.display())))?
+        let mode = std::fs::metadata(path)
+            .map_err(|e| WriteError::new(format!("failed to inspect {}: {e}", path.display())))?
             .mode()
             & 0o777;
         if mode & 0o022 != 0 {
             return Err(WriteError::new(format!(
                 "config directory {} is writable by group/others; remove group/other write permissions before writing embedded credentials",
-                _path.display()
+                path.display()
             )));
         }
     }
@@ -414,7 +422,7 @@ fn render_toml(existing: &str, entry: &CompiledEntry) -> Result<String, WriteErr
 }
 
 /// Convert a JSON scalar/array/object (the compiled entry's shape) into a
-/// toml_edit value. Codex entries carry strings, string arrays, and — for the
+/// `toml_edit` value. Codex entries carry strings, string arrays, and — for the
 /// stdio agent token (LIFIC-18) — a nested `env` object of strings.
 fn json_to_toml_value(v: &serde_json::Value) -> Result<toml_edit::Item, WriteError> {
     use toml_edit::{Array, InlineTable, Item, Value, value};
@@ -458,7 +466,7 @@ fn json_to_toml_value(v: &serde_json::Value) -> Result<toml_edit::Item, WriteErr
             }
             Ok(Item::Value(Value::InlineTable(inline)))
         }
-        other => Err(WriteError::new(format!("unsupported TOML value: {other}"))),
+        serde_json::Value::Null => Err(WriteError::new("unsupported TOML null value")),
     }
 }
 

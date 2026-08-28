@@ -510,12 +510,11 @@ async fn bounded_send<F>(send: F) -> SocketFlow
 where
     F: std::future::Future<Output = Result<(), axum::Error>>,
 {
-    match time::timeout(SOCKET_SEND_TIMEOUT, send).await {
-        Ok(result) => SocketFlow::from_send(result),
-        Err(_) => {
-            warn!("realtime websocket send timed out; dropping the socket");
-            SocketFlow::Close
-        }
+    if let Ok(result) = time::timeout(SOCKET_SEND_TIMEOUT, send).await {
+        SocketFlow::from_send(result)
+    } else {
+        warn!("realtime websocket send timed out; dropping the socket");
+        SocketFlow::Close
     }
 }
 
@@ -626,7 +625,7 @@ async fn handle_client_message(
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
     match message {
-        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => SocketFlow::Close,
+        Some(Ok(Message::Close(_)) | Err(_)) | None => SocketFlow::Close,
         Some(Ok(message)) => {
             let now = Instant::now();
             if client.admit_message(now) == ClientAdmission::RateLimited {
@@ -656,20 +655,19 @@ async fn send_activity_baseline(
     client: &mut ClientState,
 ) -> SocketFlow {
     let now = Instant::now();
-    let baseline = match client.cached_activity_baseline(now) {
-        Some(event) => Ok(event),
-        None => {
-            let baseline_db = db.clone();
-            let baseline_user = auth_user.clone();
-            tokio::task::spawn_blocking(move || activity_baseline(&baseline_db, &baseline_user))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(crate::error::LificError::Internal(format!(
-                        "websocket baseline task failed: {error}"
-                    )))
-                })
-                .inspect(|event| client.cache_activity_baseline(now, event.clone()))
-        }
+    let baseline = if let Some(event) = client.cached_activity_baseline(now) {
+        Ok(event)
+    } else {
+        let baseline_db = db.clone();
+        let baseline_user = auth_user.clone();
+        tokio::task::spawn_blocking(move || activity_baseline(&baseline_db, &baseline_user))
+            .await
+            .unwrap_or_else(|error| {
+                Err(crate::error::LificError::Internal(format!(
+                    "websocket baseline task failed: {error}"
+                )))
+            })
+            .inspect(|event| client.cache_activity_baseline(now, event.clone()))
     };
     match baseline_response(baseline) {
         RealtimeEvent::ResyncRequired => send_resync(socket, client).await,
@@ -720,12 +718,11 @@ fn activity_baseline(
 }
 
 async fn send_event(socket: &mut WebSocket, event: &RealtimeEvent) -> SocketFlow {
-    match serde_json::to_string(event) {
-        Ok(json) => send_bounded(socket, Message::Text(json.into())).await,
-        Err(_) => {
-            warn!("failed to serialize realtime event");
-            close_socket(socket).await
-        }
+    if let Ok(json) = serde_json::to_string(event) {
+        send_bounded(socket, Message::Text(json.into())).await
+    } else {
+        warn!("failed to serialize realtime event");
+        close_socket(socket).await
     }
 }
 

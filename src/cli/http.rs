@@ -1959,7 +1959,10 @@ mod tests {
         );
         assert!(!remote.is_empty(), "the {label} export wrote nothing");
         assert!(
-            remote.iter().all(|(path, _)| path.ends_with(".md")),
+            remote.iter().all(|(path, _)| {
+                path.rsplit_once('.')
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("md"))
+            }),
             "the {label} export left something other than markdown: {remote:?}"
         );
 

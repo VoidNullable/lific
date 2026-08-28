@@ -139,10 +139,11 @@ fn run_github(
         resolve_bot(pool, "github", "GitHub Import", user)?
     };
 
-    let fetcher = github::LiveGithub::new(&owner, &name, token.map(|s| s.to_string()))?;
+    let fetcher =
+        github::LiveGithub::new(&owner, &name, token.map(std::string::ToString::to_string))?;
     let slug = format!("{owner}/{name}");
-    let fetched = github::collect(&fetcher, &slug, state, &status_map)?;
-    let summary = import::run_import(pool, project_id, bot, &fetched, dry_run)?;
+    let issues = github::collect(&fetcher, &slug, state, &status_map)?;
+    let summary = import::run_import(pool, project_id, bot, &issues, dry_run)?;
     Ok(summary)
 }
 
@@ -167,8 +168,8 @@ fn run_linear(
     };
 
     let fetcher = linear::LiveLinear::new(team, token)?;
-    let fetched = linear::collect(&fetcher, &map)?;
-    let summary = import::run_import(pool, project_id, bot, &fetched, dry_run)?;
+    let issues = linear::collect(&fetcher, &map)?;
+    let summary = import::run_import(pool, project_id, bot, &issues, dry_run)?;
     Ok(summary)
 }
 
@@ -195,8 +196,8 @@ fn run_jira(
     };
 
     let fetcher = jira::LiveJira::new(site, jira_project, email, token)?;
-    let fetched = jira::collect(&fetcher, fetcher.site_slug(), &map)?;
-    let summary = import::run_import(pool, project_id, bot, &fetched, dry_run)?;
+    let issues = jira::collect(&fetcher, fetcher.site_slug(), &map)?;
+    let summary = import::run_import(pool, project_id, bot, &issues, dry_run)?;
     Ok(summary)
 }
 

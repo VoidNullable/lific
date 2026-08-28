@@ -61,7 +61,7 @@ pub(super) fn resolve_http_credential(
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Execute commands against the configured SQLite database.
+    /// Execute commands against the configured `SQLite` database.
     Sql,
     /// Execute commands against a Lific HTTP server.
     Http,
@@ -78,7 +78,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// Path to the SQLite database file (overrides config)
+    /// Path to the `SQLite` database file (overrides config)
     #[arg(long, global = true)]
     pub db: Option<PathBuf>,
 
@@ -86,15 +86,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Backend for data commands (defaults to the local SQLite database).
+    /// Backend for data commands (defaults to the local `SQLite` database).
     #[arg(long, global = true, value_enum, default_value_t = BackendKind::Sql)]
     pub backend: BackendKind,
 
-    /// Base URL for the HTTP backend (also read from LIFIC_URL).
+    /// Base URL for the HTTP backend (also read from `LIFIC_URL`).
     #[arg(long, global = true, env = "LIFIC_URL")]
     pub url: Option<String>,
 
-    /// API key for the HTTP backend (also read from LIFIC_API_KEY; login
+    /// API key for the HTTP backend (also read from `LIFIC_API_KEY`; login
     /// credentials are used when this is omitted).
     #[arg(long = "api-key", global = true, env = "LIFIC_API_KEY")]
     pub api_key: Option<String>,
@@ -126,12 +126,12 @@ pub enum Command {
     /// OAuth token is stored in your OS keyring (or a 0600 file fallback) so
     /// later commands can reuse it.
     ///
-    /// Agent/CI friendly: `--non-interactive` prints the code + device_code as
+    /// Agent/CI friendly: `--non-interactive` prints the code + `device_code` as
     /// JSON and exits immediately; complete the login later (after a human
     /// approves) with `lific login --complete <device_code>`.
     Login {
-        /// Base URL of the server (default: server.public_url, else
-        /// http://127.0.0.1:<port>).
+        /// Base URL of the server (default: `server.public_url`, else
+        /// <http://127.0.0.1>:<port>).
         #[arg(long)]
         url: Option<String>,
 
@@ -140,7 +140,7 @@ pub enum Command {
         #[arg(long = "non-interactive")]
         non_interactive: bool,
 
-        /// Resume a previously started login by polling for this device_code
+        /// Resume a previously started login by polling for this `device_code`
         /// until it is approved/denied/expired, then store the token.
         #[arg(long)]
         complete: Option<String>,
@@ -158,8 +158,8 @@ pub enum Command {
     /// Sign out: delete the stored credential for a server and best-effort
     /// revoke it server-side.
     Logout {
-        /// Base URL of the server (default: server.public_url, else
-        /// http://127.0.0.1:<port>).
+        /// Base URL of the server (default: `server.public_url`, else
+        /// <http://127.0.0.1>:<port>).
         #[arg(long)]
         url: Option<String>,
     },
@@ -173,7 +173,7 @@ pub enum Command {
     /// (not failed) when nothing is listening.
     Doctor {
         /// API key to test an authorized MCP round-trip. Falls back to the
-        /// LIFIC_API_KEY environment variable. Without a key, doctor still
+        /// `LIFIC_API_KEY` environment variable. Without a key, doctor still
         /// verifies that auth is enforced and discovery is advertised.
         #[arg(long, env = "LIFIC_API_KEY")]
         key: Option<String>,
@@ -183,7 +183,7 @@ pub enum Command {
     ///
     /// One command, whole story: writes lific.toml (kept if already present),
     /// creates the database, prints your initial API key, installs a
-    /// background service (systemd user unit on Linux, LaunchAgent on macOS)
+    /// background service (systemd user unit on Linux, `LaunchAgent` on macOS)
     /// and starts it, then waits until the server answers. Re-running is safe
     /// and repairs whatever is missing. Use `--no-service` if you'd rather run
     /// `lific start` in the foreground yourself.
@@ -237,7 +237,7 @@ pub enum Command {
     /// Produces `lific_YYYYMMDD_HHMMSS.tar.gz` (gitea-dump style) containing a
     /// consistent snapshot of the database, every attachment blob, and a
     /// `manifest.json`. Safe to run while the server is running (the DB is
-    /// snapshotted via SQLite's online backup, no writer lock is held). The archive is
+    /// snapshotted via `SQLite`'s online backup, no writer lock is held). The archive is
     /// chmod 0600. Point external harnesses (restic/borg/cron) at the output,
     /// or call this as a pre-backup hook.
     Dump {
@@ -310,8 +310,8 @@ pub enum Command {
         #[arg(long)]
         oauth: bool,
 
-        /// Override the MCP URL (default: server.public_url, else
-        /// http://127.0.0.1:<port>/mcp).
+        /// Override the MCP URL (default: `server.public_url`, else
+        /// <http://127.0.0.1>:<port>/mcp).
         #[arg(long)]
         url: Option<String>,
 
@@ -503,7 +503,7 @@ pub enum ImportAction {
         #[arg(long, default_value = "all")]
         state: String,
 
-        /// GitHub token (falls back to GITHUB_TOKEN). Optional for public
+        /// GitHub token (falls back to `GITHUB_TOKEN`). Optional for public
         /// repos, but strongly recommended to avoid the 60 req/hr anon limit.
         #[arg(long, env = "GITHUB_TOKEN")]
         token: Option<String>,
@@ -536,7 +536,7 @@ pub enum ImportAction {
         #[arg(long)]
         project: String,
 
-        /// Linear personal API key (falls back to LINEAR_API_KEY).
+        /// Linear personal API key (falls back to `LINEAR_API_KEY`).
         #[arg(long, env = "LINEAR_API_KEY")]
         token: Option<String>,
 
@@ -563,11 +563,11 @@ pub enum ImportAction {
         #[arg(long)]
         project: String,
 
-        /// Jira account email (falls back to JIRA_EMAIL).
+        /// Jira account email (falls back to `JIRA_EMAIL`).
         #[arg(long, env = "JIRA_EMAIL")]
         email: Option<String>,
 
-        /// Jira API token (falls back to JIRA_API_TOKEN).
+        /// Jira API token (falls back to `JIRA_API_TOKEN`).
         #[arg(long, env = "JIRA_API_TOKEN")]
         token: Option<String>,
 

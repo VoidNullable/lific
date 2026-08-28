@@ -90,7 +90,7 @@ pub trait DeviceFlow {
 /// consecutive `slow_down` signals we've seen. RFC 8628 says to increase the
 /// interval by 5 seconds on each `slow_down`.
 pub fn poll_backoff(base_interval: u64, slow_downs: u32) -> u64 {
-    base_interval + 5 * (slow_downs as u64)
+    base_interval + 5 * u64::from(slow_downs)
 }
 
 /// Run the polling loop to a terminal outcome, sleeping `sleep` between polls.

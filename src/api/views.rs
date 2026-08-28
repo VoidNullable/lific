@@ -30,7 +30,10 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::views;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{CreateSavedView, Role, SavedView, UpdateSavedView},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -75,7 +78,7 @@ pub(super) async fn create_view(
     Ok(Json(view))
 }
 
-/// PATCH /api/projects/{id}/views/{view_id} — rename, replace the config,
+/// PATCH /`api/projects/{id}/views/{view_id`} — rename, replace the config,
 /// and/or (un)set the default flag, all independently addressable. 404 if
 /// `view_id` doesn't exist, belongs to a different project, or belongs to a
 /// different user (see the module doc comment — never a 403 here).
@@ -95,7 +98,7 @@ pub(super) async fn update_view(
     Ok(Json(view))
 }
 
-/// DELETE /api/projects/{id}/views/{view_id} — same ownership 404 as PATCH.
+/// DELETE /`api/projects/{id}/views/{view_id`} — same ownership 404 as PATCH.
 pub(super) async fn delete_view(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,

@@ -230,8 +230,7 @@ pub fn map_issue(
             author: c
                 .user
                 .as_ref()
-                .map(|u| u.login.clone())
-                .unwrap_or_else(|| "ghost".to_string()),
+                .map_or_else(|| "ghost".to_string(), |u| u.login.clone()),
             created_at: c.created_at.clone(),
             body: c.body.clone().unwrap_or_default(),
         })
@@ -500,7 +499,7 @@ impl GithubFetcher for LiveGithub {
             .headers()
             .get("link")
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let issues: Vec<GithubIssue> = Self::json_bounded(resp, "issues")?;
         if issues.len() > 100 {
             return Err(GithubImportError::Limit(GithubLimit::PageItems {
@@ -524,7 +523,7 @@ impl GithubFetcher for LiveGithub {
                 .headers()
                 .get("link")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             let batch: Vec<GithubComment> = Self::json_bounded(resp, "comments")?;
             if batch.len() > 100 {
                 return Err(GithubImportError::Limit(GithubLimit::PageItems {

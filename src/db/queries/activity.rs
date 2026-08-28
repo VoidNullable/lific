@@ -139,7 +139,8 @@ pub fn list_activity(
         n + 2,
     );
 
-    let refs: Vec<&dyn rusqlite::types::ToSql> = sp.iter().map(|p| p.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::types::ToSql> =
+        sp.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), row_to_activity)?;
     let items: Vec<Activity> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -217,7 +218,7 @@ mod tests {
     use crate::db::models::*;
     use crate::db::queries;
 
-    /// Seed a project and return (pool, project_id).
+    /// Seed a project and return (pool, `project_id`).
     fn seeded() -> (crate::db::DbPool, i64) {
         let pool = crate::db::open_memory().expect("test db");
         let project = {

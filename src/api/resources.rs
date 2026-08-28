@@ -6,7 +6,13 @@ use rusqlite::Connection;
 
 use crate::authz;
 use crate::db::queries::ResourceTable;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{
+        CreateFolder, CreateLabel, CreateModule, Folder, Label, Module, Role, UpdateFolder,
+        UpdateLabel, UpdateModule,
+    },
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 

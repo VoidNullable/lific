@@ -14,7 +14,15 @@ use crate::{
     links::{IssueLinkContext, MarkdownReference},
 };
 
-use super::schemas::*;
+use super::schemas::{
+    AddCommentInput, BulkUpdateInput, CreateIssueInput, CreatePageInput, CreatePlanInput,
+    DeleteCommentInput, DeleteInput, EditCommentInput, EditIssueInput, EditPageInput,
+    EditPlanStepInput, ExportInput, GetActivityInput, GetAttachmentInput, GetBoardInput,
+    GetIssueInput, GetPageInput, GetPlanInput, LinkIssuesInput, ListAttachmentsInput,
+    ListCommentsInput, ListIssuesInput, ListResourcesInput, ManageResourceInput, PlanStepInput,
+    SearchInput, UnlinkIssuesInput, UpdateIssueInput, UpdatePageInput, UpdatePlanStepInput,
+    UploadAttachmentInput,
+};
 use super::{LificMcp, current_issue_link_context, sanitize_error};
 
 /// Self-onboarding nudge (LIF-257): shown by cold read tools when the DB has
@@ -431,8 +439,8 @@ impl Display for CommentLines<'_> {
     }
 }
 
-/// Render a plan + its step tree for get_plan output, with complete step
-/// descriptions (get_plan is the rehydration tool and the only read path
+/// Render a plan + its step tree for `get_plan` output, with complete step
+/// descriptions (`get_plan` is the rehydration tool and the only read path
 /// for them). Step lines carry `#<id>` so the agent can target edits, and
 /// issue-linked steps show provenance ("via LIF-42" / "reopened — LIF-42
 /// reopened").
@@ -727,12 +735,13 @@ impl Display for PlanSteps<'_> {
             }?;
             formatter.write_char('\n')?;
             (!node.description.is_empty())
-                .then(|| match self.full_descriptions {
-                    true => node.description.lines().try_for_each(|line| {
-                        (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
-                        writeln!(formatter, "    {line}")
-                    }),
-                    false => {
+                .then(|| {
+                    if self.full_descriptions {
+                        node.description.lines().try_for_each(|line| {
+                            (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
+                            writeln!(formatter, "    {line}")
+                        })
+                    } else {
                         (0..self.depth).try_for_each(|_| formatter.write_str("  "))?;
                         writeln!(formatter, "    {}", truncate_value(&node.description, 100))
                     }
@@ -1419,7 +1428,7 @@ impl LificMcp {
                         return Ok(self.empty_search_result());
                     }
                     Err(crate::error::LificError::NotFound(error)) => {
-                        return Err(error.to_string());
+                        return Err(error.clone());
                     }
                     Ok(_) => {
                         return Ok(self.empty_search_result());
@@ -1962,18 +1971,14 @@ impl LificMcp {
         .map_err(|error| format!("export worker failed: {error}"))??;
 
         match kind {
-            Kind::Page => Ok(bundle
-                .files
-                .into_iter()
-                .next()
-                .map(|file| file.content)
-                .unwrap_or_else(|| "Error: page export produced no files".into())),
-            Kind::Issue => Ok(bundle
-                .files
-                .into_iter()
-                .next()
-                .map(|file| file.content)
-                .unwrap_or_else(|| "Error: issue export produced no files".into())),
+            Kind::Page => Ok(bundle.files.into_iter().next().map_or_else(
+                || "Error: page export produced no files".into(),
+                |file| file.content,
+            )),
+            Kind::Issue => Ok(bundle.files.into_iter().next().map_or_else(
+                || "Error: issue export produced no files".into(),
+                |file| file.content,
+            )),
             Kind::Project => Ok(render_response(|output| {
                 writeln!(output, "{} exported file(s):", bundle.files.len())?;
                 bundle
@@ -4105,8 +4110,8 @@ impl LificMcp {
                     separator: "; ",
                 }
             )?;
-            match input.echo_tree.unwrap_or(false) {
-                true => write!(
+            if input.echo_tree.unwrap_or(false) {
+                write!(
                     output,
                     "{}",
                     PlanView {
@@ -4114,15 +4119,16 @@ impl LificMcp {
                         context: context.as_deref(),
                         full_descriptions: false,
                     }
-                ),
-                false => write!(
+                )
+            } else {
+                write!(
                     output,
                     "{} [{}]: {}/{} done",
                     plan_reference(context.as_deref(), &plan),
                     plan.status,
                     plan.done_count,
                     plan.step_count
-                ),
+                )
             }
         }))
     }
@@ -4451,8 +4457,8 @@ impl LificMcp {
     }
 }
 
-/// Recursively resolve an MCP PlanStepInput (issue identifiers → ids) into a
-/// query-layer CreatePlanStep, so create_plan can author the whole tree in one
+/// Recursively resolve an MCP `PlanStepInput` (issue identifiers → ids) into a
+/// query-layer `CreatePlanStep`, so `create_plan` can author the whole tree in one
 /// transaction.
 fn build_create_step(
     conn: &rusqlite::Connection,
@@ -4624,9 +4630,10 @@ impl Display for AttachmentLines<'_> {
                 HumanSize(row.size_bytes),
                 row.uploader,
                 row.created_at,
-                match row.links.is_empty() {
-                    true => "unlinked".to_string(),
-                    false => row.links.join(","),
+                if row.links.is_empty() {
+                    "unlinked".to_string()
+                } else {
+                    row.links.join(",")
                 }
             )
         })
@@ -4755,7 +4762,7 @@ mod tests {
         std::iter::from_fn(|| rx.try_recv().ok().map(|message| message.event)).collect()
     }
 
-    /// Seed a project via manage_resource, return identifier.
+    /// Seed a project via `manage_resource`, return identifier.
     fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
@@ -5548,7 +5555,7 @@ mod tests {
         );
     }
 
-    /// LIF-411: REST has never returned raw SQLite text to a client
+    /// LIF-411: REST has never returned raw `SQLite` text to a client
     /// (`error.rs` logs it and answers "internal server error"); MCP handed it
     /// straight to the agent, leaking schema details into whatever transcript
     /// the agent writes. The detail now goes to the log only.
@@ -7108,7 +7115,7 @@ mod tests {
         attachment.id
     }
 
-    /// Every (entity_type, entity_id) an attachment is currently linked to.
+    /// Every (`entity_type`, `entity_id`) an attachment is currently linked to.
     fn links_for(m: &LificMcp, attachment_id: i64) -> Vec<(String, i64)> {
         let conn = m.db.read().unwrap();
         let mut stmt = conn
@@ -8352,7 +8359,7 @@ mod tests {
 
         let result = m.edit_issue(Parameters(EditIssueInput {
             identifier: "EDE-1".into(),
-            old_string: "".into(),
+            old_string: String::new(),
             new_string: "x".into(),
             field: None,
             replace_all: None,
@@ -8808,7 +8815,7 @@ mod tests {
     }
 
     /// Move a page into a folder, then move it back to root via the
-    /// empty-string sentinel (folder_id = NULL).
+    /// empty-string sentinel (`folder_id` = NULL).
     #[test]
     fn mcp_update_page_clears_folder_with_empty_string() {
         let (m, _guard) = mcp();
@@ -9401,7 +9408,7 @@ mod tests {
     // ── LIF-143: edit_comment / delete_comment ─────────────────────────────
 
     /// Set `MCP_REQUEST_USER` to `user` (identity for the acting-user
-    /// resolution in edit/delete_comment) and hand the handler lock back so
+    /// resolution in `edit/delete_comment`) and hand the handler lock back so
     /// the caller holds it for its whole body — same discipline as
     /// `seed_user`. Create a fresh user first, then call this.
     fn act_as(user: &models::User) -> tokio::sync::MutexGuard<'static, ()> {
@@ -10171,8 +10178,8 @@ mod tests {
     /// Regression (LIF-155): rmcp executes tools on internally-spawned
     /// tasks, where tokio task-locals set around `service.handle()` are
     /// invisible. Attribution must therefore come from the serialized
-    /// MCP_REQUEST_USER global via LificMcp::write()'s explicit re-stamp.
-    /// This test reproduces the boundary with a literal tokio::spawn.
+    /// `MCP_REQUEST_USER` global via `LificMcp::write()`'s explicit re-stamp.
+    /// This test reproduces the boundary with a literal `tokio::spawn`.
     #[tokio::test]
     async fn mcp_attribution_survives_task_spawn() {
         let (m, _guard) = mcp();

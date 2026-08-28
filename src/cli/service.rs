@@ -11,7 +11,7 @@
 //! - **systemd (user unit)** on Linux: `~/.config/systemd/user/lific.service`,
 //!   enabled via `systemctl --user enable --now`. `loginctl enable-linger` is
 //!   attempted (best-effort) so the unit keeps running after logout.
-//! - **launchd (LaunchAgent)** on macOS: `~/Library/LaunchAgents/dev.lific.plist`,
+//! - **launchd (`LaunchAgent`)** on macOS: `~/Library/LaunchAgents/dev.lific.plist`,
 //!   loaded via `launchctl bootstrap gui/<uid>` (falling back to the legacy
 //!   `launchctl load -w` on older systems).
 //!
@@ -118,8 +118,7 @@ pub fn detect() -> Option<Manager> {
         let ok = Command::new("systemctl")
             .args(["--user", "show", "--property=Version"])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|o| o.status.success());
         if ok {
             return Some(Manager::SystemdUser);
         }
@@ -152,7 +151,7 @@ pub fn definition_path(manager: Manager) -> Result<PathBuf, String> {
 /// Render the systemd user unit. Paths are systemd-quoted so spaces survive.
 pub fn systemd_unit(plan: &ServicePlan) -> String {
     format!(
-        r#"# Managed by `lific init` / `lific service install`.
+        r"# Managed by `lific init` / `lific service install`.
 [Unit]
 Description=Lific issue tracker
 After=network.target
@@ -166,14 +165,14 @@ RestartSec=2
 
 [Install]
 WantedBy=default.target
-"#,
+",
         exe = systemd_quote(&plan.exe, true),
         config = systemd_quote(&plan.config, true),
         workdir = systemd_quote(&plan.workdir, false),
     )
 }
 
-/// Quote a path for a systemd ExecStart line (double quotes, escape embedded
+/// Quote a path for a systemd `ExecStart` line (double quotes, escape embedded
 /// quotes/backslashes). systemd's quoting rules accept this for paths.
 fn systemd_quote(p: &Path, escape_dollar: bool) -> String {
     let s = p.display().to_string();
@@ -191,7 +190,7 @@ fn systemd_quote(p: &Path, escape_dollar: bool) -> String {
     }
 }
 
-/// Render the launchd LaunchAgent plist.
+/// Render the launchd `LaunchAgent` plist.
 pub fn launchd_plist(plan: &ServicePlan) -> String {
     let log = plan.workdir.join("lific.log");
     format!(
@@ -262,7 +261,7 @@ fn launchd_domain() -> Result<String, String> {
     Err("launchd services are only available on macOS".to_string())
 }
 
-/// Load (or reload) the LaunchAgent at `path` into the user's GUI domain.
+/// Load (or reload) the `LaunchAgent` at `path` into the user's GUI domain.
 ///
 /// Shared by [`install`] and [`restart`], which perform an identical dance:
 /// boot out any already-loaded copy, bootstrap the new one, and fall back to
@@ -315,8 +314,7 @@ pub fn install(manager: Manager, plan: &ServicePlan) -> Result<InstallReport, St
             let linger = Command::new("loginctl")
                 .arg("enable-linger")
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|s| s.success());
             Ok(InstallReport {
                 manager: manager.label().into(),
                 definition: path.display().to_string(),
@@ -385,13 +383,11 @@ pub fn status(manager: Manager) -> Result<StatusReport, String> {
         Manager::SystemdUser => Command::new("systemctl")
             .args(["--user", "is-active", "--quiet", SYSTEMD_UNIT_NAME])
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
+            .is_ok_and(|s| s.success()),
         Manager::Launchd => Command::new("launchctl")
             .args(["print", &format!("{}/{LAUNCHD_LABEL}", launchd_domain()?)])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false),
+            .is_ok_and(|o| o.status.success()),
     };
     Ok(StatusReport {
         manager: manager.label().into(),

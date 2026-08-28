@@ -408,7 +408,7 @@ fn search_literal(
     visible_project_ids: Option<&HashSet<i64>>,
 ) -> Result<Vec<SearchResult>, LificError> {
     match q.sort.as_deref() {
-        None | Some("relevance") | Some("recent") => {}
+        None | Some("relevance" | "recent") => {}
         Some(other) => {
             return Err(LificError::BadRequest(format!(
                 "invalid sort '{other}'. Use relevance or recent."

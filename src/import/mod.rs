@@ -219,7 +219,7 @@ pub fn ensure_label(
 
 /// The write side: import one normalized issue into `project_id`, attributing
 /// comments to `bot_id` (when present). Idempotent — returns `Skipped` if the
-/// source marker already exists. Non-dry-run only; callers gate on dry_run.
+/// source marker already exists. Non-dry-run only; callers gate on `dry_run`.
 pub enum ApplyOutcome {
     /// Newly created; carries how many comments/labels were created.
     Created {
@@ -290,7 +290,7 @@ pub fn apply_issue(
 }
 
 /// Build the full summary for a set of fetched issues, either applying them
-/// (dry_run = false) or just counting (dry_run = true). Shared by CLI + web so
+/// (`dry_run` = false) or just counting (`dry_run` = true). Shared by CLI + web so
 /// a preview and a real run report the same shape.
 pub fn run_import(
     pool: &DbPool,

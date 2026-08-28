@@ -389,7 +389,7 @@ async fn register_client(
     }
 
     let client_name = req.client_name.unwrap_or_else(|| "MCP Client".into());
-    if client_name.len() > MAX_CLIENT_NAME_BYTES || client_name.chars().any(|c| c.is_control()) {
+    if client_name.len() > MAX_CLIENT_NAME_BYTES || client_name.chars().any(char::is_control) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -991,8 +991,7 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
     }
     let custom_option = if is_custom { " selected" } else { "" };
     options.push_str(&format!(
-        "<option value=\"{}\"{custom_option}>Custom tool&hellip;</option>",
-        CUSTOM_TOOL_OPTION
+        "<option value=\"{CUSTOM_TOOL_OPTION}\"{custom_option}>Custom tool&hellip;</option>"
     ));
 
     // The placeholder is only the selected placeholder when there's no remembered
@@ -1018,10 +1017,9 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
         var tool = document.getElementById('tool');
         var custom = document.getElementById('custom_tool');
         tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '{custom_option_value}' ? 'block' : 'none';
+            custom.style.display = tool.value === '{CUSTOM_TOOL_OPTION}' ? 'block' : 'none';
         }});
         </script>",
-        custom_option_value = CUSTOM_TOOL_OPTION,
     )
 }
 
@@ -1099,7 +1097,7 @@ fn resolve_approval_bot(
 fn normalize_user_code(input: &str) -> String {
     let cleaned: String = input
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_uppercase())
         .collect();
     if cleaned.len() == 8 {
@@ -1182,7 +1180,7 @@ async fn device_authorization(
     };
 
     if req.client_name.as_deref().is_some_and(|name| {
-        name.len() > MAX_CLIENT_NAME_BYTES || name.chars().any(|c| c.is_control())
+        name.len() > MAX_CLIENT_NAME_BYTES || name.chars().any(char::is_control)
     }) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1505,8 +1503,8 @@ struct TokenRequest {
     /// is then refused by the `grant_type` match: we issue no refresh tokens.
     #[allow(dead_code)]
     refresh_token: Option<String>,
-    /// RFC 8628 device grant: the opaque device_code returned by
-    /// /oauth/device_authorization.
+    /// RFC 8628 device grant: the opaque `device_code` returned by
+    /// /`oauth/device_authorization`.
     device_code: Option<String>,
 }
 
@@ -1818,8 +1816,7 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
 
     // Expiry check first (RFC 8628: expired_token).
     let expired = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
-        .map(|t| now >= t.with_timezone(&chrono::Utc))
-        .unwrap_or(true);
+        .map_or(true, |t| now >= t.with_timezone(&chrono::Utc));
     if expired {
         let _ = conn.execute(
             "DELETE FROM oauth_device_codes WHERE device_code_hash = ?1",
@@ -2167,7 +2164,7 @@ pub enum OAuthReject {
 
 /// Resolve an OAuth bearer token with one SQL statement.
 ///
-/// A connection alone is not a snapshot in SQLite autocommit mode: each
+/// A connection alone is not a snapshot in `SQLite` autocommit mode: each
 /// statement starts its own read transaction. Keep token validity, its nullable
 /// binding, the bound user, and the bot owner's liveness in one joined query so
 /// revocation cannot land between those decisions.
@@ -2349,7 +2346,7 @@ mod tests {
         router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242))))
     }
 
-    /// Register a client, returning the client_id.
+    /// Register a client, returning the `client_id`.
     async fn register_client_helper(app: &Router, redirect_uri: &str) -> String {
         let body = serde_json::json!({
             "redirect_uris": [redirect_uri],
@@ -3851,7 +3848,7 @@ mod tests {
 
     // ── LIF-252: device authorization flow (RFC 8628) ────────────────────
 
-    /// POST /oauth/device_authorization and return the parsed JSON.
+    /// POST /`oauth/device_authorization` and return the parsed JSON.
     async fn request_device_code(app: &Router, client_name: Option<&str>) -> serde_json::Value {
         let body = match client_name {
             Some(n) => format!("client_name={}", urlencoding::encode(n)),
@@ -4664,7 +4661,7 @@ mod tests {
         }
     }
 
-    /// Every OAuth expiry column is written with `to_rfc3339`, and SQLite's
+    /// Every OAuth expiry column is written with `to_rfc3339`, and `SQLite`'s
     /// `datetime('now')` is not that format. Compared as raw text they
     /// disagree within the same day: 'T' sorts after every digit, so
     /// '2026-08-20T11:59:00+00:00' reads as later than '2026-08-20 12:00:00'

@@ -1,6 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::models::*;
+use crate::db::models::{
+    CreatePlan, CreatePlanStep, ListPlansQuery, Plan, PlanStepNode, UpdatePlan,
+};
 use crate::error::LificError;
 
 use super::{savepoint, unescape_text};
@@ -146,7 +148,7 @@ fn assemble_tree(flat: Vec<PlanStepNode>) -> Vec<PlanStepNode> {
         children_of: &mut std::collections::HashMap<Option<i64>, Vec<PlanStepNode>>,
     ) -> Vec<PlanStepNode> {
         let mut nodes = children_of.remove(&parent).unwrap_or_default();
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             node.children = build(Some(node.id), children_of);
         }
         nodes
@@ -235,7 +237,8 @@ pub fn list_plans(conn: &Connection, q: &ListPlansQuery) -> Result<Vec<Plan>, Li
           ORDER BY {order_by}"
     );
 
-    let refs: Vec<&dyn rusqlite::types::ToSql> = pv.iter().map(|p| p.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::types::ToSql> =
+        pv.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), |row| {
         let proj: String = row.get(3)?;
@@ -301,7 +304,7 @@ fn insert_step_tree(
                 step.title,
                 unescape_text(&step.description),
                 step.issue_id,
-                step.done as i64,
+                i64::from(step.done),
             ],
         )?;
         let child_id = conn.last_insert_rowid();
@@ -379,7 +382,7 @@ pub fn assert_step_in_plan(
     Ok(())
 }
 
-/// Directly set a step's title (full rename, vs the find/replace edit_step_text).
+/// Directly set a step's title (full rename, vs the find/replace `edit_step_text`).
 pub fn set_step_title(conn: &Connection, step_id: i64, title: &str) -> Result<(), LificError> {
     let changed = conn.execute(
         "UPDATE plan_steps SET title = ?1, edited_at = datetime('now') WHERE id = ?2",
@@ -462,7 +465,7 @@ pub fn add_step(
     Ok(conn.last_insert_rowid())
 }
 
-/// Find/replace on a step's title or description (mirrors edit_issue/edit_page).
+/// Find/replace on a step's title or description (mirrors `edit_issue/edit_page`).
 pub fn edit_step_text(
     conn: &Connection,
     step_id: i64,
@@ -688,6 +691,9 @@ pub fn delete_step(conn: &Connection, step_id: i64) -> Result<(), LificError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use super::*;
     use crate::db;
     use crate::db::queries::{issues, projects};
@@ -1453,7 +1459,7 @@ mod tests {
 
     // ── Coverage backfill: previously-untested step mutators & guards ──
 
-    /// assert_step_in_plan is an integrity guard: it must accept a step that
+    /// `assert_step_in_plan` is an integrity guard: it must accept a step that
     /// belongs to the plan and reject one that doesn't, so a caller can't
     /// mutate a step via the wrong plan's identifier.
     #[test]

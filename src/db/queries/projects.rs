@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, params};
 
-use crate::db::models::*;
+use crate::db::models::{CreateProject, Project, Role, UpdateProject};
 use crate::error::LificError;
 
 use super::unescape_text;
@@ -208,7 +208,7 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
 /// dense and deterministic, avoiding the float-midpoint exhaustion and
 /// all-equal-rank collisions a per-item PATCH scheme would hit.
 ///
-/// Rejects duplicate ids and any id that doesn't exist (BadRequest). Projects
+/// Rejects duplicate ids and any id that doesn't exist (`BadRequest`). Projects
 /// not present in `ids` keep their current rank — callers should send the full
 /// list to guarantee a total order.
 pub fn reorder_projects(conn: &Connection, ids: &[i64]) -> Result<Vec<Project>, LificError> {
@@ -224,9 +224,11 @@ pub fn reorder_projects(conn: &Connection, ids: &[i64]) -> Result<Vec<Project>, 
     }
     super::savepoint(conn, "reorder_projects", || {
         for (position, id) in ids.iter().enumerate() {
+            let position = i64::try_from(position)
+                .map_err(|_| LificError::BadRequest("too many projects to reorder".into()))?;
             let changed = conn.execute(
                 "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
-                params![position as i64, id],
+                params![position, id],
             )?;
             if changed == 0 {
                 return Err(LificError::BadRequest(format!("project {id} not found")));
@@ -341,11 +343,11 @@ fn project_viewer_ids(conn: &Connection, project: &Project) -> Result<Vec<i64>, 
     let admins = stmt
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    admins.into_iter().for_each(|id| {
+    for id in admins {
         if !ids.contains(&id) {
             ids.push(id);
         }
-    });
+    }
     Ok(ids)
 }
 
@@ -652,14 +654,14 @@ mod tests {
             .unwrap();
             conn.last_insert_rowid()
         };
-        let blocker = insert_issue(1, "Blocker", "active", "2026-01-01 00:00:00");
+        let blocking_issue = insert_issue(1, "Blocker", "active", "2026-01-01 00:00:00");
         insert_issue(2, "Unblocked", "todo", "2026-01-02 00:00:00");
-        let blocked = insert_issue(3, "Blocked", "todo", "2026-01-03 00:00:00");
+        let blocked_issue = insert_issue(3, "Blocked", "todo", "2026-01-03 00:00:00");
         insert_issue(4, "Done", "done", "2026-01-04 00:00:00");
         conn.execute(
             "INSERT INTO issue_relations (source_id, target_id, relation_type)
              VALUES (?1, ?2, 'blocks')",
-            params![blocker, blocked],
+            params![blocking_issue, blocked_issue],
         )
         .unwrap();
 
@@ -807,7 +809,7 @@ mod tests {
 
     // ── LIF-103: tristate clear-to-NULL semantics for emoji + lead_user_id ──
 
-    /// Seed a real user so projects with lead_user_id pass the FK constraint.
+    /// Seed a real user so projects with `lead_user_id` pass the FK constraint.
     fn seed_user(conn: &Connection, username: &str) -> i64 {
         conn.execute(
             "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)

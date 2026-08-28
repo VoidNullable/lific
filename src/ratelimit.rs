@@ -124,7 +124,8 @@ fn header_ip(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
 /// right to left. `None` means the chain was malformed or entirely trusted.
 fn x_forwarded_for_client_ip(headers: &HeaderMap, trusted_proxies: &[IpNetwork]) -> Option<IpAddr> {
     let mut entries = Vec::new();
-    for value in headers.get_all("x-forwarded-for").iter() {
+    let forwarded_for = headers.get_all("x-forwarded-for");
+    for value in &forwarded_for {
         let line = value.to_str().ok()?;
         entries.extend(line.split(','));
     }
@@ -156,9 +157,7 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted_proxies: &[IpNetwork
     let client = if headers.contains_key("x-forwarded-for") {
         x_forwarded_for_client_ip(headers, trusted_proxies).unwrap_or(peer)
     } else {
-        header_ip(headers, "x-real-ip")
-            .map(normalize_ip)
-            .unwrap_or(peer)
+        header_ip(headers, "x-real-ip").map_or(peer, normalize_ip)
     };
     normalize_ip(client).to_string()
 }
@@ -263,7 +262,10 @@ impl RateLimiter {
             return None;
         }
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if !state.attempts.contains_key(key) && !Self::make_room(&mut state, now, self.window) {
             return None;
@@ -309,7 +311,10 @@ impl RateLimiter {
             return;
         }
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(entry) = state.attempts.get_mut(key) else {
             return;
         };
@@ -325,14 +330,17 @@ impl RateLimiter {
 
     /// How many seconds until the oldest attempt in the window expires.
     pub fn retry_after(&self, key: &str) -> u64 {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         match state.attempts.get(key) {
             Some(entries) if !entries.is_empty() => {
                 let oldest = entries[0].at;
                 let elapsed = now.saturating_duration_since(oldest);
                 if elapsed < self.window {
-                    (self.window - elapsed).as_secs() + 1
+                    self.window.checked_sub(elapsed).unwrap().as_secs() + 1
                 } else {
                     0
                 }
@@ -345,7 +353,7 @@ impl RateLimiter {
     pub(crate) fn contains_key(&self, key: &str) -> bool {
         self.state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .attempts
             .contains_key(key)
     }
@@ -756,8 +764,8 @@ mod tests {
     #[test]
     fn a_reservation_that_is_never_refunded_stays_spent() {
         let rl = RateLimiter::new(2, Duration::from_secs(60));
-        let _spent = Reservation::acquire(&rl, "ip", "id").expect("free");
-        drop(_spent);
+        let spent = Reservation::acquire(&rl, "ip", "id").expect("free");
+        drop(spent);
         // Dropping is not refunding: a failed attempt must cost something.
         assert!(rl.check("ip"));
         assert!(!rl.check("ip"));

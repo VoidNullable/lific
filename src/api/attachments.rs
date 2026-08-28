@@ -30,7 +30,10 @@ use axum::{
 use std::sync::Arc;
 
 use crate::authz;
-use crate::db::models::*;
+use crate::db::models::{
+    Attachment, AttachmentEntity, AuthUser, PendingOrphanList, ProjectAttachmentPage,
+    ProjectAttachmentQuery, Role,
+};
 use crate::db::queries::attachments as q;
 use crate::db::{DbPool, queries};
 use crate::error::LificError;
@@ -115,7 +118,7 @@ pub(super) async fn upload_attachment(
                 if let Some(fname) = field.file_name() {
                     filename = sanitize_filename(fname);
                 }
-                declared_mime = field.content_type().map(|s| s.to_string());
+                declared_mime = field.content_type().map(std::string::ToString::to_string);
                 let mut data = Vec::new();
                 while let Some(chunk) = field
                     .chunk()
@@ -488,8 +491,7 @@ pub(super) async fn download_attachment(
     let requested = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
-        .map(|v| parse_range(v, total))
-        .unwrap_or(RangeRequest::Whole);
+        .map_or(RangeRequest::Whole, |v| parse_range(v, total));
 
     let (status, body, content_range) = match requested {
         RangeRequest::Whole => (StatusCode::OK, bytes, None),
@@ -645,26 +647,25 @@ pub(super) async fn attachment_thumbnail(
         ));
     }
 
-    let thumb = match store.read_thumb(&attachment.sha256)? {
-        Some(bytes) => bytes,
-        None => {
-            let source = store.read(&attachment.sha256)?;
-            match storage::generate_thumbnail(&source) {
-                Ok(Some(bytes)) => {
-                    // Best-effort cache write: a read-only or full disk should
-                    // still serve the thumbnail it just built.
-                    if let Err(e) = store.write_thumb(&attachment.sha256, &bytes) {
-                        tracing::warn!(error = %e, "failed to cache attachment thumbnail");
-                    }
-                    bytes
+    let thumb = if let Some(bytes) = store.read_thumb(&attachment.sha256)? {
+        bytes
+    } else {
+        let source = store.read(&attachment.sha256)?;
+        match storage::generate_thumbnail(&source) {
+            Ok(Some(bytes)) => {
+                // Best-effort cache write: a read-only or full disk should
+                // still serve the thumbnail it just built.
+                if let Err(e) = store.write_thumb(&attachment.sha256, &bytes) {
+                    tracing::warn!(error = %e, "failed to cache attachment thumbnail");
                 }
-                // Small enough to need none, or undecodable: both are "there
-                // is no thumbnail here", not a server error.
-                Ok(None) | Err(_) => {
-                    return Err(LificError::NotFound(
-                        "no thumbnail for this attachment".into(),
-                    ));
-                }
+                bytes
+            }
+            // Small enough to need none, or undecodable: both are "there
+            // is no thumbnail here", not a server error.
+            Ok(None) | Err(_) => {
+                return Err(LificError::NotFound(
+                    "no thumbnail for this attachment".into(),
+                ));
             }
         }
     };
@@ -959,7 +960,7 @@ fn comment_title(content: &str) -> String {
 
 /// `GET /api/attachments/{id}/preview`: what is inside a container upload.
 ///
-/// Zip archives report their central directory, SQLite databases report their
+/// Zip archives report their central directory, `SQLite` databases report their
 /// tables and row counts, and everything else reports `{"kind":"none"}`. Gated
 /// exactly like the download, because a preview is a read of the same bytes in
 /// a more convenient shape. See `crate::preview` for how both parsers are kept
@@ -2639,7 +2640,7 @@ mod media_tests {
             )))
     }
 
-    /// A tiny but structurally valid WebM header the sniffer accepts.
+    /// A tiny but structurally valid `WebM` header the sniffer accepts.
     fn webm_bytes() -> Vec<u8> {
         let mut v = vec![0x1A, 0x45, 0xDF, 0xA3];
         v.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F]);
@@ -3547,7 +3548,7 @@ mod cookie_fallback_tests {
 
     /// Build a router that wraps the production `api::router` in the real
     /// `require_api_key` middleware, plus the attachment layers. Returns the
-    /// app and the shared DbPool.
+    /// app and the shared `DbPool`.
     fn real_middleware_app(db: crate::db::DbPool) -> axum::Router {
         let auth_state = crate::auth::AuthState {
             db: db.clone(),
@@ -3568,7 +3569,7 @@ mod cookie_fallback_tests {
             ))
     }
 
-    /// Create a user and a live session, returning (user_id, session token).
+    /// Create a user and a live session, returning (`user_id`, session token).
     fn user_with_session(db: &crate::db::DbPool, username: &str) -> (i64, String) {
         let conn = db.write().unwrap();
         let user = crate::db::queries::users::create_user(

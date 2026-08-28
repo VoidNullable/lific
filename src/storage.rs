@@ -1,6 +1,6 @@
 //! LIF-262: content-addressed file storage for attachments.
 //!
-//! Raw bytes never touch SQLite. Each uploaded blob is written to
+//! Raw bytes never touch `SQLite`. Each uploaded blob is written to
 //! `<data_dir>/attachments/<sha256>`, where `<data_dir>` is the directory
 //! containing the database file (see [`AttachmentStore::from_db_path`]). The
 //! file name IS the content hash, so identical bytes uploaded twice collapse
@@ -97,10 +97,13 @@ fn existing_regular_file(path: &Path, label: &str) -> Result<bool, LificError> {
 /// its own fsync. Without this, a crash right after an upload can leave a
 /// database row pointing at a blob whose directory entry never landed.
 /// Unix only: Windows has no directory handle to sync.
-fn sync_dir(_dir: &Path) -> Result<(), LificError> {
+fn sync_dir(dir: &Path) -> Result<(), LificError> {
+    #[cfg(not(unix))]
+    let _ = dir;
+
     #[cfg(unix)]
     {
-        std::fs::File::open(_dir)
+        std::fs::File::open(dir)
             .and_then(|dir| dir.sync_all())
             .map_err(|e| LificError::Internal(format!("sync directory: {e}")))?;
     }
@@ -262,8 +265,7 @@ impl AttachmentStore {
 
     /// Compute the lowercase hex SHA-256 of a byte slice — the content address.
     pub fn hash_bytes(bytes: &[u8]) -> String {
-        let digest = Sha256::digest(bytes);
-        digest.iter().map(|b| format!("{b:02x}")).collect()
+        crate::auth::hex_encode(&Sha256::digest(bytes))
     }
 
     /// Path of the store's cross-process lock file.
@@ -571,7 +573,7 @@ pub fn sweep_orphans(
 /// `attachments_fts` yet.
 ///
 /// Two populations need this: uploads that predate migration 042 (the
-/// migration can seed filenames from SQLite, but the bytes live on disk where
+/// migration can seed filenames from `SQLite`, but the bytes live on disk where
 /// SQL can't reach them), and any upload whose extraction was interrupted.
 /// Idempotent by construction — the driving query only returns rows with an
 /// empty `extracted_text`, so a second run finds nothing and does nothing.
@@ -635,7 +637,7 @@ pub fn start_gc_task(
             let store = store.clone();
             move || match backfill_attachment_text(&pool, &store) {
                 Ok(n) if n > 0 => {
-                    tracing::info!(indexed = n, "attachment text backfill indexed files")
+                    tracing::info!(indexed = n, "attachment text backfill indexed files");
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "attachment text backfill failed"),
@@ -654,7 +656,7 @@ pub fn start_gc_task(
                 let store = store.clone();
                 move || match sweep_orphans(&pool, &store, ORPHAN_GRACE_SECONDS) {
                     Ok(n) if n > 0 => {
-                        tracing::info!(collected = n, "attachment GC swept orphans")
+                        tracing::info!(collected = n, "attachment GC swept orphans");
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "attachment GC sweep failed"),
@@ -892,8 +894,11 @@ fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize>
         match reader.read(&mut buf[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            }
         }
     }
     Ok(filled)
@@ -1032,7 +1037,7 @@ fn sniff_magic(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// The 16-byte header every SQLite database file starts with, NUL included.
+/// The 16-byte header every `SQLite` database file starts with, NUL included.
 pub const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
 /// Heuristic executable/script sniff for the signature-less path. Blocks the
@@ -1117,7 +1122,7 @@ pub fn generate_thumbnail(bytes: &[u8]) -> Result<Option<Vec<u8>>, LificError> {
     }
 
     let image = reader_for(bytes)
-        .and_then(|r| r.decode())
+        .and_then(image::ImageReader::decode)
         .map_err(|e| LificError::BadRequest(format!("undecodable image: {e}")))?;
     // `thumbnail` preserves the aspect ratio and fits inside the box, so a
     // 1000x200 strip comes back 480x96 rather than stretched.
@@ -1567,7 +1572,7 @@ mod tests {
                 &sha,
                 "server.log",
                 "text/plain",
-                body.len() as i64,
+                i64::try_from(body.len()).expect("test body length fits i64"),
                 None,
             )
             .unwrap()
@@ -1731,7 +1736,9 @@ mod tests {
             if self.remaining == 0 {
                 return Ok(0);
             }
-            let take = buf.len().min(self.remaining as usize);
+            let take = usize::try_from(self.remaining)
+                .unwrap_or(buf.len())
+                .min(buf.len());
             buf[..take].fill(self.byte);
             self.remaining -= take as u64;
             self.served += take as u64;
@@ -1899,7 +1906,7 @@ mod tests {
         );
     }
 
-    /// QuickTime shares the ISO base media container with mp4 but is not on
+    /// `QuickTime` shares the ISO base media container with mp4 but is not on
     /// the allowlist, so it must not be waved through wearing an mp4 label.
     #[test]
     fn quicktime_is_not_relabelled_as_mp4() {

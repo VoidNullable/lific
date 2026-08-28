@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
-    /// Browser session (lific_sess_ token).
+    /// Browser session (`lific_sess`_ token).
     Web,
     /// MCP request (any token presented to /mcp).
     Mcp,
@@ -33,7 +33,7 @@ pub enum Transport {
 }
 
 impl Transport {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Transport::Web => "web",
             Transport::Mcp => "mcp",

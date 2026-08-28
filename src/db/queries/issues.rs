@@ -1,6 +1,8 @@
 use rusqlite::{Connection, params};
 
-use crate::db::models::*;
+use crate::db::models::{
+    CreateIssue, Issue, IssueStatusCounts, ListIssuesQuery, ProjectRelation, Status, UpdateIssue,
+};
 use crate::error::LificError;
 
 use super::unescape_text;
@@ -332,8 +334,8 @@ pub fn list_issues_page(
     let order_clause = match q.order_by.as_deref() {
         None | Some("sort_order") => format!("i.sort_order {dir}, i.sequence {dir}"),
         Some("sequence") => format!("i.sequence {dir}"),
-        Some("created") | Some("created_at") => format!("i.created_at {dir}, i.sequence {dir}"),
-        Some("updated") | Some("updated_at") => format!("i.updated_at {dir}, i.sequence {dir}"),
+        Some("created" | "created_at") => format!("i.created_at {dir}, i.sequence {dir}"),
+        Some("updated" | "updated_at") => format!("i.updated_at {dir}, i.sequence {dir}"),
         Some("priority") => format!(
             "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END {dir}, i.sequence {dir}"
         ),
@@ -354,8 +356,10 @@ pub fn list_issues_page(
     param_values.push(Box::new(super::over_fetch(limit)));
     param_values.push(Box::new(offset));
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         let project_ident: String = row.get(3)?;
@@ -419,7 +423,7 @@ pub fn list_issues_page(
             .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
             .collect();
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
+            params.iter().map(std::convert::AsRef::as_ref).collect();
         let mut stmt = conn.prepare(&sql)?;
         let label_rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -734,6 +738,9 @@ pub fn unlink_issues(conn: &Connection, source_id: i64, target_id: i64) -> Resul
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use super::*;
     use crate::db;
     use crate::db::queries::{projects, resources};
@@ -1619,7 +1626,7 @@ mod tests {
         assert_eq!(limited.len(), 3);
     }
 
-    /// Read an issue's raw updated_at timestamp directly from the table.
+    /// Read an issue's raw `updated_at` timestamp directly from the table.
     fn issue_updated_at(conn: &rusqlite::Connection, issue_id: i64) -> String {
         conn.query_row(
             "SELECT updated_at FROM issues WHERE id = ?1",
@@ -1687,9 +1694,9 @@ mod tests {
 
     // ── Date-window filters + sort control ───────────────────
 
-    /// Pin an issue's created_at/updated_at to explicit values so date
+    /// Pin an issue's `created_at/updated_at` to explicit values so date
     /// filter and ordering tests don't depend on wall-clock timing. The
-    /// `issues_updated` trigger rewrites updated_at to now on every UPDATE,
+    /// `issues_updated` trigger rewrites `updated_at` to now on every UPDATE,
     /// which would silently overwrite the pin — drop it first.
     fn pin_timestamps(conn: &rusqlite::Connection, issue_id: i64, created: &str, updated: &str) {
         conn.execute_batch("DROP TRIGGER IF EXISTS issues_updated;")

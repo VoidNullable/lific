@@ -608,9 +608,9 @@ fn every_mcp_tool_is_classified() {
     let mut unclassified: Vec<&str> = tools
         .iter()
         .filter(|name| !manifest.contains_key(name.as_str()))
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect();
-    unclassified.sort();
+    unclassified.sort_unstable();
     unclassified.dedup();
 
     assert!(
@@ -634,7 +634,7 @@ fn mcp_manifest_has_no_stale_entries() {
         .filter(|name| !tools.contains(**name))
         .copied()
         .collect();
-    stale.sort();
+    stale.sort_unstable();
 
     assert!(
         stale.is_empty(),

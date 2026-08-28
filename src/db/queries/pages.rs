@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::models::*;
+use crate::db::models::{CreatePage, Page, UpdatePage};
 use crate::error::LificError;
 
 use super::unescape_text;
@@ -70,7 +70,8 @@ fn populate_page_labels(conn: &Connection, pages: &mut [Page]) -> Result<(), Lif
         .iter()
         .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
         .collect();
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -185,8 +186,8 @@ pub fn list_pages_page(
         None | Some("sort_order") => "pg.sort_order",
         Some("title") => "pg.title COLLATE NOCASE",
         Some("status") => "pg.status",
-        Some("created") | Some("created_at") => "pg.created_at",
-        Some("updated") | Some("updated_at") => "pg.updated_at",
+        Some("created" | "created_at") => "pg.created_at",
+        Some("updated" | "updated_at") => "pg.updated_at",
         Some(other) => {
             return Err(LificError::BadRequest(format!(
                 "invalid order_by '{other}'. Use sort_order, title, status, created, or updated."
@@ -212,8 +213,10 @@ pub fn list_pages_page(
         param_values.push(Box::new(offset));
     }
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), page_from_row)?;
     let rows: Vec<Page> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -444,6 +447,9 @@ pub fn delete_page(conn: &Connection, id: i64) -> Result<(), LificError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use super::*;
     use crate::db;
     use crate::db::queries::{projects, resources};
@@ -1187,7 +1193,7 @@ mod tests {
     // ── Sort control (order_by / order) ───────────────────────
 
     /// Pin a page's timestamps so ordering tests don't race the clock.
-    /// The `pages_updated` trigger rewrites updated_at to now on every
+    /// The `pages_updated` trigger rewrites `updated_at` to now on every
     /// UPDATE, which would silently overwrite the pin — drop it first.
     fn pin_page_timestamps(
         conn: &rusqlite::Connection,

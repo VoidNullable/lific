@@ -299,9 +299,7 @@ pub fn load_with_source(base_url: &str) -> Option<(String, TokenSource)> {
 pub fn delete(base_url: &str) -> bool {
     let key = normalize_base_url(base_url);
     let kr = keyring_delete(&key);
-    let file = default_file_path()
-        .map(|p| FileStore::new(p).delete(&key).unwrap_or(false))
-        .unwrap_or(false);
+    let file = default_file_path().is_some_and(|p| FileStore::new(p).delete(&key).unwrap_or(false));
     kr || file
 }
 

@@ -413,8 +413,7 @@ fn build_app_with_store(
             info!(
                 acting_as = authless_user
                     .as_ref()
-                    .map(|u| u.username.as_str())
-                    .unwrap_or("<anonymous>"),
+                    .map_or("<anonymous>", |u| u.username.as_str()),
                 "authless MCP endpoint enabled at /mcp/<token>"
             );
             build_authless_mcp_router(
@@ -524,9 +523,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // stale or toggled flag must not turn a reachable instance into
         // passwordless admin. On a genuinely local instance with an https
         // public_url on a private network, keep the loud warning.
-        let auto_login = db::queries::settings::get(&conn)
-            .map(|s| s.web_auto_login)
-            .unwrap_or(false);
+        let auto_login = db::queries::settings::get(&conn).is_ok_and(|s| s.web_auto_login);
         if auto_login && let Some(exposure) = reachability.public_exposure() {
             return Err(format!(
                 "refusing to start: single-user web auto-login is enabled while \
@@ -584,7 +581,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     // Start backup task
     if cfg.backup.enabled {
         let pool_arc = Arc::new(pool.clone());
-        backup::start_backup_task(pool_arc, cfg.database.path.clone(), cfg.backup.clone());
+        backup::start_backup_task(pool_arc, cfg.database.path.clone(), &cfg.backup);
         info!(
             dir = %cfg.backup_dir().display(),
             interval = %format!("{}m", cfg.backup.interval_minutes),
@@ -776,8 +773,8 @@ async fn shutdown_signal(pool: db::DbPool) {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        () = ctrl_c => {},
+        () = terminate => {},
     }
 
     info!("shutdown signal received, checkpointing WAL...");

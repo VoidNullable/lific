@@ -9,11 +9,11 @@ use crate::config::BackupConfig;
 use crate::db::DbPool;
 use crate::dump;
 
-/// Start the background backup task. Returns the JoinHandle.
+/// Start the background backup task. Returns the `JoinHandle`.
 pub fn start_backup_task(
     pool: Arc<DbPool>,
     db_path: PathBuf,
-    config: BackupConfig,
+    config: &BackupConfig,
 ) -> tokio::task::JoinHandle<()> {
     let backup_dir = if config.dir.is_absolute() {
         config.dir.clone()
@@ -166,9 +166,7 @@ fn run_backup(
 
     match dump::write_dump(pool, db_path, &backup_path) {
         Ok(manifest) => {
-            let size = std::fs::metadata(&backup_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(&backup_path).map_or(0, |m| m.len());
             info!(
                 path = %backup_path.display(),
                 size_kb = size / 1024,
@@ -209,7 +207,7 @@ fn run_backup(
 /// default install keeps the append-only history it has always kept. Anything
 /// larger deletes rows whose `ts` predates the cutoff.
 ///
-/// The cutoff is computed by SQLite itself (`datetime('now', '-N days')`)
+/// The cutoff is computed by `SQLite` itself (`datetime('now', '-N days')`)
 /// rather than in Rust: `audit_log.ts` is written by the migration-018
 /// triggers as `datetime('now')`, so comparing against a value from the same
 /// clock and the same format is the only way the comparison is honest. The
@@ -261,7 +259,7 @@ fn sweep_stale_tmps(backup_dir: &Path, db_stem: &str) {
             return;
         }
     };
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -307,7 +305,7 @@ fn sweep_stale_tmps(backup_dir: &Path, db_stem: &str) {
         match result {
             Ok(()) => info!(path = %path.display(), "removed stale backup staging file"),
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to remove stale staging file")
+                warn!(path = %path.display(), error = %e, "failed to remove stale staging file");
             }
         }
     }
@@ -324,12 +322,11 @@ fn rotate_backups(backup_dir: &Path, db_stem: &str, retain: usize) {
     let prefix = format!("{db_stem}_");
     let mut backups: Vec<PathBuf> = match std::fs::read_dir(backup_dir) {
         Ok(entries) => entries
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.path())
             .filter(|p| {
-                let name = match p.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n,
-                    None => return false,
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    return false;
                 };
                 if !name.starts_with(&prefix) {
                     return false;
@@ -407,7 +404,10 @@ mod tests {
 
         rotate_backups(dir, "lific", 3);
 
-        let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
+        let remaining: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
         assert_eq!(remaining.len(), 3);
 
         // Oldest two (01, 02) should be gone, newest three (03, 04, 05) kept
@@ -526,7 +526,7 @@ mod tests {
         );
         let archives = fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tar.gz"))
             .count();
         assert_eq!(archives, 1, "and the backup still produced its archive");
@@ -675,7 +675,7 @@ mod tests {
         // Exactly one `.tar.gz` archive, no bare `.db` snapshot.
         let archives: Vec<_> = fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.ends_with(".tar.gz"))
             .collect();
@@ -703,7 +703,10 @@ mod tests {
                 .any(|n| n == &format!("attachments/{blob_name}"))
         );
         assert!(
-            !names.iter().any(|n| n.ends_with(".tmp")),
+            !names.iter().any(|n| {
+                n.rsplit_once('.')
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("tmp"))
+            }),
             "in-progress .tmp writes must not be archived: {names:?}"
         );
     }

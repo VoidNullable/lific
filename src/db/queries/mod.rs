@@ -35,13 +35,13 @@ pub const DEFAULT_PAGE_LIMIT: i64 = 50;
 /// documents a deliberately lower cap of its own (see `activity::list_activity`).
 pub const MAX_PAGE_LIMIT: i64 = 500;
 
-/// SQLite's "no limit" sentinel: `LIMIT -1` returns every row. Only reachable
+/// `SQLite`'s "no limit" sentinel: `LIMIT -1` returns every row. Only reachable
 /// through `page_unbounded`, where an absent limit means "no limit" by design.
 pub const NO_LIMIT: i64 = -1;
 
 /// Clamp caller-supplied pagination into `(limit, offset)` ready for SQL.
 ///
-/// LIF-141 class: SQLite treats `LIMIT -1` as "no limit", so an unclamped
+/// LIF-141 class: `SQLite` treats `LIMIT -1` as "no limit", so an unclamped
 /// `?limit=-1` would dump the whole table. Floor at 1 so a 0/negative value
 /// still paginates, cap at [`MAX_PAGE_LIMIT`], and floor the offset at 0.
 pub fn page(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
@@ -143,7 +143,7 @@ pub(crate) fn project_visibility_sql(
     }
 }
 
-/// Run a closure inside a SQLite SAVEPOINT so that multi-statement writes are atomic.
+/// Run a closure inside a `SQLite` SAVEPOINT so that multi-statement writes are atomic.
 /// On success the savepoint is released; on error it is rolled back.
 pub(crate) fn savepoint<F, T>(
     conn: &rusqlite::Connection,

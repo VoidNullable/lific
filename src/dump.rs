@@ -194,7 +194,7 @@ pub(crate) fn staging_is_locked(path: &Path) -> bool {
 /// Take a consistent snapshot of the live DB into the already-reserved staging
 /// file `dest`.
 ///
-/// The SQLite online backup API runs on a read connection, holds no long
+/// The `SQLite` online backup API runs on a read connection, holds no long
 /// writer lock, and copies into a file this process created with
 /// `O_CREAT|O_EXCL|O_NOFOLLOW` — so, unlike `VACUUM INTO`, nothing resolves a
 /// pathname a second time between reserving the destination and writing it.
@@ -335,7 +335,7 @@ fn refresh_activity(file: &File) -> std::io::Result<()> {
 ///
 /// Shared code path used by both `lific dump` and the interval backup task.
 /// Produces a gzip-compressed tar containing `lific.db` (a consistent snapshot
-/// taken with SQLite's online backup API), every non-`.tmp` attachment blob
+/// taken with `SQLite`'s online backup API), every non-`.tmp` attachment blob
 /// under `attachments/`, and `manifest.json`. The finished file is chmod 0600
 /// (it contains the whole DB).
 ///
@@ -523,7 +523,7 @@ struct BlobIdentity {
     ino: u64,
 }
 
-/// Whether an open failure means "that name is a symlink and O_NOFOLLOW
+/// Whether an open failure means "that name is a symlink and `O_NOFOLLOW`
 /// refused it". Linux reports `ELOOP`, the BSDs `EMLINK`;
 /// `ErrorKind::FilesystemLoop` is still unstable, so match the raw codes.
 fn is_symlink(error: &std::io::Error) -> bool {
@@ -588,8 +588,7 @@ fn open_verified_blob(path: &Path) -> Result<Option<VerifiedBlob>, LificError> {
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     #[cfg(unix)]
     let identity = {
@@ -749,8 +748,7 @@ fn append_bytes<W: std::io::Write>(
     header.set_mtime(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_secs()),
     );
     header.set_cksum();
     tar.append_data(&mut header, name, bytes)
@@ -1083,7 +1081,7 @@ fn create_staging_file(path: &Path) -> Result<File, LificError> {
         .map_err(|e| LificError::Internal(format!("create staging file: {e}")))
 }
 
-/// Validate the extracted SQLite file before it can replace the live DB. This
+/// Validate the extracted `SQLite` file before it can replace the live DB. This
 /// catches corrupt archives and ensures every metadata attachment reference is
 /// a safe content-addressed filename with matching staged bytes.
 fn validate_staged_database(
@@ -1429,15 +1427,13 @@ fn read_manifest(archive: &Path, limits: &RestoreLimits) -> Result<Manifest, Lif
 /// may still be running (best-effort — see command help).
 fn wal_is_hot(db_path: &Path) -> bool {
     let wal = PathBuf::from(format!("{}-wal", db_path.display()));
-    std::fs::metadata(&wal)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0)
 }
 
 /// Run `lific restore`: validate the archive, then stage-extract it into the
 /// data dir at `db_path`. Refuses to clobber an existing DB unless `force`;
 /// with `force`, moves the existing DB + `-wal`/`-shm` aside. Refuses archives
-/// created by a newer Lific (higher schema_version than this binary).
+/// created by a newer Lific (higher `schema_version` than this binary).
 // The bounded-default entry point kept for callers with no options to express
 // (the tests, and anything embedding a restore); `lific restore` itself goes
 // through `run_restore_with` so it can pass `--allow-large`.
@@ -1474,8 +1470,7 @@ pub fn run_restore_with(
     let data_dir = db_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| LificError::Internal(format!("create data dir: {e}")))?;
 
@@ -1849,7 +1844,7 @@ mod tests {
 
     /// Build a real on-disk DB with a seeded project, plus an attachments dir
     /// containing one real blob and one `.tmp` stray. Returns (dir guard,
-    /// db_path).
+    /// `db_path`).
     fn seed_data_dir(tag: &str) -> (TempDir, PathBuf) {
         let tmp = temp_dir(tag);
         let dir = tmp.path();
@@ -1915,7 +1910,10 @@ mod tests {
             crate::storage::AttachmentStore::hash_bytes(b"second blob bytes")
         )));
         assert!(
-            !entries.iter().any(|e| e.ends_with(".tmp")),
+            !entries.iter().any(|e| {
+                e.rsplit_once('.')
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("tmp"))
+            }),
             "in-progress .tmp writes must be excluded: {entries:?}"
         );
 
@@ -3075,7 +3073,7 @@ mod tests {
         );
         assert!(
             !root
-                .join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME))
+                .join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash"))
                 .exists(),
             "nothing may be stranded under the pre-restore name"
         );
@@ -3091,7 +3089,7 @@ mod tests {
         let (dir_tmp, db_path, staging, _sha) = seed_install_fixture("install_db_clash");
         let root = dir_tmp.path();
         fs::write(
-            root.join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME)),
+            root.join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash")),
             b"someone else's file",
         )
         .unwrap();
@@ -3110,7 +3108,7 @@ mod tests {
             .unwrap();
         assert_eq!(live, 1);
         assert_eq!(
-            fs::read(root.join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME))).unwrap(),
+            fs::read(root.join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash"))).unwrap(),
             b"someone else's file",
             "an unrelated file at the backup path is never clobbered"
         );
@@ -3489,9 +3487,7 @@ mod tests {
         for entry in tar.entries().unwrap() {
             let mut entry = entry.unwrap();
             let name = entry.path().unwrap().to_string_lossy().to_string();
-            if name == ARCHIVE_MANIFEST_NAME {
-                continue;
-            }
+            if name == ARCHIVE_MANIFEST_NAME {}
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
             append_bytes(&mut builder, &name, &buf).unwrap();

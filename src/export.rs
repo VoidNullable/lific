@@ -47,8 +47,7 @@ const MAX_EXPORT_JSON_BYTES: usize = MAX_EXPORT_TOTAL_BYTES * 6 + 64 * 1024;
 fn ensure_text_size(label: &str, value: &str) -> Result<(), LificError> {
     if value.len() > MAX_EXPORT_FILE_BYTES {
         return Err(LificError::BadRequest(format!(
-            "{label} exceeds the {} byte limit",
-            MAX_EXPORT_FILE_BYTES
+            "{label} exceeds the {MAX_EXPORT_FILE_BYTES} byte limit"
         )));
     }
     Ok(())
@@ -66,14 +65,12 @@ fn ensure_comment_sizes(conn: &Connection, issue_id: i64) -> Result<(), LificErr
     )?;
     if too_large != 0 {
         return Err(LificError::BadRequest(format!(
-            "an issue comment exceeds the {} byte export limit",
-            MAX_EXPORT_FILE_BYTES
+            "an issue comment exceeds the {MAX_EXPORT_FILE_BYTES} byte export limit"
         )));
     }
     if total_bytes > MAX_EXPORT_FILE_BYTES as i64 {
         return Err(LificError::BadRequest(format!(
-            "issue comments exceed the {} byte aggregate export limit",
-            MAX_EXPORT_FILE_BYTES
+            "issue comments exceed the {MAX_EXPORT_FILE_BYTES} byte aggregate export limit"
         )));
     }
     Ok(())
@@ -183,8 +180,7 @@ fn ensure_metadata_size(items: i64, bytes: i64) -> Result<(), LificError> {
     }
     if bytes > MAX_EXPORT_TOTAL_BYTES as i64 {
         return Err(LificError::BadRequest(format!(
-            "export metadata exceeds the {} byte total limit",
-            MAX_EXPORT_TOTAL_BYTES
+            "export metadata exceeds the {MAX_EXPORT_TOTAL_BYTES} byte total limit"
         )));
     }
     Ok(())
@@ -250,8 +246,7 @@ impl ExportBudget {
             .ok_or_else(|| LificError::BadRequest("export size overflow".into()))?;
         if self.bytes > MAX_EXPORT_TOTAL_BYTES {
             return Err(LificError::BadRequest(format!(
-                "export exceeds the {} byte total limit",
-                MAX_EXPORT_TOTAL_BYTES
+                "export exceeds the {MAX_EXPORT_TOTAL_BYTES} byte total limit"
             )));
         }
         Ok(())
@@ -481,8 +476,7 @@ fn ensure_project_preflight(
     }
     if comment_count > max_comments {
         return Err(LificError::BadRequest(format!(
-            "project export contains too many comments ({} > {})",
-            comment_count, max_comments
+            "project export contains too many comments ({comment_count} > {max_comments})"
         )));
     }
     ensure_metadata_size(metadata_items, metadata_bytes)?;
@@ -494,8 +488,7 @@ fn ensure_project_preflight(
         .ok_or_else(|| LificError::BadRequest("export size overflow".into()))?;
     if source_bytes > max_total_bytes {
         return Err(LificError::BadRequest(format!(
-            "project source exceeds the {} byte total export limit",
-            max_total_bytes
+            "project source exceeds the {max_total_bytes} byte total export limit"
         )));
     }
     let oversized: i64 = conn.query_row(

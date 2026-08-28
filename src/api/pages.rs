@@ -4,7 +4,10 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{AttachmentEntity, CreatePage, Page, Role, UpdatePage},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -48,7 +51,7 @@ pub(super) struct PageQuery {
     /// LIF-112: filter pages by lifecycle status. Mirrors `?status=` on
     /// the issue list endpoint.
     status: Option<String>,
-    /// Sort column: sort_order (default), title, status, created, updated.
+    /// Sort column: `sort_order` (default), title, status, created, updated.
     /// Whitelisted in `list_pages`.
     order_by: Option<String>,
     /// Sort direction: asc (default) or desc.
@@ -210,7 +213,7 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    /// Seed a page-friendly project plus two labels, return (project_id).
+    /// Seed a page-friendly project plus two labels, return (`project_id`).
     async fn seed_project_with_labels(app: &axum::Router) -> i64 {
         let (project_id, _) = seed_project(app).await;
         for (name, color) in [("design", "#22C55E"), ("draft", "#F59E0B")] {

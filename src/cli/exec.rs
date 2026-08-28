@@ -1,10 +1,17 @@
 use crate::db::DbPool;
-use crate::db::models::*;
+use crate::db::models::{
+    Comment, CreateFolder, CreateIssue, CreateLabel, CreateModule, CreatePage, CreateProject,
+    ListIssuesQuery, Priority, SearchQuery, Status, UpdateFolder, UpdateIssue, UpdateLabel,
+    UpdateModule, UpdatePage, UpdateProject,
+};
 use crate::db::queries;
 use crate::error::LificError;
 
 use super::render;
-use super::*;
+use super::{
+    Command, CommentAction, ExportAction, FolderAction, IssueAction, LabelAction, ModuleAction,
+    PageAction, ProjectAction, owned_labels,
+};
 
 /// Run a CLI CRUD command against the database.
 /// Returns Ok(()) on success, printing output to stdout.
@@ -823,6 +830,9 @@ fn folder(
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::wildcard_imports)]
+    use crate::db::models::*;
+
     use crate::db;
     use crate::db::queries;
 

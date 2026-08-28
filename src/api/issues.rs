@@ -4,7 +4,12 @@ use axum::{
 };
 
 use crate::authz;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{
+        AttachmentEntity, CreateIssue, Issue, ListIssuesQuery, ProjectRelation, Role, UpdateIssue,
+    },
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -138,7 +143,7 @@ pub(super) async fn delete_issue_handler(
 
 /// LIF-363: every relation edge inside one project, in one round trip. Feeds
 /// the dependency-graph view; the client filters to `blocks` edges itself so
-/// a future view mode (e.g. relates_to clusters) needs no new endpoint.
+/// a future view mode (e.g. `relates_to` clusters) needs no new endpoint.
 pub(super) async fn project_relations(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
@@ -656,7 +661,7 @@ mod tests {
 
     /// LIF-385: `status` and `priority` are enums, so a value outside the set
     /// is refused by the extractor. Before, it travelled all the way to
-    /// SQLite's CHECK constraint and came back as a 500.
+    /// `SQLite`'s CHECK constraint and came back as a 500.
     #[tokio::test]
     async fn out_of_set_status_and_priority_are_refused() {
         let app = test_app();

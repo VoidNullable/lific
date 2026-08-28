@@ -220,7 +220,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 
 /// Migrations that rebuild a table other tables reference by foreign key.
 ///
-/// SQLite cannot change a column's collating sequence in place, so those
+/// `SQLite` cannot change a column's collating sequence in place, so those
 /// migrations drop and recreate the table. Two connection pragmas have to be
 /// set around the rebuild, and neither can be set from inside the migration
 /// file itself:
@@ -231,11 +231,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 ///   takes every child row with it.
 /// * `legacy_alter_table = ON` — otherwise `ALTER TABLE x RENAME TO parent`
 ///   reparses every trigger in the schema and fails with "error in trigger
-///   audit_issues_insert: no such table: main.projects", since the old table
+///   `audit_issues_insert`: no such table: main.projects", since the old table
 ///   is already gone by then. Legacy mode also leaves child `REFERENCES`
 ///   clauses alone, which is what we want: ids are preserved verbatim.
 ///
-/// This is the standard SQLite table-rebuild procedure. Both pragmas are
+/// This is the standard `SQLite` table-rebuild procedure. Both pragmas are
 /// silent no-ops inside a transaction, and `run` serializes the whole batch
 /// under one `BEGIN IMMEDIATE` (see below), so when a rebuild migration is
 /// pending the pragmas are set on the connection *before* that transaction
@@ -899,7 +899,7 @@ mod tests {
         rows.collect::<Result<Vec<String>, _>>().unwrap()
     }
 
-    /// The whole point of the index is that SQLite reaches for it instead of
+    /// The whole point of the index is that `SQLite` reaches for it instead of
     /// scanning, so assert against the query planner rather than merely that
     /// a name exists in `sqlite_master`.
     fn query_plan(conn: &Connection, sql: &str) -> String {

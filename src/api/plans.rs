@@ -5,7 +5,10 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::plans::{self, StepDoneEffect};
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{CreatePlan, CreatePlanStep, ListPlansQuery, Plan, Role, UpdatePlan},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -728,7 +731,7 @@ mod tests {
         assert!(
             plan_b_after["steps"][0]["steps"]
                 .as_array()
-                .is_none_or(|children| children.is_empty()),
+                .is_none_or(std::vec::Vec::is_empty),
             "nothing may have been grafted under the foreign step: {plan_b_after}"
         );
 

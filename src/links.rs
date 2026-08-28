@@ -157,15 +157,14 @@ impl IssueLinkContext {
         host_header: Option<&str>,
         allowed_hosts: &[String],
     ) -> Option<Self> {
-        match public_url {
-            Some(public_url) => Self::parse(public_url),
-            None => {
-                let authority = parse_http_authority(host_header?)?;
-                if !authority_is_allowlisted(&authority, allowed_hosts) {
-                    return None;
-                }
-                Self::parse(&format!("http://{authority}"))
+        if let Some(public_url) = public_url {
+            Self::parse(public_url)
+        } else {
+            let authority = parse_http_authority(host_header?)?;
+            if !authority_is_allowlisted(&authority, allowed_hosts) {
+                return None;
             }
+            Self::parse(&format!("http://{authority}"))
         }
     }
 

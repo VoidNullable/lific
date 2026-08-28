@@ -7,7 +7,13 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::authz;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{
+        CreateProject, Issue, IssueStatusCounts, ListIssuesQuery, Project, ReorderProjects, Role,
+        UpdateProject,
+    },
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -133,26 +139,23 @@ pub(super) async fn update_project(
         // When this grants a lead membership the gate re-runs against the
         // freshly read session user, so a lead revoked since the request
         // arrived cannot hand the role to anyone.
-        let gate_identity = match &recent {
-            Some((token, granter_id)) => {
-                let fresh = crate::auth::revalidate_recent_session(tx, token, *granter_id)?;
-                Some(crate::auth::fresh_identity(
-                    &fresh,
-                    crate::actor::Transport::Web,
-                ))
-            }
+        let gate_identity = if let Some((token, granter_id)) = &recent {
+            let fresh = crate::auth::revalidate_recent_session(tx, token, *granter_id)?;
+            Some(crate::auth::fresh_identity(
+                &fresh,
+                crate::actor::Transport::Web,
+            ))
+        } else {
             // Not a grant (a rename, or clearing the lead). No recency, but
             // still not the middleware's snapshot: the caller is re-read here
             // so a demoted admin cannot edit on the strength of a stale
             // `is_admin`.
-            None => {
-                let caller = super::require_user(&identity)?;
-                let fresh = crate::auth::fresh_caller(tx, caller.id)?;
-                Some(crate::auth::fresh_identity(
-                    &fresh,
-                    crate::actor::Transport::Web,
-                ))
-            }
+            let caller = super::require_user(&identity)?;
+            let fresh = crate::auth::fresh_caller(tx, caller.id)?;
+            Some(crate::auth::fresh_identity(
+                &fresh,
+                crate::actor::Transport::Web,
+            ))
         };
         crate::authz::require_role_conn(tx, &gate_identity, id, Role::Lead)?;
         crate::db::queries::update_project(tx, id, &input)
@@ -458,7 +461,7 @@ pub(super) fn import_github_with(
     };
     // A resource-ceiling refusal surfaces as 413 (see the `GithubImportError`
     // conversion in `crate::error`); GitHub being unreachable stays a 500.
-    let fetched = crate::import::github::collect(fetcher, slug, state, &status_map)?;
+    let imported = crate::import::github::collect(fetcher, slug, state, &status_map)?;
 
     // A dry run never mints a bot or writes; a real run resolves/creates the
     // import bot owned by the requester.
@@ -476,7 +479,7 @@ pub(super) fn import_github_with(
         }
     };
 
-    crate::import::run_import(db, project_id, bot, &fetched, req.dry_run)
+    crate::import::run_import(db, project_id, bot, &imported, req.dry_run)
 }
 
 #[cfg(test)]
@@ -801,8 +804,8 @@ mod tests {
     /// LIF-364 (dr.leech's report): with `authz_enforced` ON, an instance
     /// admin must see every project in `GET /api/projects` — including ones
     /// they are not a member of — while a plain non-member sees none. This
-    /// pins the full REST stack (identity extension → visible_project_ids →
-    /// filter_visible), not just the authz unit.
+    /// pins the full REST stack (identity extension → `visible_project_ids` →
+    /// `filter_visible`), not just the authz unit.
     #[tokio::test]
     async fn enforced_admin_sees_all_projects_non_member_sees_none() {
         let (db, admin, _lead, _maint, _viewer, non_member, project_id) = setup_membership_test();

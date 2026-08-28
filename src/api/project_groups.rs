@@ -18,7 +18,10 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::project_groups;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{AssignProjectGroup, CreateProjectGroup, ProjectGroup, Role, UpdateProjectGroup},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 

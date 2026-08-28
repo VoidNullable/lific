@@ -145,8 +145,7 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
     let status = issue
         .state
         .as_ref()
-        .map(|s| map_state_type(&s.type_, map))
-        .unwrap_or(map.backlog);
+        .map_or(map.backlog, |s| map_state_type(&s.type_, map));
 
     let labels = issue
         .labels
@@ -166,8 +165,7 @@ pub fn map_issue(issue: &LinearIssue, map: &LinearStatusMap) -> NormalizedIssue 
             author: c
                 .user
                 .as_ref()
-                .map(|u| u.handle())
-                .unwrap_or_else(|| "unknown".into()),
+                .map_or_else(|| "unknown".into(), LinearUser::handle),
             created_at: c.created_at.clone(),
             body: c.body.clone().unwrap_or_default(),
         })
@@ -226,7 +224,7 @@ pub fn collect(
 
 /// The GraphQL query used by the live fetcher. `first: 50` batches with nested
 /// label/comment connections to stay well under the ~1500 req/hr budget.
-pub const ISSUES_QUERY: &str = r#"
+pub const ISSUES_QUERY: &str = r"
 query Issues($team: String!, $after: String) {
   issues(
     first: 50
@@ -247,7 +245,7 @@ query Issues($team: String!, $after: String) {
     }
   }
 }
-"#;
+";
 
 /// Live GraphQL fetcher over the blocking reqwest client.
 pub struct LiveLinear {

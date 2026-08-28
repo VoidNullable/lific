@@ -28,7 +28,10 @@ use axum::{
 
 use crate::authz;
 use crate::db::queries::members;
-use crate::db::{DbPool, models::*};
+use crate::db::{
+    DbPool,
+    models::{AddMember, ChangeMemberRole, MemberWithUser, ProjectMember, Role},
+};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
@@ -87,7 +90,7 @@ pub(super) async fn my_project_role(
     })?;
 
     Ok(Json(serde_json::json!({
-        "role": role.map(|r| r.as_str()),
+        "role": role.map(super::super::db::models::Role::as_str),
         "enforced": enforced,
         "is_admin": is_admin,
     })))
@@ -153,7 +156,7 @@ pub(super) async fn add_project_member(
     Ok(Json(member))
 }
 
-/// PATCH /api/projects/{id}/members/{user_id} — change an existing
+/// PATCH /`api/projects/{id}/members/{user_id`} — change an existing
 /// member's role. 404 if they aren't a member; 409 if this would demote
 /// the project's sole `lead`.
 ///
@@ -217,7 +220,7 @@ pub(super) async fn update_project_member(
     Ok(Json(member))
 }
 
-/// DELETE /api/projects/{id}/members/{user_id} — remove a member. 404 if
+/// DELETE /`api/projects/{id}/members/{user_id`} — remove a member. 404 if
 /// they aren't a member; 409 if they're the project's sole `lead`.
 ///
 /// Not gated on recency: removing a member only ever takes access away.
@@ -424,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn demoting_or_removing_the_sole_lead_is_rejected_until_a_second_lead_exists() {
-        let (db, _admin, lead, _maintainer, _viewer, _non_member, project_id) =
+        let (db, _admin, lead, _maintainer, _viewer, non_member, project_id) =
             setup_membership_test();
         let lead_app = app_as_user(db.clone(), &lead);
 
@@ -448,7 +451,7 @@ mod tests {
         let resp = json_post(
             &lead_app,
             &format!("/api/projects/{project_id}/members"),
-            serde_json::json!({ "user_id": _non_member.id, "role": "lead" }),
+            serde_json::json!({ "user_id": non_member.id, "role": "lead" }),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -492,7 +495,7 @@ mod tests {
         let resp = json_post(
             &lead_app,
             &format!("/api/projects/{project_id}/members"),
-            serde_json::json!({ "user_id": 999999 }),
+            serde_json::json!({ "user_id": 999_999 }),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

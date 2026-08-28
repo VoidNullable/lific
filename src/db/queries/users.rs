@@ -4,7 +4,7 @@ use argon2::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::models::*;
+use crate::db::models::{AuthUser, CreateUser, Session, User};
 use crate::error::LificError;
 
 pub(crate) const INVALID_SESSION_MESSAGE: &str = "invalid or expired session";
@@ -879,7 +879,7 @@ pub fn lock_down_account(conn: &Connection, user_id: i64) -> Result<(), LificErr
     })
 }
 
-/// Generate a session token with the lific_sess_ prefix.
+/// Generate a session token with the `lific_sess`_ prefix.
 fn generate_session_token() -> String {
     let bytes: [u8; 32] = rand::random();
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -927,7 +927,7 @@ fn unusable_password_hash() -> Result<String, LificError> {
     hash_password(&random_pw_hex)
 }
 
-/// Whether a failure is SQLite rejecting a write because it broke a constraint
+/// Whether a failure is `SQLite` rejecting a write because it broke a constraint
 /// (UNIQUE, CHECK, foreign key). LIF-367 leans on this to tell "another
 /// connect got here first" apart from a genuine database failure.
 fn is_constraint_violation(err: &LificError) -> bool {
@@ -1156,7 +1156,7 @@ pub fn find_bot_by_owner_and_tool(
     }
 }
 
-/// Find a legacy bot (tool_id NULL, minted before LIFIC-17) by its owner and
+/// Find a legacy bot (`tool_id` NULL, minted before LIFIC-17) by its owner and
 /// its tool *prefix*.
 ///
 /// Legacy bots were keyed by the `{tool}-{owner.username}` username, which
@@ -1209,11 +1209,11 @@ pub fn bot_is_connected(conn: &Connection, bot_id: i64) -> Result<bool, LificErr
 /// another way. Returns the bot user.
 ///
 /// LIFIC-13: the single find-or-create decision all three doors (OAuth
-/// approval, `lific connect`, web create_bot) share.
+/// approval, `lific connect`, web `create_bot`) share.
 ///
 /// LIFIC-17: dedupe keys on the stable `(owner_id, tool_id)` pair, not the
 /// derived username, so renaming the owner never orphans the agent. Legacy
-/// bots minted before the `tool_id` column existed (tool_id NULL) are found
+/// bots minted before the `tool_id` column existed (`tool_id` NULL) are found
 /// by their owner and tool prefix and backfilled in place — safe even when the
 /// owner renamed in the meantime, since the prefix match skips the stale owner
 /// name embedded in their username.
@@ -2192,7 +2192,7 @@ mod tests {
 
     /// Insert an active (non-revoked) `oauth_tokens` row bound to `user_id`.
     fn insert_oauth_token_for(conn: &Connection, user_id: i64) -> i64 {
-        let token_hash = format!("testtoken-{user_id}-{}", user_id);
+        let token_hash = format!("testtoken-{user_id}-{user_id}");
         let client_id = "test-client";
         conn.execute(
             "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, 'Test', '[\"http://localhost\"]')",
@@ -3078,7 +3078,7 @@ mod tests {
     /// The first-admin decision is `SELECT COUNT(*) = 0 FROM users` followed by
     /// an insert. Those are two statements, so on a bare writer guard they were
     /// two implicit transactions and two racing signups could both read zero.
-    /// Inside one `BEGIN IMMEDIATE` they cannot: SQLite admits one writer, so
+    /// Inside one `BEGIN IMMEDIATE` they cannot: `SQLite` admits one writer, so
     /// the second signup reads the first one's committed row.
     #[test]
     fn concurrent_signups_produce_exactly_one_first_admin() {

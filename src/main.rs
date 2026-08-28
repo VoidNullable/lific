@@ -73,10 +73,13 @@ fn write_private_config(path: &std::path::Path, contents: &str) -> std::io::Resu
 /// `sync_all` persists its bytes; the name that reaches them lives in the
 /// parent directory and survives a crash only once that is synced too.
 /// Unix only: Windows exposes no directory handle to sync.
-fn sync_parent_dir(_dir: &std::path::Path) -> std::io::Result<()> {
+fn sync_parent_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = dir;
+
     #[cfg(unix)]
     {
-        std::fs::File::open(_dir)?.sync_all()?;
+        std::fs::File::open(dir)?.sync_all()?;
     }
     Ok(())
 }
@@ -107,6 +110,7 @@ use rmcp::ServiceExt;
 use tracing::info;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -584,17 +588,15 @@ fn local_url(cfg: &Config) -> String {
 fn http_backend_url(cli_url: Option<&str>, public_url: Option<&str>, cfg: &Config) -> String {
     cli_url
         .or(public_url)
-        .map(str::to_owned)
-        .unwrap_or_else(|| local_url(cfg))
+        .map_or_else(|| local_url(cfg), str::to_owned)
 }
 /// Poll `<base>/api/health` until it answers 200 or the deadline passes.
 async fn wait_healthy(base_url: &str, timeout: std::time::Duration) -> bool {
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
+    else {
+        return false;
     };
     let url = format!("{base_url}/api/health");
     let deadline = std::time::Instant::now() + timeout;
@@ -661,9 +663,7 @@ fn load_config_for_init(
 /// explicit `--auth-mode` flag (non-interactive); otherwise, on a TTY, shows
 /// the interactive menu. Refuses (rather than hangs) off a TTY, matching
 /// `prompt_text`/`confirm`, and names the bypass flag.
-fn resolve_auth_mode(
-    flag: &Option<String>,
-) -> Result<config::AuthMode, Box<dyn std::error::Error>> {
+fn resolve_auth_mode(flag: Option<&str>) -> Result<config::AuthMode, Box<dyn std::error::Error>> {
     if let Some(value) = flag {
         return config::AuthMode::parse(value).ok_or_else(|| {
             format!("invalid --auth-mode '{value}': expected login-free or passwords").into()
@@ -723,6 +723,7 @@ fn prompt_password_for_auth_mode() -> Result<String, Box<dyn std::error::Error>>
 // clap can't express the --config conflict, and init threads many small flags;
 // the repo tolerates this for command handlers (see cli/import.rs).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn cmd_init(
     config_flag: Option<&std::path::Path>,
     db_flag: Option<&std::path::Path>,
@@ -806,8 +807,10 @@ async fn cmd_init(
     // interactive TTY menu), persist the choice to the config file + database,
     // and create the first admin in that mode. An existing instance with users
     // skips all of this entirely.
-    let created_admin = if !auth::has_human_operator(&pool) {
-        let mode = resolve_auth_mode(&auth_mode_flag)?;
+    let created_admin = if auth::has_human_operator(&pool) {
+        None
+    } else {
+        let mode = resolve_auth_mode(auth_mode_flag.as_deref())?;
 
         // Persist the choice into the config file, editing it in place (the
         // change set `[auth] required` and `[server] host`; every other section
@@ -847,8 +850,6 @@ async fn cmd_init(
         };
         info!(operator = %admin.username, mode = mode.as_str(), "created first human admin");
         Some(admin)
-    } else {
-        None
     };
 
     // Mint the initial API key HERE, in the operator's terminal. Once the
@@ -883,7 +884,7 @@ async fn cmd_init(
                         // port while our unit crash-loops on AddrInUse), and
                         // silence alone is ambiguous. Cross-check the unit's
                         // own active state to say something precise.
-                        let active = cli::service::status(mgr).map(|s| s.active).unwrap_or(false);
+                        let active = cli::service::status(mgr).is_ok_and(|s| s.active);
                         match (healthy, active) {
                             (true, true) => {}
                             (true, false) => {
@@ -920,7 +921,7 @@ async fn cmd_init(
                     "no supported service manager found (needs a systemd user session on \
                      Linux, or launchd on macOS)"
                         .to_string(),
-                )
+                );
             }
         }
     }
@@ -1020,16 +1021,15 @@ async fn cmd_init(
 
     let mut outro_msg = format!("Verify anytime with {}", ui::command("lific doctor"));
     if service_report.is_some() {
-        outro_msg.push_str(&format!(
-            " · manage the service with {}",
-            ui::command("lific service status|restart|stop|uninstall")
-        ));
+        outro_msg.push_str(" · manage the service with ");
+        outro_msg.push_str(&ui::command("lific service status|restart|stop|uninstall"));
     }
     ui::outro(outro_msg);
     Ok(())
 }
 
 /// `lific service <action>`: manage the background service `init` installs.
+#[allow(clippy::too_many_lines)]
 fn cmd_service(
     cfg: &Config,
     config_flag: Option<&std::path::Path>,
@@ -1164,18 +1164,18 @@ mod init_target_tests {
     use crate::db;
     use std::path::{Path, PathBuf};
 
-    fn os_default() -> Option<(PathBuf, PathBuf)> {
-        Some((
+    fn os_default() -> (PathBuf, PathBuf) {
+        (
             PathBuf::from("/home/u/.config/lific/lific.toml"),
             PathBuf::from("/home/u/.local/share/lific/lific.db"),
-        ))
+        )
     }
 
     // LIF-295: bare init targets the OS dirs, with an explicit db path so the
     // generated config can split config dir from data dir.
     #[test]
     fn bare_init_targets_os_dirs() {
-        let (config, db) = resolve_init_target(None, false, false, os_default());
+        let (config, db) = resolve_init_target(None, false, false, Some(os_default()));
         assert_eq!(config, Path::new("/home/u/.config/lific/lific.toml"));
         assert_eq!(
             db.as_deref(),
@@ -1185,7 +1185,7 @@ mod init_target_tests {
 
     #[test]
     fn here_flag_forces_cwd_layout() {
-        let (config, db) = resolve_init_target(None, true, false, os_default());
+        let (config, db) = resolve_init_target(None, true, false, Some(os_default()));
         assert_eq!(config, Path::new("lific.toml"));
         assert_eq!(db, None, "cwd layout keeps the relative default db");
     }
@@ -1194,7 +1194,7 @@ mod init_target_tests {
     // a second instance in the OS dirs.
     #[test]
     fn existing_cwd_config_wins_over_os_dirs() {
-        let (config, db) = resolve_init_target(None, false, true, os_default());
+        let (config, db) = resolve_init_target(None, false, true, Some(os_default()));
         assert_eq!(config, Path::new("lific.toml"));
         assert_eq!(db, None);
     }
@@ -1205,7 +1205,7 @@ mod init_target_tests {
             Some(Path::new("/srv/lific/lific.toml")),
             false,
             true,
-            os_default(),
+            Some(os_default()),
         );
         assert_eq!(config, Path::new("/srv/lific/lific.toml"));
         assert_eq!(db, None);
@@ -1248,7 +1248,7 @@ mod init_target_tests {
 
     /// Run `lific init --config <dir>/lific.toml --no-service` for the operator
     /// `name` and assert on the DB state it wrote (stdout isn't a TTY under the
-    /// test harness, so we can't capture cmd_init's printed JSON — instead we
+    /// test harness, so we can't capture `cmd_init`'s printed JSON — instead we
     /// re-open the database and read back the shared facts).
     async fn run_init(
         dir: &TempDir,
