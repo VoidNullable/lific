@@ -465,6 +465,22 @@ impl LificMcp {
             .map(|t| t.name.to_string())
             .collect()
     }
+
+    /// The live tool surface as `(name, input schema)` pairs, read from the
+    /// same `list_all()` the production `list_tools` handler serves — so a
+    /// check written against this is checking what clients actually receive,
+    /// not a parallel description of it.
+    pub(crate) fn list_tool_schemas(&self) -> Vec<(String, serde_json::Value)> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                let schema = serde_json::to_value(&t.input_schema)
+                    .expect("a tool's input schema must serialize");
+                (t.name.to_string(), schema)
+            })
+            .collect()
+    }
 }
 
 impl ServerHandler for LificMcp {
@@ -1196,6 +1212,144 @@ mod tests {
             seen.map(|u| u.id),
             Some(user.id),
             "the middleware's identity survives the seam untouched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    //! Guards on the *shape* of the published MCP tool surface.
+    //!
+    //! LIF-433 and LIF-435 reported that `edit_issue`/`edit_page` advertised
+    //! camelCase parameters (`oldString`) while the deserializer wanted
+    //! snake_case, making the cheap edit path unusable over MCP. Dumping the
+    //! real `tools/list` response showed the server has only ever published
+    //! snake_case, so the camelCase came from the reporting client, not from
+    //! here. Both issues were closed as client-side.
+    //!
+    //! The suggested fix was still the right idea, and it is what this module
+    //! is: a check driven by the advertised schema itself rather than a
+    //! hand-maintained list of tools, so schema-versus-deserializer drift
+    //! cannot reach a client the way it appeared to have.
+
+    use crate::mcp::LificMcp;
+
+    fn live_surface() -> Vec<(String, serde_json::Value)> {
+        let db = crate::db::open_memory().expect("test db");
+        LificMcp::new(db).list_tool_schemas()
+    }
+
+    /// Every parameter a client is told to send must be snake_case, because
+    /// that is what serde deserializes. A camelCase property here would be
+    /// rejected at the JSON-RPC boundary with a bare "missing field" and no
+    /// hint that the schema itself was the liar.
+    #[test]
+    fn every_advertised_parameter_is_snake_case() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+
+        for (tool, schema) in live_surface() {
+            let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+                // A tool with no parameters at all is legitimate; a tool whose
+                // schema stopped being an object with `properties` is not, and
+                // the count assertion below is what notices.
+                continue;
+            };
+            for name in props.keys() {
+                checked += 1;
+                let snake = name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if !snake {
+                    offenders.push(format!("{tool}.{name}"));
+                }
+            }
+        }
+
+        // Without this the test passes vacuously the day the schema changes
+        // shape and `properties` stops being where parameters live.
+        assert!(
+            checked > 50,
+            "only {checked} parameters inspected across the whole surface — the \
+             schema shape probably changed and this test is no longer looking \
+             at anything"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these advertised parameters are not snake_case, so a client that \
+             follows the schema will be rejected by the deserializer: {offenders:?}"
+        );
+    }
+
+    /// Anything listed as required must also be described in `properties`.
+    /// A required name with no property is unanswerable: the client is told to
+    /// send a field it has been given no definition for.
+    #[test]
+    fn every_required_parameter_is_also_declared() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+
+        for (tool, schema) in live_surface() {
+            assert!(
+                schema.is_object(),
+                "{tool}'s input schema is not a JSON object: {schema}"
+            );
+            let required = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let props = schema.get("properties").and_then(|p| p.as_object());
+            for name in required.iter().filter_map(|v| v.as_str()) {
+                checked += 1;
+                if props.is_none_or(|p| !p.contains_key(name)) {
+                    offenders.push(format!("{tool}.{name}"));
+                }
+            }
+        }
+
+        assert!(
+            checked > 10,
+            "only {checked} required parameters inspected — the schema shape \
+             probably changed and this test is no longer looking at anything"
+        );
+        assert!(
+            offenders.is_empty(),
+            "required parameters missing a property definition: {offenders:?}"
+        );
+    }
+
+    /// Every registered tool has to appear in the README.
+    ///
+    /// The count drifted to three different numbers across the repo (26 in the
+    /// architecture page, 27 in the release-post template, 30 in the README)
+    /// precisely because nothing checked. Names rather than a count, so adding
+    /// a tool fails this test instead of silently making a sentence wrong.
+    ///
+    /// Deliberately not asserted against `SERVER_INSTRUCTIONS`: that text is
+    /// guidance an agent pays for on every connection, not an inventory, and
+    /// forcing all 30 names into it would trade agent context for tidiness.
+    #[test]
+    fn every_tool_is_named_in_the_readme() {
+        const README: &str = include_str!("../../README.md");
+
+        let db = crate::db::open_memory().expect("test db");
+        let tools = LificMcp::new(db).list_tool_names();
+
+        assert!(
+            tools.len() > 15,
+            "sanity check: only {} tools found — ToolRouter wiring is probably broken",
+            tools.len()
+        );
+
+        let undocumented: Vec<&String> = tools
+            .iter()
+            .filter(|name| !README.contains(name.as_str()))
+            .collect();
+
+        assert!(
+            undocumented.is_empty(),
+            "these MCP tools are registered but never named in README.md: {undocumented:?}"
         );
     }
 }

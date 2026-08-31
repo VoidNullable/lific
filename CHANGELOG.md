@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Only `lific init` creates a database
+
+Lific used to create a database out of thin air whenever it could not find one, which sounds convenient and was in practice a way to quietly hand people the wrong tracker.
+
+- **A first run no longer leaves a stray database in your repository.** The MCP registry launches Lific as a bare `lific mcp` with no database argument, using whatever directory your AI client is working in. With no config file anywhere, that resolved to a relative `lific.db` in the current directory, so the server created one there, migrated it, and served an empty tracker. A new user got no projects, three untracked files next to their source code, and no explanation. Local commands did the same thing: `lific project list` or `lific user list` in an unconfigured directory answered `[]` and left a database behind. Every command that reads a local database now refuses to run against one that does not exist, and the error names the exact file and points at `lific init`.
+- **`init --db` writes the database it actually used.** Passing `--db` seeded that database with your admin account and then wrote a config file naming a different, default path. The next command that read only the config created that second, empty database and reported no users, with both files on disk and nothing saying they had diverged. The config now records the path `init` really used, absolute, so the database it sets up and the database everything else reads are the same file. Running `init` against a config that already names a different database says so instead of silently seeding one and reading the other.
+
+### Development
+
+- **The MCP tool surface is checked against itself.** Three tests now read the live tool router the way a client does: every advertised parameter must be snake_case (so the published schema can never disagree with what the server actually deserializes), every required parameter must have a definition, and every registered tool must be named in the README. The tool count had drifted to three different numbers in three places before anything checked.
+
+### Upgrading
+
+- **Lific will no longer create a database implicitly.** `lific init` is the only command that creates one. Everything that opens a local database now exits with an error when the file does not exist rather than creating it: `mcp`, `start`, `dump`, `import`, `service install`, the data commands (`issue`, `project`, `page`, `comment`, `module`, `label`, `folder`, `search`, `export`), and the administrative ones (`instance`, `key`, `user`, `member`). This applies to an explicit `--db` or `--config` too, matching what `lific connect` has always done. Unaffected, because they must keep working without a database: `init`, `restore`, `doctor` (which reports the missing database instead of dying on it), `login`, `logout`, `connect`, `agents-md`, `completion`, and `service uninstall`/`stop`/`status`/`restart`. Commands run with `--backend http` never needed a local database and are untouched. If you have automation that relied on a bare command conjuring a database, run `lific init --db <path>` first.
+
 ## v2.8.0 (2026-08-30)
 
 The web UI stops treating the server as something to ask again and again and starts treating it as something to stay in sync with: every change carries a sequence number, tabs replay what they missed, navigation renders from a live read model instead of refetching, and deletes became reversible on the server. Around that, the OAuth consent screen finally says who is asking for what, and [@mjc](https://github.com/mjc) contributed another hardening pass across imports, rendered content, restores, filesystem writes, and the toolchain itself.

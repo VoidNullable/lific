@@ -392,6 +392,31 @@ impl Default for RetentionConfig {
     }
 }
 
+/// Resolve `path` against the process cwd when it is relative.
+///
+/// Unlike [`std::fs::canonicalize`] this works for a file that does not exist
+/// yet, which is exactly the case that matters when `init` is about to write
+/// the path into a config file for later commands to read back.
+pub fn absolutize(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    // Drop `.` components so `lific.db` and `./lific.db` resolve to the same
+    // path and callers comparing two of these do not report a spurious
+    // disagreement. `..` is deliberately left alone: resolving it lexically is
+    // wrong when a symlink is involved, and these paths are compared and
+    // displayed rather than walked.
+    joined
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
 impl Config {
     /// Load config from the first file found, or return defaults when no file
     /// exists anywhere in the search path.
@@ -514,6 +539,46 @@ impl Config {
         let config = dirs::config_dir()?.join("lific").join(CONFIG_FILENAME);
         let db = dirs::data_dir()?.join("lific").join("lific.db");
         Some((config, db))
+    }
+
+    /// Absolute, display-ready form of `database.path`, so an error can name
+    /// the file the caller is actually about to get rather than a bare
+    /// `lific.db` that says nothing about which directory it landed in.
+    pub fn absolute_database_path(&self) -> String {
+        if let Ok(canon) = std::fs::canonicalize(&self.database.path) {
+            return canon.display().to_string();
+        }
+        absolutize(&self.database.path).display().to_string()
+    }
+
+    /// Refuse to operate on a database that does not exist yet.
+    ///
+    /// `lific init` is the only command that may create one. Everything else
+    /// must resolve to a database that is already there, because the
+    /// alternative is what used to happen: with no config file anywhere,
+    /// `database.path` falls back to the bare relative default `lific.db`,
+    /// which resolves against the process cwd. A config-less `lific mcp` —
+    /// exactly how `server.json` tells MCP clients to launch us — would then
+    /// create `lific.db`, `lific.db-wal` and `lific.db-shm` in whatever
+    /// directory the agent happened to be sitting in, migrate them, and serve
+    /// an empty tracker. The user gets no projects, three junk files in
+    /// `git status`, and no explanation.
+    ///
+    /// `lific connect` has guarded this since it shipped; this is the same
+    /// rule applied to every other door.
+    pub fn require_existing_database(&self) -> Result<(), String> {
+        if self.database.path.exists() {
+            return Ok(());
+        }
+        // One line on purpose: `fn main() -> Result<_, Box<dyn Error>>` prints
+        // errors with `{:?}`, so an embedded newline reaches the user as a
+        // literal `\n`. Matches `connect::ensure_instance_exists`.
+        Err(format!(
+            "no Lific instance found: {} does not exist. Only `lific init` creates a database; \
+             run it to set one up, or point at an existing instance with --config <file> or \
+             --db <file>.",
+            self.absolute_database_path()
+        ))
     }
 
     /// Generate a default config file as a TOML string.
@@ -1119,5 +1184,98 @@ enabled = false
         assert_eq!(AuthMode::parse("bogus"), None);
         assert_eq!(AuthMode::LoginFree.as_str(), "login-free");
         assert_eq!(AuthMode::Passwords.as_str(), "passwords");
+    }
+}
+
+#[cfg(test)]
+mod instance_guard_tests {
+    //! The "only `lific init` creates a database" rule.
+    //!
+    //! Regression cover for the first-run failure: `server.json` tells MCP
+    //! clients to launch a bare `lific mcp`, which with no config file anywhere
+    //! resolved `database.path` to the relative default `lific.db` against the
+    //! agent's cwd and created a fresh empty instance inside the user's repo.
+
+    use super::*;
+
+    /// An absolute path literal the host actually agrees is absolute; see the
+    /// note on the sibling module's copy for why Windows needs its own.
+    #[cfg(unix)]
+    const ABSOLUTE_DB_PATH: &str = "/srv/lific/lific.db";
+    #[cfg(not(unix))]
+    const ABSOLUTE_DB_PATH: &str = "C:/srv/lific/lific.db";
+
+    #[test]
+    fn missing_database_is_refused_and_the_error_names_the_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = Config::default();
+        cfg.database.path = dir.path().join("nope.db");
+
+        let err = cfg
+            .require_existing_database()
+            .expect_err("a database that does not exist must not be conjured");
+
+        assert!(
+            err.contains(&dir.path().join("nope.db").display().to_string()),
+            "the error has to name the file the caller would otherwise have \
+             silently created, got: {err}"
+        );
+        assert!(
+            err.contains("lific init"),
+            "the error must point at the one command that does create a database, got: {err}"
+        );
+    }
+
+    #[test]
+    fn existing_database_is_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("lific.db");
+        std::fs::write(&db, b"").expect("touch db");
+        let mut cfg = Config::default();
+        cfg.database.path = db;
+
+        assert!(cfg.require_existing_database().is_ok());
+    }
+
+    #[test]
+    fn the_bare_default_config_points_at_a_relative_path() {
+        // This is the property that made the bug possible, pinned so nobody
+        // "tidies" the default into something absolute and quietly removes the
+        // reason the guard above exists.
+        assert!(
+            Config::default().database.path.is_relative(),
+            "the no-config-found default is relative, which is exactly why it \
+             must never be opened implicitly"
+        );
+    }
+
+    #[test]
+    fn absolutize_resolves_relative_paths_without_requiring_them_to_exist() {
+        let resolved = absolutize(Path::new("does-not-exist.db"));
+        assert!(
+            resolved.is_absolute(),
+            "a relative path must come back absolute even when no such file exists"
+        );
+        assert!(resolved.ends_with("does-not-exist.db"));
+    }
+
+    #[test]
+    fn absolutize_leaves_absolute_paths_alone() {
+        let already = absolutize(Path::new(ABSOLUTE_DB_PATH));
+        assert_eq!(already, PathBuf::from(ABSOLUTE_DB_PATH));
+    }
+
+    #[test]
+    fn absolutize_normalizes_dot_components() {
+        // `init`'s --db-versus-config warning compares two absolutized paths,
+        // so `lific.db` and `./lific.db` disagreeing would fire it spuriously.
+        assert_eq!(
+            absolutize(Path::new("lific.db")),
+            absolutize(Path::new("./lific.db"))
+        );
+        assert_eq!(
+            absolutize(Path::new("data/./lific.db")),
+            absolutize(Path::new("data/lific.db"))
+        );
     }
 }

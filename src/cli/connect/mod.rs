@@ -217,17 +217,7 @@ pub fn default_url(cfg: &Config) -> String {
 /// Absolute DB path for stdio configs (canonicalized when the file exists, else
 /// made absolute against cwd so the spawned server opens the right file).
 pub fn absolute_db_path(cfg: &Config) -> String {
-    let p = &cfg.database.path;
-    if let Ok(canon) = std::fs::canonicalize(p) {
-        return canon.display().to_string();
-    }
-    if p.is_absolute() {
-        return p.display().to_string();
-    }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(p).display().to_string(),
-        Err(_) => p.display().to_string(),
-    }
+    cfg.absolute_database_path()
 }
 
 /// Build the canonical [`ServerConfig`] for one client. `key` is that client's

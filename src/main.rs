@@ -45,6 +45,44 @@ fn is_crud_command(cmd: &Command) -> bool {
     )
 }
 
+/// Whether `cmd` operates on a local database that must already exist.
+///
+/// Only `lific init` creates a database. Every other command that reaches
+/// `db::open` has to find one, because the alternative is the first-run
+/// failure this guard exists for: with no config file anywhere,
+/// `database.path` is the bare relative `lific.db`, so an unguarded command
+/// creates and migrates a fresh empty instance in whatever directory it
+/// happened to run from.
+///
+/// The exemption list is the interesting half, and it is deliberately
+/// exhaustive rather than a catch-all, so a command added later is guarded by
+/// default instead of by somebody remembering to:
+///
+/// - `Init` creates the database; `Restore` writes one into place.
+/// - `Doctor` must be able to *report* a missing database, not die on it.
+/// - `Login`/`Logout` are pure HTTP and never open a database.
+/// - `Connect` carries its own, more specific version of this guard.
+/// - `AgentsMd` only writes a markdown file.
+/// - `Completion` returns before config is even loaded.
+/// - Of the service actions only `install` needs one, so that installing a
+///   unit whose `start` would immediately fail the guard is refused up front.
+///   `uninstall`/`stop`/`status`/`restart` must keep working on a host whose
+///   database is gone, which is exactly when you need to stop the service.
+fn needs_existing_database(cmd: &Command) -> bool {
+    match cmd {
+        Command::Init { .. }
+        | Command::Restore { .. }
+        | Command::Doctor { .. }
+        | Command::Login { .. }
+        | Command::Logout { .. }
+        | Command::Connect { .. }
+        | Command::AgentsMd { .. }
+        | Command::Completion { .. } => false,
+        Command::Service { action } => matches!(action, cli::ServiceAction::Install),
+        _ => true,
+    }
+}
+
 fn write_private_config(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let staging = tempfile::Builder::new()
@@ -166,6 +204,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
             .await
             .map_err(Into::into);
+    }
+
+    // Only `lific init` creates a database. Checked once, here, after the HTTP
+    // backend has had its chance to return (an HTTP command talks to a server
+    // and must never need a local database at all).
+    if needs_existing_database(&cli.command) {
+        cfg.require_existing_database()?;
     }
 
     // Handle CRUD commands (direct database access, no server needed)
@@ -646,6 +691,33 @@ fn resolve_init_target(
     }
 }
 
+/// The TOML `init` writes when it creates a brand-new config file.
+///
+/// LIF-432: an explicit `--db` has to survive into the file. It used to be
+/// applied only to the in-memory config that `init` seeded the database
+/// through, so `lific --db ./smoke.db init` created the admin in `smoke.db`
+/// and then wrote a config naming `lific.db`. The next config-only command
+/// created that second, empty database and reported no users, with both files
+/// on disk and nothing saying they had diverged.
+///
+/// The path is absolutized first: `init` resolves a relative `--db` against
+/// the process cwd, but [`Config::load`] anchors a relative `database.path` to
+/// the config file's own directory. Under the OS-dirs layout those are two
+/// different directories, so writing the relative form would reintroduce the
+/// same divergence by a longer route.
+fn init_config_toml(
+    db_flag: Option<&std::path::Path>,
+    default_db: Option<&std::path::Path>,
+) -> String {
+    match db_flag {
+        Some(db) => Config::default_toml_with_db(&config::absolutize(db)),
+        None => match default_db {
+            Some(db) => Config::default_toml_with_db(db),
+            None => Config::default_toml(),
+        },
+    }
+}
+
 /// Load the config file `init` operates on, applying the optional `--db`
 /// override on top. Shared by the initial load and the post-auth-mode reload
 /// (LIFIC-25), so the override logic lives in exactly one place. A malformed
@@ -774,12 +846,32 @@ async fn cmd_init(
             #[cfg(not(unix))]
             let _ = parent_existed;
         }
-        let toml = match &default_db {
-            Some(db) => Config::default_toml_with_db(db),
-            None => Config::default_toml(),
-        };
+        let toml = init_config_toml(db_flag, default_db.as_deref());
         create_private_config(&config_path, &toml)?;
         true
+    };
+
+    // LIF-432, the other half: an existing config keeps its own database path,
+    // so `--db` redirects only this run. Seeding one database while every
+    // later command reads another is the exact failure this issue described,
+    // and it is worth a word even when we cannot fix it by rewriting the file.
+    if !created_config
+        && let Some(db) = db_flag
+        && let Ok(on_disk) = Config::load(Some(&config_path))
+        && config::absolutize(&on_disk.database.path) != config::absolutize(db)
+    {
+        let msg = format!(
+            "--db points at {} but {} says {}. init will seed the --db path; later commands \
+             reading only the config will use the other one.",
+            config::absolutize(db).display(),
+            config_path.display(),
+            on_disk.database.path.display()
+        );
+        if json {
+            eprintln!("warning: {msg}");
+        } else {
+            ui::warn(msg);
+        }
     };
 
     // (Re)load from the file init actually operates on, so a relative
@@ -1164,9 +1256,76 @@ fn cmd_service(
 }
 #[cfg(test)]
 mod init_target_tests {
-    use super::{Config, auth, cmd_init, resolve_init_target};
+    use super::{Config, auth, cmd_init, init_config_toml, resolve_init_target};
     use crate::db;
     use std::path::{Path, PathBuf};
+
+    /// LIF-432: whatever database `init` actually seeds must be the database
+    /// the config it writes names, or every later config-only command lands in
+    /// a different, empty file without a word of warning.
+    mod written_config_names_the_seeded_database {
+        use super::*;
+
+        fn db_path_in(toml: &str) -> String {
+            toml.parse::<toml::Table>()
+                .expect("init writes valid TOML")
+                .get("database")
+                .and_then(|d| d.get("path"))
+                .and_then(|p| p.as_str())
+                .expect("a [database] path is always written")
+                .to_string()
+        }
+
+        #[test]
+        fn an_explicit_db_flag_wins_over_the_os_default() {
+            let toml = init_config_toml(
+                Some(Path::new("/tmp/smoke.db")),
+                Some(Path::new("/home/u/.local/share/lific/lific.db")),
+            );
+            assert_eq!(
+                db_path_in(&toml),
+                crate::config::absolutize(Path::new("/tmp/smoke.db"))
+                    .display()
+                    .to_string(),
+                "--db is the path init seeds, so it is the path the config must name"
+            );
+        }
+
+        #[test]
+        fn a_relative_db_flag_is_written_absolute() {
+            // init resolves a relative --db against the cwd; Config::load
+            // anchors a relative database.path to the config file's directory.
+            // Writing the relative form would let those two disagree whenever
+            // the config does not live in the cwd, which is the default layout.
+            let toml = init_config_toml(Some(Path::new("smoke.db")), None);
+            let written = db_path_in(&toml);
+            assert!(
+                Path::new(&written).is_absolute(),
+                "expected an absolute path, got {written}"
+            );
+            assert!(written.ends_with("smoke.db"));
+        }
+
+        #[test]
+        fn without_a_db_flag_the_os_default_is_written_unchanged() {
+            let toml = init_config_toml(None, Some(Path::new(super::OS_DEFAULT_DB_FIXTURE)));
+            assert_eq!(db_path_in(&toml), super::OS_DEFAULT_DB_FIXTURE);
+        }
+
+        #[test]
+        fn the_cwd_layout_keeps_the_plain_relative_default() {
+            // --here / --config put the database beside the config file, where
+            // a relative path is correct and anchoring resolves it properly.
+            let toml = init_config_toml(None, None);
+            assert_eq!(db_path_in(&toml), "lific.db");
+        }
+    }
+
+    /// An absolute OS-data-dir path literal for the host platform.
+    #[cfg(unix)]
+    const OS_DEFAULT_DB_FIXTURE: &str = "/home/u/.local/share/lific/lific.db";
+    #[cfg(not(unix))]
+    const OS_DEFAULT_DB_FIXTURE: &str = "C:/Users/u/AppData/Roaming/lific/lific.db";
 
     fn os_default() -> (PathBuf, PathBuf) {
         (
