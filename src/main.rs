@@ -632,7 +632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // LIF-451: a stdio session launched inside a bound repository
             // defaults project-scoped tools to that project. Resolved once,
             // here, because the working directory cannot change mid-session.
-            let bound_project = stdio_bound_project(&pool);
+            let bound_project = stdio_bound_project(&pool, token_user.as_ref());
             if let Some(ref identifier) = bound_project {
                 info!(project = %identifier, "stdio session bound to project");
             }
@@ -674,7 +674,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// session that simply requires an explicit `project` is a working session.
 /// The one case worth a word on stderr is an ambiguous checkout, because only
 /// a human can resolve it.
-fn stdio_bound_project(pool: &db::DbPool) -> Option<String> {
+fn stdio_bound_project(
+    pool: &db::DbPool,
+    token_user: Option<&db::models::AuthUser>,
+) -> Option<String> {
     use db::queries::repo_bindings::{Resolution, resolve};
     use repo_identity::AliasKind;
 
@@ -699,9 +702,28 @@ fn stdio_bound_project(pool: &db::DbPool) -> Option<String> {
 
     let conn = pool.read().ok()?;
     match resolve(&conn, &aliases) {
-        Ok(Resolution::One(binding)) => db::queries::get_project(&conn, binding.project_id)
-            .map(|project| project.identifier)
-            .ok(),
+        Ok(Resolution::One(binding)) => {
+            // A LIFIC_TOKEN-scoped agent session must not have a project it
+            // cannot see named in its instructions: an invisible binding is
+            // treated as no binding, matching the resolve endpoint's rule.
+            if let Some(user) = token_user {
+                let identity = resolve_caller::ResolvedIdentity {
+                    user: user.clone(),
+                    transport: actor::Transport::Mcp,
+                };
+                match authz::can_view_project(pool, &identity, binding.project_id) {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(e) => {
+                        info!(error = %e, "binding visibility check failed; session is unbound");
+                        return None;
+                    }
+                }
+            }
+            db::queries::get_project(&conn, binding.project_id)
+                .map(|project| project.identifier)
+                .ok()
+        }
         Ok(Resolution::Conflict(_)) => {
             eprintln!(
                 "This repository resolves to more than one binding, so no project was assumed. \

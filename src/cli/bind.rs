@@ -465,7 +465,9 @@ pub fn human(value: &Value) -> String {
             w(&mut out);
             let _ = writeln!(
                 out,
-                "Run `lific bind PROJECT` with one of them to pick explicitly."
+                "Two bindings each own one of this repository's aliases. Settle it by merging \
+                 them (POST /api/repos/merge) or deleting one (DELETE /api/repos/bindings/{{id}}), \
+                 then re-run `lific bind`."
             );
         }
         _ => {
@@ -747,7 +749,11 @@ mod tests {
         assert_eq!(identifiers, vec!["LIF", "OTH"]);
         let text = human(&report);
         assert!(text.contains("more than one project"), "{text}");
-        assert!(text.contains("lific bind PROJECT"), "{text}");
+        // The guidance must name real remedies. `lific bind PROJECT` is not
+        // one: claim_aliases refuses aliases owned by another project, so a
+        // conflict can only be settled by merging or deleting a binding.
+        assert!(text.contains("/api/repos/merge"), "{text}");
+        assert!(text.contains("re-run `lific bind`"), "{text}");
     }
 
     // ── identity, against real repositories ──────────────────

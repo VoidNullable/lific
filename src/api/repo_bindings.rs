@@ -306,6 +306,16 @@ pub(super) async fn bind_repo(
     let project_id = with_read(&db, |conn| {
         queries::resolve_project_identifier(conn, &input.project)
     })?;
+    // 404 before 403, byte-identical to the unknown-identifier error above:
+    // a bind attempt must not distinguish "that project exists but you cannot
+    // see it" from "no such project".
+    let visible = authz::visible_project_ids(&db, &identity)?;
+    if !project_visible(&visible, project_id) {
+        return Err(LificError::NotFound(format!(
+            "project '{}' not found",
+            input.project
+        )));
+    }
     // Cheap pre-check on a read connection so an unauthorized caller never
     // reaches the writer; re-run authoritatively inside the transaction.
     authz::require_role(&db, &identity, project_id, Role::Lead)?;

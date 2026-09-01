@@ -452,7 +452,42 @@ where
 /// `credential` is optional: an auth-optional instance takes requests with no
 /// `Authorization` header at all, so `None` sends none rather than failing.
 pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn Error>> {
-    let client = reqwest::Client::builder().build()?;
+    // The same plaintext rule the HTTP CLI backend enforces (http.rs:92-101):
+    // a bearer credential never crosses unencrypted http to a non-loopback
+    // host. The proxy would otherwise be the one door that leaks it.
+    if let Ok(parsed) = reqwest::Url::parse(&url) {
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(format!("--url must be http:// or https://, got {other}://").into());
+            }
+        }
+        let non_loopback = parsed
+            .host_str()
+            .is_some_and(|host| !super::http::is_loopback_host(host));
+        if parsed.scheme() == "http" && non_loopback {
+            if credential.is_some() {
+                return Err(format!(
+                    "refusing to send bearer credentials over plaintext http to {}",
+                    parsed.host_str().unwrap_or_default()
+                )
+                .into());
+            }
+            eprintln!(
+                "warning: connecting over unencrypted http to {}",
+                parsed.host_str().unwrap_or_default()
+            );
+        }
+    } else {
+        return Err(format!("--url is not a valid URL: {url}").into());
+    }
+
+    // Bounded, because a proxy that hangs forever on a dead remote looks to
+    // the agent like a tracker that stopped answering, with no error to show.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
     // Resolved before the pump, so the very first `initialize` already knows
     // the answer and no request is ever forwarded against a stale binding.
     let bound = resolve_binding(&client, &url, credential.as_deref()).await;

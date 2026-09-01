@@ -91,6 +91,10 @@ fn identifier_at(bytes: &[u8], index: usize) -> Option<(&str, usize)> {
 pub fn closing_references(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut found: Vec<String> = Vec::new();
+    // Set membership beside the ordered Vec: `contains` on the Vec made a
+    // message with N references quadratic, which matters because /api/git-hook
+    // feeds this attacker-sized bodies.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut index = 0usize;
 
     while index < bytes.len() {
@@ -116,7 +120,7 @@ pub fn closing_references(text: &str) -> Vec<String> {
         match identifier_at(bytes, cursor) {
             Some((identifier, end)) => {
                 let identifier = identifier.to_ascii_uppercase();
-                if !found.contains(&identifier) {
+                if seen.insert(identifier.clone()) {
                     found.push(identifier);
                 }
                 index = end;
@@ -136,9 +140,10 @@ pub fn closing_references(text: &str) -> Vec<String> {
 #[must_use]
 pub fn closing_references_in<S: AsRef<str>>(messages: &[S]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for message in messages {
         for identifier in closing_references(message.as_ref()) {
-            if !found.contains(&identifier) {
+            if seen.insert(identifier.clone()) {
                 found.push(identifier);
             }
         }

@@ -165,10 +165,27 @@ pub(super) async fn git_hook(
         .clone()
         .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
 
+    // Deliberate ceilings, named in the refusal (the PR #40 convention): a CI
+    // push has no business carrying more, and each reference below costs
+    // resolution plus authorization queries.
+    const MAX_MESSAGES: usize = 500;
+    const MAX_REFERENCES: usize = 500;
+    if input.messages.len() > MAX_MESSAGES {
+        return Err(LificError::BadRequest(format!(
+            "too many messages in one request (max {MAX_MESSAGES})"
+        )));
+    }
+    let references = issue_refs::closing_references_in(&input.messages);
+    if references.len() > MAX_REFERENCES {
+        return Err(LificError::BadRequest(format!(
+            "too many issue references in one request (max {MAX_REFERENCES})"
+        )));
+    }
+
     let mut acted = Vec::new();
     let mut skips = Vec::new();
 
-    for identifier in issue_refs::closing_references_in(&input.messages) {
+    for identifier in references {
         match verdict(&db, &identity, &caller, &identifier)? {
             Verdict::Skip(reason) => skips.push(skipped(&identifier, reason)),
             Verdict::Close(id) => {

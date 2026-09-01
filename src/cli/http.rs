@@ -1291,7 +1291,7 @@ fn alias_bodies(aliases: &[(String, String)]) -> Vec<Value> {
         .collect()
 }
 
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<IpAddr>()
