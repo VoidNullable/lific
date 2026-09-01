@@ -4,6 +4,7 @@ pub mod connect;
 pub mod credentials;
 pub mod doctor;
 pub mod exec;
+pub mod git_hook;
 pub mod http;
 pub mod import;
 pub mod instance;
@@ -392,6 +393,36 @@ pub enum Command {
         /// Create the project first if it does not exist yet.
         #[arg(long)]
         create: bool,
+    },
+
+    /// Close the issues that commit messages say they close (LIF-5).
+    ///
+    /// A message containing `closes LIF-42` (or `fixes`, or `resolves`, in any
+    /// case) marks LIF-42 done. A bare mention does not: "see LIF-42" leaves
+    /// the issue alone.
+    ///
+    /// With no `--range`, the whole of stdin is read as one message, which is
+    /// what a `commit-msg` hook wants:
+    ///
+    ///   #!/bin/sh
+    ///   lific git-hook < "$1"
+    ///
+    /// With `--range`, the messages come from `git log` over that range, which
+    /// is what a `post-receive` hook or a CI step wants:
+    ///
+    ///   lific git-hook --range origin/master..HEAD
+    ///
+    /// Works against a local database and, with `--backend http`, against a
+    /// remote instance.
+    GitHook {
+        /// Commit range to read messages from (e.g. `origin/master..HEAD`).
+        /// Omit to read one message from stdin.
+        #[arg(long)]
+        range: Option<String>,
+
+        /// Report what would close and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Generate shell completions (e.g. `lific completion fish | source`)

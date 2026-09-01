@@ -12,6 +12,7 @@ mod dump;
 mod error;
 mod export;
 mod import;
+mod issue_refs;
 mod links;
 mod mcp;
 mod oauth;
@@ -48,6 +49,12 @@ fn is_crud_command(cmd: &Command) -> bool {
             // `needs_existing_database`, which is what stops the SQL path from
             // conjuring an empty instance in whatever directory it ran from.
             | Command::Bind { .. }
+            // LIF-5: `git-hook` closes issues, so it belongs on both backends
+            // — a local hook writes to the database directly, a CI step posts
+            // to `/api/git-hook`. Routing it here also puts it under
+            // `needs_existing_database`, so the SQL path refuses rather than
+            // conjuring an empty instance in whatever checkout it ran from.
+            | Command::GitHook { .. }
     )
 }
 
@@ -198,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.backend == BackendKind::Http {
         if !is_crud_command(&cli.command) {
             return Err(
-                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, folder, and bind"
+                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, folder, bind, and git-hook"
                     .into(),
             );
         }
@@ -653,7 +660,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Module { .. }
         | Command::Label { .. }
         | Command::Folder { .. }
-        | Command::Bind { .. } => unreachable!(),
+        | Command::Bind { .. }
+        | Command::GitHook { .. } => unreachable!(),
     }
 
     Ok(())

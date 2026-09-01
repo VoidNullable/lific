@@ -235,7 +235,11 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
 /// LIF-452: the one sentence a repository-bound stdio session appends to
 /// [`SERVER_INSTRUCTIONS`]. Kept to a single clause for the same reason the
 /// base string is: every connected agent pays for it at session start.
-fn bound_project_note(project: &str) -> String {
+///
+/// `pub(crate)` because the remote stdio proxy ([`crate::cli::mcp_proxy`])
+/// appends the very same sentence to the instructions it relays, and the two
+/// must not drift.
+pub(crate) fn bound_project_note(project: &str) -> String {
     format!(
         " This session is bound to project {project}; project-scoped tools default to it when \
          project is omitted."

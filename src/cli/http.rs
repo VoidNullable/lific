@@ -163,6 +163,7 @@ impl HttpBackend {
             Command::Label { action } => self.label(action).await,
             Command::Folder { action } => self.folder(action).await,
             Command::Bind { project, create } => self.bind_repo(project.as_deref(), *create).await,
+            Command::GitHook { range, dry_run } => self.git_hook(range.as_deref(), *dry_run).await,
             _ => bail!("the HTTP backend does not support this command yet"),
         }
     }
@@ -320,6 +321,9 @@ impl HttpBackend {
             // The document `bind` produces is identical on both backends, so
             // it renders through the same function the SQL executor calls.
             Command::Bind { .. } => crate::cli::bind::human(value),
+            // Same document from both backends, so it renders through the same
+            // function the SQL executor calls.
+            Command::GitHook { .. } => crate::cli::git_hook::human(value),
             _ => return None,
         })
     }
@@ -636,6 +640,30 @@ impl HttpBackend {
             &matched,
             created,
         ))
+    }
+
+    /// `lific git-hook` over HTTP (LIF-5).
+    ///
+    /// The messages are collected locally — stdin, or `git log` over the range
+    /// — because the checkout lives here and the server has never seen it. The
+    /// decision is the server's: `POST /api/git-hook` gates every referenced
+    /// identifier on its own project and answers with the document both
+    /// backends print.
+    async fn git_hook(&self, range: Option<&str>, dry_run: bool) -> Result<Value> {
+        let messages = crate::cli::git_hook::messages(range)?;
+        self.git_hook_with_messages(&messages, dry_run).await
+    }
+
+    /// [`Self::git_hook`] with the messages injected, so the request shaping
+    /// can be tested without a git checkout or a pipe underneath the test
+    /// process.
+    async fn git_hook_with_messages(&self, messages: &[String], dry_run: bool) -> Result<Value> {
+        self.send_json(
+            Method::POST,
+            "/api/git-hook",
+            &json!({ "messages": messages, "dry_run": dry_run }),
+        )
+        .await
     }
 
     async fn resolve_aliases(&self, aliases: &[(String, String)]) -> Result<Value> {

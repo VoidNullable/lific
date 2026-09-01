@@ -856,6 +856,30 @@ impl LificMcp {
     }
 }
 
+/// The `list_resources` types that demand a `project` today, and so may take
+/// the binding's. `page` (omission lists every project's pages) and `project`
+/// (the argument is ignored) are absent because omitting `project` already
+/// means something for them.
+const FALLBACK_RESOURCE_TYPES: [&str; 5] = ["issue", "plan", "module", "label", "folder"];
+
+/// Whether an omitted `project` on `tool` may be filled in from a repository
+/// binding, per the classification table on [`LificMcp::project_or_bound`].
+///
+/// That table is the policy; this function is its executable form, so the two
+/// consumers cannot drift. The server applies it per-tool through
+/// `project_or_bound`; the remote stdio proxy ([`crate::cli::mcp_proxy`])
+/// applies it to an outbound `tools/call` before the request leaves the
+/// machine, and has nothing but the tool name and arguments to go on.
+pub(crate) fn project_fallback_applies(tool: &str, resource_type: Option<&str>) -> bool {
+    match tool {
+        "list_issues" | "create_issue" | "get_board" | "create_plan" => true,
+        "list_resources" => {
+            resource_type.is_some_and(|kind| FALLBACK_RESOURCE_TYPES.contains(&kind))
+        }
+        _ => false,
+    }
+}
+
 fn canonical_project_identifier(
     conn: &rusqlite::Connection,
     project_id: i64,
@@ -11874,6 +11898,53 @@ mod tests {
                 "{rt} still demanded a project: {listed}"
             );
         }
+    }
+
+    #[test]
+    fn the_fallback_classification_matches_the_documented_table() {
+        // Every row of the table on `project_or_bound`, in order.
+        let resolvable: [(&str, Option<&str>); 9] = [
+            ("list_issues", None),
+            ("create_issue", None),
+            ("get_board", None),
+            ("create_plan", None),
+            ("list_resources", Some("issue")),
+            ("list_resources", Some("plan")),
+            ("list_resources", Some("module")),
+            ("list_resources", Some("label")),
+            ("list_resources", Some("folder")),
+        ];
+        for (tool, resource_type) in resolvable {
+            assert!(
+                project_fallback_applies(tool, resource_type),
+                "{tool}({resource_type:?}) is resolvable"
+            );
+        }
+
+        let excluded: [(&str, Option<&str>); 9] = [
+            ("list_resources", Some("page")),
+            ("list_resources", Some("project")),
+            ("list_resources", None),
+            ("search", None),
+            ("create_page", None),
+            ("manage_resource", Some("issue")),
+            ("bulk_update", None),
+            ("delete", Some("issue")),
+            ("get_activity", None),
+        ];
+        for (tool, resource_type) in excluded {
+            assert!(
+                !project_fallback_applies(tool, resource_type),
+                "{tool}({resource_type:?}) must never take the binding"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_never_takes_the_binding() {
+        assert!(!project_fallback_applies("", None));
+        assert!(!project_fallback_applies("list_issues_v2", None));
+        assert!(!project_fallback_applies("LIST_ISSUES", None));
     }
 
     #[test]

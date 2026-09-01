@@ -6,6 +6,7 @@ pub(crate) mod attachments;
 mod auth;
 mod comments;
 mod export;
+mod git_hook;
 mod insights;
 mod issues;
 mod members;
@@ -375,6 +376,9 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/bindings",
             get(repo_bindings::list_project_bindings),
         )
+        // LIF-5: close the issues a batch of commit messages says it closes.
+        // For CI; `lific git-hook` is the same thing for a local hook.
+        .route("/api/git-hook", post(git_hook::git_hook))
         // Health
         .route("/api/health", get(health))
         .layer(
