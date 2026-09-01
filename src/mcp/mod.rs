@@ -232,6 +232,16 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
       Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(type='plan', project='X'), then get_plan to see where you left off. \
      Use pages for documentation and design notes.";
 
+/// LIF-452: the one sentence a repository-bound stdio session appends to
+/// [`SERVER_INSTRUCTIONS`]. Kept to a single clause for the same reason the
+/// base string is: every connected agent pays for it at session start.
+fn bound_project_note(project: &str) -> String {
+    format!(
+        " This session is bound to project {project}; project-scoped tools default to it when \
+         project is omitted."
+    )
+}
+
 #[derive(Clone)]
 pub struct LificMcp {
     db: Arc<DbPool>,
@@ -248,6 +258,12 @@ pub struct LificMcp {
     /// deadlock on [`MCP_HANDLER_LOCK`]) and a tokenless local stdio session,
     /// which keeps its credential-less operator behavior.
     stdio_auth: Option<Arc<StdioAuth>>,
+    /// LIF-451: the project identifier (e.g. `"LIF"`) this session's working
+    /// directory is bound to, resolved once at stdio startup. Tools that would
+    /// otherwise reject an omitted `project` fall back to it; see
+    /// [`LificMcp::project_or_bound`] for the per-tool policy. Always `None`
+    /// on the HTTP transport, which has no single working directory to bind.
+    bound_project: Option<String>,
 }
 
 impl LificMcp {
@@ -267,7 +283,16 @@ impl LificMcp {
             store,
             tool_router: Self::create_tool_router(),
             stdio_auth: None,
+            bound_project: None,
         }
+    }
+
+    /// LIF-451: point this server at the project the session's repository is
+    /// bound to. Only `lific mcp` (stdio) calls this; every other constructor
+    /// leaves it `None`, which is the pre-binding behavior exactly.
+    pub fn with_bound_project(mut self, project: Option<String>) -> Self {
+        self.bound_project = project;
+        self
     }
 
     /// The `lific mcp` (stdio) constructor.
@@ -487,15 +512,23 @@ impl ServerHandler for LificMcp {
     fn get_info(&self) -> ServerInfo {
         // Pin to 2025-03-26: rmcp defaults to 2025-06-18 which many clients
         // (including Zed) skipped, going straight from 2025-03-26 to 2025-11-25.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_03_26)
             // Identify as lific, not rmcp's build-env default — this name is
             // what connected clients (and `lific doctor`) display.
             .with_server_info(rmcp::model::Implementation::new(
                 "lific",
                 env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(SERVER_INSTRUCTIONS)
+            ));
+        // LIF-452: a bound session says so, once, in one sentence. The
+        // unbound path stays byte-identical to before the feature existed.
+        match &self.bound_project {
+            Some(project) => info.with_instructions(format!(
+                "{SERVER_INSTRUCTIONS}{}",
+                bound_project_note(project)
+            )),
+            None => info.with_instructions(SERVER_INSTRUCTIONS),
+        }
     }
 
     fn list_tools(
@@ -907,6 +940,50 @@ mod tests {
         assert!(
             addition <= 700,
             "convention addition grew to {addition} chars; keep it tight"
+        );
+
+        // LIF-452: the binding sentence is a second unconditional cost, paid
+        // by every bound session. One sentence, and it stays one sentence.
+        let bound = bound_project_note("LIF").len();
+        assert!(
+            bound <= 200,
+            "the bound-session note grew to {bound} chars; keep it to one sentence"
+        );
+    }
+
+    // ── LIF-452: a bound session is told so, once ──
+
+    #[test]
+    fn get_info_tells_a_bound_session_which_project_it_defaults_to() {
+        let pool = crate::db::open_memory().expect("test db");
+        let mcp = LificMcp::new(pool).with_bound_project(Some("LIF".into()));
+
+        let instructions = mcp
+            .get_info()
+            .instructions
+            .expect("server info must carry instructions");
+
+        assert!(
+            instructions.starts_with(SERVER_INSTRUCTIONS),
+            "the binding note is appended, never a rewrite: {instructions}"
+        );
+        assert!(instructions.contains("bound to project LIF"));
+        assert!(instructions.contains("project is omitted"));
+    }
+
+    #[test]
+    fn get_info_instructions_are_unchanged_for_an_unbound_session() {
+        let pool = crate::db::open_memory().expect("test db");
+        let mcp = LificMcp::new(pool);
+
+        let instructions = mcp
+            .get_info()
+            .instructions
+            .expect("server info must carry instructions");
+
+        assert_eq!(
+            instructions, SERVER_INSTRUCTIONS,
+            "an unbound session must pay nothing for the feature"
         );
     }
 

@@ -1,4 +1,5 @@
 pub mod agents_md;
+pub mod bind;
 pub mod connect;
 pub mod credentials;
 pub mod doctor;
@@ -370,6 +371,27 @@ pub enum Command {
         /// omitted, a generic placeholder is used with a discovery note.
         #[arg(long)]
         project: Option<String>,
+    },
+
+    /// Bind the repository containing the current directory to a project, so
+    /// tools and agents can tell which project a checkout belongs to (LIF-450).
+    ///
+    /// With no PROJECT this reports what the repository currently resolves to,
+    /// which doubles as the "where am I" diagnostic. Identity comes from the
+    /// repository's `origin` remote and its root commit, never from the path,
+    /// so a second clone of the same repository resolves to the same project
+    /// without being bound again.
+    ///
+    /// Works against a local database and, with `--backend http`, against a
+    /// remote instance.
+    Bind {
+        /// Project identifier to bind this repository to (e.g. LIF). Omit to
+        /// report what the repository already resolves to.
+        project: Option<String>,
+
+        /// Create the project first if it does not exist yet.
+        #[arg(long)]
+        create: bool,
     },
 
     /// Generate shell completions (e.g. `lific completion fish | source`)
@@ -1850,6 +1872,30 @@ mod tests {
                 assert_eq!(project, Some("LIF".into()));
             }
             _ => panic!("expected AgentsMd"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_reports_when_no_project_is_named() {
+        let cli = Cli::try_parse_from(["lific", "bind"]).unwrap();
+        match cli.command {
+            Command::Bind { project, create } => {
+                assert!(project.is_none());
+                assert!(!create);
+            }
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_with_a_project_and_create() {
+        let cli = Cli::try_parse_from(["lific", "bind", "LIF", "--create"]).unwrap();
+        match cli.command {
+            Command::Bind { project, create } => {
+                assert_eq!(project, Some("LIF".into()));
+                assert!(create);
+            }
+            _ => panic!("expected Bind"),
         }
     }
 

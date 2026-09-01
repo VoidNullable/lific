@@ -43,6 +43,11 @@ fn is_crud_command(cmd: &Command) -> bool {
             | Command::Module { .. }
             | Command::Label { .. }
             | Command::Folder { .. }
+            // LIF-450: `bind` reads and writes repo bindings, so it belongs on
+            // both backends. Routing it here also puts it under
+            // `needs_existing_database`, which is what stops the SQL path from
+            // conjuring an empty instance in whatever directory it ran from.
+            | Command::Bind { .. }
     )
 }
 
@@ -193,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.backend == BackendKind::Http {
         if !is_crud_command(&cli.command) {
             return Err(
-                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, and folder"
+                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, folder, and bind"
                     .into(),
             );
         }
@@ -617,7 +622,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|token| !token.is_empty())
                 .map(|token| mcp::StdioAuth::new(token, manager));
 
-            let server = mcp::LificMcp::for_stdio(pool, stdio_auth);
+            // LIF-451: a stdio session launched inside a bound repository
+            // defaults project-scoped tools to that project. Resolved once,
+            // here, because the working directory cannot change mid-session.
+            let bound_project = stdio_bound_project(&pool);
+            if let Some(ref identifier) = bound_project {
+                info!(project = %identifier, "stdio session bound to project");
+            }
+
+            let server =
+                mcp::LificMcp::for_stdio(pool, stdio_auth).with_bound_project(bound_project);
             let transport = rmcp::transport::io::stdio();
 
             info!("lific MCP server started (stdio)");
@@ -638,10 +652,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Comment { .. }
         | Command::Module { .. }
         | Command::Label { .. }
-        | Command::Folder { .. } => unreachable!(),
+        | Command::Folder { .. }
+        | Command::Bind { .. } => unreachable!(),
     }
 
     Ok(())
+}
+
+/// LIF-451: the project this stdio session's working directory is bound to.
+///
+/// Every failure is an unbound session, not an error: `lific mcp` is routinely
+/// launched from a directory that is not a git repository at all, and a
+/// session that simply requires an explicit `project` is a working session.
+/// The one case worth a word on stderr is an ambiguous checkout, because only
+/// a human can resolve it.
+fn stdio_bound_project(pool: &db::DbPool) -> Option<String> {
+    use db::queries::repo_bindings::{Resolution, resolve};
+    use repo_identity::AliasKind;
+
+    let dir = std::env::current_dir().ok()?;
+    let aliases = match repo_identity::compute(&dir) {
+        Ok(aliases) => aliases,
+        Err(e) => {
+            info!(error = %e, "no repository identity here; session is unbound");
+            return None;
+        }
+    };
+    let aliases: Vec<(&str, &str)> = aliases
+        .iter()
+        .map(|alias| {
+            let kind = match alias.kind {
+                AliasKind::Remote => "remote",
+                AliasKind::Root => "root",
+            };
+            (kind, alias.value.as_str())
+        })
+        .collect();
+
+    let conn = pool.read().ok()?;
+    match resolve(&conn, &aliases) {
+        Ok(Resolution::One(binding)) => db::queries::get_project(&conn, binding.project_id)
+            .map(|project| project.identifier)
+            .ok(),
+        Ok(Resolution::Conflict(_)) => {
+            eprintln!(
+                "This repository resolves to more than one binding, so no project was assumed. \
+                 Run `lific bind` in the repo to settle it."
+            );
+            None
+        }
+        Ok(Resolution::None) => None,
+        Err(e) => {
+            info!(error = %e, "could not resolve a repo binding; session is unbound");
+            None
+        }
+    }
 }
 
 /// Render a configured host for the authority half of a `host:port` URL.

@@ -162,6 +162,7 @@ impl HttpBackend {
             }),
             Command::Label { action } => self.label(action).await,
             Command::Folder { action } => self.folder(action).await,
+            Command::Bind { project, create } => self.bind_repo(project.as_deref(), *create).await,
             _ => bail!("the HTTP backend does not support this command yet"),
         }
     }
@@ -316,6 +317,9 @@ impl HttpBackend {
                     .collect();
                 render::export_written(&written, output)
             }
+            // The document `bind` produces is identical on both backends, so
+            // it renders through the same function the SQL executor calls.
+            Command::Bind { .. } => crate::cli::bind::human(value),
             _ => return None,
         })
     }
@@ -495,6 +499,198 @@ impl HttpBackend {
                     .await
             }
         }
+    }
+
+    // ── bind (LIF-450) ───────────────────────────────────────
+    //
+    // The remote half of `lific bind`. It matters more than the local half:
+    // `lific connect` needs a local database, so this is the only way anyone
+    // running against a remote instance can bind a checkout at all.
+    //
+    // Identity is computed here, on the machine holding the checkout, and
+    // only the resulting aliases cross the wire. The server never sees the
+    // path, the remote URL, or anything else about the working tree.
+
+    async fn bind_repo(&self, project: Option<&str>, create: bool) -> Result<Value> {
+        let aliases = crate::cli::bind::current_repo_aliases()?;
+        self.bind_repo_with_aliases(&aliases, project, create).await
+    }
+
+    /// [`Self::bind_repo`] with the identity injected, so the request shaping
+    /// can be tested without a git checkout underneath the test process.
+    async fn bind_repo_with_aliases(
+        &self,
+        aliases: &[(String, String)],
+        project: Option<&str>,
+        create: bool,
+    ) -> Result<Value> {
+        match project {
+            None => self.report_repo(aliases).await,
+            Some(identifier) => self.bind_repo_to(aliases, identifier, create).await,
+        }
+    }
+
+    /// `lific bind` with no project: ask the server what this checkout points
+    /// at. `resolve` is visibility-filtered, so "none" here can also mean "a
+    /// binding you cannot see", which is exactly the answer the operator
+    /// should act on.
+    async fn report_repo(&self, aliases: &[(String, String)]) -> Result<Value> {
+        let resolved = self.resolve_aliases(aliases).await?;
+        match resolved["resolution"].as_str().unwrap_or_default() {
+            "one" => {
+                let matched = self.matching_aliases(aliases).await?;
+                Ok(crate::cli::bind::bound_json(
+                    crate::cli::bind::project_summary_from_json(&resolved["project"]),
+                    aliases,
+                    &matched,
+                    false,
+                ))
+            }
+            "conflict" => {
+                let projects = resolved["projects"]
+                    .as_array()
+                    .map(|projects| {
+                        projects
+                            .iter()
+                            .map(crate::cli::bind::project_summary_from_json)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(crate::cli::bind::conflict_json(projects, aliases))
+            }
+            _ => Ok(crate::cli::bind::unbound_json(aliases)),
+        }
+    }
+
+    /// `lific bind PROJECT`: create the project if asked to, then claim the
+    /// checkout for it.
+    async fn bind_repo_to(
+        &self,
+        aliases: &[(String, String)],
+        identifier: &str,
+        create: bool,
+    ) -> Result<Value> {
+        // Listing first keeps "the server said no such project" distinct from
+        // "the request never got there": a transport failure propagates from
+        // the GET, and only an honestly absent project reaches `--create`.
+        let listed = self.get_json("/api/projects", &[]).await?;
+        let existing = listed.as_array().and_then(|projects| {
+            projects
+                .iter()
+                .find(|project| {
+                    project["identifier"]
+                        .as_str()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
+                })
+                .cloned()
+        });
+
+        let (project, created) = match existing {
+            Some(project) => (project, false),
+            None => {
+                if !create {
+                    bail!(
+                        "project '{identifier}' does not exist on this server; pass --create to \
+                         create it: `lific bind {identifier} --create`"
+                    );
+                }
+                let created = self
+                    .send_json(
+                        Method::POST,
+                        "/api/projects",
+                        &models::CreateProject {
+                            // The identifier doubles as the name, as it does
+                            // on the SQL path; `lific project update --name`
+                            // is one command away.
+                            name: identifier.to_owned(),
+                            identifier: identifier.to_owned(),
+                            description: String::new(),
+                            emoji: None,
+                            lead_user_id: None,
+                        },
+                    )
+                    .await?;
+                (created, true)
+            }
+        };
+
+        let bound = self.bind_request(identifier, aliases).await?;
+        let matched = bound["identities"]
+            .as_array()
+            .map(|identities| {
+                identities
+                    .iter()
+                    .filter_map(|identity| {
+                        Some((
+                            identity["kind"].as_str()?.to_owned(),
+                            identity["value"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(crate::cli::bind::bound_json(
+            crate::cli::bind::project_summary_from_json(&project),
+            aliases,
+            &matched,
+            created,
+        ))
+    }
+
+    async fn resolve_aliases(&self, aliases: &[(String, String)]) -> Result<Value> {
+        self.send_json(
+            Method::POST,
+            "/api/repos/resolve",
+            &json!({ "aliases": alias_bodies(aliases) }),
+        )
+        .await
+    }
+
+    /// Which of the presented aliases the server actually knows.
+    ///
+    /// `resolve` answers for the whole set at once and does not say which
+    /// member matched, so each alias is resolved on its own. There are at most
+    /// two of them, and `resolve` is a read the server does not rate limit.
+    async fn matching_aliases(
+        &self,
+        aliases: &[(String, String)],
+    ) -> Result<std::collections::HashSet<(String, String)>> {
+        let mut matched = std::collections::HashSet::new();
+        for alias in aliases {
+            let resolved = self.resolve_aliases(std::slice::from_ref(alias)).await?;
+            if resolved["resolution"].as_str() != Some("none") {
+                matched.insert(alias.clone());
+            }
+        }
+        Ok(matched)
+    }
+
+    /// `POST /api/repos/bind`, passing a 409 through verbatim.
+    ///
+    /// The server refuses an alias another project owns with a constant
+    /// message that deliberately never names that project (an alias is a
+    /// selector, not proof of ownership, so naming the owner would leak across
+    /// a visibility boundary). Wrapping it in the generic transport prefix
+    /// would bury the one sentence the operator needs, so this reports the
+    /// server's own words and nothing else.
+    async fn bind_request(&self, project: &str, aliases: &[(String, String)]) -> Result<Value> {
+        let body = json!({ "project": project, "aliases": alias_bodies(aliases) });
+        let response = self
+            .request_builder(Method::POST, "/api/repos/bind")
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response.json().await?);
+        }
+        let message = read_error_body(response).await.unwrap_or_default();
+        let detail = sanitize_error_detail(&error_detail(&message));
+        if status == reqwest::StatusCode::CONFLICT {
+            bail!("{detail}");
+        }
+        bail!("HTTP backend request failed ({status}): {detail}");
     }
 
     async fn page(&self, action: &PageAction) -> Result<Value> {
@@ -1057,6 +1253,14 @@ impl HttpBackend {
             None => request,
         }
     }
+}
+
+/// The `aliases` array both repo endpoints take.
+fn alias_bodies(aliases: &[(String, String)]) -> Vec<Value> {
+    aliases
+        .iter()
+        .map(|(kind, value)| json!({ "kind": kind, "value": value }))
+        .collect()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -2681,6 +2885,134 @@ mod tests {
             "HTTP backend request failed (400 Bad Request): invalid page identifier: TST-DOC- [31m"
         ));
         assert!(!error.chars().any(|character| character.is_ascii_control()));
+        fixture.server.abort();
+    }
+
+    // ── bind (LIF-450) ───────────────────────────────────────
+    //
+    // The identity computation is exercised in `cli::bind`; what these cover
+    // is the request shaping against the real API router, which is the half
+    // that can drift from the server.
+
+    fn bind_aliases() -> Vec<(String, String)> {
+        vec![
+            (
+                "remote".to_owned(),
+                "v1:github.com/void/http-bind".to_owned(),
+            ),
+            (
+                "root".to_owned(),
+                "v1:1111111111111111111111111111111111111111".to_owned(),
+            ),
+        ]
+    }
+
+    fn matched_flags(bound: &serde_json::Value) -> Vec<bool> {
+        bound["aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|alias| alias["matched"].as_bool().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn binds_a_repository_over_http_against_real_api_router() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let aliases = bind_aliases();
+
+        let bound = backend
+            .bind_repo_with_aliases(&aliases, Some("TST"), false)
+            .await
+            .unwrap();
+
+        assert_eq!(bound["resolution"], "one");
+        assert_eq!(bound["project"]["identifier"], "TST");
+        assert_eq!(bound["created"], false);
+        assert_eq!(matched_flags(&bound), vec![true, true]);
+
+        // …and the server agrees, which is what `lific bind` with no project
+        // reports back.
+        let report = backend
+            .bind_repo_with_aliases(&aliases, None, false)
+            .await
+            .unwrap();
+        assert_eq!(report["resolution"], "one");
+        assert_eq!(report["project"]["identifier"], "TST");
+        assert_eq!(matched_flags(&report), vec![true, true]);
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_over_http_reports_an_unbound_repository() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let report = backend
+            .bind_repo_with_aliases(&bind_aliases(), None, false)
+            .await
+            .unwrap();
+
+        assert_eq!(report["resolution"], "none");
+        assert_eq!(report["project"], serde_json::Value::Null);
+        assert_eq!(matched_flags(&report), vec![false, false]);
+        assert!(super::super::bind::human(&report).contains("not bound to any project"));
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_over_http_creates_the_project_when_asked_to() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let bound = backend
+            .bind_repo_with_aliases(&bind_aliases(), Some("NEW"), true)
+            .await
+            .unwrap();
+
+        assert_eq!(bound["created"], true);
+        assert_eq!(bound["project"]["identifier"], "NEW");
+        assert_eq!(bound["project"]["name"], "NEW");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_over_http_names_create_for_a_project_the_server_does_not_have() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+
+        let error = backend
+            .bind_repo_with_aliases(&bind_aliases(), Some("GHOST"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("GHOST"), "{error}");
+        assert!(error.contains("--create"), "{error}");
+        fixture.server.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_over_http_repeats_the_servers_conflict_message_verbatim() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let aliases = bind_aliases();
+        backend
+            .bind_repo_with_aliases(&aliases, Some("TST"), false)
+            .await
+            .unwrap();
+
+        let error = backend
+            .bind_repo_with_aliases(&aliases, Some("OTH"), true)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error, "one or more aliases are already bound",
+            "the server's constant refusal must reach the user unwrapped"
+        );
         fixture.server.abort();
     }
 
