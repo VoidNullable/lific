@@ -56,11 +56,19 @@ This project uses **Lific** for issue tracking and project management (local-fir
 single-binary, SQLite-backed).\n\
 {ident_note}\
 \n\
-**Preferred access — MCP.** If a Lific MCP server is configured in your client \
-(see the tools/MCP config in this repo or your global config), use it directly: \
-list/create/update issues, pages, and plans through the Lific tools.\n\
+Lific reaches you two ways, and they do different jobs rather than one being a \
+lesser version of the other.\n\
 \n\
-**CLI fallback** (works without MCP; add `--json` for machine-readable output):\n\
+**MCP is for the tracker itself.** If a Lific MCP server is configured in your \
+client (see the tools/MCP config in this repo or your global config), read and \
+write issues, pages, and plans through those tools. It is already connected, so \
+prefer it for anything that is just data.\n\
+\n\
+**The CLI is for anything involving this machine.** The MCP server may be running \
+on another host and cannot see your filesystem, your working directory, or your \
+git history. Work that depends on where you are is the CLI's job. It also mirrors \
+every data command, so it works when MCP is not configured at all (add `--json` \
+for machine-readable output):\n\
 \n\
 ```bash\n\
 lific issue list --project {ident} --json      # browse issues\n\
@@ -160,6 +168,41 @@ mod tests {
         let block = render_block(None);
         assert!(block.contains("APP"));
         assert!(block.contains("lific project list"));
+    }
+
+    /// This block is the one piece of Lific documentation that lands inside the
+    /// user's repository, where agents actually read it, so what it says about
+    /// the two surfaces matters more than its length suggests.
+    ///
+    /// It used to rank them: "Preferred access - MCP" against "CLI fallback
+    /// (works without MCP)". That is a category error. The surfaces have
+    /// partially disjoint capabilities, not overlapping ones of differing
+    /// quality: the MCP server may be on another host and can never see the
+    /// user's filesystem, working directory, or git history, so local work is
+    /// not something the CLI does *worse*, it is something only the CLI can do
+    /// at all. See the Local capability doctrine page.
+    #[test]
+    fn block_presents_the_two_surfaces_as_roles_not_a_ranking() {
+        let block = render_block(Some("LIF"));
+
+        assert!(
+            !block.to_lowercase().contains("fallback"),
+            "the CLI must not be described as a fallback for MCP"
+        );
+        assert!(
+            !block.contains("Preferred access"),
+            "the two surfaces must not be ranked against each other"
+        );
+
+        // The distinction that justifies keeping both has to survive edits.
+        assert!(
+            block.contains("another host"),
+            "the block must explain that the MCP server may not be on this machine"
+        );
+        assert!(
+            block.contains("git history") && block.contains("working directory"),
+            "the block must name what MCP cannot see, which is why the CLI exists"
+        );
     }
 
     #[test]
