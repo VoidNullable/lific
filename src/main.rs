@@ -65,6 +65,9 @@ fn is_crud_command(cmd: &Command) -> bool {
 /// - `Connect` carries its own, more specific version of this guard.
 /// - `AgentsMd` only writes a markdown file.
 /// - `Completion` returns before config is even loaded.
+/// - `Mcp --remote` is a stdio proxy in front of a remote instance: it never
+///   opens a database, and the point of it is to run on a machine that has
+///   none. Plain `lific mcp` still serves from a local database and is guarded.
 /// - Of the service actions only `install` needs one, so that installing a
 ///   unit whose `start` would immediately fail the guard is refused up front.
 ///   `uninstall`/`stop`/`status`/`restart` must keep working on a host whose
@@ -79,6 +82,7 @@ fn needs_existing_database(cmd: &Command) -> bool {
         | Command::Connect { .. }
         | Command::AgentsMd { .. }
         | Command::Completion { .. } => false,
+        Command::Mcp { remote, .. } => !remote,
         Command::Service { action } => matches!(action, cli::ServiceAction::Install),
         _ => true,
     }
@@ -162,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ignored — tokio socket writes rely on that to surface EPIPE as errors
     // instead of killing the process.
     #[cfg(unix)]
-    if !matches!(cli.command, Command::Start { .. } | Command::Mcp) {
+    if !matches!(cli.command, Command::Start { .. } | Command::Mcp { .. }) {
         // SAFETY: setting a signal disposition to SIG_DFL before any threads
         // depend on the ignored state; standard practice for CLI tools.
         unsafe {
@@ -523,7 +527,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Command::Mcp => {
+        Command::Mcp {
+            remote: true,
+            url: mcp_url,
+        } => {
+            // LIF-453: the stdio proxy. No database, no local MCP server —
+            // just JSON-RPC forwarded to a remote instance's /mcp endpoint,
+            // so a remote deployment gets a local presence in an AI client.
+            // Logs must stay on stderr: a stray stdout line corrupts the
+            // stdio session.
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
+                )
+                .with_writer(std::io::stderr)
+                .init();
+
+            let url = mcp_url
+                .or(cli.url)
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    "lific mcp --remote needs the instance to proxy to: pass --url <URL> or set \
+                     LIFIC_URL"
+                        .into()
+                })?;
+            let credential = cli::resolve_http_credential(cli.api_key.as_deref(), || {
+                cli::credentials::load(&url)
+            })?;
+            return cli::mcp_proxy::run(url, credential).await;
+        }
+
+        Command::Mcp {
+            remote: false,
+            url: _,
+        } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()

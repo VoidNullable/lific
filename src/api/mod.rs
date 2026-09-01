@@ -13,6 +13,7 @@ mod pages;
 mod plans;
 mod project_groups;
 mod projects;
+mod repo_bindings;
 mod resources;
 mod sync;
 mod views;
@@ -358,6 +359,21 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route(
             "/api/projects/{id}/attachments/orphans",
             get(attachments::list_project_orphans),
+        )
+        // Repo → project bindings (LIF-449). `resolve` is open to any
+        // authenticated caller and visibility-filtered; every mutation is
+        // Lead-or-admin on the bound project and rate limited per user. See
+        // src/api/repo_bindings.rs, design LIF-DOC-27.
+        .route("/api/repos/resolve", post(repo_bindings::resolve_repo))
+        .route("/api/repos/bind", post(repo_bindings::bind_repo))
+        .route("/api/repos/merge", post(repo_bindings::merge_repo_bindings))
+        .route(
+            "/api/repos/bindings/{id}",
+            delete(repo_bindings::delete_repo_binding),
+        )
+        .route(
+            "/api/projects/{id}/bindings",
+            get(repo_bindings::list_project_bindings),
         )
         // Health
         .route("/api/health", get(health))

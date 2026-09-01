@@ -8,6 +8,7 @@ pub mod import;
 pub mod instance;
 pub mod key;
 pub mod login;
+pub mod mcp_proxy;
 pub mod member;
 pub mod render;
 pub mod service;
@@ -125,7 +126,17 @@ pub enum Command {
     },
 
     /// Run MCP server over stdio (for AI assistants)
-    Mcp,
+    Mcp {
+        /// Proxy stdio JSON-RPC to a remote Lific instance instead of opening
+        /// a local database. Gives a remote deployment a local presence.
+        #[arg(long)]
+        remote: bool,
+
+        /// Base URL of the remote instance to proxy to (also read from
+        /// LIFIC_URL). Only meaningful with `--remote`.
+        #[arg(long)]
+        url: Option<String>,
+    },
 
     /// Sign in to a Lific server via the OAuth 2.0 device flow (RFC 8628).
     ///
@@ -1421,10 +1432,32 @@ mod tests {
         }
     }
 
+    /// Backward compat: client configs written by `lific connect --stdio`
+    /// pass no flags, so bare `lific mcp` must keep meaning the local server.
     #[test]
     fn parse_mcp() {
         let cli = Cli::try_parse_from(["lific", "mcp"]).unwrap();
-        assert!(matches!(cli.command, Command::Mcp));
+        assert!(matches!(
+            cli.command,
+            Command::Mcp {
+                remote: false,
+                url: None
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_mcp_remote_with_url() {
+        let cli =
+            Cli::try_parse_from(["lific", "mcp", "--remote", "--url", "https://lific.example"])
+                .unwrap();
+        match cli.command {
+            Command::Mcp { remote, url } => {
+                assert!(remote);
+                assert_eq!(url.as_deref(), Some("https://lific.example"));
+            }
+            _ => panic!("expected Mcp"),
+        }
     }
 
     #[test]

@@ -436,6 +436,19 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         // ── Search ──
         (("GET", "/api/search"), Filtered),
+        // ── Repo → project bindings (LIF-449, design LIF-DOC-27) ──
+        // `resolve` takes aliases, not a project, so there is no project to
+        // gate on before the lookup: it filters the answer through
+        // `authz::visible_project_ids` instead, and a match in an invisible
+        // project is reported byte-identically to no match.
+        (("POST", "/api/repos/resolve"), Filtered),
+        (("POST", "/api/repos/bind"), Gated(Lead)),
+        // Both of these resolve the binding to its project first, answering a
+        // constant 404 when that project is invisible, then gate on Lead.
+        // `merge` runs the gate on *both* bound projects.
+        (("POST", "/api/repos/merge"), Gated(Lead)),
+        (("DELETE", "/api/repos/bindings/{id}"), Gated(Lead)),
+        (("GET", "/api/projects/{id}/bindings"), Gated(Viewer)),
     ])
 }
 
