@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Repo binding: Lific learns where it is
+
+Until now, the tracker had no idea which repository your agent was working in. Every session began with the agent being told the project out of band, usually by a line someone wrote into `AGENTS.md`. This release gives Lific a real concept of "this repo is that project," built so the server itself never touches your filesystem or runs git.
+
+- **`lific bind [PROJECT]` binds the repository you are standing in to a project.** Run with no argument, it reports what the current repository resolves to, which doubles as a where-am-I diagnostic. `--create` makes the project first. Works against the local database and, with `--backend http`, against a remote instance. A repository is identified by up to two aliases computed locally and stored as opaque strings: its normalized `origin` remote, and the root commit of its mainline history. Paths are never used, so clones, moves, and worktrees of the same repo all resolve to the same project. Shallow clones skip the root alias rather than compute a wrong one.
+- **A bound MCP session knows its project.** Launch the stdio MCP server inside a bound repository and its initialize instructions say so, and the tools that used to error without a `project` argument (`list_issues`, `create_issue`, `get_board`, `create_plan`, and the project-scoped arms of `list_resources`) now default to the bound project. Tools where omission already meant something are untouched: `search` still searches everything, `create_page` still makes workspace pages, and `delete`/`bulk_update` still demand an explicit project. An explicit project always wins.
+- **`lific mcp --remote --url <U>` is a new stdio proxy for remote instances.** It runs on your machine, forwards MCP tool calls to a remote Lific over HTTPS, and because it is local it can do what a remote server structurally cannot: resolve the repository you are in and fill the bound project into calls that omit one. Credentials reuse `lific login` or `LIFIC_API_KEY`, bearer tokens are refused over plaintext HTTP to non-loopback hosts, and a dead remote produces clean JSON-RPC errors instead of a hung session.
+- **Commit messages close issues.** `lific git-hook` reads commit messages (from stdin for hooks, or `--range A..B`) and closes any issue referenced as `closes LIF-42`, `fixes LIF-42`, or `resolves LIF-42`, through the same code path as a normal status update, so sequence numbers, status transitions, audit, and live UI updates all fire. `POST /api/git-hook` does the same for CI, with per-issue authorization and deliberate request ceilings. `--dry-run` previews.
+- **Binding management API.** `POST /api/repos/resolve` (visibility-filtered: a binding you cannot see is indistinguishable from none), `POST /api/repos/bind` (project Lead or admin only, rate limited, refuses to say who owns a conflicting alias), `GET /api/projects/{id}/bindings`, `DELETE /api/repos/bindings/{id}` (doubles as admin reclaim), and `POST /api/repos/merge` (requires authority over both affected projects). Aliases are lookup keys, never proof of ownership, and are never accumulated automatically.
+
 ### Only `lific init` creates a database
 
 Lific used to create a database out of thin air whenever it could not find one, which sounds convenient and was in practice a way to quietly hand people the wrong tracker.
