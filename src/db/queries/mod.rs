@@ -9,6 +9,7 @@ mod pages;
 pub(crate) mod plans;
 pub(crate) mod project_groups;
 mod projects;
+pub(crate) mod repo_bindings;
 mod resources;
 mod search;
 pub(crate) mod settings;

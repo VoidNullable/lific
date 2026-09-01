@@ -18,6 +18,7 @@ mod oauth;
 mod preview;
 mod ratelimit;
 mod realtime;
+mod repo_identity;
 mod resolve_caller;
 mod retention;
 mod server;

@@ -1491,6 +1491,31 @@ pub struct PendingOrphanList {
     pub total_bytes: i64,
 }
 
+/// LIF-448: a repository bound to a project. The aliases that resolve to it
+/// live in [`RepoIdentity`]; this row carries only the target and its
+/// provenance. `created_by` records who made the binding and confers no
+/// control over it (migration 049).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoBinding {
+    pub id: i64,
+    pub project_id: i64,
+    pub created_at: String,
+    pub created_by: Option<i64>,
+}
+
+/// LIF-448: one alias that resolves to a [`RepoBinding`]. `kind` is `remote`
+/// (a normalized remote URL) or `root` (an absolute worktree root path), and
+/// `(kind, value)` is unique across the whole instance: an alias names one
+/// repository, so it can belong to only one binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoIdentity {
+    pub id: i64,
+    pub binding_id: i64,
+    pub kind: String,
+    pub value: String,
+    pub first_seen_at: String,
+}
+
 /// Deserializes a JSON field as Option<Option<T>>:
 /// - absent key → None (don't change)
 /// - "field": null → Some(None) (set to null)
