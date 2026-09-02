@@ -1345,6 +1345,7 @@ pub enum UserAction {
 mod tests {
     use super::*;
     use clap::Parser;
+    use proptest::prelude::*;
 
     #[test]
     fn owned_labels_preserve_values_and_discard_empty_items() {
@@ -2366,6 +2367,15 @@ mod tests {
     fn parse_global_config_flag() {
         let cli = Cli::try_parse_from(["lific", "--config", "/etc/lific.toml", "start"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/etc/lific.toml")));
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_unknown_commands_are_rejected(argument in "[a-z]{1,32}") {
+            let invalid = format!("unknown-{argument}");
+            let argv = vec!["lific".to_owned(), invalid];
+            prop_assert!(Cli::try_parse_from(argv).is_err());
+        }
     }
 
     #[test]

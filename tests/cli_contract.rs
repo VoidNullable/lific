@@ -4,24 +4,18 @@
 //! the overhaul must preserve exit status and stdout/stderr routing as well as
 //! the parsed command shape.
 
-use std::process::{Command, Output};
+use assert_cmd::cargo::cargo_bin_cmd;
+use predicates::prelude::*;
 
-use proptest::prelude::*;
-
-fn lific(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lific"))
-        .args(args)
-        .output()
-        .expect("the lific test binary should be runnable")
+fn lific(args: &[&str]) -> assert_cmd::assert::Assert {
+    cargo_bin_cmd!("lific").args(args).assert()
 }
 
 #[test]
 fn help_contract_exposes_the_stable_cli_surface() {
-    let output = lific(&["--help"]);
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-
-    let help = String::from_utf8(output.stdout).unwrap();
+    let mut assertion = lific(&["--help"])
+        .success()
+        .stderr(predicate::str::is_empty());
     for expected in [
         "Usage:",
         "Commands:",
@@ -35,38 +29,32 @@ fn help_contract_exposes_the_stable_cli_surface() {
         "--config",
         "--json",
     ] {
-        assert!(help.contains(expected), "help is missing {expected:?}");
+        assertion = assertion.stdout(predicate::str::contains(expected));
     }
 }
 
 #[test]
 fn version_contract_is_stdout_only() {
-    let output = lific(&["--version"]);
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .starts_with("lific ")
-    );
+    lific(&["--version"])
+        .success()
+        .stdout(predicate::str::starts_with("lific "))
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
 fn completion_contract_is_stdout_only_and_contains_the_program_name() {
-    let output = lific(&["completion", "bash"]);
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    assert!(String::from_utf8(output.stdout).unwrap().contains("lific"));
+    lific(&["completion", "bash"])
+        .success()
+        .stdout(predicate::str::contains("lific"))
+        .stderr(predicate::str::is_empty());
 }
 
-proptest! {
-    #[test]
-    fn invalid_subcommands_never_emit_stdout(argument in "[a-z]{1,16}") {
-        let invalid = format!("unknown-{argument}");
-        let output = lific(&[invalid.as_str()]);
-
-        prop_assert!(!output.status.success());
-        prop_assert!(output.stdout.is_empty());
-        prop_assert!(!output.stderr.is_empty());
+#[test]
+fn invalid_subcommands_never_emit_stdout() {
+    for argument in ["unknown", "unknown-command", "project?", "--not-a-command"] {
+        lific(&[argument])
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::is_empty().not());
     }
 }
