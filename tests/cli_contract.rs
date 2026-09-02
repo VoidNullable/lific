@@ -17,17 +17,20 @@ fn help_contract_exposes_the_stable_cli_surface() {
         .success()
         .stderr(predicate::str::is_empty());
     for expected in [
-        "Usage:",
-        "Commands:",
-        "start",
-        "mcp",
-        "login",
-        "logout",
-        "doctor",
-        "connect",
-        "completion",
-        "--config",
-        "--json",
+        "Usage: lific [OPTIONS] <COMMAND>",
+        "Commands:\n  start       ",
+        "  mcp         ",
+        "  login       ",
+        "  logout      ",
+        "  doctor      ",
+        "  connect     ",
+        "  completion  ",
+        "      --config <CONFIG>\n",
+        "      --db <DB>\n",
+        "      --json\n",
+        "      --backend <BACKEND>\n",
+        "      --url <URL>\n",
+        "      --api-key <API_KEY>\n",
     ] {
         assertion = assertion.stdout(predicate::str::contains(expected));
     }
