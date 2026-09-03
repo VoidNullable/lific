@@ -4,8 +4,11 @@
 //! the overhaul must preserve exit status and stdout/stderr routing as well as
 //! the parsed command shape.
 
+use std::path::Path;
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use rusqlite::Connection;
 
 fn lific(args: &[&str]) -> assert_cmd::assert::Assert {
     cargo_bin_cmd!("lific").args(args).assert()
@@ -66,4 +69,42 @@ fn invalid_subcommands_never_emit_stdout() {
             .stdout(predicate::str::is_empty())
             .stderr(predicate::str::is_empty().not());
     }
+}
+
+#[test]
+fn doctor_process_contract_requires_explicit_repair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("legacy.db");
+    let config_path = tmp.path().join("lific.toml");
+    std::fs::write(&config_path, "[backup]\nenabled = false\n").unwrap();
+    Connection::open(&db_path)
+        .unwrap()
+        .execute("CREATE TABLE marker (value TEXT NOT NULL)", [])
+        .unwrap();
+
+    let db = db_path.to_str().unwrap();
+    let config = config_path.to_str().unwrap();
+    lific(&["--config", config, "--db", db, "--json", "doctor"])
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("\"status\": \"fail\""));
+    assert!(!migration_table_exists(&db_path));
+
+    lific(&[
+        "--config", config, "--db", db, "--json", "doctor", "--repair",
+    ])
+    .success()
+    .stdout(predicate::str::contains("\"status\": \"pass\""));
+    assert!(migration_table_exists(&db_path));
+}
+
+fn migration_table_exists(path: &Path) -> bool {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_migrations'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok()
 }
