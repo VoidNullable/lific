@@ -98,6 +98,63 @@ fn doctor_process_contract_requires_explicit_repair() {
     assert!(migration_table_exists(&db_path));
 }
 
+#[test]
+fn doctor_process_contract_honors_database_override_after_config_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("override.db");
+    let valid_config = tmp.path().join("valid.toml");
+    let missing_config = tmp.path().join("missing.toml");
+    std::fs::write(&valid_config, "[backup]\nenabled = false\n").unwrap();
+    Connection::open(&db_path)
+        .unwrap()
+        .execute("CREATE TABLE marker (value TEXT NOT NULL)", [])
+        .unwrap();
+
+    let db = db_path.to_str().unwrap();
+    lific(&[
+        "--config",
+        valid_config.to_str().unwrap(),
+        "--db",
+        db,
+        "--json",
+        "doctor",
+        "--repair",
+    ])
+    .success();
+
+    let output = cargo_bin_cmd!("lific")
+        .current_dir(tmp.path())
+        .args([
+            "--config",
+            missing_config.to_str().unwrap(),
+            "--db",
+            db,
+            "--json",
+            "doctor",
+            "--key",
+            "unused-test-key",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("doctor:"), "stderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let check = |name: &str| {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap()
+    };
+
+    assert_eq!(check("config")["status"], "fail");
+    assert_eq!(check("database")["status"], "pass");
+    assert!(check("database")["detail"].as_str().unwrap().contains(db));
+    assert!(!tmp.path().join("lific.db").exists());
+}
+
 fn migration_table_exists(path: &Path) -> bool {
     Connection::open(path)
         .unwrap()
