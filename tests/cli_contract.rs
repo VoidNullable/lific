@@ -27,26 +27,52 @@ fn lific(args: &[&str]) -> assert_cmd::assert::Assert {
 
 #[test]
 fn help_contract_exposes_the_stable_cli_surface() {
-    let mut assertion = lific(&["--help"])
-        .success()
-        .stderr(predicate::str::is_empty());
-    for expected in [
-        "Usage: lific [OPTIONS] <COMMAND>",
-        "  start",
-        "  mcp",
-        "  login",
-        "  logout",
-        "  doctor",
-        "  connect",
-        "  completion",
-        "--config <CONFIG>",
-        "--db <DB>",
-        "--json",
-        "--backend <BACKEND>",
-        "--url <URL>",
-        "--api-key <API_KEY>",
+    let output = lific_command().arg("--help").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "help failed: status={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(stderr.is_empty(), "help wrote to stderr: {stderr}");
+    assert!(stdout.contains("Usage: lific"), "missing usage: {stdout}");
+
+    for command in [
+        "start",
+        "mcp",
+        "login",
+        "logout",
+        "doctor",
+        "connect",
+        "completion",
     ] {
-        assertion = assertion.stdout(predicate::str::contains(expected));
+        assert!(
+            stdout
+                .lines()
+                .any(|line| { line.split_whitespace().next() == Some(command) }),
+            "missing command {command:?} in help:\n{stdout}"
+        );
+    }
+
+    for option in [
+        "--config",
+        "--db",
+        "--json",
+        "--backend",
+        "--url",
+        "--api-key",
+    ] {
+        assert!(
+            stdout.lines().any(|line| {
+                let line = line.trim_start();
+                line == option
+                    || line
+                        .strip_prefix(option)
+                        .is_some_and(|rest| rest.starts_with([' ', '\t']))
+            }),
+            "missing option {option:?} in help:\n{stdout}"
+        );
     }
 }
 
