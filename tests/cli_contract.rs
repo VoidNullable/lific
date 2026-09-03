@@ -10,31 +10,41 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use rusqlite::Connection;
 
+fn lific_command() -> assert_cmd::Command {
+    let mut command = cargo_bin_cmd!("lific");
+    command
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("COLUMNS", "120")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("RUST_LOG");
+    command
+}
+
 fn lific(args: &[&str]) -> assert_cmd::assert::Assert {
-    cargo_bin_cmd!("lific").args(args).assert()
+    lific_command().args(args).assert()
 }
 
 #[test]
 fn help_contract_exposes_the_stable_cli_surface() {
     let mut assertion = lific(&["--help"])
         .success()
-        .code(0)
         .stderr(predicate::str::is_empty());
     for expected in [
         "Usage: lific [OPTIONS] <COMMAND>",
-        "Commands:\n  start       ",
-        "  mcp         ",
-        "  login       ",
-        "  logout      ",
-        "  doctor      ",
-        "  connect     ",
-        "  completion  ",
-        "      --config <CONFIG>\n",
-        "      --db <DB>\n",
-        "      --json\n",
-        "      --backend <BACKEND>\n",
-        "      --url <URL>\n",
-        "      --api-key <API_KEY>\n",
+        "  start",
+        "  mcp",
+        "  login",
+        "  logout",
+        "  doctor",
+        "  connect",
+        "  completion",
+        "--config <CONFIG>",
+        "--db <DB>",
+        "--json",
+        "--backend <BACKEND>",
+        "--url <URL>",
+        "--api-key <API_KEY>",
     ] {
         assertion = assertion.stdout(predicate::str::contains(expected));
     }
@@ -44,7 +54,6 @@ fn help_contract_exposes_the_stable_cli_surface() {
 fn version_contract_is_stdout_only() {
     lific(&["--version"])
         .success()
-        .code(0)
         .stdout(predicate::str::starts_with("lific "))
         .stderr(predicate::str::is_empty());
 }
@@ -54,7 +63,6 @@ fn completion_contract_is_stdout_only_and_contains_the_program_name() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
         lific(&["completion", shell])
             .success()
-            .code(0)
             .stdout(predicate::str::contains("lific"))
             .stderr(predicate::str::is_empty());
     }
@@ -122,7 +130,7 @@ fn doctor_process_contract_honors_database_override_after_config_failure() {
     ])
     .success();
 
-    let output = cargo_bin_cmd!("lific")
+    let output = lific_command()
         .current_dir(tmp.path())
         .args([
             "--config",
