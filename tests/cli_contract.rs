@@ -6,9 +6,23 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use rusqlite::Connection;
+
+fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir.path(), perms).unwrap();
+    }
+    dir
+}
 
 fn lific_command() -> assert_cmd::Command {
     let mut command = cargo_bin_cmd!("lific");
@@ -107,7 +121,7 @@ fn invalid_subcommands_never_emit_stdout() {
 
 #[test]
 fn doctor_process_contract_requires_explicit_repair() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_tempdir();
     let db_path = tmp.path().join("legacy.db");
     let config_path = tmp.path().join("lific.toml");
     std::fs::write(&config_path, "[backup]\nenabled = false\n").unwrap();
@@ -134,7 +148,7 @@ fn doctor_process_contract_requires_explicit_repair() {
 
 #[test]
 fn doctor_process_contract_honors_database_override_after_config_failure() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_tempdir();
     let db_path = tmp.path().join("override.db");
     let valid_config = tmp.path().join("valid.toml");
     let missing_config = tmp.path().join("missing.toml");

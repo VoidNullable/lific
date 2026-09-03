@@ -13,6 +13,14 @@ use std::path::Path;
 use std::time::SystemTime;
 
 fn main() {
+    // CI and clean checkouts may not have a built frontend yet. Create the
+    // embed directory up-front so the rust-embed derive can compile cleanly even
+    // when the web bundle has not been generated.
+    let dist = Path::new("web/dist");
+    if !dist.exists() {
+        std::fs::create_dir_all(dist).expect("create missing web/dist directory");
+    }
+
     // The built bundle: changing it must trigger a re-embed.
     println!("cargo:rerun-if-changed=web/dist");
     // The frontend sources: changing them cannot rebuild the bundle for us,
@@ -20,7 +28,6 @@ fn main() {
     // to point out that web/dist no longer matches web/src.
     println!("cargo:rerun-if-changed=web/src");
 
-    let dist = Path::new("web/dist");
     let src = Path::new("web/src");
 
     match (newest_mtime(dist), newest_mtime(src)) {
