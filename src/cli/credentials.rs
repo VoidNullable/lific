@@ -138,11 +138,11 @@ fn warn_env_token_unbound(target_url: &str) {
     if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    crate::cli::ui::stderr_line(format_args!(
         "warning: {TOKEN_ENV} is set but not bound to {target_url}; ignoring it and using the \
          stored credential for that server instead. Set {URL_ENV} to that server to send the \
          env token there."
-    );
+    ));
 }
 
 /// Where the plaintext fallback file lives: `~/.config/lific/credentials.json`.
@@ -823,12 +823,12 @@ pub fn store(base_url: &str, token: &str) -> Result<(), CredentialStoreError> {
             let store = PlaintextCredentialFileStore::new(
                 default_file_path().ok_or(CredentialStoreError::ConfigDirectoryUnavailable)?,
             );
-            eprintln!(
+            crate::cli::ui::stderr_line(format_args!(
                 "warning: OS keyring unavailable ({e}); storing token in PLAINTEXT at {} ({}). \
                  Set up a Secret Service/Keychain to secure it, or use {TOKEN_ENV} to avoid on-disk storage.",
                 store.path.display(),
                 plaintext_protection_description()
-            );
+            ));
             store
                 .store_credential_for_server_key(&key, token)
                 .map_err(CredentialStoreError::from)

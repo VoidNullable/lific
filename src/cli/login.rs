@@ -258,10 +258,10 @@ impl DeviceFlow for HttpDeviceFlow {
                 // Stale id: fall through and register a new one.
                 Err(DeviceAuthFailure::UnknownClient) => {
                     if let Err(error) = crate::cli::credentials::forget_client_id(&self.base) {
-                        eprintln!(
+                        crate::cli::ui::stderr_line(format_args!(
                             "warning: could not remove stale OAuth client cache entry for {}: {error}; continuing with a new registration",
                             self.base
-                        );
+                        ));
                     }
                 }
             }
@@ -285,10 +285,10 @@ impl DeviceFlow for HttpDeviceFlow {
             });
         };
         if let Err(error) = crate::cli::credentials::store_client_id(&self.base, &client_id) {
-            eprintln!(
+            crate::cli::ui::stderr_line(format_args!(
                 "warning: could not cache OAuth client registration for {}: {error}; continuing with the registered client",
                 self.base
-            );
+            ));
         }
 
         self.device_authorization(&[("scope", "mcp"), ("client_id", &client_id)])
@@ -400,7 +400,7 @@ pub fn run_login_with_flow<F: DeviceFlow>(
         let payload = non_interactive_json(&resp, base);
         println!(
             "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
+            crate::cli::term::json_string(&payload).unwrap_or_default()
         );
         return Ok(());
     }
@@ -447,7 +447,7 @@ fn finish(args: &LoginArgs, base: &str, outcome: PollOutcome, json: bool) -> Res
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
+                        crate::cli::term::json_string(&serde_json::json!({
                             "status": "approved",
                             "stored": false,
                             "access_token": token,
@@ -464,7 +464,7 @@ fn finish(args: &LoginArgs, base: &str, outcome: PollOutcome, json: bool) -> Res
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                    crate::cli::term::json_string(&serde_json::json!({
                         "status": "approved",
                         "stored": true,
                         "url": base,
@@ -498,7 +498,7 @@ pub fn run_logout(url: Option<&str>, cfg: &Config, json: bool) -> Result<(), Str
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            crate::cli::term::json_string(&serde_json::json!({
                 "url": base,
                 "removed": removed,
             }))

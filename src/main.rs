@@ -30,6 +30,7 @@ mod storage;
 mod test_env;
 
 use clap::{CommandFactory, FromArgMatches};
+use cli::ui::TerminalDisplay;
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
 
@@ -328,15 +329,40 @@ use rmcp::ServiceExt;
 use tracing::info;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Via `ArgMatches` rather than `Cli::parse()` so a value's source stays
-    // answerable: `lific mcp --instances` rejects a typed `--url` but ignores
-    // an exported `LIFIC_URL`. Behaviour is otherwise identical.
-    let matches = Cli::command().get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
-        Ok(cli) => cli,
-        Err(error) => error.exit(),
-    };
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("{}", error.to_string().terminal_line());
+        std::process::exit(1);
+    }
+}
+
+fn cli_error_message(error: &clap::Error) -> String {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+            error.to_string()
+        }
+        _ => cli::ui::sanitize_terminal_line(&error.to_string()),
+    }
+}
+
+fn exit_cli_error(error: clap::Error) -> ! {
+    let message = cli_error_message(&error);
+    if error.use_stderr() {
+        eprint!("{message}");
+    } else {
+        print!("{message}");
+    }
+    std::process::exit(error.exit_code());
+}
+
+fn parse_cli() -> Cli {
+    let matches = Cli::command()
+        .try_get_matches()
+        .unwrap_or_else(exit_cli_error);
+    Cli::from_arg_matches(&matches).unwrap_or_else(exit_cli_error)
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Rust ignores SIGPIPE process-wide, which makes println!/stdout writes
     // PANIC when piped into a closed reader (`lific completion fish | head`,
@@ -507,7 +533,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "attachment_count": m.attachment_count,
                     "attachment_bytes": m.attachment_bytes,
                 });
-                println!("{}", serde_json::to_string_pretty(&out_json)?);
+                println!("{}", cli::term::json_string(&out_json)?);
             } else {
                 use cli::ui;
                 ui::step(format!(
@@ -534,11 +560,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let json = cli::term::wants_json(cli.json);
             // Best-effort warning: a hot WAL suggests the server is still up.
             if dump::server_maybe_running(&cfg.database.path) {
-                eprintln!(
+                cli::ui::stderr_line(format_args!(
                     "warning: a hot -wal file is present next to {} — is the server still \
                      running? Stop it before restoring.",
                     cfg.database.path.display()
-                );
+                ));
             }
             let options = dump::RestoreOptions::new(force, allow_large);
             let result = dump::run_restore_with(&archive, &cfg.database.path, &options)
@@ -556,7 +582,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .map(|p| p.display().to_string()),
                 });
-                println!("{}", serde_json::to_string_pretty(&out_json)?);
+                println!("{}", cli::term::json_string(&out_json)?);
             } else {
                 use cli::ui;
                 ui::intro("lific restore");
@@ -739,9 +765,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "path": target.display().to_string(),
                     "action": action.as_str(),
                 });
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                println!("{}", cli::term::json_string(&out)?);
             } else {
-                println!("AGENTS.md {}: {}", action.as_str(), target.display());
+                cli::ui::line(format!(
+                    "AGENTS.md {}: {}",
+                    action.as_str(),
+                    target.display()
+                ));
             }
             return Ok(());
         }
@@ -834,7 +864,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing_subscriber::EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
                 )
-                .with_writer(std::io::stderr)
+                .with_writer(crate::cli::term::sanitized_stderr())
                 .init();
 
             let pool = db::open(&cfg.database.path)?;
@@ -1429,7 +1459,7 @@ async fn cmd_init(
                 "error": service_error,
             },
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", cli::term::json_string(&out)?);
         return Ok(());
     }
 
@@ -1551,7 +1581,7 @@ fn cmd_service(
             let plan = cli::service::ServicePlan::for_config_file(config_path)?;
             let report = cli::service::install(mgr, &plan)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                println!("{}", cli::term::json_string(&report)?);
             } else {
                 ui::intro("lific service install");
                 ui::step(format!(
@@ -1576,7 +1606,10 @@ fn cmd_service(
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "uninstalled": true, "definition": removed })
+                    cli::term::json_string(&serde_json::json!({
+                        "uninstalled": true,
+                        "definition": removed,
+                    }))?
                 );
             } else {
                 ui::intro("lific service uninstall");
@@ -1593,7 +1626,7 @@ fn cmd_service(
         ServiceAction::Status => {
             let s = cli::service::status(mgr)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&s)?);
+                println!("{}", cli::term::json_string(&s)?);
             } else if s.active {
                 ui::step(format!(
                     "Service is running ({}) — {}",
@@ -1619,7 +1652,10 @@ fn cmd_service(
         ServiceAction::Stop => {
             cli::service::stop(mgr)?;
             if json {
-                println!("{}", serde_json::json!({ "stopped": true }));
+                println!(
+                    "{}",
+                    cli::term::json_string(&serde_json::json!({ "stopped": true }))?
+                );
             } else {
                 ui::step(format!(
                     "Service stopped {}",
@@ -1630,7 +1666,10 @@ fn cmd_service(
         ServiceAction::Restart => {
             cli::service::restart(mgr)?;
             if json {
-                println!("{}", serde_json::json!({ "restarted": true }));
+                println!(
+                    "{}",
+                    cli::term::json_string(&serde_json::json!({ "restarted": true }))?
+                );
             } else {
                 ui::step(format!(
                     "Service restarted — {}",
@@ -2272,5 +2311,23 @@ mod write_private_config_tests {
             fs::metadata(&config).expect("stat").permissions().mode() & 0o777,
             0o600
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_error_tests {
+    use super::{Cli, cli_error_message};
+    use clap::Parser;
+
+    #[test]
+    fn parse_errors_sanitize_untrusted_argument_text() {
+        let error = match Cli::try_parse_from(["lific", "\u{202e}"]) {
+            Ok(_) => panic!("invalid subcommand unexpectedly parsed"),
+            Err(error) => error,
+        };
+        let rendered = cli_error_message(&error);
+
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.chars().any(char::is_control));
     }
 }

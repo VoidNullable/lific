@@ -65,7 +65,7 @@ pub async fn run(
     };
     let output = backend.execute(command, link_output).await?;
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", crate::cli::term::json_string(&output)?);
     } else {
         print!("{}", backend.human(command, &output).await);
     }
@@ -153,10 +153,10 @@ impl HttpBackend {
                 .host_str()
                 .is_some_and(|host| !is_loopback_host(host))
         {
-            eprintln!(
+            crate::cli::ui::stderr_line(format_args!(
                 "warning: connecting over unencrypted http to {}",
                 parsed.host_str().unwrap_or_default()
-            );
+            ));
         }
         Ok(Self {
             client: Client::builder()
@@ -225,7 +225,10 @@ impl HttpBackend {
     async fn human(&self, command: &Command, value: &Value) -> String {
         match self.render(command, value).await {
             Some(text) => text,
-            None => format!("{}\n", pretty(value)),
+            None => format!(
+                "{}\n",
+                crate::cli::ui::sanitize_terminal_block(&pretty(value))
+            ),
         }
     }
 
@@ -1489,16 +1492,7 @@ async fn read_error_body(mut response: reqwest::Response) -> Result<String, reqw
 }
 
 fn sanitize_error_detail(detail: &str) -> String {
-    detail
-        .chars()
-        .map(|character| {
-            if character.is_ascii_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
+    crate::cli::ui::sanitize_terminal_line(detail)
 }
 
 /// How the server delivers an export, and so how this backend turns it back
@@ -1512,7 +1506,7 @@ enum ExportShape {
 }
 
 fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    crate::cli::term::json_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 #[cfg(test)]
@@ -2917,7 +2911,7 @@ mod tests {
         let error = error.to_string();
 
         assert!(error.starts_with(
-            "HTTP backend request failed (400 Bad Request): invalid page identifier: TST-DOC- [31m"
+            "HTTP backend request failed (400 Bad Request): invalid page identifier: TST-DOC-^[[31m"
         ));
         assert!(!error.chars().any(|character| character.is_ascii_control()));
         fixture.server.abort();
@@ -3259,10 +3253,10 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_ascii_control_characters_in_error_details() {
+    fn sanitizes_terminal_controls_in_error_details() {
         assert_eq!(
-            sanitize_error_detail("access\u{1b}[31m denied\n\t"),
-            "access [31m denied  "
+            sanitize_error_detail("access\u{1b}[31m denied\n\t\u{202e}"),
+            "access^[[31m denied   "
         );
     }
 
@@ -3676,11 +3670,14 @@ mod tests {
                 &Command::Project {
                     action: ProjectAction::List,
                 },
-                &json!({"unexpected": true}),
+                &json!({"unexpected": "safe\u{1b}[2J\u{202e}"}),
             )
             .await;
 
-        assert_eq!(rendered, "{\n  \"unexpected\": true\n}\n");
+        assert_eq!(
+            rendered,
+            "{\n  \"unexpected\": \"safe\\u001b[2J\\u202e\"\n}\n"
+        );
     }
 
     #[test]

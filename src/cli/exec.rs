@@ -202,7 +202,7 @@ fn export(
 // ── Helpers ──────────────────────────────────────────────────
 
 fn print_json<T: serde::Serialize>(val: &T) {
-    println!("{}", serde_json::to_string_pretty(val).unwrap());
+    println!("{}", term::json_string(val).unwrap());
 }
 
 fn page_folder_id(

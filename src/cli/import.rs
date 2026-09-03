@@ -203,7 +203,7 @@ fn run_jira(
 /// Render the summary for humans (or JSON when piped).
 pub fn print_summary(summary: &ImportSummary, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(summary).unwrap());
+        println!("{}", crate::cli::term::json_string(summary).unwrap());
         return;
     }
     println!();

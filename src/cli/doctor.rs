@@ -955,9 +955,15 @@ async fn check_public_url(client: &reqwest::Client, public_url: &str) -> Check {
 fn print_report(report: &Report, json: bool) {
     if json {
         // Machine output: stable shape for agents/scripts.
-        match serde_json::to_string_pretty(report) {
+        match crate::cli::term::json_string(report) {
             Ok(s) => println!("{s}"),
-            Err(e) => println!("{{\"error\":\"failed to serialize report: {e}\"}}"),
+            Err(e) => println!(
+                "{}",
+                crate::cli::term::json_string(&serde_json::json!({
+                    "error": format!("failed to serialize report: {e}"),
+                }))
+                .unwrap_or_default()
+            ),
         }
         return;
     }

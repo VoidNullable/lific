@@ -18,14 +18,30 @@
 //! the project archive locally) and deletes (both backends print the
 //! [`Deleted`] below).
 
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cli::ui::TerminalDisplay;
 use crate::db::models::{
     Comment, Folder, Issue, Label, Module, Page, Priority, Project, SearchResult, Status,
 };
+
+trait TerminalWrite {
+    fn line(&mut self, text: impl Display);
+    fn block(&mut self, text: impl Display);
+}
+
+impl TerminalWrite for String {
+    fn line(&mut self, text: impl Display) {
+        let _ = writeln!(self, "{}", text.terminal_line());
+    }
+
+    fn block(&mut self, text: impl Display) {
+        let _ = writeln!(self, "{}", text.terminal_block());
+    }
+}
 
 /// What a `delete` prints under `--json`.
 ///
@@ -111,18 +127,18 @@ fn first_line_suffix(text: &str) -> String {
 pub fn issue_list(issues: &[Issue], module_name: ModuleName<'_>) -> String {
     let mut out = String::new();
     if issues.is_empty() {
-        w!(out, "No issues found.");
+        out.line("No issues found.");
         return out;
     }
-    w!(out, "{} issue(s):\n", issues.len());
+    out.line(format_args!("{} issue(s):", issues.len()));
+    out.push('\n');
     for issue in issues {
         let module = issue
             .module_id
             .and_then(module_name)
             .map(|name| format!(" ({name})"))
             .unwrap_or_default();
-        w!(
-            out,
+        out.line(format_args!(
             "  {:<8} {} | {} | {}{}{}",
             issue.identifier,
             fmt_status(issue.status),
@@ -130,55 +146,64 @@ pub fn issue_list(issues: &[Issue], module_name: ModuleName<'_>) -> String {
             issue.title,
             bracketed_labels(&issue.labels),
             module
-        );
+        ));
     }
     out
 }
 
 pub fn issue_detail(issue: &Issue, module_name: ModuleName<'_>) -> String {
     let mut out = String::new();
-    w!(out, "{} - {}", issue.identifier, issue.title);
-    w!(out, "  Status:   {}", issue.status);
-    w!(out, "  Priority: {}", issue.priority);
+    out.line(format_args!("{} - {}", issue.identifier, issue.title));
+    out.line(format_args!("  Status:   {}", issue.status));
+    out.line(format_args!("  Priority: {}", issue.priority));
     if !issue.labels.is_empty() {
-        w!(out, "  Labels:   {}", issue.labels.join(", "));
+        out.line(format_args!("  Labels:   {}", issue.labels.join(", ")));
     }
     if let Some(name) = issue.module_id.and_then(module_name) {
-        w!(out, "  Module:   {name}");
+        out.line(format_args!("  Module:   {name}"));
     }
     if !issue.blocks.is_empty() {
-        w!(out, "  Blocks:   {}", issue.blocks.join(", "));
+        out.line(format_args!("  Blocks:   {}", issue.blocks.join(", ")));
     }
     if !issue.blocked_by.is_empty() {
-        w!(out, "  Blocked:  {}", issue.blocked_by.join(", "));
+        out.line(format_args!("  Blocked:  {}", issue.blocked_by.join(", ")));
     }
     if !issue.relates_to.is_empty() {
-        w!(out, "  Relates:  {}", issue.relates_to.join(", "));
+        out.line(format_args!("  Relates:  {}", issue.relates_to.join(", ")));
     }
     if !issue.duplicates.is_empty() {
-        w!(out, "  Dupes:    {}", issue.duplicates.join(", "));
+        out.line(format_args!("  Dupes:    {}", issue.duplicates.join(", ")));
     }
     if !issue.duplicated_by.is_empty() {
-        w!(out, "  DupedBy:  {}", issue.duplicated_by.join(", "));
+        out.line(format_args!(
+            "  DupedBy:  {}",
+            issue.duplicated_by.join(", ")
+        ));
     }
     if !issue.description.is_empty() {
-        w!(out);
-        w!(out, "{}", issue.description);
+        out.push('\n');
+        out.block(&issue.description);
     }
     out
 }
 
 pub fn issue_created(issue: &Issue) -> String {
     let mut out = String::new();
-    w!(out, "Created {}: {}", issue.identifier, issue.title);
+    out.line(format_args!(
+        "Created {}: {}",
+        issue.identifier, issue.title
+    ));
     out
 }
 
 pub fn issue_updated(issue: &Issue) -> String {
     let mut out = String::new();
-    w!(out, "Updated {}: {}", issue.identifier, issue.title);
-    w!(out, "  Status:   {}", issue.status);
-    w!(out, "  Priority: {}", issue.priority);
+    out.line(format_args!(
+        "Updated {}: {}",
+        issue.identifier, issue.title
+    ));
+    out.line(format_args!("  Status:   {}", issue.status));
+    out.line(format_args!("  Priority: {}", issue.priority));
     out
 }
 
@@ -187,51 +212,47 @@ pub fn issue_updated(issue: &Issue) -> String {
 pub fn project_list(projects: &[Project]) -> String {
     let mut out = String::new();
     if projects.is_empty() {
-        w!(out, "No projects.");
+        out.line("No projects.");
         return out;
     }
-    w!(out, "{} project(s):\n", projects.len());
+    out.line(format_args!("{} project(s):", projects.len()));
+    out.push('\n');
     for project in projects {
-        w!(
-            out,
+        out.line(format_args!(
             "  {:<5} {}{}",
             project.identifier,
             project.name,
             first_line_suffix(&project.description)
-        );
+        ));
     }
     out
 }
 
 pub fn project_detail(project: &Project) -> String {
     let mut out = String::new();
-    w!(out, "{} - {}", project.identifier, project.name);
+    out.line(format_args!("{} - {}", project.identifier, project.name));
     if !project.description.is_empty() {
-        w!(out);
-        w!(out, "{}", project.description);
+        out.push('\n');
+        out.block(&project.description);
     }
     out
 }
 
 pub fn project_created(project: &Project) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Created project {} ({})",
-        project.name,
-        project.identifier
-    );
+        project.name, project.identifier
+    ));
     out
 }
 
 pub fn project_updated(project: &Project) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Updated project {} ({})",
-        project.name,
-        project.identifier
-    );
+        project.name, project.identifier
+    ));
     out
 }
 
@@ -240,10 +261,11 @@ pub fn project_updated(project: &Project) -> String {
 pub fn page_list(pages: &[Page]) -> String {
     let mut out = String::new();
     if pages.is_empty() {
-        w!(out, "No pages found.");
+        out.line("No pages found.");
         return out;
     }
-    w!(out, "{} page(s):\n", pages.len());
+    out.line(format_args!("{} page(s):", pages.len()));
+    out.push('\n');
     for page in pages {
         let preview = if page.content.is_empty() {
             "(empty)".to_string()
@@ -255,40 +277,45 @@ pub fn page_list(pages: &[Page]) -> String {
                 first_line.to_string()
             }
         };
-        w!(
-            out,
+        out.line(format_args!(
             "  {:<12} {} - {}{}",
             page.identifier,
             page.title,
             preview,
             bracketed_labels(&page.labels)
-        );
+        ));
     }
     out
 }
 
 pub fn page_detail(page: &Page) -> String {
     let mut out = String::new();
-    w!(out, "{} - {}", page.identifier, page.title);
+    out.line(format_args!("{} - {}", page.identifier, page.title));
     if !page.labels.is_empty() {
-        w!(out, "  Labels: {}", page.labels.join(", "));
+        out.line(format_args!("  Labels: {}", page.labels.join(", ")));
     }
     if !page.content.is_empty() {
-        w!(out);
-        w!(out, "{}", page.content);
+        out.push('\n');
+        out.block(&page.content);
     }
     out
 }
 
 pub fn page_created(page: &Page) -> String {
     let mut out = String::new();
-    w!(out, "Created page {}: {}", page.identifier, page.title);
+    out.line(format_args!(
+        "Created page {}: {}",
+        page.identifier, page.title
+    ));
     out
 }
 
 pub fn page_updated(page: &Page) -> String {
     let mut out = String::new();
-    w!(out, "Updated page {}: {}", page.identifier, page.title);
+    out.line(format_args!(
+        "Updated page {}: {}",
+        page.identifier, page.title
+    ));
     out
 }
 
@@ -297,19 +324,17 @@ pub fn page_updated(page: &Page) -> String {
 pub fn search_results(results: &[SearchResult]) -> String {
     let mut out = String::new();
     if results.is_empty() {
-        w!(out, "No results found.");
+        out.line("No results found.");
         return out;
     }
-    w!(out, "{} result(s):\n", results.len());
+    out.line(format_args!("{} result(s):", results.len()));
+    out.push('\n');
     for result in results {
         let identifier = result.identifier.as_deref().unwrap_or("?");
-        w!(
-            out,
+        out.line(format_args!(
             "  {:<12} [{}] {}",
-            identifier,
-            result.result_type,
-            result.title
-        );
+            identifier, result.result_type, result.title
+        ));
         if !result.snippet.is_empty() {
             // Clean up snippet for terminal display
             let snippet = result.snippet.replace("**", "").replace('\n', " ");
@@ -318,7 +343,7 @@ pub fn search_results(results: &[SearchResult]) -> String {
             } else {
                 snippet
             };
-            w!(out, "              {}", snippet);
+            out.line(format_args!("              {snippet}"));
         }
     }
     out
@@ -357,22 +382,24 @@ pub fn comment_list(
 ) -> String {
     let mut out = String::new();
     if comments.is_empty() {
-        w!(out, "No comments on {}.", identifier);
+        out.line(format_args!("No comments on {identifier}."));
         return out;
     }
-    w!(out, "{} comment(s) on {}:\n", comments.len(), identifier);
+    out.line(format_args!(
+        "{} comment(s) on {}:",
+        comments.len(),
+        identifier
+    ));
+    out.push('\n');
     for comment in comments {
-        w!(
-            out,
+        out.line(format_args!(
             "  {} ({}) - {}:",
-            comment.author_display_name,
-            comment.author,
-            comment.created_at
-        );
+            comment.author_display_name, comment.author, comment.created_at
+        ));
         for line in comment.content.lines() {
-            w!(out, "    {line}");
+            out.line(format_args!("    {line}"));
         }
-        w!(out);
+        out.push('\n');
     }
     match continuation {
         CommentContinuation::End => {}
@@ -392,13 +419,11 @@ pub fn comment_list(
 
 pub fn comment_added(comment: &Comment, identifier: &str) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Added comment to {} by {}:",
-        identifier,
-        comment.author
-    );
-    w!(out, "  {}", comment.content);
+        identifier, comment.author
+    ));
+    out.block(format_args!("  {}", comment.content));
     out
 }
 
@@ -407,43 +432,43 @@ pub fn comment_added(comment: &Comment, identifier: &str) -> String {
 pub fn module_list(modules: &[Module], project: &str) -> String {
     let mut out = String::new();
     if modules.is_empty() {
-        w!(out, "No modules in {}.", project);
+        out.line(format_args!("No modules in {project}."));
         return out;
     }
-    w!(out, "{} module(s) in {}:\n", modules.len(), project);
+    out.line(format_args!("{} module(s) in {}:", modules.len(), project));
+    out.push('\n');
     for module in modules {
-        w!(
-            out,
+        out.line(format_args!(
             "  {:<20} [{}]{}",
             module.name,
             module.status,
             first_line_suffix(&module.description)
-        );
+        ));
     }
     out
 }
 
 pub fn module_created(module: &Module, project: &str) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Created module '{}' [{}] in {}",
-        module.name,
-        module.status,
-        project
-    );
+        module.name, module.status, project
+    ));
     out
 }
 
 pub fn module_updated(module: &Module) -> String {
     let mut out = String::new();
-    w!(out, "Updated module '{}' [{}]", module.name, module.status);
+    out.line(format_args!(
+        "Updated module '{}' [{}]",
+        module.name, module.status
+    ));
     out
 }
 
 pub fn module_deleted(name: &str) -> String {
     let mut out = String::new();
-    w!(out, "Deleted module '{}'", name);
+    out.line(format_args!("Deleted module '{name}'"));
     out
 }
 
@@ -452,31 +477,38 @@ pub fn module_deleted(name: &str) -> String {
 pub fn label_list(labels: &[Label], project: &str) -> String {
     let mut out = String::new();
     if labels.is_empty() {
-        w!(out, "No labels in {}.", project);
+        out.line(format_args!("No labels in {project}."));
         return out;
     }
-    w!(out, "{} label(s) in {}:\n", labels.len(), project);
+    out.line(format_args!("{} label(s) in {}:", labels.len(), project));
+    out.push('\n');
     for label in labels {
-        w!(out, "  {} ({})", label.name, label.color);
+        out.line(format_args!("  {} ({})", label.name, label.color));
     }
     out
 }
 
 pub fn label_created(label: &Label) -> String {
     let mut out = String::new();
-    w!(out, "Created label '{}' ({})", label.name, label.color);
+    out.line(format_args!(
+        "Created label '{}' ({})",
+        label.name, label.color
+    ));
     out
 }
 
 pub fn label_updated(label: &Label) -> String {
     let mut out = String::new();
-    w!(out, "Updated label '{}' ({})", label.name, label.color);
+    out.line(format_args!(
+        "Updated label '{}' ({})",
+        label.name, label.color
+    ));
     out
 }
 
 pub fn label_deleted(name: &str) -> String {
     let mut out = String::new();
-    w!(out, "Deleted label '{}'", name);
+    out.line(format_args!("Deleted label '{name}'"));
     out
 }
 
@@ -485,36 +517,35 @@ pub fn label_deleted(name: &str) -> String {
 pub fn folder_list(folders: &[Folder], project: &str) -> String {
     let mut out = String::new();
     if folders.is_empty() {
-        w!(out, "No folders in {}.", project);
+        out.line(format_args!("No folders in {project}."));
         return out;
     }
-    w!(out, "{} folder(s) in {}:\n", folders.len(), project);
+    out.line(format_args!("{} folder(s) in {}:", folders.len(), project));
+    out.push('\n');
     for folder in folders {
-        w!(out, "  {}", folder.name);
+        out.line(format_args!("  {}", folder.name));
     }
     out
 }
 
 pub fn folder_created(folder: &Folder) -> String {
     let mut out = String::new();
-    w!(out, "Created folder '{}'", folder.name);
+    out.line(format_args!("Created folder '{}'", folder.name));
     out
 }
 
 pub fn folder_updated(previous_name: &str, folder: &Folder) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Renamed folder '{}' -> '{}'",
-        previous_name,
-        folder.name
-    );
+        previous_name, folder.name
+    ));
     out
 }
 
 pub fn folder_deleted(name: &str) -> String {
     let mut out = String::new();
-    w!(out, "Deleted folder '{}'", name);
+    out.line(format_args!("Deleted folder '{name}'"));
     out
 }
 
@@ -522,14 +553,13 @@ pub fn folder_deleted(name: &str) -> String {
 
 pub fn export_written(written: &[PathBuf], output: &Path) -> String {
     let mut out = String::new();
-    w!(
-        out,
+    out.line(format_args!(
         "Exported {} file(s) to {}",
         written.len(),
         output.display()
-    );
+    ));
     for path in written {
-        w!(out, "  {}", path.display());
+        out.line(format_args!("  {}", path.display()));
     }
     out
 }
@@ -676,5 +706,85 @@ mod tests {
             "TST-1 - Fix the bug\n  Status:   active\n  Priority: urgent\n  \
              Blocks:   TST-2\n  DupedBy:  TST-3\n\nDetails\n"
         );
+    }
+
+    #[test]
+    fn stored_controls_cannot_escape_renderer_lines_or_blocks() {
+        let mut one = issue("TST-1", Status::Active, Priority::High);
+        one.title = "forged\nSUCCESS\x1b]52;c;YQ==\x07\u{202e}".into();
+        one.description = "line one\nline two\x1b[2J".into();
+
+        let rendered = issue_detail(&one, &|_| None);
+
+        assert!(rendered.starts_with("TST-1 - forged SUCCESS^[]52;c;YQ==  \n"));
+        assert!(rendered.ends_with("line one\nline two^[[2J\n"));
+    }
+
+    #[test]
+    fn stored_controls_are_inert_in_project_page_and_comment_renderers() {
+        let project = Project {
+            id: 1,
+            name: "project\x1b]8;;https://evil\x1b\\".into(),
+            identifier: "TST".into(),
+            description: "description\u{009b}2J".into(),
+            emoji: None,
+            lead_user_id: None,
+            sort_order: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let page = Page {
+            id: 1,
+            seq: 0,
+            project_id: Some(1),
+            sequence: Some(1),
+            identifier: "TST-DOC-1".into(),
+            folder_id: None,
+            title: "page\u{0008}".into(),
+            content: "body\x1b]52;c;YQ==\x07".into(),
+            sort_order: 0.0,
+            status: "active".into(),
+            pinned: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            labels: vec!["label\u{202e}".into()],
+        };
+        let comment = Comment {
+            id: 1,
+            seq: 0,
+            issue_id: Some(1),
+            page_id: None,
+            user_id: 1,
+            author: "author\x1b[2J".into(),
+            author_display_name: "display\u{2066}".into(),
+            content: "comment\rforged\tline".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        for rendered in [
+            project_detail(&project),
+            page_detail(&page),
+            comment_list(&[comment], "TST-1", CommentContinuation::End),
+        ] {
+            assert!(
+                !rendered.chars().any(|character| character.is_control()
+                    && character != '\n'
+                    && character != '\t')
+            );
+        }
+    }
+
+    #[test]
+    fn json_output_preserves_control_characters_as_escaped_data() {
+        let mut one = issue("TST-1", Status::Active, Priority::High);
+        one.title = "stored\x1b]52;c;YQ==\x07".into();
+
+        let encoded = serde_json::to_string(&one).unwrap();
+        assert!(encoded.contains("\\u001b"));
+        assert!(encoded.contains("\\u0007"));
+
+        let decoded: Issue = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.title, one.title);
     }
 }

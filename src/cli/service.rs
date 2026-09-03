@@ -439,10 +439,11 @@ fn run_ok(cmd: &str, args: &[&str]) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
+        let detail = crate::cli::ui::sanitize_terminal_line(&String::from_utf8_lossy(&out.stderr));
         Err(format!(
             "`{cmd} {}` failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            detail.trim()
         ))
     }
 }

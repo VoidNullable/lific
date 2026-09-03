@@ -3,7 +3,7 @@
 //! The settings row in the database is authoritative; TOML only seeds it on
 //! first touch (LIF-210).
 
-use crate::cli::{InstanceAction, term};
+use crate::cli::{InstanceAction, term, ui};
 use crate::config::Config;
 use crate::db;
 
@@ -99,35 +99,41 @@ pub fn run(
             "login_message": settings.login_message,
             "users": { "total": total, "admins": admins },
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", crate::cli::term::json_string(&out)?);
     } else {
-        println!("Instance");
-        println!(
+        ui::line("Instance");
+        ui::line(format!(
             "  name:          {}",
             settings.instance_name.as_deref().unwrap_or("(unnamed)")
-        );
-        println!("  version:       {version}");
-        println!("  database:      {}", cfg.database.path.display());
-        println!("  bind:          {}:{}", cfg.server.host, cfg.server.port);
-        println!(
+        ));
+        ui::line(format!("  version:       {version}"));
+        ui::line(format!("  database:      {}", cfg.database.path.display()));
+        ui::line(format!(
+            "  bind:          {}:{}",
+            cfg.server.host, cfg.server.port
+        ));
+        ui::line(format!(
             "  public url:    {}",
             cfg.server.public_url.as_deref().unwrap_or("(not set)")
-        );
-        println!(
+        ));
+        ui::line(format!(
             "  signups:       {}",
             if settings.allow_signup {
                 "open"
             } else {
                 "closed"
             }
-        );
-        println!("  signup domains:{domains}");
-        println!("  session days:  {}", settings.session_lifetime_days);
-        println!(
+        ));
+        ui::line(format!("  signup domains:{domains}"));
+        ui::line(format!(
+            "  session days:  {}",
+            settings.session_lifetime_days
+        ));
+        ui::line(format!(
             "  login message: {}",
             settings.login_message.as_deref().unwrap_or("(none)")
-        );
-        println!("  users:         {total} ({admins} admin)");
+        ));
+        ui::line(format!("  users:         {total} ({admins} admin)"));
     }
     Ok(())
 }

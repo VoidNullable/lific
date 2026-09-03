@@ -12,7 +12,113 @@
 //!    A confirmation prompt that blocks forever in CI is a hang; instead we
 //!    error and name the flag that bypasses the prompt non-interactively.
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
+
+use crate::cli::ui::TerminalDisplay;
+
+/// A tracing writer that makes every formatted event safe for a terminal.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SanitizedStderr;
+
+pub(crate) fn sanitized_stderr() -> SanitizedStderr {
+    SanitizedStderr
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SanitizedStderr {
+    type Writer = SanitizedWriter<io::Stderr>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SanitizedWriter {
+            inner: io::stderr(),
+            pending: Vec::new(),
+        }
+    }
+}
+
+pub(crate) struct SanitizedWriter<W> {
+    inner: W,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> Write for SanitizedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            let text = String::from_utf8_lossy(&line);
+            let has_trailing_newline = text.ends_with('\n');
+            let text = text.strip_suffix('\n').unwrap_or(&text);
+            let safe = crate::cli::ui::sanitize_terminal_line(text);
+            self.inner.write_all(safe.as_bytes())?;
+            if has_trailing_newline {
+                self.inner.write_all(b"\n")?;
+            }
+        }
+        self.inner.flush()
+    }
+}
+
+/// Serialize JSON for terminal-visible stdout without changing its parsed value.
+///
+/// Serde escapes C0 controls, but leaves C1 and Unicode formatting controls
+/// literal. Escape those only while they are inside JSON strings; structural
+/// pretty-print whitespace remains valid JSON formatting.
+pub fn json_string<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let serialized = serde_json::to_string_pretty(value)?;
+    let mut output = String::with_capacity(serialized.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in serialized.chars() {
+        if !in_string {
+            output.push(ch);
+            in_string = ch == '"';
+            continue;
+        }
+
+        if escaped {
+            output.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                output.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                output.push(ch);
+                in_string = false;
+            }
+            ch if json_terminal_control(ch) => {
+                use std::fmt::Write;
+                write!(output, "\\u{:04x}", ch as u32).expect("String write cannot fail");
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    Ok(output)
+}
+
+fn json_terminal_control(ch: char) -> bool {
+    ch.is_control()
+        || ch == '\u{007f}'
+        || matches!(
+            ch,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+        )
+}
 
 /// Whether stdout is connected to an interactive terminal.
 pub fn stdout_is_tty() -> bool {
@@ -69,7 +175,7 @@ pub fn confirm_inner<R: std::io::BufRead, W: std::io::Write>(
         ));
     }
 
-    let _ = write!(writer, "{prompt} [y/N] ");
+    let _ = write!(writer, "{} [y/N] ", prompt.terminal_line());
     let _ = writer.flush();
 
     let mut line = String::new();
@@ -110,7 +216,7 @@ pub fn prompt_text_inner<R: std::io::BufRead, W: std::io::Write>(
             "interactive input required; re-run with {bypass_flag} to supply it non-interactively"
         ));
     }
-    let _ = write!(writer, "{prompt} ");
+    let _ = write!(writer, "{} ", prompt.terminal_line());
     let _ = writer.flush();
 
     let mut line = String::new();
@@ -127,6 +233,66 @@ pub fn prompt_text_inner<R: std::io::BufRead, W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn assert_json_strings_contain_no_terminal_controls(encoded: &str) {
+        let mut in_string = false;
+        let mut escaped = false;
+        for ch in encoded.chars() {
+            if !in_string {
+                if ch == '"' {
+                    in_string = true;
+                }
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => assert!(!json_terminal_control(ch), "literal control {ch:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn json_string_escapes_terminal_controls_losslessly() {
+        let value = serde_json::json!({
+            "text": "\u{001b}]52;c;clipboard\u{0007}\u{009b}2J\u{007f}\u{202e}\u{200b}\u{feff}"
+        });
+        let encoded = json_string(&value).unwrap();
+
+        assert!(encoded.contains("\\u009b"));
+        assert!(encoded.contains("\\u007f"));
+        assert!(encoded.contains("\\u202e"));
+        assert!(encoded.contains("\\ufeff"));
+
+        let without_layout = encoded.replace('\n', "");
+        assert!(!without_layout.chars().any(json_terminal_control));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            value
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn json_string_round_trips_arbitrary_text_without_literal_controls(
+            text in proptest::collection::vec(any::<char>(), 0..256)
+                .prop_map(String::from_iter)
+        ) {
+            let value = serde_json::json!({"text": text});
+            let encoded = json_string(&value).unwrap();
+
+            prop_assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+                value
+            );
+            assert_json_strings_contain_no_terminal_controls(&encoded);
+        }
+    }
 
     #[test]
     fn wants_json_explicit_flag_always_wins() {
@@ -169,6 +335,75 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let ok = confirm_inner("Proceed?", "--yes", true, &mut input, &mut out).unwrap();
         assert!(ok);
+    }
+
+    #[test]
+    fn prompts_neutralize_terminal_controls() {
+        let mut input: &[u8] = b"y\n";
+        let mut out: Vec<u8> = Vec::new();
+        confirm_inner(
+            "Delete \u{001b}]52;c;clipboard\u{0007}?",
+            "--yes",
+            true,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert_eq!(rendered, "Delete ^[]52;c;clipboard ? [y/N] ");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| !line.chars().any(char::is_control))
+        );
+    }
+
+    #[test]
+    fn tracing_writer_neutralizes_control_sequences() {
+        use std::io::Write;
+
+        let mut writer = SanitizedWriter {
+            inner: Vec::new(),
+            pending: Vec::new(),
+        };
+        writer
+            .write_all("path: evil\nforged\x1b]8;;https://evil\x1b\\\u{009b}2J\n".as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+        let rendered = String::from_utf8(writer.inner).unwrap();
+        assert_eq!(rendered, "path: evil forged^[]8;;https://evil^[\\ 2J\n");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| !line.chars().any(char::is_control))
+        );
+    }
+
+    #[test]
+    fn cli_json_sinks_do_not_bypass_terminal_encoder() {
+        for path in [
+            "src/main.rs",
+            "src/cli/exec.rs",
+            "src/cli/http.rs",
+            "src/cli/instance.rs",
+            "src/cli/member.rs",
+            "src/cli/user.rs",
+            "src/cli/key.rs",
+            "src/cli/import.rs",
+            "src/cli/doctor.rs",
+            "src/cli/login.rs",
+            "src/cli/connect/mod.rs",
+            "src/cli/connect/writer.rs",
+        ] {
+            let source = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
+            )
+            .unwrap();
+            assert!(
+                !source.contains("serde_json::to_string_pretty"),
+                "{path} must use term::json_string for terminal JSON"
+            );
+        }
     }
 
     #[test]

@@ -358,7 +358,7 @@ fn render_json(existing: &str, entry: &CompiledEntry) -> Result<String, WriteErr
     // Insert/replace only our own server entry, preserving siblings.
     top_map.insert(entry.name.clone(), entry.value.clone());
 
-    let mut out = serde_json::to_string_pretty(&root)
+    let mut out = crate::cli::term::json_string(&root)
         .map_err(|e| WriteError::new(format!("failed to serialize JSON: {e}")))?;
     out.push('\n');
     Ok(out)
@@ -369,7 +369,7 @@ fn manual_json_snippet(entry: &CompiledEntry) -> String {
     let snippet = serde_json::json!({
         entry.top_key.clone(): { entry.name.clone(): entry.value.clone() }
     });
-    serde_json::to_string_pretty(&snippet).unwrap_or_default()
+    crate::cli::term::json_string(&snippet).unwrap_or_default()
 }
 
 // ── TOML (Codex) ─────────────────────────────────────────────
@@ -660,7 +660,7 @@ mod tests {
         // Pre-existing config with another MCP server and unrelated top keys.
         std::fs::write(
             &path,
-            serde_json::to_string_pretty(&serde_json::json!({
+            crate::cli::term::json_string(&serde_json::json!({
                 "theme": "dark",
                 "mcp": {
                     "other": { "type": "remote", "url": "http://other" }
@@ -692,7 +692,7 @@ mod tests {
         let path = dir.join("opencode.json");
         std::fs::write(
             &path,
-            serde_json::to_string_pretty(&serde_json::json!({
+            crate::cli::term::json_string(&serde_json::json!({
                 "mcp": { "lific": { "type": "remote", "url": "http://stale" } }
             }))
             .unwrap(),
