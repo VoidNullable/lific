@@ -13,13 +13,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 fn main() {
-    // CI and clean checkouts may not have a built frontend yet. Create the
-    // embed directory up-front so the rust-embed derive can compile cleanly even
-    // when the web bundle has not been generated.
+    // `web/dist/.gitkeep` keeps the embed directory present in clean checkouts.
+    // Do not create it here: builds must not mutate the source tree.
     let dist = Path::new("web/dist");
-    if !dist.exists() {
-        std::fs::create_dir_all(dist).expect("create missing web/dist directory");
-    }
 
     // The built bundle: changing it must trigger a re-embed.
     println!("cargo:rerun-if-changed=web/dist");
