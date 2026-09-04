@@ -2373,8 +2373,8 @@ mod tests {
         #[test]
         fn arbitrary_unknown_commands_are_rejected(argument in "[a-z]{1,32}") {
             let invalid = format!("unknown-{argument}");
-            let argv = vec!["lific".to_owned(), invalid];
-            prop_assert!(Cli::try_parse_from(argv).is_err());
+            let error = Cli::try_parse_from(["lific", invalid.as_str()]).err();
+            prop_assert_eq!(error.map(|error| error.kind()), Some(clap::error::ErrorKind::InvalidSubcommand));
         }
     }
 
