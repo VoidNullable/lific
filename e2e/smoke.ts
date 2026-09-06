@@ -29,6 +29,8 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { checkDiscordFeedback } from "./discord-feedback";
+import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BIN = process.env.LIFIC_BIN ?? join(ROOT, "target", "debug", "lific");
@@ -114,6 +116,9 @@ async function main(): Promise<number> {
       "--password", PASSWORD,
     ]);
     cli(config, db, ["project", "create", "--name", "Demo", "--identifier", "DEMO", "--json"]);
+    const seedDb = new Database(db);
+    seedDb.run("UPDATE projects SET emoji = ? WHERE identifier = 'DEMO'", ["Lucide:Terminal"]);
+    seedDb.close();
     cli(config, db, [
       "issue", "create", "--project", "DEMO",
       "--title", "Smoke issue",
@@ -121,6 +126,8 @@ async function main(): Promise<number> {
       "--json",
     ]);
     cli(config, db, ["issue", "update", "DEMO-1", "--status", "active", "--json"]);
+    cli(config, db, ["issue", "create", "--project", "DEMO", "--title", "Second smoke issue", "--status", "active", "--json"]);
+    cli(config, db, ["issue", "create", "--project", "DEMO", "--title", "Excluded smoke issue", "--status", "backlog", "--json"]);
     cli(config, db, ["comment", "add", "DEMO-1", "--content", "First smoke comment", "--json"]);
     const pageOut = JSON.parse(
       cli(config, db, [
@@ -213,6 +220,8 @@ async function main(): Promise<number> {
       }
       console.log(`${failures.some((f) => f.startsWith(`${route.path}:`)) ? "FAIL" : "ok  "} ${route.path}`);
     }
+
+    await checkDiscordFeedback(context, base);
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------
     // A detail view opened as the app's entry point gets a synthesized
