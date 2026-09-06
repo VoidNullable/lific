@@ -2,6 +2,7 @@
   import { icons as lucideIcons } from "lucide";
   import { Icon as LucideIcon, type IconNode } from "lucide-svelte";
   import emojiData from "unicode-emoji-json";
+  import ProjectIcon from "./ProjectIcon.svelte";
 
   let {
     value = "",
@@ -143,15 +144,6 @@
       search = "";
     }
   }
-
-  // Parse current value
-  let isLucide = $derived(value.startsWith("lucide:"));
-  let lucideName = $derived(isLucide ? value.slice(7) : "");
-  let iconNode = $derived(
-    isLucide && lucideName in lucideIcons
-      ? (lucideIcons as Record<string, IconNode>)[lucideName]
-      : null
-  );
 </script>
 
 <svelte:window onclick={handleWindowClick} />
@@ -165,12 +157,8 @@
     onclick={toggle}
     title="Choose icon"
   >
-    {#if value === LIFIC_LOGO}
-      <img src="/logo.webp" alt="Lific" width="20" height="20" class="object-contain" />
-    {:else if value && isLucide && iconNode}
-      <LucideIcon iconNode={iconNode} size={20} class="text-[var(--text)]" />
-    {:else if value && !isLucide}
-      {value}
+    {#if value}
+      <ProjectIcon {value} size={20} class="text-[var(--text)]" />
     {:else}
       <span class="text-[var(--text-faint)] text-body">+</span>
     {/if}
