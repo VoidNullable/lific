@@ -17,10 +17,28 @@
 //!    / `~/.config/lific/lific.toml` = pass. Built-in defaults (no file) = warn.
 //!    A file that exists but fails to parse = fail; the already-computed
 //!    resolution is reported without repeating candidate discovery.
+//!
+//!    A failed resolution is **fail-closed**: every check that would otherwise
+//!    read a configured value is skipped with that reason named, because the
+//!    built-in defaults describe a different instance than the one the operator
+//!    meant to diagnose. Only an explicit `--db PATH` names a target
+//!    independently of config, so it is the one thing still inspected (or
+//!    repaired) after a resolution failure. Backups and every server-dependent
+//!    check are skipped outright, so no stored credential is ever presented to
+//!    the default endpoint on the strength of a configuration we failed to read.
 //! 2. **database** — file present and readable without migrations. Missing file
-//!    with a writable parent = warn ("created on first start"); unwritable
-//!    parent = fail. An existing non-Lific database = fail. `--repair` opts
-//!    into applying pending migrations through the normal database opener.
+//!    with a writable parent = warn (run `lific init`); unwritable parent =
+//!    fail. An existing non-Lific database = fail. A database another process
+//!    holds locked = warn (inconclusive, not corrupt). `--repair` opts into
+//!    applying pending migrations through the normal database opener.
+//!
+//!    Read-only inspection is a **logical** contract: it opens the file with
+//!    `SQLITE_OPEN_READ_ONLY`, bounds contention with a busy timeout, and reads
+//!    both facts inside one deferred transaction, so it never runs migrations
+//!    and never changes schema or application data. It does allow SQLite's own
+//!    bookkeeping, notably creating or updating the `-shm` file needed to read a
+//!    WAL database, which is what lets doctor see data that has not been
+//!    checkpointed yet.
 //! 3. **backups** — only when enabled. Dir missing = warn (server creates it);
 //!    dir present but unwritable = fail; no backups yet = warn; otherwise pass
 //!    with the most-recent backup age vs the configured interval.
@@ -37,15 +55,17 @@
 //!    {public_url}/.well-known/oauth-protected-resource/mcp` reachable = pass;
 //!    unreachable = warn (may be firewalled from this vantage point).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-use std::{fs::File, io};
 
 use serde::Serialize;
 
 use crate::config::Config;
 
-const MAX_DATABASE_SNAPSHOT_BYTES: u64 = 1 << 30;
+/// How long read-only inspection waits for a competing lock before reporting
+/// the database as busy. Bounded so `doctor` stays a fast command even when the
+/// server is mid-write.
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Outcome of a single check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -153,9 +173,10 @@ fn connect_base(cfg: &Config) -> String {
 }
 
 /// Run doctor with the canonical configuration-selection result. A malformed
-/// configuration remains diagnostic while independent checks continue against
-/// safe defaults. `database_override` is applied to that diagnostic config,
-/// and `repair` explicitly opts into applying migrations.
+/// configuration is reported and every configuration-dependent check is
+/// skipped, so doctor never diagnoses defaults the operator did not choose.
+/// `database_override` names a target independently of config, and `repair`
+/// explicitly opts into applying migrations.
 pub async fn run(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
     database_override: Option<&Path>,
@@ -176,35 +197,63 @@ pub async fn run(
     }
 }
 
+/// Reason attached to every check skipped because configuration selection
+/// failed. Named on each check so the output says why it did not run.
+const CONFIG_UNRESOLVED: &str = "configuration could not be resolved; skipped";
+
 /// Assemble the structured report from the single configuration-selection
-/// result. This function owns doctor's deliberate fallback policy, so callers
-/// cannot report one resolution while checking an unrelated configuration.
+/// result. This function owns doctor's fail-closed policy, so callers cannot
+/// report one resolution while checking an unrelated configuration.
 async fn build_report(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
     database_override: Option<&Path>,
     key: Option<&str>,
     database_mode: DatabaseCheckMode,
 ) -> Report {
-    let (cfg, config_check) = diagnostic_config(resolution, database_override);
+    let config_check = check_config(&resolution);
+    let Ok(resolved) = resolution else {
+        return Report::new(unconfigured_checks(
+            config_check,
+            database_override,
+            database_mode,
+        ));
+    };
 
+    let mut cfg = resolved.config;
+    if let Some(path) = database_override {
+        cfg.database.path = path.to_owned();
+    }
     let mut checks = vec![config_check, check_database(&cfg, database_mode)];
     checks.extend(check_backups(&cfg));
     checks.extend(check_remote(&cfg, key).await);
     Report::new(checks)
 }
 
-fn diagnostic_config(
-    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+/// The report doctor produces when configuration selection failed. The failure
+/// itself is retained, an explicit `--db` target is still inspected because it
+/// was named on the command line rather than read from the file we could not
+/// load, and everything else is skipped with the reason spelled out.
+fn unconfigured_checks(
+    config_check: Check,
     database_override: Option<&Path>,
-) -> (Config, Check) {
-    let check = check_config(&resolution);
-    let mut config = resolution
-        .map(|resolved| resolved.config)
-        .unwrap_or_default();
-    if let Some(path) = database_override {
-        config.database.path = path.to_owned();
-    }
-    (config, check)
+    database_mode: DatabaseCheckMode,
+) -> Vec<Check> {
+    let database = match database_override {
+        Some(path) => check_database_at(path, database_mode),
+        None => Check::new(
+            "database",
+            Status::Skipped,
+            format!("{CONFIG_UNRESOLVED} (pass --db PATH to inspect one anyway)"),
+        ),
+    };
+    vec![
+        config_check,
+        database,
+        Check::new("backups", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("server", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("oauth_discovery", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("mcp", Status::Skipped, CONFIG_UNRESOLVED),
+    ]
 }
 
 /// Run checks that depend on the configured server or its credentials.
@@ -333,9 +382,12 @@ enum DatabaseCheckMode {
 }
 
 fn check_database(cfg: &Config, mode: DatabaseCheckMode) -> Check {
-    let path = &cfg.database.path;
+    check_database_at(&cfg.database.path, mode)
+}
+
+fn check_database_at(path: &Path, mode: DatabaseCheckMode) -> Check {
     if !path.exists() {
-        // Missing is fine if the server could create it; the deciding factor is
+        // Missing is fine if init could create it; the deciding factor is
         // whether the parent directory is writable.
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
         let parent_writable = match parent {
@@ -347,7 +399,7 @@ fn check_database(cfg: &Config, mode: DatabaseCheckMode) -> Check {
                 "database",
                 Status::Warn,
                 format!(
-                    "{} does not exist yet — will be created on first start",
+                    "{} does not exist yet; run `lific init` to create it",
                     path.display()
                 ),
             )
@@ -370,10 +422,14 @@ fn check_database(cfg: &Config, mode: DatabaseCheckMode) -> Check {
 }
 
 fn check_database_read_only(path: &Path) -> Check {
-    // Doctor must not run migrations or enable WAL, because those operations
-    // mutate the instance being diagnosed.
-    match inspect_database(path) {
-        Ok(Some(version)) => Check::new(
+    // Doctor must not run migrations or change schema or application data,
+    // because those operations mutate the instance being diagnosed.
+    describe_inspection(path, inspect_database(path))
+}
+
+fn describe_inspection(path: &Path, result: anyhow::Result<Inspection>) -> Check {
+    match result {
+        Ok(Inspection::Lific { version }) => Check::new(
             "database",
             Status::Pass,
             format!(
@@ -381,10 +437,20 @@ fn check_database_read_only(path: &Path) -> Check {
                 path.display()
             ),
         ),
-        Ok(None) => Check::new(
+        Ok(Inspection::NotLific) => Check::new(
             "database",
             Status::Fail,
             format!("{} is not a Lific database", path.display()),
+        ),
+        // A lock held by another process says nothing about the database's
+        // health, so this is inconclusive rather than a failure.
+        Ok(Inspection::Busy(reason)) => Check::new(
+            "database",
+            Status::Warn,
+            format!(
+                "{} is locked by another process, so its schema could not be read ({reason})",
+                path.display()
+            ),
         ),
         Err(e) => Check::new(
             "database",
@@ -431,75 +497,78 @@ fn schema_version(connection: &rusqlite::Connection) -> rusqlite::Result<i64> {
     )
 }
 
-/// Inspect the migration marker without creating WAL/SHM files or applying
-/// migrations. `Ok(None)` means the file opened but is not a Lific database.
-fn inspect_database(path: &Path) -> anyhow::Result<Option<i64>> {
-    let wal = database_sidecar(path, "-wal");
-    if wal.exists() {
-        let snapshot = tempfile::tempdir()?;
-        let snapshot_path = snapshot.path().join("lific.db");
-        let mut remaining = MAX_DATABASE_SNAPSHOT_BYTES;
-        copy_bounded(path, &snapshot_path, &mut remaining)?;
-        copy_bounded(
-            &wal,
-            &database_sidecar(&snapshot_path, "-wal"),
-            &mut remaining,
-        )?;
-        return inspect_connection(&open_read_only_database(&snapshot_path)?).map_err(Into::into);
-    }
-
-    inspect_connection(&open_immutable_database(path)?).map_err(Into::into)
+/// What read-only inspection learned about a database file.
+#[derive(Debug)]
+enum Inspection {
+    /// A Lific database at the given schema version.
+    Lific { version: i64 },
+    /// The file opened as a database, but carries no `_migrations` table.
+    NotLific,
+    /// Another process holds a conflicting lock, so the answer is unknown.
+    Busy(String),
 }
 
-fn copy_bounded(source: &Path, destination: &Path, remaining: &mut u64) -> io::Result<()> {
-    let mut source = File::open(source)?;
-    let mut destination = File::create_new(destination)?;
-    let mut buffer = [0; 64 * 1024];
+/// Inspect the migration marker without running migrations and without
+/// changing schema or application data.
+///
+/// The connection is opened `SQLITE_OPEN_READ_ONLY`, so SQLite refuses any
+/// write to the database itself. SQLite's own bookkeeping is still permitted:
+/// reading a WAL database requires the `-shm` index, and permitting it is what
+/// lets doctor observe rows that have not been checkpointed into the main file
+/// yet. Both facts are read inside one deferred transaction, so a concurrent
+/// writer cannot make the table probe and the version read disagree.
+fn inspect_database(path: &Path) -> anyhow::Result<Inspection> {
+    inspect_database_with_timeout(path, DATABASE_BUSY_TIMEOUT)
+}
 
-    loop {
-        let read = io::Read::read(&mut source, &mut buffer)?;
-        if read == 0 {
-            return Ok(());
-        }
-        let read = u64::try_from(read).expect("buffer length fits in u64");
-        if read > *remaining {
-            return Err(io::Error::other("database snapshot exceeds doctor limit"));
-        }
-        io::Write::write_all(&mut destination, &buffer[..read as usize])?;
-        *remaining -= read;
+fn inspect_database_with_timeout(path: &Path, timeout: Duration) -> anyhow::Result<Inspection> {
+    let result = open_inspection_connection(path, timeout)
+        .and_then(|mut connection| inspect_connection(&mut connection));
+    Ok(classify_inspection(result)?)
+}
+
+fn open_inspection_connection(
+    path: &Path,
+    timeout: Duration,
+) -> rusqlite::Result<rusqlite::Connection> {
+    let connection = open_read_only_database(path)?;
+    // Bounded, so a busy instance makes doctor inconclusive rather than slow.
+    connection.busy_timeout(timeout)?;
+    Ok(connection)
+}
+
+/// Turn a lock conflict into an inconclusive result; every other error stays an
+/// error, because it means the file could not be read at all.
+fn classify_inspection(result: rusqlite::Result<Inspection>) -> rusqlite::Result<Inspection> {
+    match result {
+        Err(error) if is_busy(&error) => Ok(Inspection::Busy(error.to_string())),
+        other => other,
     }
 }
 
-fn inspect_connection(connection: &rusqlite::Connection) -> rusqlite::Result<Option<i64>> {
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+fn inspect_connection(connection: &mut rusqlite::Connection) -> rusqlite::Result<Inspection> {
     use rusqlite::OptionalExtension;
 
-    let migration_table: Option<String> = connection
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+    let migration_table: Option<String> = transaction
         .query_row(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_migrations'",
             [],
             |row| row.get(0),
         )
         .optional()?;
-    let Some(_) = migration_table else {
-        return Ok(None);
-    };
-    schema_version(connection).map(Some)
-}
-
-fn open_immutable_database(path: &Path) -> anyhow::Result<rusqlite::Connection> {
-    let absolute = std::path::absolute(path)?;
-    let mut uri = reqwest::Url::from_file_path(&absolute)
-        .map_err(|()| anyhow::anyhow!("cannot represent {} as a file URI", path.display()))?;
-    uri.query_pairs_mut()
-        .append_pair("immutable", "1")
-        .append_pair("mode", "ro");
-    rusqlite::Connection::open_with_flags(
-        uri.as_str(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(Into::into)
+    if migration_table.is_none() {
+        return Ok(Inspection::NotLific);
+    }
+    schema_version(&transaction).map(|version| Inspection::Lific { version })
 }
 
 fn open_read_only_database(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
@@ -507,12 +576,6 @@ fn open_read_only_database(path: &Path) -> rusqlite::Result<rusqlite::Connection
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-}
-
-fn database_sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    sidecar.into()
 }
 
 /// Best-effort writability probe: try to create (and remove) a temp file in the
@@ -1150,7 +1213,7 @@ mod tests {
 
         let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
-        assert!(c.detail.contains("first start"));
+        assert!(c.detail.contains("lific init"), "detail: {}", c.detail);
     }
 
     #[test]
@@ -1215,117 +1278,203 @@ mod tests {
     }
 
     #[test]
-    fn read_only_database_check_does_not_create_shm_for_a_wal_database() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source.db");
-        let inspected = tmp.path().join("inspected.db");
-        let connection = rusqlite::Connection::open(&source).unwrap();
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE _migrations (version INTEGER NOT NULL);
-                 INSERT INTO _migrations VALUES (1);
-                 PRAGMA wal_checkpoint(TRUNCATE);
-                 CREATE TABLE pending (value TEXT NOT NULL);
-                 INSERT INTO pending VALUES ('keeps the WAL present');",
-            )
-            .unwrap();
-
-        std::fs::copy(&source, &inspected).unwrap();
-        std::fs::copy(
-            database_sidecar(&source, "-wal"),
-            database_sidecar(&inspected, "-wal"),
-        )
-        .unwrap();
-        assert!(!database_sidecar(&inspected, "-shm").exists());
-
-        assert_eq!(inspect_database(&inspected).unwrap(), Some(1));
-        assert!(
-            !database_sidecar(&inspected, "-shm").exists(),
-            "read-only inspection must not create SQLite bookkeeping files"
-        );
-    }
-
-    #[test]
-    fn read_only_database_check_reads_an_uncheckpointed_wal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source.db");
-        let inspected = tmp.path().join("inspected.db");
-        let connection = rusqlite::Connection::open(&source).unwrap();
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .unwrap();
-        connection
-            .execute_batch(
-                "PRAGMA wal_checkpoint(TRUNCATE);
-                 CREATE TABLE _migrations (version INTEGER NOT NULL);
-                 INSERT INTO _migrations VALUES (7);",
-            )
-            .unwrap();
-
-        std::fs::copy(&source, &inspected).unwrap();
-        std::fs::copy(
-            database_sidecar(&source, "-wal"),
-            database_sidecar(&inspected, "-wal"),
-        )
-        .unwrap();
-        assert_eq!(
-            inspect_connection(&open_immutable_database(&inspected).unwrap()).unwrap(),
-            None,
-            "the migration marker must exist only in the WAL"
-        );
-        let database_before = std::fs::read(&inspected).unwrap();
-        let wal_path = database_sidecar(&inspected, "-wal");
-        let wal_before = std::fs::read(&wal_path).unwrap();
-
-        assert_eq!(inspect_database(&inspected).unwrap(), Some(7));
-        assert!(!database_sidecar(&inspected, "-shm").exists());
-        assert_eq!(std::fs::read(&inspected).unwrap(), database_before);
-        assert_eq!(std::fs::read(wal_path).unwrap(), wal_before);
-    }
-
-    #[test]
-    fn read_only_database_check_preserves_an_active_wal_database() {
+    fn read_only_inspection_leaves_data_and_schema_untouched() {
+        // The contract is logical, not byte-for-byte: SQLite may write its own
+        // `-shm` bookkeeping to read a WAL database, but nothing the operator
+        // stored may change.
         let tmp = tempfile::tempdir().unwrap();
         let database = tmp.path().join("active.db");
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .unwrap();
-        connection
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
             .execute_batch(
                 "CREATE TABLE _migrations (version INTEGER NOT NULL);
-                 INSERT INTO _migrations VALUES (9);",
+                 INSERT INTO _migrations VALUES (9);
+                 CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+                 INSERT INTO issues VALUES ('LIF-1', 'stays put');",
             )
             .unwrap();
-        let wal = database_sidecar(&database, "-wal");
-        let shm = database_sidecar(&database, "-shm");
-        assert!(wal.exists());
-        assert!(shm.exists());
-        let database_before = std::fs::read(&database).unwrap();
-        let wal_before = std::fs::read(&wal).unwrap();
-        let shm_before = std::fs::read(&shm).unwrap();
+        let before = logical_contents(&writer);
 
-        assert_eq!(inspect_database(&database).unwrap(), Some(9));
-        assert_eq!(std::fs::read(&database).unwrap(), database_before);
-        assert_eq!(std::fs::read(wal).unwrap(), wal_before);
-        assert_eq!(std::fs::read(shm).unwrap(), shm_before);
+        assert_version(inspect_database(&database).unwrap(), 9);
+
+        assert_eq!(
+            logical_contents(&writer),
+            before,
+            "read-only inspection must not change schema or application data"
+        );
+        assert_eq!(
+            journal_mode(&writer),
+            "wal",
+            "read-only inspection must not change the journal mode"
+        );
     }
 
     #[test]
-    fn database_snapshot_copy_stops_at_its_byte_limit() {
+    fn read_only_inspection_reads_an_uncheckpointed_wal() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source");
-        let destination = tmp.path().join("destination");
-        std::fs::write(&source, b"0123456789").unwrap();
-        let mut remaining = 4;
+        let database = tmp.path().join("wal.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (6);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let wal = sidecar(&database, "-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            0,
+            "the truncating checkpoint must empty the WAL"
+        );
 
-        let error = copy_bounded(&source, &destination, &mut remaining).unwrap_err();
+        // v7 now lives only in the WAL, never in the main database file.
+        writer
+            .execute("UPDATE _migrations SET version = 7", [])
+            .unwrap();
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
 
-        assert_eq!(error.kind(), std::io::ErrorKind::Other);
-        assert!(std::fs::metadata(destination).unwrap().len() <= 4);
+        assert_version(inspect_database(&database).unwrap(), 7);
+    }
+
+    #[test]
+    fn read_only_inspection_reads_both_facts_from_one_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("snapshot.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (3);",
+            )
+            .unwrap();
+
+        // Commit between the two production queries, after the table probe has
+        // established the snapshot but before the version query is prepared.
+        let mut reader = open_inspection_connection(&database, DATABASE_BUSY_TIMEOUT).unwrap();
+        let mut updated = false;
+        reader.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+            if !updated
+                && matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "_migrations",
+                        ..
+                    }
+                )
+            {
+                writer
+                    .execute_batch(
+                        "UPDATE _migrations SET version = 4; PRAGMA wal_checkpoint(PASSIVE);",
+                    )
+                    .unwrap();
+                updated = true;
+            }
+            rusqlite::hooks::Authorization::Allow
+        }));
+        assert_version(inspect_connection(&mut reader).unwrap(), 3);
+        drop(reader);
+
+        // A later check, with its own transaction, sees the new version.
+        assert_version(inspect_database(&database).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_locked_database_is_inconclusive_rather_than_a_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("locked.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (5);",
+            )
+            .unwrap();
+        // Rollback-journal mode, where an exclusive lock shuts readers out
+        // outright instead of letting them read an older snapshot.
+        assert_eq!(journal_mode(&writer), "delete");
+        writer
+            .execute_batch("BEGIN EXCLUSIVE; UPDATE _migrations SET version = 6;")
+            .unwrap();
+
+        // A short timeout keeps the test fast; the production timeout only
+        // decides how long to wait, not how the outcome is classified.
+        let inspection =
+            inspect_database_with_timeout(&database, Duration::from_millis(50)).unwrap();
+
+        assert!(
+            matches!(inspection, Inspection::Busy(_)),
+            "a locked database must be reported busy, got {inspection:?}"
+        );
+        let check = describe_inspection(&database, Ok(inspection));
+        assert_eq!(check.status, Status::Warn, "detail: {}", check.detail);
+        assert!(
+            check.detail.contains("locked by another process"),
+            "detail: {}",
+            check.detail
+        );
+        writer.execute_batch("ROLLBACK;").unwrap();
+    }
+
+    fn assert_version(inspection: Inspection, expected: i64) {
+        match inspection {
+            Inspection::Lific { version } => assert_eq!(version, expected),
+            other => panic!("expected schema v{expected}, got {other:?}"),
+        }
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        sidecar.into()
+    }
+
+    fn journal_mode(connection: &rusqlite::Connection) -> String {
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .unwrap()
+    }
+
+    /// Everything an operator would care about: the schema, plus the rows of
+    /// every user table in it.
+    fn logical_contents(connection: &rusqlite::Connection) -> Vec<String> {
+        let names: Vec<(String, String)> = connection
+            .prepare("SELECT name, COALESCE(sql, '') FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let mut contents = Vec::new();
+        for (name, sql) in &names {
+            contents.push(format!("schema:{name}:{sql}"));
+        }
+        for (name, sql) in &names {
+            if !sql.starts_with("CREATE TABLE") {
+                continue;
+            }
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM \"{name}\""))
+                .unwrap();
+            let columns = statement.column_count();
+            let rows: Vec<String> = statement
+                .query_map([], |row| {
+                    let mut cells = Vec::new();
+                    for index in 0..columns {
+                        cells.push(format!("{:?}", row.get_ref(index)?));
+                    }
+                    Ok(cells.join(","))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            contents.push(format!("rows:{name}:{}", rows.join(";")));
+        }
+        contents
     }
 
     #[test]
@@ -1371,8 +1520,8 @@ mod tests {
     }
 
     fn assert_no_database_sidecars(path: &Path) {
-        assert!(!database_sidecar(path, "-wal").exists());
-        assert!(!database_sidecar(path, "-shm").exists());
+        assert!(!sidecar(path, "-wal").exists());
+        assert!(!sidecar(path, "-shm").exists());
         assert!(!path.with_extension("db.bak").exists());
     }
 
@@ -1782,28 +1931,148 @@ mod tests {
         assert_eq!(status("public_url"), Some(Status::Pass));
     }
 
-    #[test]
-    fn database_override_is_diagnosed_after_config_resolution_failure() {
+    // ── fail-closed on a configuration failure ───────────────────────────
+
+    fn detail_of(checks: &[Check], name: &str) -> String {
+        let Some(check) = checks.iter().find(|check| check.name == name) else {
+            panic!("no `{name}` check in the report");
+        };
+        check.detail.clone()
+    }
+
+    /// Every check that would have read a configured value, and so must be
+    /// skipped rather than run against built-in defaults.
+    fn assert_config_dependent_checks_skipped(report: &Report) {
+        for name in ["backups", "server", "oauth_discovery", "mcp"] {
+            assert_eq!(
+                status_of(&report.checks, name),
+                Some(Status::Skipped),
+                "`{name}` must be skipped after a configuration failure"
+            );
+            assert!(
+                detail_of(&report.checks, name).contains("configuration"),
+                "`{name}` must name why it was skipped"
+            );
+        }
+        assert_eq!(
+            status_of(&report.checks, "public_url"),
+            None,
+            "no public URL is known, so nothing may be dialed"
+        );
+        assert_eq!(status_of(&report.checks, "credentials"), None);
+    }
+
+    fn malformed_config_resolution(
+        dir: &Path,
+    ) -> Result<crate::config::ResolvedConfig, crate::config::ConfigError> {
+        let path = dir.join("bad.toml");
+        std::fs::write(&path, "{{{ not toml").unwrap();
+        Config::resolve(Some(&path))
+    }
+
+    #[tokio::test]
+    async fn a_malformed_config_never_repairs_the_default_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
+        assert!(
+            detail_of(&report.checks, "database").contains("--db"),
+            "the skip must say how to inspect a database anyway"
+        );
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok, "the configuration failure is retained");
+    }
+
+    #[tokio::test]
+    async fn a_missing_explicit_config_never_repairs_the_default_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolution = Config::resolve(Some(&tmp.path().join("missing.toml")));
+        assert!(matches!(
+            resolution,
+            Err(crate::config::ConfigError::MissingExplicit { .. })
+        ));
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_is_still_inspected_after_a_config_failure() {
         let tmp = tempfile::tempdir().unwrap();
         let database_path = tmp.path().join("override.db");
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE _migrations (version INTEGER NOT NULL);
-                 INSERT INTO _migrations VALUES (11);",
-            )
-            .unwrap();
-        let resolution = Config::resolve(Some(&tmp.path().join("missing.toml")));
+        drop(crate::db::open(&database_path).unwrap());
+        let resolution = malformed_config_resolution(tmp.path());
 
-        let (config, config_check) = diagnostic_config(resolution, Some(&database_path));
-        let database_check = check_database(&config, DatabaseCheckMode::ReadOnly);
+        let report = build_report(
+            resolution,
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
 
-        assert_eq!(config_check.status, Status::Fail);
-        assert_eq!(database_check.status, Status::Pass);
-        assert!(
-            database_check
-                .detail
-                .contains(database_path.to_str().unwrap())
-        );
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        let detail = detail_of(&report.checks, "database");
+        assert!(detail.contains(database_path.to_str().unwrap()), "{detail}");
+        assert!(detail.contains("no migrations run"), "{detail}");
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok, "the configuration failure is retained");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_can_still_be_repaired_after_a_config_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database_path = tmp.path().join("old.db");
+        create_unrecognized_database(&database_path);
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(
+            resolution,
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::Repair,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        assert!(detail_of(&report.checks, "database").contains("migrations applied"));
+        assert!(has_migration_table(&database_path));
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok);
+    }
+
+    #[tokio::test]
+    async fn built_in_defaults_still_run_every_check() {
+        // A successful resolution with no config file on disk is a warning, not
+        // a failure, so the defaults it yields stay fully diagnosable.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.database.path = tmp.path().join("lific.db");
+        let addr = serve_reset_connections().await;
+        config.server.host = addr.ip().to_string();
+        config.server.port = addr.port();
+        let resolution = Ok(crate::config::ResolvedConfig {
+            config,
+            path: None,
+            source: crate::config::ConfigSource::BuiltInDefault,
+        });
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::ReadOnly).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "backups"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "server"), Some(Status::Warn));
+        assert!(report.ok);
     }
 }

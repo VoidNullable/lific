@@ -192,6 +192,12 @@ pub enum Command {
     /// nothing failed, 1 otherwise — so agents and CI can gate on it. Safe to
     /// run whether or not a server is up; server-dependent checks are skipped
     /// (not failed) when nothing is listening.
+    ///
+    /// By default the database is inspected read-only: doctor runs no migrations
+    /// and changes no schema or application data. SQLite may create or update
+    /// WAL/SHM bookkeeping files. If the configuration file cannot be read,
+    /// every check that depends on it is skipped rather than run against
+    /// built-in defaults; pass --db PATH to inspect a specific database anyway.
     Doctor {
         /// API key to test an authorized MCP round-trip. Falls back to the
         /// LIFIC_API_KEY environment variable. Without a key, doctor still
@@ -200,6 +206,7 @@ pub enum Command {
         key: Option<String>,
 
         /// Apply pending database migrations while checking the database.
+        /// Needs a readable config, or an explicit --db PATH.
         #[arg(long)]
         repair: bool,
     },
