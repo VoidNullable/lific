@@ -33,7 +33,6 @@
     groupBy,
     isFocused,
     isSelected,
-    selectionActive,
     isChanged = false,
     hitSnippet,
     statusOpen,
@@ -74,8 +73,6 @@
     isFocused: boolean;
     /** Row is in the multi-select set. */
     isSelected: boolean;
-    /** Any selection exists (keeps checkboxes visible across all rows). */
-    selectionActive: boolean;
     /** LIF-153: this issue has been updated (or created) since the snapshot
      *  taken the last time the user looked at this project's list. Renders
      *  the accent dot in the identifier gutter. */
@@ -162,18 +159,18 @@
   class="w-full flex items-center gap-2 sm:gap-3 px-3 sm:px-6 text-left
          {density === 'comfortable' ? 'py-3' : 'py-2.5'}
          {isLast ? '' : 'border-b border-[var(--border)]'}
-         border-l-2 transition-colors group cursor-pointer
+         border-l-2 transition-colors group
          {isFocused ? 'border-l-[var(--accent)]' : 'border-l-transparent'}
          {isSelected || isFocused
     ? 'bg-[var(--accent-subtle)]'
     : 'hover:bg-[var(--bg-subtle)]'}"
   data-issue-index={idx}
-  role="button"
+  role="group"
+  aria-label={issue.identifier}
   tabindex="-1"
   use:longpress={{ onLongPress: () => onPeek(issue) }}
   onclick={(e) => {
-    // LIF-149: shift-click extends a range, ctrl/cmd-click toggles —
-    // plain click still opens the issue.
+    // Modifier clicks select; only the identifier and title navigate.
     if (e.shiftKey) {
       e.preventDefault();
       onRangeSelect(idx);
@@ -184,7 +181,6 @@
       onToggleSelect(issue.id, idx);
       return;
     }
-    onOpen(issue);
   }}
   onmousedown={(e) => {
     // Shift-click means "extend selection" — suppress the native
@@ -193,22 +189,23 @@
   }}
   onmouseenter={(e) => onMouseEnterRow(e, idx)}
   oncontextmenu={handleContextMenu}
+  onkeydown={(e) => {
+    if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement).closest("button")) e.stopPropagation();
+  }}
 >
-  <!-- Selection checkbox (LIF-149). Space is always reserved so rows never
-       shift; the box is invisible until hover or until a selection exists
-       anywhere, then stays visible for the session of that selection.
-       LIF-234: hidden for viewers — selection only drives bulk mutations. -->
+  <!-- Keep selection visible and distinct from the circular status icon. -->
   {#if editable}
   <button
     class="size-4 shrink-0 rounded border flex items-center justify-center
            transition
            {isSelected
       ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-text)]'
-      : 'border-[var(--border)] text-transparent hover:border-[var(--text-faint)]'}
-           {isSelected || selectionActive
-      ? 'opacity-100'
-      : 'opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100'}"
+      : 'border-[var(--text-muted)] text-transparent hover:border-[var(--text)]'}
+           cursor-pointer"
     title={isSelected ? "Deselect" : "Select  ·  X"}
+    role="checkbox"
+    aria-checked={isSelected}
+    aria-label={`Select ${issue.identifier}`}
     onclick={(e) => {
       e.stopPropagation();
       if (e.shiftKey) onRangeSelect(idx);
@@ -234,9 +231,10 @@
       <button
         class="size-4 flex items-center justify-center transition-colors
                {editable ? 'hover:text-[var(--accent)]' : 'cursor-default'}"
+        aria-label={`Status: ${issue.status}`}
         onclick={(e) => {
-          if (!editable) return;
           e.stopPropagation();
+          if (!editable) return;
           onToggleStatusDropdown(issue);
         }}
       >
@@ -292,9 +290,14 @@
         <span class="sr-only">Updated since you last looked</span>
       {/if}
     </span>
-    <span class="text-body-sm text-[var(--text-faint)] font-mono w-[52px] sm:w-[72px] truncate">
+    <button class="text-body-sm text-left text-[var(--text-faint)] hover:text-[var(--accent)] cursor-pointer font-mono w-[52px] sm:w-[72px] truncate"
+      onclick={(e) => {
+        if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+        e.stopPropagation();
+        onOpen(issue);
+      }}>
       {issue.identifier}
-    </span>
+    </button>
   </div>
 
   <!-- Title (and, in search mode, an optional content snippet below it when
@@ -302,14 +305,19 @@
        vertically to stack the two lines while the outer row stays
        items-center, so icons remain aligned to the title column as a whole. -->
   <div class="flex-1 min-w-0 flex flex-col gap-0.5">
-    <span
-      class="text-body text-[var(--text)] truncate
+    <button
+      onclick={(e) => {
+        if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+        e.stopPropagation();
+        onOpen(issue);
+      }}
+      class="text-body text-left self-start max-w-full cursor-pointer hover:underline text-[var(--text)] truncate
              {issue.status === 'done' || issue.status === 'cancelled'
         ? 'line-through text-[var(--text-muted)]'
         : ''}"
     >
       {issue.title}
-    </span>
+    </button>
     {#if hitSnippet}
       <span class="text-caption text-[var(--text-muted)] truncate">
         {hitSnippet}

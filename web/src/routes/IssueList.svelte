@@ -68,6 +68,7 @@
   } from "../lib/issues/state.svelte"; // LIF-243: undo layer
   import { scheduleDelete } from "../lib/issues/deferredDelete.svelte"; // LIF-283
   import { shortcutsSuppressed } from "../lib/shortcuts"; // LIF-245
+  import { selectedIssueExport } from "../lib/issues/export";
   import { projectRole, loadProjectRole } from "../lib/projectRole.svelte"; // LIF-234
 
   const topbarCtx = getContext<{
@@ -763,6 +764,39 @@
   // Which action-bar menu is open (popovers open upward from the bar).
   let bulkMenu = $state<BulkMenu>(null);
   let bulkBusy = $state(false);
+  let bulkError = $state("");
+
+  let allSelected = $derived.by(() => flatIssues.length > 0 && flatIssues.every((i) => view.selectedIds.has(i.id)));
+
+  function selectAll() {
+    if (!canEdit || bulkBusy) return;
+    view.selectedIds = new Set(flatIssues.map((i) => i.id));
+    view.lastSelectedIdx = flatIssues.length ? 0 : -1;
+  }
+
+  async function bulkExport() {
+    if (bulkBusy || !view.selectedIds.size) return;
+    const identifiers = flatIssues.filter((i) => view.selectedIds.has(i.id)).map((i) => i.identifier);
+    const filename = `${projectIdentifier}-selected-issues.md`;
+    bulkBusy = true;
+    bulkMenu = null;
+    bulkError = "";
+    try {
+      const blob = await selectedIssueExport(identifiers);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      bulkError = e instanceof Error ? e.message : "Could not export selected issues. Try again.";
+    } finally {
+      bulkBusy = false;
+    }
+  }
 
   function toggleSelect(id: number, idx: number) {
     const next = new Set(view.selectedIds);
@@ -790,6 +824,7 @@
   function clearSelection() {
     view.clearSelection();
     bulkMenu = null;
+    bulkError = "";
   }
 
   // Prune selection to rows that still exist — filters, search, and the
@@ -1171,6 +1206,12 @@
     // issue). `c` (new issue) and `/` (search) aren't row-scoped, so they
     // stay available in both layouts, same as before.
     const listOnly = layout === "list";
+
+    if (listOnly && canEdit && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      selectAll();
+      return;
+    }
 
     switch (e.key) {
       case "ArrowDown":
@@ -2047,6 +2088,20 @@
   {/if}
 
   <!-- Issue list -->
+  {#if canEdit && !loading && !error && subTabIssues.length > 0}
+    <label class="flex shrink-0 items-center gap-2 px-3 sm:px-6 py-2 border-b border-[var(--border)] text-caption text-[var(--text-muted)]">
+      <input
+        type="checkbox"
+        class="size-4 accent-[var(--accent)]"
+        checked={allSelected}
+        indeterminate={view.selectedIds.size > 0 && !allSelected}
+        disabled={bulkBusy || flatIssues.length === 0}
+        onchange={() => allSelected ? clearSelection() : selectAll()}
+      />
+      Select all visible issues
+      <span class="tabular-nums">({flatIssues.length})</span>
+    </label>
+  {/if}
   <div class="flex-1 overflow-y-auto" bind:this={listEl}>
     {#if loading}
       <!-- LIF-281: grouped-list skeleton with shape+position parity to the
@@ -2234,12 +2289,14 @@
     <BulkActionBar
       selectedCount={view.selectedIds.size}
       {bulkBusy}
+      error={bulkError}
       bind:bulkMenu
       {modules}
       {labels}
       onUpdate={bulkUpdate}
       onAddLabel={bulkAddLabel}
       onDelete={bulkDelete}
+      onExport={bulkExport}
       onClear={clearSelection}
     />
   {/if}
@@ -2275,7 +2332,6 @@
     groupBy={view.groupBy}
     isFocused={idx === view.focusedIndex}
     isSelected={view.selectedIds.has(issue.id)}
-    selectionActive={view.selectedIds.size > 0}
     isChanged={changedIds.has(issue.id)}
     hitSnippet={issueSearchScores.get(issue.id)?.snippet ?? null}
     statusOpen={view.statusDropdownId === issue.id}

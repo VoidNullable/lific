@@ -35,6 +35,8 @@
     onAddLabel,
     onDelete,
     onClear,
+    onExport,
+    error = "",
   }: {
     selectedCount: number;
     bulkBusy: boolean;
@@ -49,6 +51,8 @@
     onDelete: () => void;
     /** Clear the selection. */
     onClear: () => void;
+    onExport: () => void;
+    error?: string;
   } = $props();
 </script>
 
@@ -75,10 +79,13 @@
     </span>
     {#if bulkBusy}
       <span class="text-caption text-[var(--text-faint)] animate-pulse pr-1">
-        Applying...
+        Working...
       </span>
     {/if}
     <div class="w-px h-4 bg-[var(--border)] mx-1"></div>
+
+    <button class="text-body-sm px-2 py-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] disabled:opacity-50"
+      disabled={bulkBusy} onclick={onExport}>Export</button>
 
     {#snippet bulkTrigger(menu: "status" | "priority" | "module" | "label", label: string)}
       <button
@@ -265,9 +272,13 @@
              text-[var(--text-muted)] hover:text-[var(--text)]
              hover:bg-[var(--bg-subtle)] transition-colors"
       title="Clear selection  ·  Esc"
+      disabled={bulkBusy}
       onclick={onClear}
     >
       <X size={14} />
     </button>
+    {#if error}
+      <p role="alert" class="w-full max-w-lg px-2 text-caption text-[var(--error)]">{error}</p>
+    {/if}
   </div>
 </div>

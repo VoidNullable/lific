@@ -57,6 +57,7 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "Enter", label: "Open the focused issue", scope: "list" },
   { keys: "Space", label: "Peek the focused issue", scope: "list" },
   { keys: "X", label: "Toggle selection on the focused row", scope: "list" },
+  { keys: "Ctrl/⌘ A", label: "Select all visible issues", scope: "list" },
   { keys: "⇧ J/K", label: "Extend selection", scope: "list" },
   { keys: "S", label: "Open the status picker", scope: "list" },
   { keys: "⇧ S", label: "Cycle status", scope: "list" },
