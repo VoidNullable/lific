@@ -55,6 +55,48 @@
   let user = $state<AuthUser | null>(null);
   let bots = $state<Bot[]>([]);
   let loading = $state(true);
+  let customOpen = $state(false);
+  let customId = $state("");
+  let customName = $state("");
+  let customTemplate = $state("");
+  let toolsError = $state("");
+
+  function connectionId(bot: Bot): string {
+    // Older bots can lack tool_id until their next connection backfills it.
+    return bot.tool_id ?? TOOL_TEMPLATES.find((t) => bot.username.startsWith(`${t.id}-`))?.id ?? bot.username;
+  }
+
+  function genericTemplate(id: string, name: string): ToolTemplate {
+    return {
+      id, name, description: "Custom MCP connection",
+      configPath: { linux: null, mac: null, windows: null },
+      configNote: [{ text: "Use this URL and Authorization header in your client's HTTP MCP settings. The exact config format depends on your client." }],
+      generateConfig: (url, key) => JSON.stringify({ url, headers: { Authorization: `Bearer ${key}` } }, null, 2),
+    };
+  }
+
+  let connectionTemplates = $derived([
+    ...TOOL_TEMPLATES,
+    ...bots.filter((b) => !TOOL_TEMPLATES.some((t) => t.id === connectionId(b)))
+      .map((b) => genericTemplate(connectionId(b), b.display_name)),
+  ]);
+
+  function connectCustom() {
+    const id = customId.trim().toLowerCase();
+    const name = customName.trim() || id;
+    toolsError = "";
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/.test(id)) {
+      toolsError = "Use 1-48 letters, numbers, hyphens or underscores for the connection ID, starting with a letter or number.";
+      return;
+    }
+    if (getToolBot(id)?.connected) {
+      toolsError = "That connection already exists. Choose a different ID for another agent.";
+      return;
+    }
+    const template = TOOL_TEMPLATES.find((t) => t.id === customTemplate) ?? genericTemplate(id, name);
+    customOpen = false;
+    openConnect({ ...template, id, name });
+  }
 
   // Connect modal
   let connectTool = $state<ToolTemplate | null>(null);
@@ -303,7 +345,7 @@
 
   function getToolBot(toolId: string): Bot | undefined {
     if (!user) return undefined;
-    return bots.find((b) => b.username === `${toolId}-${user!.username}`);
+    return bots.find((b) => connectionId(b) === toolId);
   }
   function toolState(toolId: string): "connected" | "disconnected" | "none" {
     const bot = getToolBot(toolId);
@@ -342,7 +384,7 @@
     recover: boolean,
   ): Promise<"ok" | "stale" | "failed"> {
     const res = await retryOnceAfterReauth(
-      () => createBot(template.id),
+      () => createBot(template.id, template.name),
       async () => {
         if (!recover || !webAutoLogin || !user) {
           // `recover` false means the password prompt already refreshed the
@@ -434,6 +476,7 @@
   }
 
   function closeConnect() {
+    if (connecting || reauthBusy) return;
     connectTool = null;
     connectKey = null;
     connectError = "";
@@ -474,13 +517,17 @@
 
   async function handleDisconnect(id: number) {
     busyId = id;
-    await disconnectBot(id);
+    toolsError = "";
+    const result = await disconnectBot(id);
+    if (!result.ok) toolsError = result.error;
     await loadBots();
     busyId = null;
   }
   async function handleRemove(id: number) {
     busyId = id;
-    await deleteBot(id);
+    toolsError = "";
+    const result = await deleteBot(id);
+    if (!result.ok) toolsError = result.error;
     await loadBots();
     busyId = null;
   }
@@ -677,16 +724,16 @@
         </p>
 
         <div class="grid sm:grid-cols-2 gap-2.5">
-          {#each TOOL_TEMPLATES as template (template.id)}
+          {#each connectionTemplates as template (template.id)}
             {@const st = toolState(template.id)}
             {@const bot = getToolBot(template.id)}
-            <div class="flex items-center gap-3.5 p-3.5 rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
+            <div data-connection-id={template.id} class="flex flex-wrap items-center gap-3.5 p-3.5 rounded-xl bg-[var(--surface)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
               <div class="size-10 shrink-0 rounded-lg bg-[var(--bg-subtle)] grid place-items-center text-[var(--text)]">
                 <ToolIcon tool={template.id} size={20} />
               </div>
               <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="text-body font-medium text-[var(--text)]">{template.name}</span>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-body font-medium text-[var(--text)] break-all">{bot?.display_name ?? template.name}</span>
                   {#if st === "connected"}
                     <span class="inline-flex items-center gap-1 text-micro font-semibold uppercase tracking-wide
                                  text-[var(--success)] bg-[var(--success-bg)] px-1.5 py-0.5 rounded-full">
@@ -698,7 +745,7 @@
                     </span>
                   {/if}
                 </div>
-                <p class="text-caption text-[var(--text-muted)] truncate mt-0.5">{template.description}</p>
+                <p class="text-caption text-[var(--text-muted)] truncate mt-0.5">{bot ? connectionId(bot) : template.description}</p>
               </div>
               <div class="shrink-0 flex items-center gap-1.5">
                 {#if st === "connected" && bot}
@@ -738,6 +785,28 @@
             </div>
           {/each}
         </div>
+        <button class="mt-4 toolbar-pill" onclick={() => { customOpen = !customOpen; toolsError = ""; }} aria-expanded={customOpen}>
+          Add custom or named connection
+        </button>
+        {#if toolsError}<p role="alert" class="mt-3 text-body-sm text-[var(--error)]">{toolsError}</p>{/if}
+        {#if customOpen}
+          <form class="mt-4 max-w-lg flex flex-col gap-3" onsubmit={(e) => { e.preventDefault(); connectCustom(); }}>
+            <p class="text-body-sm text-[var(--text-muted)]">Give each agent or machine its own connection ID. Disconnecting one leaves the others connected.</p>
+            <label class="text-body-sm">Config template
+              <select class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customTemplate}>
+                <option value="">Custom HTTP MCP client</option>
+                {#each TOOL_TEMPLATES as template}<option value={template.id}>{template.name}</option>{/each}
+              </select>
+            </label>
+            <label class="text-body-sm">Connection ID
+              <input required maxlength="48" pattern={"[a-zA-Z0-9][a-zA-Z0-9_\\-]{0,47}"} placeholder="codex-laptop" class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customId} />
+            </label>
+            <label class="text-body-sm">Display name (optional)
+              <input maxlength="80" placeholder="Codex on my laptop" class="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] p-2" bind:value={customName} />
+            </label>
+            <button type="submit" class="self-start text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)] px-3 py-2 rounded-md">Connect agent</button>
+          </form>
+        {/if}
       </section>
 
       <!-- ── ACCOUNT (profile + security, bottom of page) ─── -->
@@ -911,6 +980,10 @@
     <div
       class="w-full max-w-[620px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl
              max-h-[85dvh] overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Connect ${connectTool.name}`}
+      tabindex="-1"
       onclick={(e) => e.stopPropagation()}
     >
       <!-- Header -->
@@ -922,7 +995,7 @@
           <h3 class="text-body-lg font-semibold text-[var(--text)] leading-tight">Connect {connectTool.name}</h3>
           <p class="text-caption text-[var(--text-muted)] truncate">{connectTool.description}</p>
         </div>
-        <button class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors" onclick={closeConnect} aria-label="Close">
+        <button class="size-7 grid place-items-center rounded-md text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors disabled:opacity-50" onclick={closeConnect} disabled={connecting || reauthBusy} aria-label="Close">
           <X size={16} />
         </button>
       </div>
@@ -1047,6 +1120,7 @@
             <!-- OS selector: its own full-width segmented row. OSes that share
                  an identical path are merged into one button (e.g. Linux / macOS).
                  A single group means the path is the same everywhere. -->
+            {#if osGroups.length > 0}
             <div class="flex items-center gap-2 mb-2.5">
               <div class="inline-flex flex-1 p-0.5 rounded-lg bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]">
                 {#each osGroups as group (group.label)}
@@ -1071,6 +1145,7 @@
               <span class="text-micro font-semibold uppercase tracking-wide text-[var(--text-muted)] shrink-0">File</span>
               <code class="flex-1 min-w-0 font-mono text-caption bg-[var(--bg-subtle)] px-2 py-1 rounded text-[var(--text)] overflow-x-auto whitespace-nowrap">{activePath}</code>
             </div>
+            {/if}
 
             {#if connectTool.configNote}
               <div class="flex flex-col gap-1.5 mb-2.5">

@@ -1297,7 +1297,7 @@ pub fn list_bots(
                     SELECT 1 FROM api_keys k WHERE k.user_id = u.id AND k.revoked = 0
                     UNION
                     SELECT 1 FROM oauth_tokens t WHERE t.user_id = u.id AND t.revoked = 0
-                ) as connected
+                ) as connected, u.tool_id
          FROM users u
          WHERE u.is_bot = 1 AND u.owner_id = ?1
          ORDER BY u.created_at DESC",
@@ -1310,6 +1310,7 @@ pub fn list_bots(
             owner_id: row.get(3)?,
             created_at: row.get(4)?,
             connected: row.get(5)?,
+            tool_id: row.get(6)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

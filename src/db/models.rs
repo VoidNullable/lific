@@ -801,6 +801,8 @@ pub struct Bot {
     /// OAuth token). Used by the Connected Tools UI to show connected state,
     /// independent of *how* the bot was connected (LIFIC-13 OAuth vs lific connect key).
     pub connected: bool,
+    #[serde(default)]
+    pub tool_id: Option<String>,
 }
 
 // ── API Key (user-facing) ────────────────────────────────────

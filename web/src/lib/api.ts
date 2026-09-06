@@ -308,6 +308,7 @@ export interface Bot {
   owner_id: number | null;
   created_at: string;
   connected: boolean;
+  tool_id: string | null;
 }
 
 export interface CreateBotResponse {
@@ -320,10 +321,10 @@ export async function listBots() {
   return request<Bot[]>("/auth/bots");
 }
 
-export async function createBot(tool: string) {
+export async function createBot(tool: string, display_name?: string) {
   return request<CreateBotResponse>("/auth/bots", {
     method: "POST",
-    body: JSON.stringify({ tool }),
+    body: JSON.stringify({ tool, display_name }),
   });
 }
 
@@ -1661,8 +1662,8 @@ export async function getBoard(
  *  entirely rather than offering a config path no app reads. */
 export interface OsPaths {
   linux: string | null;
-  mac: string;
-  windows: string;
+  mac: string | null;
+  windows: string | null;
 }
 
 /** A single instruction. `text` renders as prose; `command`, when present,

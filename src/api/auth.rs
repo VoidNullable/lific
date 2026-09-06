@@ -1108,6 +1108,7 @@ pub(super) struct CreateBotRequest {
     /// Tool identifier (e.g. "opencode", "cursor", "claude", "codex", "pi",
     /// "vscode", "zed")
     tool: String,
+    display_name: Option<String>,
 }
 
 /// POST /api/auth/bots: connect a tool. Finds or creates the caller's bot for
@@ -1129,7 +1130,18 @@ pub(super) async fn create_bot(
     let session_token = crate::auth::recent_session_token(&headers)?;
 
     let tool = input.tool.trim().to_lowercase();
-    let display_name = match tool.as_str() {
+    if tool.is_empty()
+        || tool.len() > 48
+        || !tool.as_bytes()[0].is_ascii_alphanumeric()
+        || !tool
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(LificError::BadRequest(
+            "connection ID must be 1-48 letters, numbers, hyphens or underscores, starting with a letter or number".into(),
+        ));
+    }
+    let default_name = match tool.as_str() {
         "opencode" => "OpenCode",
         "cursor" => "Cursor",
         "claude-code" => "Claude Code",
@@ -1138,8 +1150,20 @@ pub(super) async fn create_bot(
         "pi" => "Pi",
         "vscode" => "VS Code",
         "zed" => "Zed",
-        _ => return Err(LificError::BadRequest(format!("unknown tool: {tool}"))),
+        _ => &tool,
     };
+    let display_name = input
+        .display_name
+        .as_deref()
+        .map_or(default_name, str::trim);
+    if display_name.is_empty()
+        || display_name.chars().count() > 80
+        || display_name.chars().any(char::is_control)
+    {
+        return Err(LificError::BadRequest(
+            "connection name must be 1-80 characters without control characters".into(),
+        ));
+    }
 
     let bot_username = format!("{tool}-{}", user.username);
 
@@ -1980,6 +2004,158 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert!(body["key"].as_str().unwrap().starts_with("lific_sk"));
+        }
+
+        #[tokio::test]
+        async fn custom_connections_are_independent_and_reconnect_after_owner_rename() {
+            let f = fixture();
+            let mut ids = Vec::new();
+            for tool in ["codex-laptop", "codex-desktop", "my-agent"] {
+                let (status, body) = send(
+                    &f.app,
+                    "POST",
+                    "/api/auth/bots",
+                    &f.session,
+                    Some(serde_json::json!({"tool": tool, "display_name": "My agent"})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                assert_eq!(body["bot"]["display_name"], "My agent");
+                ids.push(body["bot"]["id"].as_i64().unwrap());
+            }
+            assert_ne!(ids[0], ids[1]);
+            let (status, _) = send(
+                &f.app,
+                "POST",
+                "/api/auth/bots",
+                &f.session,
+                Some(serde_json::json!({"tool": "codex-laptop"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let (status, _) = send(
+                &f.app,
+                "POST",
+                &format!("/api/auth/bots/{}/disconnect", ids[0]),
+                &f.session,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            {
+                let conn = f.db.write().unwrap();
+                assert!(!crate::db::queries::users::bot_is_connected(&conn, ids[0]).unwrap());
+                assert!(crate::db::queries::users::bot_is_connected(&conn, ids[1]).unwrap());
+                conn.execute(
+                    "UPDATE users SET username = 'renamed-owner' WHERE id = ?1",
+                    [f.user_id],
+                )
+                .unwrap();
+            }
+            let (status, body) = send(
+                &f.app,
+                "POST",
+                "/api/auth/bots",
+                &f.session,
+                Some(serde_json::json!({"tool": "codex-laptop"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["bot"]["id"].as_i64(), Some(ids[0]));
+            let (status, body) = send(&f.app, "GET", "/api/auth/bots", &f.session, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let bot = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["id"].as_i64() == Some(ids[0]))
+                .unwrap();
+            assert_eq!(bot["tool_id"], "codex-laptop");
+            assert_eq!(bot["connected"], true);
+
+            let other_session = {
+                let conn = f.db.write().unwrap();
+                crate::db::queries::users::create_session(&conn, f.stranger_id, None)
+                    .unwrap()
+                    .token
+            };
+            let (status, body) = send(
+                &f.app,
+                "POST",
+                "/api/auth/bots",
+                &other_session,
+                Some(serde_json::json!({"tool": "codex-laptop"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_ne!(body["bot"]["id"].as_i64(), Some(ids[0]));
+        }
+
+        #[tokio::test]
+        async fn custom_connections_reject_invalid_identity_input() {
+            let f = fixture();
+            for tool in [
+                "".to_string(),
+                "a".repeat(49),
+                "bad/id".into(),
+                "-prefix".into(),
+                "bad name".into(),
+                "bad\nname".into(),
+            ] {
+                let (status, _) = send(
+                    &f.app,
+                    "POST",
+                    "/api/auth/bots",
+                    &f.session,
+                    Some(serde_json::json!({"tool": tool})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{tool:?}");
+            }
+            for name in [" ".to_string(), "x".repeat(81), "bad\nname".into()] {
+                let (status, _) = send(
+                    &f.app,
+                    "POST",
+                    "/api/auth/bots",
+                    &f.session,
+                    Some(serde_json::json!({"tool": "my-agent", "display_name": name})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+            }
+            assert!(
+                crate::db::queries::users::find_bot_by_owner_and_tool(
+                    &f.db.read().unwrap(),
+                    f.user_id,
+                    "my-agent"
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn custom_connections_require_recent_session_authentication() {
+            let f = fixture();
+            f.db.write()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET created_at = datetime('now', '-16 minutes')",
+                    [],
+                )
+                .unwrap();
+            for credential in [&f.session, &f.human_key, &f.bot_key] {
+                let (status, _) = send(
+                    &f.app,
+                    "POST",
+                    "/api/auth/bots",
+                    credential,
+                    Some(serde_json::json!({"tool": "my-agent"})),
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
         }
 
         #[tokio::test]
