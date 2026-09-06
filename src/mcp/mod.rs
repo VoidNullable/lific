@@ -232,6 +232,20 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
       Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(type='plan', project='X'), then get_plan to see where you left off. \
      Use pages for documentation and design notes.";
 
+/// LIF-452: the one sentence a repository-bound stdio session appends to
+/// [`SERVER_INSTRUCTIONS`]. Kept to a single clause for the same reason the
+/// base string is: every connected agent pays for it at session start.
+///
+/// `pub(crate)` because the remote stdio proxy ([`crate::cli::mcp_proxy`])
+/// appends the very same sentence to the instructions it relays, and the two
+/// must not drift.
+pub(crate) fn bound_project_note(project: &str) -> String {
+    format!(
+        " This session is bound to project {project}; project-scoped tools default to it when \
+         project is omitted."
+    )
+}
+
 #[derive(Clone)]
 pub struct LificMcp {
     db: Arc<DbPool>,
@@ -248,6 +262,12 @@ pub struct LificMcp {
     /// deadlock on [`MCP_HANDLER_LOCK`]) and a tokenless local stdio session,
     /// which keeps its credential-less operator behavior.
     stdio_auth: Option<Arc<StdioAuth>>,
+    /// LIF-451: the project identifier (e.g. `"LIF"`) this session's working
+    /// directory is bound to, resolved once at stdio startup. Tools that would
+    /// otherwise reject an omitted `project` fall back to it; see
+    /// [`LificMcp::project_or_bound`] for the per-tool policy. Always `None`
+    /// on the HTTP transport, which has no single working directory to bind.
+    bound_project: Option<String>,
 }
 
 impl LificMcp {
@@ -267,7 +287,16 @@ impl LificMcp {
             store,
             tool_router: Self::create_tool_router(),
             stdio_auth: None,
+            bound_project: None,
         }
+    }
+
+    /// LIF-451: point this server at the project the session's repository is
+    /// bound to. Only `lific mcp` (stdio) calls this; every other constructor
+    /// leaves it `None`, which is the pre-binding behavior exactly.
+    pub fn with_bound_project(mut self, project: Option<String>) -> Self {
+        self.bound_project = project;
+        self
     }
 
     /// The `lific mcp` (stdio) constructor.
@@ -465,21 +494,45 @@ impl LificMcp {
             .map(|t| t.name.to_string())
             .collect()
     }
+
+    /// The live tool surface as `(name, input schema)` pairs, read from the
+    /// same `list_all()` the production `list_tools` handler serves — so a
+    /// check written against this is checking what clients actually receive,
+    /// not a parallel description of it.
+    pub(crate) fn list_tool_schemas(&self) -> Vec<(String, serde_json::Value)> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                let schema = serde_json::to_value(&t.input_schema)
+                    .expect("a tool's input schema must serialize");
+                (t.name.to_string(), schema)
+            })
+            .collect()
+    }
 }
 
 impl ServerHandler for LificMcp {
     fn get_info(&self) -> ServerInfo {
         // Pin to 2025-03-26: rmcp defaults to 2025-06-18 which many clients
         // (including Zed) skipped, going straight from 2025-03-26 to 2025-11-25.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_03_26)
             // Identify as lific, not rmcp's build-env default — this name is
             // what connected clients (and `lific doctor`) display.
             .with_server_info(rmcp::model::Implementation::new(
                 "lific",
                 env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(SERVER_INSTRUCTIONS)
+            ));
+        // LIF-452: a bound session says so, once, in one sentence. The
+        // unbound path stays byte-identical to before the feature existed.
+        match &self.bound_project {
+            Some(project) => info.with_instructions(format!(
+                "{SERVER_INSTRUCTIONS}{}",
+                bound_project_note(project)
+            )),
+            None => info.with_instructions(SERVER_INSTRUCTIONS),
+        }
     }
 
     fn list_tools(
@@ -892,6 +945,50 @@ mod tests {
             addition <= 700,
             "convention addition grew to {addition} chars; keep it tight"
         );
+
+        // LIF-452: the binding sentence is a second unconditional cost, paid
+        // by every bound session. One sentence, and it stays one sentence.
+        let bound = bound_project_note("LIF").len();
+        assert!(
+            bound <= 200,
+            "the bound-session note grew to {bound} chars; keep it to one sentence"
+        );
+    }
+
+    // ── LIF-452: a bound session is told so, once ──
+
+    #[test]
+    fn get_info_tells_a_bound_session_which_project_it_defaults_to() {
+        let pool = crate::db::open_memory().expect("test db");
+        let mcp = LificMcp::new(pool).with_bound_project(Some("LIF".into()));
+
+        let instructions = mcp
+            .get_info()
+            .instructions
+            .expect("server info must carry instructions");
+
+        assert!(
+            instructions.starts_with(SERVER_INSTRUCTIONS),
+            "the binding note is appended, never a rewrite: {instructions}"
+        );
+        assert!(instructions.contains("bound to project LIF"));
+        assert!(instructions.contains("project is omitted"));
+    }
+
+    #[test]
+    fn get_info_instructions_are_unchanged_for_an_unbound_session() {
+        let pool = crate::db::open_memory().expect("test db");
+        let mcp = LificMcp::new(pool);
+
+        let instructions = mcp
+            .get_info()
+            .instructions
+            .expect("server info must carry instructions");
+
+        assert_eq!(
+            instructions, SERVER_INSTRUCTIONS,
+            "an unbound session must pay nothing for the feature"
+        );
     }
 
     // ── LIFIC-18: stdio session identity (set_stdio_user seam) ─────────────
@@ -1196,6 +1293,144 @@ mod tests {
             seen.map(|u| u.id),
             Some(user.id),
             "the middleware's identity survives the seam untouched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    //! Guards on the *shape* of the published MCP tool surface.
+    //!
+    //! LIF-433 and LIF-435 reported that `edit_issue`/`edit_page` advertised
+    //! camelCase parameters (`oldString`) while the deserializer wanted
+    //! snake_case, making the cheap edit path unusable over MCP. Dumping the
+    //! real `tools/list` response showed the server has only ever published
+    //! snake_case, so the camelCase came from the reporting client, not from
+    //! here. Both issues were closed as client-side.
+    //!
+    //! The suggested fix was still the right idea, and it is what this module
+    //! is: a check driven by the advertised schema itself rather than a
+    //! hand-maintained list of tools, so schema-versus-deserializer drift
+    //! cannot reach a client the way it appeared to have.
+
+    use crate::mcp::LificMcp;
+
+    fn live_surface() -> Vec<(String, serde_json::Value)> {
+        let db = crate::db::open_memory().expect("test db");
+        LificMcp::new(db).list_tool_schemas()
+    }
+
+    /// Every parameter a client is told to send must be snake_case, because
+    /// that is what serde deserializes. A camelCase property here would be
+    /// rejected at the JSON-RPC boundary with a bare "missing field" and no
+    /// hint that the schema itself was the liar.
+    #[test]
+    fn every_advertised_parameter_is_snake_case() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+
+        for (tool, schema) in live_surface() {
+            let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+                // A tool with no parameters at all is legitimate; a tool whose
+                // schema stopped being an object with `properties` is not, and
+                // the count assertion below is what notices.
+                continue;
+            };
+            for name in props.keys() {
+                checked += 1;
+                let snake = name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if !snake {
+                    offenders.push(format!("{tool}.{name}"));
+                }
+            }
+        }
+
+        // Without this the test passes vacuously the day the schema changes
+        // shape and `properties` stops being where parameters live.
+        assert!(
+            checked > 50,
+            "only {checked} parameters inspected across the whole surface — the \
+             schema shape probably changed and this test is no longer looking \
+             at anything"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these advertised parameters are not snake_case, so a client that \
+             follows the schema will be rejected by the deserializer: {offenders:?}"
+        );
+    }
+
+    /// Anything listed as required must also be described in `properties`.
+    /// A required name with no property is unanswerable: the client is told to
+    /// send a field it has been given no definition for.
+    #[test]
+    fn every_required_parameter_is_also_declared() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+
+        for (tool, schema) in live_surface() {
+            assert!(
+                schema.is_object(),
+                "{tool}'s input schema is not a JSON object: {schema}"
+            );
+            let required = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let props = schema.get("properties").and_then(|p| p.as_object());
+            for name in required.iter().filter_map(|v| v.as_str()) {
+                checked += 1;
+                if props.is_none_or(|p| !p.contains_key(name)) {
+                    offenders.push(format!("{tool}.{name}"));
+                }
+            }
+        }
+
+        assert!(
+            checked > 10,
+            "only {checked} required parameters inspected — the schema shape \
+             probably changed and this test is no longer looking at anything"
+        );
+        assert!(
+            offenders.is_empty(),
+            "required parameters missing a property definition: {offenders:?}"
+        );
+    }
+
+    /// Every registered tool has to appear in the README.
+    ///
+    /// The count drifted to three different numbers across the repo (26 in the
+    /// architecture page, 27 in the release-post template, 30 in the README)
+    /// precisely because nothing checked. Names rather than a count, so adding
+    /// a tool fails this test instead of silently making a sentence wrong.
+    ///
+    /// Deliberately not asserted against `SERVER_INSTRUCTIONS`: that text is
+    /// guidance an agent pays for on every connection, not an inventory, and
+    /// forcing all 30 names into it would trade agent context for tidiness.
+    #[test]
+    fn every_tool_is_named_in_the_readme() {
+        const README: &str = include_str!("../../README.md");
+
+        let db = crate::db::open_memory().expect("test db");
+        let tools = LificMcp::new(db).list_tool_names();
+
+        assert!(
+            tools.len() > 15,
+            "sanity check: only {} tools found — ToolRouter wiring is probably broken",
+            tools.len()
+        );
+
+        let undocumented: Vec<&String> = tools
+            .iter()
+            .filter(|name| !README.contains(name.as_str()))
+            .collect();
+
+        assert!(
+            undocumented.is_empty(),
+            "these MCP tools are registered but never named in README.md: {undocumented:?}"
         );
     }
 }

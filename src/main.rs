@@ -12,12 +12,14 @@ mod dump;
 mod error;
 mod export;
 mod import;
+mod issue_refs;
 mod links;
 mod mcp;
 mod oauth;
 mod preview;
 mod ratelimit;
 mod realtime;
+mod repo_identity;
 mod resolve_caller;
 mod retention;
 mod server;
@@ -42,7 +44,60 @@ fn is_crud_command(cmd: &Command) -> bool {
             | Command::Module { .. }
             | Command::Label { .. }
             | Command::Folder { .. }
+            // LIF-450: `bind` reads and writes repo bindings, so it belongs on
+            // both backends. Routing it here also puts it under
+            // `needs_existing_database`, which is what stops the SQL path from
+            // conjuring an empty instance in whatever directory it ran from.
+            | Command::Bind { .. }
+            // LIF-5: `git-hook` closes issues, so it belongs on both backends
+            // — a local hook writes to the database directly, a CI step posts
+            // to `/api/git-hook`. Routing it here also puts it under
+            // `needs_existing_database`, so the SQL path refuses rather than
+            // conjuring an empty instance in whatever checkout it ran from.
+            | Command::GitHook { .. }
     )
+}
+
+/// Whether `cmd` operates on a local database that must already exist.
+///
+/// Only `lific init` creates a database. Every other command that reaches
+/// `db::open` has to find one, because the alternative is the first-run
+/// failure this guard exists for: with no config file anywhere,
+/// `database.path` is the bare relative `lific.db`, so an unguarded command
+/// creates and migrates a fresh empty instance in whatever directory it
+/// happened to run from.
+///
+/// The exemption list is the interesting half, and it is deliberately
+/// exhaustive rather than a catch-all, so a command added later is guarded by
+/// default instead of by somebody remembering to:
+///
+/// - `Init` creates the database; `Restore` writes one into place.
+/// - `Doctor` must be able to *report* a missing database, not die on it.
+/// - `Login`/`Logout` are pure HTTP and never open a database.
+/// - `Connect` carries its own, more specific version of this guard.
+/// - `AgentsMd` only writes a markdown file.
+/// - `Completion` returns before config is even loaded.
+/// - `Mcp --remote` is a stdio proxy in front of a remote instance: it never
+///   opens a database, and the point of it is to run on a machine that has
+///   none. Plain `lific mcp` still serves from a local database and is guarded.
+/// - Of the service actions only `install` needs one, so that installing a
+///   unit whose `start` would immediately fail the guard is refused up front.
+///   `uninstall`/`stop`/`status`/`restart` must keep working on a host whose
+///   database is gone, which is exactly when you need to stop the service.
+fn needs_existing_database(cmd: &Command) -> bool {
+    match cmd {
+        Command::Init { .. }
+        | Command::Restore { .. }
+        | Command::Doctor { .. }
+        | Command::Login { .. }
+        | Command::Logout { .. }
+        | Command::Connect { .. }
+        | Command::AgentsMd { .. }
+        | Command::Completion { .. } => false,
+        Command::Mcp { remote, .. } => !remote,
+        Command::Service { action } => matches!(action, cli::ServiceAction::Install),
+        _ => true,
+    }
 }
 
 fn write_private_config(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
@@ -123,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ignored — tokio socket writes rely on that to surface EPIPE as errors
     // instead of killing the process.
     #[cfg(unix)]
-    if !matches!(cli.command, Command::Start { .. } | Command::Mcp) {
+    if !matches!(cli.command, Command::Start { .. } | Command::Mcp { .. }) {
         // SAFETY: setting a signal disposition to SIG_DFL before any threads
         // depend on the ignored state; standard practice for CLI tools.
         unsafe {
@@ -171,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.backend == BackendKind::Http {
         if !is_crud_command(&cli.command) {
             return Err(
-                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, and folder"
+                "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, folder, bind, and git-hook"
                     .into(),
             );
         }
@@ -187,6 +242,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
             .await
             .map_err(Into::into);
+    }
+
+    // Only `lific init` creates a database. Checked once, here, after the HTTP
+    // backend has had its chance to return (an HTTP command talks to a server
+    // and must never need a local database at all).
+    if needs_existing_database(&cli.command) {
+        cfg.require_existing_database()?;
     }
 
     // Handle CRUD commands (direct database access, no server needed)
@@ -486,7 +548,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Command::Mcp => {
+        Command::Mcp {
+            remote: true,
+            url: mcp_url,
+        } => {
+            // LIF-453: the stdio proxy. No database, no local MCP server —
+            // just JSON-RPC forwarded to a remote instance's /mcp endpoint,
+            // so a remote deployment gets a local presence in an AI client.
+            // Logs must stay on stderr: a stray stdout line corrupts the
+            // stdio session.
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
+                )
+                .with_writer(std::io::stderr)
+                .init();
+
+            let url = mcp_url
+                .or(cli.url)
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    "lific mcp --remote needs the instance to proxy to: pass --url <URL> or set \
+                     LIFIC_URL"
+                        .into()
+                })?;
+            let credential = cli::resolve_http_credential(cli.api_key.as_deref(), || {
+                cli::credentials::load(&url)
+            })?;
+            return cli::mcp_proxy::run(url, credential).await;
+        }
+
+        Command::Mcp {
+            remote: false,
+            url: _,
+        } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -541,7 +638,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|token| !token.is_empty())
                 .map(|token| mcp::StdioAuth::new(token, manager));
 
-            let server = mcp::LificMcp::for_stdio(pool, stdio_auth);
+            // LIF-451: a stdio session launched inside a bound repository
+            // defaults project-scoped tools to that project. Resolved once,
+            // here, because the working directory cannot change mid-session.
+            let bound_project = stdio_bound_project(&pool, token_user.as_ref());
+            if let Some(ref identifier) = bound_project {
+                info!(project = %identifier, "stdio session bound to project");
+            }
+
+            let server =
+                mcp::LificMcp::for_stdio(pool, stdio_auth).with_bound_project(bound_project);
             let transport = rmcp::transport::io::stdio();
 
             info!("lific MCP server started (stdio)");
@@ -563,10 +669,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Comment { .. }
         | Command::Module { .. }
         | Command::Label { .. }
-        | Command::Folder { .. } => unreachable!(),
+        | Command::Folder { .. }
+        | Command::Bind { .. }
+        | Command::GitHook { .. } => unreachable!(),
     }
 
     Ok(())
+}
+
+/// LIF-451: the project this stdio session's working directory is bound to.
+///
+/// Every failure is an unbound session, not an error: `lific mcp` is routinely
+/// launched from a directory that is not a git repository at all, and a
+/// session that simply requires an explicit `project` is a working session.
+/// The one case worth a word on stderr is an ambiguous checkout, because only
+/// a human can resolve it.
+fn stdio_bound_project(
+    pool: &db::DbPool,
+    token_user: Option<&db::models::AuthUser>,
+) -> Option<String> {
+    use db::queries::repo_bindings::{Resolution, resolve};
+    use repo_identity::AliasKind;
+
+    let dir = std::env::current_dir().ok()?;
+    let aliases = match repo_identity::compute(&dir) {
+        Ok(aliases) => aliases,
+        Err(e) => {
+            info!(error = %e, "no repository identity here; session is unbound");
+            return None;
+        }
+    };
+    let aliases: Vec<(&str, &str)> = aliases
+        .iter()
+        .map(|alias| {
+            let kind = match alias.kind {
+                AliasKind::Remote => "remote",
+                AliasKind::Root => "root",
+            };
+            (kind, alias.value.as_str())
+        })
+        .collect();
+
+    let conn = pool.read().ok()?;
+    match resolve(&conn, &aliases) {
+        Ok(Resolution::One(binding)) => {
+            // A LIFIC_TOKEN-scoped agent session must not have a project it
+            // cannot see named in its instructions: an invisible binding is
+            // treated as no binding, matching the resolve endpoint's rule.
+            if let Some(user) = token_user {
+                let identity = resolve_caller::ResolvedIdentity {
+                    user: user.clone(),
+                    transport: actor::Transport::Mcp,
+                };
+                match authz::can_view_project(pool, &identity, binding.project_id) {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(e) => {
+                        info!(error = %e, "binding visibility check failed; session is unbound");
+                        return None;
+                    }
+                }
+            }
+            db::queries::get_project(&conn, binding.project_id)
+                .map(|project| project.identifier)
+                .ok()
+        }
+        Ok(Resolution::Conflict(_)) => {
+            eprintln!(
+                "This repository resolves to more than one binding, so no project was assumed. \
+                 Run `lific bind` in the repo to settle it."
+            );
+            None
+        }
+        Ok(Resolution::None) => None,
+        Err(e) => {
+            info!(error = %e, "could not resolve a repo binding; session is unbound");
+            None
+        }
+    }
 }
 
 /// Render a configured host for the authority half of a `host:port` URL.
@@ -653,6 +833,33 @@ fn resolve_init_target(
     match os_default {
         Some((config, db)) => (config, Some(db)),
         None => (std::path::PathBuf::from("lific.toml"), None),
+    }
+}
+
+/// The TOML `init` writes when it creates a brand-new config file.
+///
+/// LIF-432: an explicit `--db` has to survive into the file. It used to be
+/// applied only to the in-memory config that `init` seeded the database
+/// through, so `lific --db ./smoke.db init` created the admin in `smoke.db`
+/// and then wrote a config naming `lific.db`. The next config-only command
+/// created that second, empty database and reported no users, with both files
+/// on disk and nothing saying they had diverged.
+///
+/// The path is absolutized first: `init` resolves a relative `--db` against
+/// the process cwd, but [`Config::load`] anchors a relative `database.path` to
+/// the config file's own directory. Under the OS-dirs layout those are two
+/// different directories, so writing the relative form would reintroduce the
+/// same divergence by a longer route.
+fn init_config_toml(
+    db_flag: Option<&std::path::Path>,
+    default_db: Option<&std::path::Path>,
+) -> String {
+    match db_flag {
+        Some(db) => Config::default_toml_with_db(&config::absolutize(db)),
+        None => match default_db {
+            Some(db) => Config::default_toml_with_db(db),
+            None => Config::default_toml(),
+        },
     }
 }
 
@@ -784,18 +991,38 @@ async fn cmd_init(
             #[cfg(not(unix))]
             let _ = parent_existed;
         }
-        let toml = match &default_db {
-            Some(db) => Config::default_toml_with_db(db),
-            None => Config::default_toml(),
-        };
+        let toml = init_config_toml(db_flag, default_db.as_deref());
         create_private_config(&config_path, &toml)?;
         true
+    };
+
+    // LIF-432, the other half: an existing config keeps its own database path,
+    // so `--db` redirects only this run. Seeding one database while every
+    // later command reads another is the exact failure this issue described,
+    // and it is worth a word even when we cannot fix it by rewriting the file.
+    if !created_config
+        && let Some(db) = db_flag
+        && let Ok(resolved) = Config::resolve(Some(&config_path))
+        && config::absolutize(&resolved.config.database.path) != config::absolutize(db)
+    {
+        let msg = format!(
+            "--db points at {} but {} says {}. init will seed the --db path; later commands \
+             reading only the config will use the other one.",
+            config::absolutize(db).display(),
+            config_path.display(),
+            resolved.config.database.path.display()
+        );
+        if json {
+            eprintln!("warning: {msg}");
+        } else {
+            ui::warn(msg);
+        }
     };
 
     // (Re)load from the file init actually operates on, so a relative
     // database.path anchors to the config's own directory — the same
     // resolution the installed service (WorkingDirectory = that directory)
-    // applies at runtime. The pre-dispatch Config::load can't have done
+    // applies at runtime. The pre-dispatch Config::resolve can't have done
     // this when the file didn't exist yet. Applied again after the auth-mode
     // edit rewrites the file (LIFIC-25).
     let mut cfg = load_config_for_init(&config_path, db_flag)?;
@@ -1172,9 +1399,76 @@ fn cmd_service(
 }
 #[cfg(test)]
 mod init_target_tests {
-    use super::{Config, auth, cmd_init, resolve_init_target};
+    use super::{Config, auth, cmd_init, init_config_toml, resolve_init_target};
     use crate::db;
     use std::path::{Path, PathBuf};
+
+    /// LIF-432: whatever database `init` actually seeds must be the database
+    /// the config it writes names, or every later config-only command lands in
+    /// a different, empty file without a word of warning.
+    mod written_config_names_the_seeded_database {
+        use super::*;
+
+        fn db_path_in(toml: &str) -> String {
+            toml.parse::<toml::Table>()
+                .expect("init writes valid TOML")
+                .get("database")
+                .and_then(|d| d.get("path"))
+                .and_then(|p| p.as_str())
+                .expect("a [database] path is always written")
+                .to_string()
+        }
+
+        #[test]
+        fn an_explicit_db_flag_wins_over_the_os_default() {
+            let toml = init_config_toml(
+                Some(Path::new("/tmp/smoke.db")),
+                Some(Path::new("/home/u/.local/share/lific/lific.db")),
+            );
+            assert_eq!(
+                db_path_in(&toml),
+                crate::config::absolutize(Path::new("/tmp/smoke.db"))
+                    .display()
+                    .to_string(),
+                "--db is the path init seeds, so it is the path the config must name"
+            );
+        }
+
+        #[test]
+        fn a_relative_db_flag_is_written_absolute() {
+            // init resolves a relative --db against the cwd; Config::load
+            // anchors a relative database.path to the config file's directory.
+            // Writing the relative form would let those two disagree whenever
+            // the config does not live in the cwd, which is the default layout.
+            let toml = init_config_toml(Some(Path::new("smoke.db")), None);
+            let written = db_path_in(&toml);
+            assert!(
+                Path::new(&written).is_absolute(),
+                "expected an absolute path, got {written}"
+            );
+            assert!(written.ends_with("smoke.db"));
+        }
+
+        #[test]
+        fn without_a_db_flag_the_os_default_is_written_unchanged() {
+            let toml = init_config_toml(None, Some(Path::new(super::OS_DEFAULT_DB_FIXTURE)));
+            assert_eq!(db_path_in(&toml), super::OS_DEFAULT_DB_FIXTURE);
+        }
+
+        #[test]
+        fn the_cwd_layout_keeps_the_plain_relative_default() {
+            // --here / --config put the database beside the config file, where
+            // a relative path is correct and anchoring resolves it properly.
+            let toml = init_config_toml(None, None);
+            assert_eq!(db_path_in(&toml), "lific.db");
+        }
+    }
+
+    /// An absolute OS-data-dir path literal for the host platform.
+    #[cfg(unix)]
+    const OS_DEFAULT_DB_FIXTURE: &str = "/home/u/.local/share/lific/lific.db";
+    #[cfg(not(unix))]
+    const OS_DEFAULT_DB_FIXTURE: &str = "C:/Users/u/AppData/Roaming/lific/lific.db";
 
     fn os_default() -> (PathBuf, PathBuf) {
         (

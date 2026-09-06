@@ -6,6 +6,7 @@ pub(crate) mod attachments;
 mod auth;
 mod comments;
 mod export;
+mod git_hook;
 mod insights;
 mod issues;
 mod members;
@@ -13,6 +14,7 @@ mod pages;
 mod plans;
 mod project_groups;
 mod projects;
+mod repo_bindings;
 mod resources;
 mod sync;
 mod views;
@@ -359,6 +361,24 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/attachments/orphans",
             get(attachments::list_project_orphans),
         )
+        // Repo → project bindings (LIF-449). `resolve` is open to any
+        // authenticated caller and visibility-filtered; every mutation is
+        // Lead-or-admin on the bound project and rate limited per user. See
+        // src/api/repo_bindings.rs, design LIF-DOC-27.
+        .route("/api/repos/resolve", post(repo_bindings::resolve_repo))
+        .route("/api/repos/bind", post(repo_bindings::bind_repo))
+        .route("/api/repos/merge", post(repo_bindings::merge_repo_bindings))
+        .route(
+            "/api/repos/bindings/{id}",
+            delete(repo_bindings::delete_repo_binding),
+        )
+        .route(
+            "/api/projects/{id}/bindings",
+            get(repo_bindings::list_project_bindings),
+        )
+        // LIF-5: close the issues a batch of commit messages says it closes.
+        // For CI; `lific git-hook` is the same thing for a local hook.
+        .route("/api/git-hook", post(git_hook::git_hook))
         // Health
         .route("/api/health", get(health))
         .layer(

@@ -819,6 +819,67 @@ fn resolve_project(conn: &rusqlite::Connection, ident: &str) -> Result<i64, Stri
     queries::resolve_project_identifier(conn, ident).map_err(|e| e.to_string())
 }
 
+/// What an agent is told when it omitted `project` and there is no binding to
+/// fall back to. Names the fix rather than restating the schema.
+const UNBOUND_PROJECT_ERROR: &str = "project required (this session has no repository binding); \
+     pass project or run 'lific bind' in the repo";
+
+impl LificMcp {
+    /// LIF-451: the single seam where an omitted `project` may fall back to the
+    /// session's repository binding. An explicit `project` always wins.
+    ///
+    /// Implicit resolution applies *only* where omitting `project` is already
+    /// an error, so no tool changes meaning when a session is bound. The whole
+    /// project-taking surface, classified (LIF-DOC-27):
+    ///
+    /// | Tool | Class | Why |
+    /// |---|---|---|
+    /// | `list_issues` | resolvable | omission is an error today |
+    /// | `create_issue` | resolvable | omission is an error today |
+    /// | `get_board` | resolvable | omission is an error today |
+    /// | `create_plan` | resolvable | omission is an error today |
+    /// | `list_resources` (issue, plan, module, label, folder) | resolvable | omission is an error today |
+    /// | `list_resources` (page) | meaning-preserved | omission lists pages across every project |
+    /// | `list_resources` (project) | meaning-preserved | `project` is ignored for this type |
+    /// | `search` | meaning-preserved | omission searches ALL projects |
+    /// | `create_page` | meaning-preserved | omission creates a WORKSPACE page |
+    /// | `manage_resource` | meaning-preserved | `project` selects the target of an update; a create carries its own identifier |
+    /// | `bulk_update` | destructive-excluded | bulk writes stay explicit; `project` remains required |
+    /// | `delete` | destructive-excluded | takes identifiers; the `project` arg only scopes name lookups |
+    ///
+    /// `get_activity` and `export` take a scope *identifier* (`PRO`, `PRO-42`,
+    /// `PRO-DOC-3`), not a `project` parameter, so there is nothing to resolve.
+    fn project_or_bound<'a>(&'a self, explicit: Option<&'a str>) -> Result<&'a str, String> {
+        explicit
+            .or(self.bound_project.as_deref())
+            .ok_or_else(|| UNBOUND_PROJECT_ERROR.to_string())
+    }
+}
+
+/// The `list_resources` types that demand a `project` today, and so may take
+/// the binding's. `page` (omission lists every project's pages) and `project`
+/// (the argument is ignored) are absent because omitting `project` already
+/// means something for them.
+const FALLBACK_RESOURCE_TYPES: [&str; 5] = ["issue", "plan", "module", "label", "folder"];
+
+/// Whether an omitted `project` on `tool` may be filled in from a repository
+/// binding, per the classification table on [`LificMcp::project_or_bound`].
+///
+/// That table is the policy; this function is its executable form, so the two
+/// consumers cannot drift. The server applies it per-tool through
+/// `project_or_bound`; the remote stdio proxy ([`crate::cli::mcp_proxy`])
+/// applies it to an outbound `tools/call` before the request leaves the
+/// machine, and has nothing but the tool name and arguments to go on.
+pub(crate) fn project_fallback_applies(tool: &str, resource_type: Option<&str>) -> bool {
+    match tool {
+        "list_issues" | "create_issue" | "get_board" | "create_plan" => true,
+        "list_resources" => {
+            resource_type.is_some_and(|kind| FALLBACK_RESOURCE_TYPES.contains(&kind))
+        }
+        _ => false,
+    }
+}
+
 fn canonical_project_identifier(
     conn: &rusqlite::Connection,
     project_id: i64,
@@ -1682,7 +1743,7 @@ impl LificMcp {
             return Ok(nudge);
         }
         let conn = self.read_conn()?;
-        let pid = resolve_project(&conn, &input.project)?;
+        let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
         let module_id = match &input.module {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
@@ -2009,7 +2070,7 @@ impl LificMcp {
 
     fn create_issue_inner(&self, input: CreateIssueInput) -> Result<String, String> {
         let conn = self.read_conn()?;
-        let pid = resolve_project(&conn, &input.project)?;
+        let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         let module_id = match &input.module {
             Some(name) => Some(resolve_module(&conn, pid, name)?),
@@ -2374,7 +2435,10 @@ impl LificMcp {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
-        let pid = resolve_project(&*self.read_conn()?, &input.project)?;
+        let pid = resolve_project(
+            &*self.read_conn()?,
+            self.project_or_bound(input.project.as_deref())?,
+        )?;
         require_role_mcp(&self.db, pid, models::Role::Viewer)?;
         const BOARD_CAP: i64 = 500;
         let board = self.read(|conn| {
@@ -2972,9 +3036,7 @@ impl LificMcp {
         let context = current_issue_link_context();
         match input.resource_type.as_str() {
             "plan" => {
-                let Some(ref proj) = input.project else {
-                    return Err("project required".into());
-                };
+                let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 // No clamp here: list_plans applies the shared one, and its
@@ -3055,9 +3117,7 @@ impl LificMcp {
                 }))
             }
             "issue" => {
-                let Some(ref proj) = input.project else {
-                    return Err("project required".into());
-                };
+                let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 // This branch publishes a bigger default page than list_issues
@@ -3196,9 +3256,7 @@ impl LificMcp {
                 }))
             }
             "module" => {
-                let Some(ref proj) = input.project else {
-                    return Err("project required".into());
-                };
+                let proj = self.project_or_bound(input.project.as_deref())?;
                 let resolver = self.read_conn()?;
                 let pid = resolve_project(&resolver, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
@@ -3221,9 +3279,7 @@ impl LificMcp {
                 }))
             }
             "label" => {
-                let Some(ref proj) = input.project else {
-                    return Err("project required".into());
-                };
+                let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let labels = self.read(|conn| queries::list_labels(conn, pid))?;
@@ -3235,9 +3291,7 @@ impl LificMcp {
                 }))
             }
             "folder" => {
-                let Some(ref proj) = input.project else {
-                    return Err("project required".into());
-                };
+                let proj = self.project_or_bound(input.project.as_deref())?;
                 let pid = resolve_project(&*self.read_conn()?, proj)?;
                 require_role_mcp(&self.db, pid, models::Role::Viewer)?;
                 let folders = self.read(|conn| queries::list_folders(conn, pid))?;
@@ -3812,7 +3866,10 @@ impl LificMcp {
     }
 
     fn create_plan_inner(&self, input: CreatePlanInput) -> Result<String, String> {
-        let pid = resolve_project(&*self.read_conn()?, &input.project)?;
+        let pid = resolve_project(
+            &*self.read_conn()?,
+            self.project_or_bound(input.project.as_deref())?,
+        )?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
         // LIF-407: the anchor and every step-linked issue can live outside
         // this plan's project; each needs Maintainer on its own project,
@@ -4829,7 +4886,7 @@ mod tests {
 
     fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
-            project: project.into(),
+            project: Some(project.into()),
             title: title.into(),
             description: None,
             status: None,
@@ -5320,7 +5377,7 @@ mod tests {
             emoji: None,
         }));
         let result = m.create_issue(Parameters(CreateIssueInput {
-            project: "OPT".into(),
+            project: Some("OPT".into()),
             title: "Detailed issue".into(),
             description: Some("Some markdown".into()),
             status: Some("todo".into()),
@@ -5569,7 +5626,7 @@ mod tests {
         seed_project(&m, "Test", "SCH");
 
         let result = m.create_issue(Parameters(CreateIssueInput {
-            project: "SCH".into(),
+            project: Some("SCH".into()),
             title: "Scheduled".into(),
             target_date: Some("2026-06-15".into()),
             ..Default::default()
@@ -5608,7 +5665,7 @@ mod tests {
         seed_project(&m, "Test", "UNC");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "UNC".into(),
+            project: Some("UNC".into()),
             title: "Prescheduled".into(),
             start_date: Some("2026-01-01".into()),
             target_date: Some("2026-02-01".into()),
@@ -5653,7 +5710,7 @@ mod tests {
         // Two active issues in the Backend module (should be updated).
         for title in ["In-module A", "In-module B"] {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "BLK".into(),
+                project: Some("BLK".into()),
                 title: title.into(),
                 status: Some("active".into()),
                 priority: None,
@@ -5665,7 +5722,7 @@ mod tests {
         }
         // One active issue with NO module (outside the filter).
         m.create_issue(Parameters(CreateIssueInput {
-            project: "BLK".into(),
+            project: Some("BLK".into()),
             title: "Loose one".into(),
             status: Some("active".into()),
             priority: None,
@@ -5802,7 +5859,7 @@ mod tests {
         }
 
         let result = m.create_issue(Parameters(CreateIssueInput {
-            project: "OPQ".into(),
+            project: Some("OPQ".into()),
             title: "Doomed".into(),
             ..Default::default()
         }));
@@ -5865,7 +5922,7 @@ mod tests {
         assert!(get.contains("not found"), "got: {get}");
 
         let listed = m.list_issues(Parameters(ListIssuesInput {
-            project: "SFT".into(),
+            project: Some("SFT".into()),
             ..Default::default()
         }));
         assert!(
@@ -5934,7 +5991,7 @@ mod tests {
         seed_project(&m, "Test", "LST");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LST".into(),
+            project: Some("LST".into()),
             title: "Todo one".into(),
             status: Some("todo".into()),
             priority: Some("high".into()),
@@ -5944,7 +6001,7 @@ mod tests {
             ..Default::default()
         }));
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LST".into(),
+            project: Some("LST".into()),
             title: "Active one".into(),
             status: Some("active".into()),
             priority: Some("low".into()),
@@ -5956,7 +6013,7 @@ mod tests {
 
         // Filter by status
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "LST".into(),
+            project: Some("LST".into()),
             status: Some("todo".into()),
             priority: None,
             module: None,
@@ -5985,19 +6042,19 @@ mod tests {
         assert!(created.starts_with("Created module"), "got: {created}");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             title: "In a module".into(),
             module: Some("Backend".into()),
             ..Default::default()
         }));
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             title: "Unassigned".into(),
             ..Default::default()
         }));
 
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             ..Default::default()
         }));
         assert!(result.contains("2 issues"), "got: {result}");
@@ -6018,7 +6075,7 @@ mod tests {
         crate::mcp::reset_issue_link_context_reads();
 
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "CTX".into(),
+            project: Some("CTX".into()),
             ..Default::default()
         }));
 
@@ -6031,7 +6088,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Empty", "EMP");
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "EMP".into(),
+            project: Some("EMP".into()),
             status: None,
             priority: None,
             module: None,
@@ -6051,7 +6108,7 @@ mod tests {
         // before the (bad) project identifier is ever resolved.
         seed_project(&m, "Alpha", "AAA");
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "NOPE".into(),
+            project: Some("NOPE".into()),
             status: None,
             priority: None,
             module: None,
@@ -6073,7 +6130,7 @@ mod tests {
             seed_issue(&m, "PAG", &format!("Issue {i}"));
         }
         let page1 = m.list_issues(Parameters(ListIssuesInput {
-            project: "PAG".into(),
+            project: Some("PAG".into()),
             status: None,
             priority: None,
             module: None,
@@ -6091,7 +6148,7 @@ mod tests {
 
         // Page 2: offset=2, limit=2 — still more.
         let page2 = m.list_issues(Parameters(ListIssuesInput {
-            project: "PAG".into(),
+            project: Some("PAG".into()),
             status: None,
             priority: None,
             module: None,
@@ -6109,7 +6166,7 @@ mod tests {
 
         // Page 3: offset=4, limit=2 — only 1 remaining, no hint.
         let page3 = m.list_issues(Parameters(ListIssuesInput {
-            project: "PAG".into(),
+            project: Some("PAG".into()),
             status: None,
             priority: None,
             module: None,
@@ -6132,7 +6189,7 @@ mod tests {
         seed_project(&m, "Small", "SML");
         seed_issue(&m, "SML", "Only one");
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "SML".into(),
+            project: Some("SML".into()),
             status: None,
             priority: None,
             module: None,
@@ -6228,7 +6285,7 @@ mod tests {
         }));
 
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "BLK".into(),
+            project: Some("BLK".into()),
             blocked: Some(true),
             ..Default::default()
         }));
@@ -6247,7 +6304,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "BRD");
         m.create_issue(Parameters(CreateIssueInput {
-            project: "BRD".into(),
+            project: Some("BRD".into()),
             title: "A".into(),
             status: Some("todo".into()),
             description: None,
@@ -6257,7 +6314,7 @@ mod tests {
             ..Default::default()
         }));
         m.create_issue(Parameters(CreateIssueInput {
-            project: "BRD".into(),
+            project: Some("BRD".into()),
             title: "B".into(),
             status: Some("active".into()),
             description: None,
@@ -6268,7 +6325,7 @@ mod tests {
         }));
 
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BRD".into(),
+            project: Some("BRD".into()),
             group_by: None,
             ..Default::default()
         }));
@@ -6284,7 +6341,7 @@ mod tests {
         seed_project(&m, "Board Order", "BRO");
         for status in ["done", "active", "backlog", "todo", "cancelled"] {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "BRO".into(),
+                project: Some("BRO".into()),
                 title: format!("issue {status}"),
                 status: Some(status.into()),
                 description: None,
@@ -6299,7 +6356,7 @@ mod tests {
         // count-only stubs); the ordering assertion below still works either
         // way, but this keeps the test focused on ordering, not omission.
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BRO".into(),
+            project: Some("BRO".into()),
             group_by: None,
             include_closed: Some(true),
             ..Default::default()
@@ -6323,7 +6380,7 @@ mod tests {
         seed_project(&m, "Board Prio", "BRP");
         for priority in ["none", "medium", "urgent", "low", "high"] {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "BRP".into(),
+                project: Some("BRP".into()),
                 title: format!("issue {priority}"),
                 status: None,
                 description: None,
@@ -6335,7 +6392,7 @@ mod tests {
         }
 
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BRP".into(),
+            project: Some("BRP".into()),
             group_by: Some("priority".into()),
             ..Default::default()
         }));
@@ -6365,7 +6422,7 @@ mod tests {
             ("scrapped", "cancelled"),
         ] {
             m.create_issue(Parameters(CreateIssueInput {
-                project: ident.into(),
+                project: Some(ident.into()),
                 title: title.into(),
                 status: Some(status.into()),
                 ..Default::default()
@@ -6378,7 +6435,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_board_mix(&m, "BCA");
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCA".into(),
+            project: Some("BCA".into()),
             ..Default::default()
         }));
         // Closed columns keep a header + count but stub out their contents.
@@ -6403,7 +6460,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_board_mix(&m, "BCB");
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCB".into(),
+            project: Some("BCB".into()),
             include_closed: Some(true),
             ..Default::default()
         }));
@@ -6418,7 +6475,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_board_mix(&m, "BCC");
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCC".into(),
+            project: Some("BCC".into()),
             group_by: Some("priority".into()),
             ..Default::default()
         }));
@@ -6442,14 +6499,14 @@ mod tests {
         seed_project(&m, "Capped Board", "BCD");
         for i in 0..4 {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "BCD".into(),
+                project: Some("BCD".into()),
                 title: format!("todo-{i}"),
                 status: Some("todo".into()),
                 ..Default::default()
             }));
         }
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCD".into(),
+            project: Some("BCD".into()),
             max_per_column: Some(2),
             ..Default::default()
         }));
@@ -6468,13 +6525,13 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Unbounded Board", "BCU");
         m.create_issue(Parameters(CreateIssueInput {
-            project: "BCU".into(),
+            project: Some("BCU".into()),
             title: "still-visible".into(),
             status: Some("todo".into()),
             ..Default::default()
         }));
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCU".into(),
+            project: Some("BCU".into()),
             max_per_column: Some(i64::MAX),
             ..Default::default()
         }));
@@ -6487,13 +6544,13 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "No Done", "BCE");
         m.create_issue(Parameters(CreateIssueInput {
-            project: "BCE".into(),
+            project: Some("BCE".into()),
             title: "just-todo".into(),
             status: Some("todo".into()),
             ..Default::default()
         }));
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "BCE".into(),
+            project: Some("BCE".into()),
             ..Default::default()
         }));
         // No done/cancelled issues exist → no stub line at all.
@@ -6532,7 +6589,7 @@ mod tests {
         }
 
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "OVF".into(),
+            project: Some("OVF".into()),
             ..Default::default()
         }));
         assert!(
@@ -6902,7 +6959,7 @@ mod tests {
         .unwrap();
         seed_issue(&m, "REC", "Current work");
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "REC".into(),
+            project: Some("REC".into()),
             title: "Current plan".into(),
             anchor_issue: None,
             steps: None,
@@ -6953,7 +7010,7 @@ mod tests {
         // Even with a bogus project filter, an empty DB nudges rather than
         // returning "project not found".
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "ANY".into(),
+            project: Some("ANY".into()),
             ..Default::default()
         }));
         assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
@@ -6973,7 +7030,7 @@ mod tests {
     fn nudge_get_board_on_empty_db() {
         let (m, _guard) = mcp();
         let result = m.get_board(Parameters(GetBoardInput {
-            project: "ANY".into(),
+            project: Some("ANY".into()),
             ..Default::default()
         }));
         assert_eq!(result, NO_PROJECTS_NUDGE, "got: {result}");
@@ -6992,7 +7049,7 @@ mod tests {
         assert!(listed.contains("1 projects"), "got: {listed}");
 
         let issues = m.list_issues(Parameters(ListIssuesInput {
-            project: "AAA".into(),
+            project: Some("AAA".into()),
             ..Default::default()
         }));
         assert!(!issues.contains(NO_PROJECTS_NUDGE), "got: {issues}");
@@ -7004,7 +7061,7 @@ mod tests {
         assert!(!searched.contains(NO_PROJECTS_NUDGE), "got: {searched}");
 
         let board = m.get_board(Parameters(GetBoardInput {
-            project: "AAA".into(),
+            project: Some("AAA".into()),
             ..Default::default()
         }));
         assert!(!board.contains(NO_PROJECTS_NUDGE), "got: {board}");
@@ -7531,7 +7588,7 @@ mod tests {
         let att = seed_attachment(&m, "shot.png");
 
         let result = m.create_issue(Parameters(CreateIssueInput {
-            project: "ATI".into(),
+            project: Some("ATI".into()),
             title: "With attachment".into(),
             description: Some(format!("see ![shot](/api/attachments/{att})")),
             ..Default::default()
@@ -7557,7 +7614,7 @@ mod tests {
         let new = seed_attachment(&m, "new.png");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "ATU".into(),
+            project: Some("ATU".into()),
             title: "Swap".into(),
             description: Some(format!("/api/attachments/{old}")),
             ..Default::default()
@@ -7590,7 +7647,7 @@ mod tests {
         let att = seed_attachment(&m, "edit.png");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "ATE".into(),
+            project: Some("ATE".into()),
             title: "Edited".into(),
             description: Some("placeholder".into()),
             ..Default::default()
@@ -8500,7 +8557,7 @@ mod tests {
         desc: &str,
     ) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
-            project: project.into(),
+            project: Some(project.into()),
             title: title.into(),
             description: Some(desc.into()),
             status: None,
@@ -8601,7 +8658,7 @@ mod tests {
         seed_project(&m, "Test", "ESC");
         let description = "Example:\n```c\nprintf(\"\\n\");\n```\n";
         let created = m.create_issue(Parameters(CreateIssueInput {
-            project: "ESC".into(),
+            project: Some("ESC".into()),
             title: "Preserve code escapes".into(),
             description: Some(description.into()),
             ..Default::default()
@@ -8819,7 +8876,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Test", "EDP");
         m.create_issue(Parameters(CreateIssueInput {
-            project: "EDP".into(),
+            project: Some("EDP".into()),
             title: "Stays".into(),
             description: Some("change me".into()),
             status: Some("active".into()),
@@ -10197,7 +10254,7 @@ mod tests {
 
         // Everything was just created, so a far-future since excludes all…
         let none = m.list_issues(Parameters(ListIssuesInput {
-            project: ident.clone(),
+            project: Some(ident.clone()),
             created_since: Some("2099-01-01".into()),
             ..Default::default()
         }));
@@ -10205,7 +10262,7 @@ mod tests {
 
         // …and a far-past since includes them.
         let all = m.list_issues(Parameters(ListIssuesInput {
-            project: ident,
+            project: Some(ident),
             created_since: Some("2000-01-01".into()),
             ..Default::default()
         }));
@@ -10220,7 +10277,7 @@ mod tests {
         seed_issue(&m, &ident, "Newest");
 
         let listing = m.list_issues(Parameters(ListIssuesInput {
-            project: ident.clone(),
+            project: Some(ident.clone()),
             order_by: Some("sequence".into()),
             order: Some("desc".into()),
             ..Default::default()
@@ -10230,7 +10287,7 @@ mod tests {
         assert!(newest < oldest, "got: {listing}");
 
         let bad = m.list_issues(Parameters(ListIssuesInput {
-            project: ident,
+            project: Some(ident),
             order_by: Some("votes".into()),
             ..Default::default()
         }));
@@ -10303,7 +10360,7 @@ mod tests {
                 labels: None,
             }));
             m.create_plan(Parameters(CreatePlanInput {
-                project: "TST".into(),
+                project: Some("TST".into()),
                 title: "Audit plan".into(),
                 anchor_issue: None,
                 steps: None,
@@ -10454,7 +10511,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Audit", "TST");
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "TST".into(),
+            project: Some("TST".into()),
             title: "Audit plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10485,7 +10542,7 @@ mod tests {
         seed_project(&m, "Audit", "TST");
         seed_issue(&m, "TST", "Linked issue");
         m.create_plan(Parameters(CreatePlanInput {
-            project: "TST".into(),
+            project: Some("TST".into()),
             title: "Audit plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10597,7 +10654,7 @@ mod tests {
             // The spawned task has NO task-local actor — like production.
             tokio::spawn(async move {
                 let result = m2.create_issue(Parameters(CreateIssueInput {
-                    project: "TST".into(),
+                    project: Some("TST".into()),
                     title: "Spawned write".into(),
                     description: None,
                     status: None,
@@ -10631,7 +10688,7 @@ mod tests {
         seed_project(&m, "Plans", "PLN");
 
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Ship feature".into(),
             anchor_issue: None,
             steps: Some(vec![
@@ -10685,7 +10742,7 @@ mod tests {
                            cutoff so the rehydrate must return every word of it.\n\
                            Second line survives too.";
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Long notes".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10719,7 +10776,7 @@ mod tests {
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Real work");
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10759,7 +10816,7 @@ mod tests {
         seed_issue(&m, "PLN", "Real work"); // PLN-1
 
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10812,7 +10869,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PET");
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PET".into(),
+            project: Some("PET".into()),
             title: "Tree plan".into(),
             anchor_issue: None,
             steps: Some(vec![
@@ -10856,7 +10913,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PPR");
         m.create_plan(Parameters(CreatePlanInput {
-            project: "PPR".into(),
+            project: Some("PPR".into()),
             title: "Rename me".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10891,7 +10948,7 @@ mod tests {
         let issue_id = issue_id_for(&m, "PLE-1");
 
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLE".into(),
+            project: Some("PLE".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10932,7 +10989,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -10968,7 +11025,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Plans", "PLN");
         m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: None,
@@ -11013,7 +11070,7 @@ mod tests {
         seed_project(&m, "Plans", "PLN");
         seed_issue(&m, "PLN", "Mirrored work"); // PLN-1
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -11055,7 +11112,7 @@ mod tests {
         seed_project(&m, "Plans", "RPN");
         seed_issue(&m, "RPN", "Mirrored work"); // RPN-1
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "RPN".into(),
+            project: Some("RPN".into()),
             title: "Plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -11094,7 +11151,7 @@ mod tests {
         seed_project(&m, "Plans", "ARC");
         seed_issue(&m, "ARC", "Mirrored work"); // ARC-1
         m.create_plan(Parameters(CreatePlanInput {
-            project: "ARC".into(),
+            project: Some("ARC".into()),
             title: "Archived plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -11134,7 +11191,7 @@ mod tests {
         let _ag = first_admin_guard();
         seed_project(&m, "Plans", "PLN");
         m.create_plan(Parameters(CreatePlanInput {
-            project: "PLN".into(),
+            project: Some("PLN".into()),
             title: "Doomed".into(),
             anchor_issue: None,
             steps: None,
@@ -11182,7 +11239,7 @@ mod tests {
         let (m, _guard) = mcp();
         seed_project(&m, "Escape", "ESC");
         let created = m.create_issue(Parameters(CreateIssueInput {
-            project: "ESC".into(),
+            project: Some("ESC".into()),
             title: RAW_TITLE.into(),
             description: Some(r#"body with & and < and > and "quotes""#.into()),
             ..Default::default()
@@ -11192,7 +11249,7 @@ mod tests {
 
         // get_board
         let board = m.get_board(Parameters(GetBoardInput {
-            project: "ESC".into(),
+            project: Some("ESC".into()),
             ..Default::default()
         }));
         assert_no_html_escape(&board, &[RAW_TITLE]);
@@ -11207,7 +11264,7 @@ mod tests {
 
         // list_issues (fmt_issue path)
         let issues = m.list_issues(Parameters(ListIssuesInput {
-            project: "ESC".into(),
+            project: Some("ESC".into()),
             ..Default::default()
         }));
         assert_no_html_escape(&issues, &[RAW_TITLE]);
@@ -11267,7 +11324,7 @@ mod tests {
         seed_project(&m, "Escape", "ESC");
         let raw_step = r#"land A & B <fast> "now""#;
         let created = m.create_plan(Parameters(CreatePlanInput {
-            project: "ESC".into(),
+            project: Some("ESC".into()),
             title: "Escaping plan".into(),
             anchor_issue: None,
             steps: Some(vec![PlanStepInput {
@@ -11775,6 +11832,245 @@ mod tests {
             "No attachments on ATT-1."
         );
     }
+
+    // ── LIF-451: implicit project from the session's repository binding ──
+    //
+    // The bound project only ever fills in for an omitted `project` that
+    // would otherwise be an error. The meaning-preservation tests below are
+    // the ones that matter: a binding must not quietly narrow `search` or
+    // turn a workspace page into a project page.
+
+    /// A session bound to `ident`, with that project already created.
+    fn bound_mcp(ident: &str) -> (LificMcp, McpTestGuard) {
+        let db = crate::db::open_memory().expect("test db");
+        seed_first_admin(&db);
+        let m = LificMcp::new(db);
+        let guard = acquire_test_guard();
+        seed_project(&m, ident, ident);
+        (m.with_bound_project(Some(ident.to_string())), guard)
+    }
+
+    #[test]
+    fn a_bound_session_lists_the_bound_projects_issues_without_being_told_the_project() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "Implicit list");
+
+        let listed = m.list_issues(Parameters(ListIssuesInput::default()));
+
+        assert!(listed.contains("Implicit list"), "got: {listed}");
+        assert!(listed.contains("BND-1"), "got: {listed}");
+    }
+
+    #[test]
+    fn a_bound_session_creates_issues_in_the_bound_project() {
+        let (m, _guard) = bound_mcp("BND");
+
+        let created = m.create_issue(Parameters(CreateIssueInput {
+            title: "Implicit create".into(),
+            ..Default::default()
+        }));
+
+        assert!(created.contains("BND-1"), "got: {created}");
+    }
+
+    #[test]
+    fn a_bound_session_boards_the_bound_project() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "Implicit board");
+
+        let board = m.get_board(Parameters(GetBoardInput::default()));
+
+        assert!(board.contains("Implicit board"), "got: {board}");
+    }
+
+    #[test]
+    fn a_bound_session_lists_bound_project_resources_without_being_told_the_project() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "Resource listing");
+
+        for rt in ["issue", "module", "label", "folder", "plan"] {
+            let listed = m.list_resources(Parameters(ListResourcesInput {
+                resource_type: rt.into(),
+                ..Default::default()
+            }));
+            assert!(
+                !listed.contains("project required"),
+                "{rt} still demanded a project: {listed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_classification_matches_the_documented_table() {
+        // Every row of the table on `project_or_bound`, in order.
+        let resolvable: [(&str, Option<&str>); 9] = [
+            ("list_issues", None),
+            ("create_issue", None),
+            ("get_board", None),
+            ("create_plan", None),
+            ("list_resources", Some("issue")),
+            ("list_resources", Some("plan")),
+            ("list_resources", Some("module")),
+            ("list_resources", Some("label")),
+            ("list_resources", Some("folder")),
+        ];
+        for (tool, resource_type) in resolvable {
+            assert!(
+                project_fallback_applies(tool, resource_type),
+                "{tool}({resource_type:?}) is resolvable"
+            );
+        }
+
+        let excluded: [(&str, Option<&str>); 9] = [
+            ("list_resources", Some("page")),
+            ("list_resources", Some("project")),
+            ("list_resources", None),
+            ("search", None),
+            ("create_page", None),
+            ("manage_resource", Some("issue")),
+            ("bulk_update", None),
+            ("delete", Some("issue")),
+            ("get_activity", None),
+        ];
+        for (tool, resource_type) in excluded {
+            assert!(
+                !project_fallback_applies(tool, resource_type),
+                "{tool}({resource_type:?}) must never take the binding"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_never_takes_the_binding() {
+        assert!(!project_fallback_applies("", None));
+        assert!(!project_fallback_applies("list_issues_v2", None));
+        assert!(!project_fallback_applies("LIST_ISSUES", None));
+    }
+
+    #[test]
+    fn an_explicit_project_wins_over_the_binding() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "Bound issue");
+        seed_project(&m, "Other", "OTH");
+        seed_issue(&m, "OTH", "Other issue");
+
+        let listed = m.list_issues(Parameters(ListIssuesInput {
+            project: Some("OTH".into()),
+            ..Default::default()
+        }));
+        assert!(listed.contains("Other issue"), "got: {listed}");
+        assert!(!listed.contains("Bound issue"), "got: {listed}");
+
+        let created = m.create_issue(Parameters(CreateIssueInput {
+            project: Some("OTH".into()),
+            title: "Explicit create".into(),
+            ..Default::default()
+        }));
+        assert!(created.contains("OTH-2"), "got: {created}");
+    }
+
+    #[test]
+    fn an_unbound_session_says_how_to_bind_when_the_project_is_omitted() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Unbound", "UNB");
+
+        for result in [
+            m.list_issues(Parameters(ListIssuesInput::default())),
+            m.get_board(Parameters(GetBoardInput::default())),
+            m.create_issue(Parameters(CreateIssueInput {
+                title: "No project".into(),
+                ..Default::default()
+            })),
+            m.create_plan(Parameters(CreatePlanInput {
+                title: "No project".into(),
+                ..Default::default()
+            })),
+            m.list_resources(Parameters(ListResourcesInput {
+                resource_type: "issue".into(),
+                ..Default::default()
+            })),
+        ] {
+            assert!(result.contains("project required"), "got: {result}");
+            assert!(
+                result.contains("lific bind"),
+                "the error must name the fix: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_session_still_searches_every_project() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "findme here");
+        seed_project(&m, "Other", "OTH");
+        seed_issue(&m, "OTH", "findme there");
+
+        let found = m.search(Parameters(SearchInput {
+            query: "findme".into(),
+            ..Default::default()
+        }));
+
+        assert!(
+            found.contains("OTH-1"),
+            "a binding must not narrow search: {found}"
+        );
+        assert!(found.contains("BND-1"), "got: {found}");
+    }
+
+    #[test]
+    fn a_bound_session_still_creates_workspace_pages() {
+        let (m, _guard) = bound_mcp("BND");
+        let _ag = first_admin_guard();
+
+        let created = m.create_page(Parameters(CreatePageInput {
+            title: "Global Note".into(),
+            ..Default::default()
+        }));
+
+        assert!(created.contains("DOC-"), "got: {created}");
+        assert!(
+            !created.contains("BND-DOC-"),
+            "an omitted project must still mean workspace, not the binding: {created}"
+        );
+        let workspace_pages: i64 = m
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM pages WHERE project_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .expect("count workspace pages");
+        assert_eq!(workspace_pages, 1, "the page must have no project");
+    }
+
+    #[test]
+    fn bulk_update_still_requires_an_explicit_project_when_the_session_is_bound() {
+        let (m, _guard) = bound_mcp("BND");
+        seed_issue(&m, "BND", "Untouched");
+
+        // The deserializer is the boundary a real MCP client crosses, and
+        // `project` is still required there.
+        let err = serde_json::from_value::<BulkUpdateInput>(serde_json::json!({
+            "set_status": "done",
+        }))
+        .expect_err("bulk_update must keep requiring an explicit project");
+        assert!(err.to_string().contains("project"), "got: {err}");
+
+        // And nothing downstream substitutes the binding for a blank one.
+        let result = m.bulk_update(Parameters(BulkUpdateInput {
+            project: String::new(),
+            set_status: Some("done".into()),
+            ..Default::default()
+        }));
+        assert!(result.starts_with("Error"), "got: {result}");
+        let listed = m.list_issues(Parameters(ListIssuesInput::default()));
+        assert!(listed.contains("Untouched"), "got: {listed}");
+        assert!(
+            !listed.contains("done"),
+            "no issue may have been closed: {listed}"
+        );
+    }
 }
 
 /// LIF-198: project-scoped authorization enforcement across every MCP tool.
@@ -11820,7 +12116,7 @@ mod authz_gating_tests {
         // Seed an active issue as a permitted member.
         let created = as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 status: Some("active".into()),
                 priority: None,
@@ -11864,7 +12160,7 @@ mod authz_gating_tests {
         let _ = project_id;
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Secret work".into(),
                 description: None,
                 status: None,
@@ -11934,7 +12230,7 @@ mod authz_gating_tests {
 
         let via_step = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Leaky".into(),
                 anchor_issue: None,
                 steps: Some(vec![PlanStepInput {
@@ -11948,7 +12244,7 @@ mod authz_gating_tests {
 
         let via_child = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Leaky nested".into(),
                 anchor_issue: None,
                 steps: Some(vec![PlanStepInput {
@@ -11966,7 +12262,7 @@ mod authz_gating_tests {
 
         let via_anchor = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Leaky anchor".into(),
                 anchor_issue: Some(foreign_ident.clone()),
                 steps: None,
@@ -11990,7 +12286,7 @@ mod authz_gating_tests {
         // A step linked to an issue the caller *can* see still works.
         let allowed = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Mine".into(),
                 ..Default::default()
             }))
@@ -11998,7 +12294,7 @@ mod authz_gating_tests {
         assert!(allowed.starts_with("Created"), "got: {allowed}");
         let ok = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Fine".into(),
                 anchor_issue: None,
                 steps: Some(vec![PlanStepInput {
@@ -12019,7 +12315,7 @@ mod authz_gating_tests {
         let (_foreign_project, foreign_ident, _foreign_issue) = seed_foreign_project(&m);
         let plan = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Anchorable".into(),
                 anchor_issue: None,
                 steps: None,
@@ -12048,7 +12344,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Discussion".into(),
                 ..Default::default()
             }))
@@ -12120,7 +12416,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Findable".into(),
                 ..Default::default()
             }))
@@ -12187,7 +12483,7 @@ mod authz_gating_tests {
         assert!(page.starts_with("Created"), "got: {page}");
         let plan = as_user(&lead, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Plan".into(),
                 anchor_issue: None,
                 steps: None,
@@ -12230,7 +12526,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Unique searchable xyzzy".into(),
                 description: None,
                 status: None,
@@ -12419,7 +12715,7 @@ mod authz_gating_tests {
         ] {
             let result = as_user(user, || {
                 m.create_issue(Parameters(CreateIssueInput {
-                    project: "MEM".into(),
+                    project: Some("MEM".into()),
                     title: format!("by {}", user.username),
                     description: None,
                     status: None,
@@ -12444,7 +12740,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 description: None,
                 status: None,
@@ -12509,7 +12805,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Commentable".into(),
                 description: None,
                 status: None,
@@ -12547,7 +12843,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Revocation test".into(),
                 ..Default::default()
             }))
@@ -12792,7 +13088,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let issue_a = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "A".into(),
                 description: None,
                 status: None,
@@ -12822,7 +13118,7 @@ mod authz_gating_tests {
         let _ = project_id;
         let issue_b = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "OTH".into(),
+                project: Some("OTH".into()),
                 title: "B".into(),
                 description: None,
                 status: None,
@@ -12878,7 +13174,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let plan = as_user(&maintainer, || {
             m.create_plan(Parameters(CreatePlanInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Plan".into(),
                 anchor_issue: None,
                 steps: Some(vec![PlanStepInput {
@@ -12913,7 +13209,7 @@ mod authz_gating_tests {
         };
         let foreign_issue = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "OT2".into(),
+                project: Some("OT2".into()),
                 title: "Foreign".into(),
                 description: None,
                 status: None,
@@ -13017,7 +13313,7 @@ mod authz_gating_tests {
 
         let created = as_user(&bot, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Bot-made".into(),
                 description: None,
                 status: None,
@@ -13052,7 +13348,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Guarded".into(),
                 description: None,
                 status: None,
@@ -13105,7 +13401,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Admin spot-check".into(),
                 description: None,
                 status: None,
@@ -13131,7 +13427,7 @@ mod authz_gating_tests {
 
         let write = as_user(&admin, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "by admin".into(),
                 description: None,
                 status: None,
@@ -13176,7 +13472,7 @@ mod authz_gating_tests {
             setup_membership_mcp();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Token-guarded".into(),
                 description: None,
                 status: None,
@@ -13401,7 +13697,7 @@ mod authz_gating_tests {
 
         let result = as_user(&outsider_user, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "LEG".into(),
+                project: Some("LEG".into()),
                 title: "Legacy open".into(),
                 description: None,
                 status: None,
@@ -13464,7 +13760,7 @@ mod authz_gating_tests {
             membership_mcp_with_attachments();
         let created = as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 ..Default::default()
             }))
@@ -13489,7 +13785,7 @@ mod authz_gating_tests {
             membership_mcp_with_attachments();
         as_user(&lead, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 ..Default::default()
             }))
@@ -13513,7 +13809,7 @@ mod authz_gating_tests {
             membership_mcp_with_attachments();
         as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 ..Default::default()
             }))
@@ -13585,7 +13881,7 @@ mod authz_gating_tests {
             membership_mcp_with_attachments();
         as_user(&maintainer, || {
             m.create_issue(Parameters(CreateIssueInput {
-                project: "MEM".into(),
+                project: Some("MEM".into()),
                 title: "Target".into(),
                 ..Default::default()
             }))

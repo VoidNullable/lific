@@ -28,8 +28,10 @@ pub struct SearchInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListIssuesInput {
-    #[schemars(description = "Project ID (e.g. LIF)")]
-    pub project: String,
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
     #[schemars(description = "Filter by status: backlog, todo, active, done, cancelled")]
     pub status: Option<String>,
     #[schemars(description = "Filter by priority: urgent, high, medium, low, none")]
@@ -84,8 +86,10 @@ pub struct GetActivityInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreateIssueInput {
-    #[schemars(description = "Project ID (e.g. LIF)")]
-    pub project: String,
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
     #[schemars(description = "Issue title")]
     pub title: String,
     #[schemars(description = "Markdown description")]
@@ -160,8 +164,10 @@ pub struct BulkUpdateInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetBoardInput {
-    #[schemars(description = "Project ID (e.g. LIF)")]
-    pub project: String,
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
     #[schemars(description = "Group by: status, priority, or module (default: status)")]
     pub group_by: Option<String>,
     #[schemars(
@@ -285,7 +291,7 @@ pub struct ListResourcesInput {
     )]
     pub resource_type: String,
     #[schemars(
-        description = "Project ID (required for issues, plans, modules, labels, and folders; optional for pages and projects)"
+        description = "Project ID (required for issues, plans, modules, labels, and folders unless the session is bound to a repository; optional for pages and projects)"
     )]
     pub project: Option<String>,
     #[schemars(description = "Folder name (for pages)")]
@@ -404,8 +410,10 @@ pub struct PlanStepInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreatePlanInput {
-    #[schemars(description = "Project ID (e.g. LIF)")]
-    pub project: String,
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
     #[schemars(description = "Plan title")]
     pub title: String,
     #[schemars(

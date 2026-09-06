@@ -436,6 +436,38 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         // ── Search ──
         (("GET", "/api/search"), Filtered),
+        // ── Repo → project bindings (LIF-449, design LIF-DOC-27) ──
+        // `resolve` takes aliases, not a project, so there is no project to
+        // gate on before the lookup: it filters the answer through
+        // `authz::visible_project_ids` instead, and a match in an invisible
+        // project is reported byte-identically to no match.
+        (("POST", "/api/repos/resolve"), Filtered),
+        (("POST", "/api/repos/bind"), Gated(Lead)),
+        // Both of these resolve the binding to its project first, answering a
+        // constant 404 when that project is invisible, then gate on Lead.
+        // `merge` runs the gate on *both* bound projects.
+        (("POST", "/api/repos/merge"), Gated(Lead)),
+        (("DELETE", "/api/repos/bindings/{id}"), Gated(Lead)),
+        (("GET", "/api/projects/{id}/bindings"), Gated(Viewer)),
+        // ── Git-driven closing (LIF-5) ──
+        // The body carries commit messages, not a project, so there is no
+        // single project to gate on before the parse. Each referenced
+        // identifier is then resolved and gated on its own project at
+        // Maintainer — the same bar `PUT /api/issues/{id}` takes — and a
+        // failure is reported per identifier rather than failing the request:
+        // an issue in a project the caller cannot see is skipped with the same
+        // "not found" an identifier naming nothing at all gets, and one in a
+        // project they can read but not write is skipped as "forbidden". See
+        // src/api/git_hook.rs.
+        (
+            ("POST", "/api/git-hook"),
+            Exempt(
+                "per-identifier, not per-request: every referenced issue is gated at Maintainer on \
+                 its own project (authz::require_role), and an invisible project is skipped \
+                 byte-identically to a nonexistent identifier via authz::can_view_project — see \
+                 api::git_hook (LIF-5)",
+            ),
+        ),
     ])
 }
 

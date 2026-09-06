@@ -1,13 +1,16 @@
 pub mod agents_md;
+pub mod bind;
 pub mod connect;
 pub mod credentials;
 pub mod doctor;
 pub mod exec;
+pub mod git_hook;
 pub mod http;
 pub mod import;
 pub mod instance;
 pub mod key;
 pub mod login;
+pub mod mcp_proxy;
 pub mod member;
 pub mod render;
 pub mod service;
@@ -125,7 +128,17 @@ pub enum Command {
     },
 
     /// Run MCP server over stdio (for AI assistants)
-    Mcp,
+    Mcp {
+        /// Proxy stdio JSON-RPC to a remote Lific instance instead of opening
+        /// a local database. Gives a remote deployment a local presence.
+        #[arg(long)]
+        remote: bool,
+
+        /// Base URL of the remote instance to proxy to (also read from
+        /// LIFIC_URL). Only meaningful with `--remote`.
+        #[arg(long)]
+        url: Option<String>,
+    },
 
     /// Sign in to a Lific server via the OAuth 2.0 device flow (RFC 8628).
     ///
@@ -363,6 +376,57 @@ pub enum Command {
         /// omitted, a generic placeholder is used with a discovery note.
         #[arg(long)]
         project: Option<String>,
+    },
+
+    /// Bind the repository containing the current directory to a project, so
+    /// tools and agents can tell which project a checkout belongs to (LIF-450).
+    ///
+    /// With no PROJECT this reports what the repository currently resolves to,
+    /// which doubles as the "where am I" diagnostic. Identity comes from the
+    /// repository's `origin` remote and its root commit, never from the path,
+    /// so a second clone of the same repository resolves to the same project
+    /// without being bound again.
+    ///
+    /// Works against a local database and, with `--backend http`, against a
+    /// remote instance.
+    Bind {
+        /// Project identifier to bind this repository to (e.g. LIF). Omit to
+        /// report what the repository already resolves to.
+        project: Option<String>,
+
+        /// Create the project first if it does not exist yet.
+        #[arg(long)]
+        create: bool,
+    },
+
+    /// Close the issues that commit messages say they close (LIF-5).
+    ///
+    /// A message containing `closes LIF-42` (or `fixes`, or `resolves`, in any
+    /// case) marks LIF-42 done. A bare mention does not: "see LIF-42" leaves
+    /// the issue alone.
+    ///
+    /// With no `--range`, the whole of stdin is read as one message, which is
+    /// what a `commit-msg` hook wants:
+    ///
+    ///   #!/bin/sh
+    ///   lific git-hook < "$1"
+    ///
+    /// With `--range`, the messages come from `git log` over that range, which
+    /// is what a `post-receive` hook or a CI step wants:
+    ///
+    ///   lific git-hook --range origin/master..HEAD
+    ///
+    /// Works against a local database and, with `--backend http`, against a
+    /// remote instance.
+    GitHook {
+        /// Commit range to read messages from (e.g. `origin/master..HEAD`).
+        /// Omit to read one message from stdin.
+        #[arg(long)]
+        range: Option<String>,
+
+        /// Report what would close and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Generate shell completions (e.g. `lific completion fish | source`)
@@ -1425,10 +1489,32 @@ mod tests {
         }
     }
 
+    /// Backward compat: client configs written by `lific connect --stdio`
+    /// pass no flags, so bare `lific mcp` must keep meaning the local server.
     #[test]
     fn parse_mcp() {
         let cli = Cli::try_parse_from(["lific", "mcp"]).unwrap();
-        assert!(matches!(cli.command, Command::Mcp));
+        assert!(matches!(
+            cli.command,
+            Command::Mcp {
+                remote: false,
+                url: None
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_mcp_remote_with_url() {
+        let cli =
+            Cli::try_parse_from(["lific", "mcp", "--remote", "--url", "https://lific.example"])
+                .unwrap();
+        match cli.command {
+            Command::Mcp { remote, url } => {
+                assert!(remote);
+                assert_eq!(url.as_deref(), Some("https://lific.example"));
+            }
+            _ => panic!("expected Mcp"),
+        }
     }
 
     #[test]
@@ -1837,6 +1923,30 @@ mod tests {
                 assert_eq!(project, Some("LIF".into()));
             }
             _ => panic!("expected AgentsMd"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_reports_when_no_project_is_named() {
+        let cli = Cli::try_parse_from(["lific", "bind"]).unwrap();
+        match cli.command {
+            Command::Bind { project, create } => {
+                assert!(project.is_none());
+                assert!(!create);
+            }
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_with_a_project_and_create() {
+        let cli = Cli::try_parse_from(["lific", "bind", "LIF", "--create"]).unwrap();
+        match cli.command {
+            Command::Bind { project, create } => {
+                assert_eq!(project, Some("LIF".into()));
+                assert!(create);
+            }
+            _ => panic!("expected Bind"),
         }
     }
 

@@ -23,6 +23,18 @@ pub fn run(pool: &DbPool, command: &Command, json: bool) -> Result<(), Box<dyn s
         Command::Module { action } => module(pool, action, json),
         Command::Label { action } => label(pool, action, json),
         Command::Folder { action } => folder(pool, action, json),
+        Command::Bind { project, create } => Ok(super::bind::run_sql(
+            pool,
+            project.as_deref(),
+            *create,
+            json,
+        )?),
+        Command::GitHook { range, dry_run } => Ok(super::git_hook::run_sql(
+            pool,
+            range.as_deref(),
+            *dry_run,
+            json,
+        )?),
         _ => unreachable!(
             "non-CRUD commands are dispatched by main.rs to their own modules \
              (cli::instance, cli::key, cli::user, cli::member, server::run, ...)"

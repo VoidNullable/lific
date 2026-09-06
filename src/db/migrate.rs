@@ -236,6 +236,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "oauth device scope",
         include_str!("../../migrations/048_oauth_device_scope.sql"),
     ),
+    (
+        49,
+        "repo bindings",
+        include_str!("../../migrations/049_repo_bindings.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
