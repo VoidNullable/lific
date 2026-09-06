@@ -77,6 +77,9 @@ fn read_config_file(path: &Path) -> std::io::Result<ConfigFile> {
 /// start is the safe failure mode.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("--config path '{}' does not exist", path.display())]
+    MissingExplicit { path: PathBuf },
+
     #[error("failed to read config {}: {source}", path.display())]
     Read {
         path: PathBuf,
@@ -148,6 +151,37 @@ impl Default for AuthConfig {
             secure_cookies: true,
         }
     }
+}
+
+/// Where the selected configuration came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    Explicit,
+    ProjectLocal,
+    User,
+    System,
+    BuiltInDefault,
+}
+
+impl ConfigSource {
+    /// Stable human-readable provenance for diagnostics and service planning.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::ProjectLocal => "project-local",
+            Self::User => "user",
+            Self::System => "system",
+            Self::BuiltInDefault => "built-in default",
+        }
+    }
+}
+
+/// The one configuration-selection result shared by startup and diagnostics.
+#[derive(Debug, Clone)]
+pub struct ResolvedConfig {
+    pub config: Config,
+    pub path: Option<PathBuf>,
+    pub source: ConfigSource,
 }
 
 impl AuthConfig {
@@ -435,78 +469,99 @@ impl Config {
     /// 4. System config dir (LIF-293): /etc/lific/ on Linux/BSD,
     ///    /Library/Application Support/Lific/ on macOS,
     ///    %ProgramData%\lific\ on Windows
+    #[cfg(test)]
     pub fn load(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
-        let candidates = Self::candidate_paths(explicit_path);
+        Self::resolve(explicit_path).map(|resolved| resolved.config)
+    }
 
-        for path in &candidates {
-            match std::fs::symlink_metadata(path) {
-                Ok(_) => match read_config_file(path) {
-                    Ok(file) => match toml::from_str::<Config>(&file.contents) {
-                        Ok(mut config) => {
-                            if let Err(source) = tighten_config_permissions(&file)
-                                && source.kind() != std::io::ErrorKind::PermissionDenied
-                            {
-                                return Err(ConfigError::Read {
-                                    path: path.clone(),
-                                    source,
-                                });
-                            }
-                            info!(path = %path.display(), "loaded config");
-                            // Anchor a relative database path to the config
-                            // file's own directory, not the process cwd —
-                            // `lific --config /srv/lific/lific.toml <cmd>` must
-                            // find /srv/lific/lific.db no matter where it runs
-                            // from. (backup_dir derives from database.path, so
-                            // backups inherit the same anchoring.)
-                            if config.database.path.is_relative()
-                                && let Some(parent) = path.parent()
-                                && !parent.as_os_str().is_empty()
-                            {
-                                config.database.path = parent.join(&config.database.path);
-                            }
-                            return Ok(config);
-                        }
+    /// Resolve one configuration file and retain both its path and provenance.
+    /// Resolution never creates files. An explicit path is the sole candidate:
+    /// missing, unreadable, or malformed input is never replaced with defaults.
+    /// With no explicit path, the first existing candidate wins and only
+    /// complete absence returns in-memory defaults; `lific init` creates the
+    /// selected file.
+    pub fn resolve(explicit_path: Option<&Path>) -> Result<ResolvedConfig, ConfigError> {
+        for (source, path) in Self::candidate_sources(explicit_path) {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    let file = read_config_file(&path).map_err(|source| ConfigError::Read {
+                        path: path.clone(),
+                        source,
+                    })?;
+                    let mut config = match toml::from_str::<Config>(&file.contents) {
+                        Ok(config) => config,
                         Err(source) => {
                             return Err(ConfigError::Parse {
-                                path: path.clone(),
+                                path,
                                 source: Box::new(source),
                             });
                         }
-                    },
-                    Err(source) => {
-                        return Err(ConfigError::Read {
-                            path: path.clone(),
-                            source,
-                        });
+                    };
+                    match tighten_config_permissions(&file) {
+                        Err(source) if source.kind() != std::io::ErrorKind::PermissionDenied => {
+                            return Err(ConfigError::Read { path, source });
+                        }
+                        Ok(()) | Err(_) => {}
                     }
-                },
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(ConfigError::Read {
-                        path: path.clone(),
+                    info!(path = %path.display(), source = source.label(), "loaded config");
+                    if config.database.path.is_relative()
+                        && let Some(parent) = path.parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        config.database.path = parent.join(&config.database.path);
+                    }
+                    return Ok(ResolvedConfig {
+                        config,
+                        path: Some(path),
                         source,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if source == ConfigSource::Explicit {
+                        return Err(ConfigError::MissingExplicit { path });
+                    }
+                }
+                Err(source_error) => {
+                    return Err(ConfigError::Read {
+                        path,
+                        source: source_error,
                     });
                 }
             }
         }
 
-        Ok(Config::default())
+        Ok(ResolvedConfig {
+            config: Config::default(),
+            path: None,
+            source: ConfigSource::BuiltInDefault,
+        })
     }
 
-    /// The ordered list of paths [`Config::load`] probes. Split out so the
+    /// The ordered list of paths [`Config::resolve`] probes. Split out so the
     /// search order is testable without creating files in /etc.
+    #[cfg(test)]
     fn candidate_paths(explicit_path: Option<&Path>) -> Vec<PathBuf> {
-        if let Some(p) = explicit_path {
-            return vec![p.to_path_buf()];
+        Self::candidate_sources(explicit_path)
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect()
+    }
+
+    fn candidate_sources(explicit_path: Option<&Path>) -> Vec<(ConfigSource, PathBuf)> {
+        if let Some(path) = explicit_path {
+            return vec![(ConfigSource::Explicit, path.to_path_buf())];
         }
-        let mut c = vec![PathBuf::from(CONFIG_FILENAME)];
+        let mut candidates = vec![(ConfigSource::ProjectLocal, PathBuf::from(CONFIG_FILENAME))];
         if let Some(config_dir) = dirs::config_dir() {
-            c.push(config_dir.join("lific").join(CONFIG_FILENAME));
+            candidates.push((
+                ConfigSource::User,
+                config_dir.join("lific").join(CONFIG_FILENAME),
+            ));
         }
         if let Some(system_dir) = Self::system_config_dir() {
-            c.push(system_dir.join(CONFIG_FILENAME));
+            candidates.push((ConfigSource::System, system_dir.join(CONFIG_FILENAME)));
         }
-        c
+        candidates
     }
 
     /// The platform's system-wide config directory for Lific (LIF-293): the
@@ -520,14 +575,6 @@ impl Config {
         } else {
             Some(PathBuf::from("/etc/lific"))
         }
-    }
-
-    /// First existing config file among the standard search locations, if
-    /// any. Used by commands that operate on "the instance" without an
-    /// explicit `--config` (e.g. `lific service install`) so they agree with
-    /// what `Config::load` would pick.
-    pub fn discover_path() -> Option<PathBuf> {
-        Self::candidate_paths(None).into_iter().find(|p| p.exists())
     }
 
     /// LIF-295: the OS-standard home for a `lific init` instance — config
@@ -644,6 +691,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prop_assert_eq;
     use std::io::Write;
 
     /// An absolute `database.path` literal for the host platform.
@@ -861,13 +909,64 @@ enabled = false
         assert_eq!(config.database.path, PathBuf::from(ABSOLUTE_DB_PATH));
     }
 
-    /// No config file anywhere is a legitimate first-run state, so defaults
-    /// are correct here. This is the ONLY path that may return defaults.
+    /// An explicit `--config` path names one file. A missing file is a hard
+    /// error; only complete absence of every candidate may return defaults.
     #[test]
-    fn missing_file_returns_defaults() {
-        let config =
-            Config::load(Some(Path::new("/tmp/nonexistent_lific_cfg_12345.toml"))).unwrap();
-        assert_eq!(config.server.port, 3456);
+    fn missing_explicit_file_is_a_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.toml");
+        let error = Config::load(Some(&path)).unwrap_err();
+        assert!(matches!(error, ConfigError::MissingExplicit { .. }));
+        assert_eq!(
+            error.to_string(),
+            format!("--config path '{}' does not exist", path.display())
+        );
+    }
+
+    #[test]
+    fn resolve_reports_explicit_path_and_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lific.toml");
+        std::fs::write(&path, "[server]\nport = 3998\n").unwrap();
+
+        let resolved = Config::resolve(Some(&path)).unwrap();
+
+        assert_eq!(resolved.path, Some(path));
+        assert_eq!(resolved.source, ConfigSource::Explicit);
+        assert_eq!(resolved.config.server.port, 3998);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn explicit_resolution_anchors_any_safe_relative_database_name(
+            database_name in "[a-zA-Z0-9_-]{1,24}"
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("lific.toml");
+            std::fs::write(
+                &path,
+                format!("[database]\npath = \"{database_name}.db\"\n"),
+            ).unwrap();
+
+            let resolved = Config::resolve(Some(&path)).unwrap();
+            let expected_database = tmp.path().join(format!("{database_name}.db"));
+
+            prop_assert_eq!(resolved.source, ConfigSource::Explicit);
+            prop_assert_eq!(resolved.path, Some(path.clone()));
+            prop_assert_eq!(
+                resolved.config.database.path.as_path(),
+                expected_database.as_path()
+            );
+            let loaded = Config::load(Some(&path)).unwrap();
+            prop_assert_eq!(
+                loaded.database.path.as_path(),
+                resolved.config.database.path.as_path()
+            );
+            prop_assert_eq!(
+                Config::load(Some(&path)).unwrap().server.port,
+                resolved.config.server.port
+            );
+        }
     }
 
     /// A malformed config must refuse to load rather than silently reverting

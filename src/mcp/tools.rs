@@ -6042,19 +6042,19 @@ mod tests {
         assert!(created.starts_with("Created module"), "got: {created}");
 
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             title: "In a module".into(),
             module: Some("Backend".into()),
             ..Default::default()
         }));
         m.create_issue(Parameters(CreateIssueInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             title: "Unassigned".into(),
             ..Default::default()
         }));
 
         let result = m.list_issues(Parameters(ListIssuesInput {
-            project: "LSM".into(),
+            project: Some("LSM".into()),
             ..Default::default()
         }));
         assert!(result.contains("2 issues"), "got: {result}");

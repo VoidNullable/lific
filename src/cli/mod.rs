@@ -107,7 +107,12 @@ pub struct Cli {
 
     /// API key for the HTTP backend (also read from LIFIC_API_KEY; login
     /// credentials are used when this is omitted).
-    #[arg(long = "api-key", global = true, env = "LIFIC_API_KEY")]
+    #[arg(
+        long = "api-key",
+        global = true,
+        env = "LIFIC_API_KEY",
+        hide_env_values = true
+    )]
     pub api_key: Option<String>,
 
     #[command(subcommand)]
@@ -192,12 +197,23 @@ pub enum Command {
     /// nothing failed, 1 otherwise — so agents and CI can gate on it. Safe to
     /// run whether or not a server is up; server-dependent checks are skipped
     /// (not failed) when nothing is listening.
+    ///
+    /// By default the database is inspected read-only: doctor runs no migrations
+    /// and changes no schema or application data. SQLite may create or update
+    /// WAL/SHM bookkeeping files. If the configuration file cannot be read,
+    /// every check that depends on it is skipped rather than run against
+    /// built-in defaults; pass --db PATH to inspect a specific database anyway.
     Doctor {
         /// API key to test an authorized MCP round-trip. Falls back to the
         /// LIFIC_API_KEY environment variable. Without a key, doctor still
         /// verifies that auth is enforced and discovery is advertised.
-        #[arg(long, env = "LIFIC_API_KEY")]
+        #[arg(long, env = "LIFIC_API_KEY", hide_env_values = true)]
         key: Option<String>,
+
+        /// Apply pending database migrations while checking the database.
+        /// Needs a readable config, or an explicit --db PATH.
+        #[arg(long)]
+        repair: bool,
     },
 
     /// Set up a ready-to-use Lific instance.
@@ -1655,8 +1671,9 @@ mod tests {
         // env var polluting the assertion.
         let cli = Cli::try_parse_from(["lific", "doctor"]).unwrap();
         match cli.command {
-            Command::Doctor { key } => {
+            Command::Doctor { key, repair } => {
                 assert_eq!(key, env_fallback("LIFIC_API_KEY"));
+                assert!(!repair);
             }
             _ => panic!("expected Doctor"),
         }
@@ -1762,7 +1779,22 @@ mod tests {
     fn parse_doctor_with_key_flag() {
         let cli = Cli::try_parse_from(["lific", "doctor", "--key", "lific_sk-live-abc"]).unwrap();
         match cli.command {
-            Command::Doctor { key } => assert_eq!(key, Some("lific_sk-live-abc".into())),
+            Command::Doctor { key, repair } => {
+                assert_eq!(key, Some("lific_sk-live-abc".into()));
+                assert!(!repair);
+            }
+            _ => panic!("expected Doctor"),
+        }
+    }
+
+    #[test]
+    fn parse_doctor_with_repair_flag() {
+        let cli = Cli::try_parse_from(["lific", "doctor", "--repair"]).unwrap();
+        match cli.command {
+            Command::Doctor { key, repair } => {
+                assert_eq!(key, env_fallback("LIFIC_API_KEY"));
+                assert!(repair);
+            }
             _ => panic!("expected Doctor"),
         }
     }

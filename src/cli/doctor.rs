@@ -15,17 +15,36 @@
 //!
 //! 1. **config** — which config file is in use. Explicit `--config` / `./lific.toml`
 //!    / `~/.config/lific/lific.toml` = pass. Built-in defaults (no file) = warn.
-//!    A file that exists but fails to parse = fail (we re-parse directly here
-//!    so the diagnostic can report the parse error as one check among many,
-//!    rather than aborting the whole run the way `Config::load` now does).
-//! 2. **database** — file present + opens + migrations apply. Missing file with a
-//!    writable parent = warn ("created on first start"); unwritable parent = fail.
-//!    Opening runs migrations (same as `lific start`); we say so.
+//!    A file that exists but fails to parse = fail; the already-computed
+//!    resolution is reported without repeating candidate discovery.
+//!
+//!    A failed resolution is **fail-closed**: every check that would otherwise
+//!    read a configured value is skipped with that reason named, because the
+//!    built-in defaults describe a different instance than the one the operator
+//!    meant to diagnose. Only an explicit `--db PATH` names a target
+//!    independently of config, so it is the one thing still inspected (or
+//!    repaired) after a resolution failure. Backups and every server-dependent
+//!    check are skipped outright, so no stored credential is ever presented to
+//!    the default endpoint on the strength of a configuration we failed to read.
+//! 2. **database** — file present and readable without migrations. Missing file
+//!    with a writable parent = warn (run `lific init`); unwritable parent =
+//!    fail. An existing non-Lific database = fail. A database another process
+//!    holds locked = warn (inconclusive, not corrupt). `--repair` opts into
+//!    applying pending migrations through the normal database opener.
+//!
+//!    Read-only inspection is a **logical** contract: it opens the file with
+//!    `SQLITE_OPEN_READ_ONLY`, bounds contention with a busy timeout, and reads
+//!    both facts inside one deferred transaction, so it never runs migrations
+//!    and never changes schema or application data. It does allow SQLite's own
+//!    bookkeeping, notably creating or updating the `-shm` file needed to read a
+//!    WAL database, which is what lets doctor see data that has not been
+//!    checkpointed yet.
 //! 3. **backups** — only when enabled. Dir missing = warn (server creates it);
 //!    dir present but unwritable = fail; no backups yet = warn; otherwise pass
 //!    with the most-recent backup age vs the configured interval.
 //! 4. **server** — HTTP reachability of `http://{host}:{port}/api/health`
-//!    (0.0.0.0 → 127.0.0.1). Not running = warn (doctor must work offline).
+//!    (0.0.0.0 → 127.0.0.1). A 2xx response passes; another HTTP status warns
+//!    while dependent checks continue. Not running warns and skips them.
 //! 5. **oauth_discovery** — `GET {base}/.well-known/oauth-protected-resource/mcp`
 //!    → 200 + JSON containing `resource`. Skipped when the server is unreachable.
 //! 6. **mcp** — `POST {base}/mcp` JSON-RPC `initialize`. No key → expect 401 with
@@ -42,6 +61,11 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::Config;
+
+/// How long read-only inspection waits for a competing lock before reporting
+/// the database as busy. Bounded so `doctor` stays a fast command even when the
+/// server is mid-write.
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Outcome of a single check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -148,63 +172,149 @@ fn connect_base(cfg: &Config) -> String {
     )
 }
 
-/// Entry point invoked from `main`.
-///
-/// Returns `Ok(())` when no check failed, or `Err(message)` when at least one
-/// did — which propagates to a non-zero process exit via `main`'s `?`.
+/// Run doctor with the canonical configuration-selection result. A malformed
+/// configuration is reported and every configuration-dependent check is
+/// skipped, so doctor never diagnoses defaults the operator did not choose.
+/// `database_override` names a target independently of config, and `repair`
+/// explicitly opts into applying migrations.
 pub async fn run(
-    cfg: &Config,
-    explicit_config: Option<&Path>,
-    key: Option<String>,
+    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    database_override: Option<&Path>,
+    key: Option<&str>,
+    repair: bool,
     json: bool,
 ) -> Result<(), String> {
-    let report = build_report_with_config_path(cfg, explicit_config, key.as_deref()).await;
-    print_report(&report, json);
-    if report.fail_count() > 0 {
-        Err(format!("doctor: {} check(s) failed", report.fail_count()))
+    let database_mode = if repair {
+        DatabaseCheckMode::Repair
     } else {
-        Ok(())
+        DatabaseCheckMode::ReadOnly
+    };
+    let report = build_report(resolution, database_override, key, database_mode).await;
+    print_report(&report, json);
+    match report.fail_count() {
+        0 => Ok(()),
+        count => Err(format!("doctor: {count} check(s) failed")),
     }
 }
 
-/// Run every check and assemble the report. Split from `run` so tests can
-/// inspect the structured result without touching stdout. Uses the default
-/// config search order for provenance (no explicit `--config`).
-#[cfg_attr(not(test), allow(dead_code))]
-pub async fn build_report(cfg: &Config, key: Option<&str>) -> Report {
-    build_report_with_config_path(cfg, None, key).await
+/// Reason attached to every check skipped because configuration selection
+/// failed. Named on each check so the output says why it did not run.
+const CONFIG_UNRESOLVED: &str = "configuration could not be resolved; skipped";
+
+/// Assemble the structured report from the single configuration-selection
+/// result. This function owns doctor's fail-closed policy, so callers cannot
+/// report one resolution while checking an unrelated configuration.
+async fn build_report(
+    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    database_override: Option<&Path>,
+    key: Option<&str>,
+    database_mode: DatabaseCheckMode,
+) -> Report {
+    let config_check = check_config(&resolution);
+    let Ok(resolved) = resolution else {
+        return Report::new(unconfigured_checks(
+            config_check,
+            database_override,
+            database_mode,
+        ));
+    };
+
+    let mut cfg = resolved.config;
+    if let Some(path) = database_override {
+        cfg.database.path = path.to_owned();
+    }
+    let mut checks = vec![config_check, check_database(&cfg, database_mode)];
+    checks.extend(check_backups(&cfg));
+    checks.extend(check_remote(&cfg, key).await);
+    Report::new(checks)
 }
 
-/// Like [`build_report`] but honors an explicit `--config` path when reporting
-/// which config file is in use.
-pub async fn build_report_with_config_path(
-    cfg: &Config,
-    explicit_config: Option<&Path>,
-    key: Option<&str>,
-) -> Report {
+/// The report doctor produces when configuration selection failed. The failure
+/// itself is retained, an explicit `--db` target is still inspected because it
+/// was named on the command line rather than read from the file we could not
+/// load, and everything else is skipped with the reason spelled out.
+fn unconfigured_checks(
+    config_check: Check,
+    database_override: Option<&Path>,
+    database_mode: DatabaseCheckMode,
+) -> Vec<Check> {
+    let database = match database_override {
+        Some(path) => check_database_at(path, database_mode),
+        None => Check::new(
+            "database",
+            Status::Skipped,
+            format!("{CONFIG_UNRESOLVED} (pass --db PATH to inspect one anyway)"),
+        ),
+    };
+    vec![
+        config_check,
+        database,
+        Check::new("backups", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("server", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("oauth_discovery", Status::Skipped, CONFIG_UNRESOLVED),
+        Check::new("mcp", Status::Skipped, CONFIG_UNRESOLVED),
+    ]
+}
+
+/// Run checks that depend on the configured server or its credentials.
+async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
+    let base = connect_base(cfg);
+    let credential_base = cfg.server.public_url.as_deref().unwrap_or(&base);
     let mut checks = Vec::new();
 
-    checks.push(check_config(explicit_config));
-    checks.push(check_database(cfg));
-    if let Some(c) = check_backups(cfg) {
-        checks.push(c);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    else {
+        checks.push(Check::new(
+            "server",
+            Status::Warn,
+            "could not build HTTP client — skipped",
+        ));
+        checks.extend(skipped_local_checks("skipped"));
+        return checks;
+    };
+
+    checks.extend(check_local_remote(&client, &base, key, credential_base).await);
+
+    if let Some(url) = cfg.server.public_url.as_deref() {
+        checks.push(check_public_url(&client, url).await);
     }
 
-    // Build the base URL a client would use to reach this server.
-    let base = connect_base(cfg);
+    checks
+}
 
-    // LIF-252/LIF-258: if no --key/LIFIC_API_KEY was given, fall back to a
-    // token stored by `lific login` (env > keyring > file). We probe the
-    // credential store keyed by the server's public_url when set, else the
-    // loopback base, since that's how `lific login` would have keyed it.
-    let cred_base = cfg.server.public_url.as_deref().unwrap_or(&base);
-    let (effective_key, key_source): (
-        Option<String>,
-        Option<crate::cli::credentials::TokenSource>,
-    ) = match key {
-        Some(k) => (Some(k.to_string()), None),
-        None => match crate::cli::credentials::load_with_source(cred_base) {
-            Ok(Some((tok, src))) => (Some(tok), Some(src)),
+/// Run the server checks sharing the local configured endpoint.
+async fn check_local_remote(
+    client: &reqwest::Client,
+    base: &str,
+    explicit_key: Option<&str>,
+    credential_base: &str,
+) -> Vec<Check> {
+    let probe = http_server_reachable(client, base).await;
+    let mut checks = vec![server_check_result(&probe)];
+    match probe {
+        ServerProbe::Reachable(_) => {
+            checks.extend(check_reachable_remote(client, base, explicit_key, credential_base).await)
+        }
+        ServerProbe::Unreachable => {
+            checks.extend(skipped_local_checks("server not reachable — skipped"));
+        }
+    }
+    checks
+}
+
+async fn check_reachable_remote(
+    client: &reqwest::Client,
+    base: &str,
+    explicit_key: Option<&str>,
+    credential_base: &str,
+) -> Vec<Check> {
+    let mut checks = vec![check_oauth_discovery(client, base).await];
+    let (key, key_source) = match explicit_key {
+        Some(key) => (Some(key.to_owned()), None),
+        None => match crate::cli::credentials::load_with_source(credential_base) {
+            Ok(Some((key, source))) => (Some(key), Some(source)),
             Ok(None) => (None, None),
             Err(error) => {
                 checks.push(Check::new(
@@ -216,145 +326,68 @@ pub async fn build_report_with_config_path(
             }
         },
     };
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .ok();
-
-    let server_up = match &client {
-        Some(c) => http_server_reachable(c, &base).await,
-        None => None,
-    };
-
-    match (&client, &server_up) {
-        (Some(c), Some(reachable)) => {
-            checks.push(server_check_result(reachable));
-            if reachable.reachable {
-                checks.push(check_oauth_discovery(c, &base).await);
-                let mut mcp_check = check_mcp(c, &base, effective_key.as_deref()).await;
-                // Note where the credential came from when it was a stored
-                // login token rather than an explicit --key/LIFIC_API_KEY.
-                if let Some(src) = key_source {
-                    mcp_check.detail = format!("{} (using {})", mcp_check.detail, src.label());
-                }
-                checks.push(mcp_check);
-            } else {
-                checks.push(Check::new(
-                    "oauth_discovery",
-                    Status::Skipped,
-                    "server not reachable — skipped",
-                ));
-                checks.push(Check::new(
-                    "mcp",
-                    Status::Skipped,
-                    "server not reachable — skipped",
-                ));
-            }
-        }
-        _ => {
-            // Could not even build a client; report all HTTP checks as skipped.
-            checks.push(Check::new(
-                "server",
-                Status::Warn,
-                "could not build HTTP client — skipped",
-            ));
-            checks.push(Check::new("oauth_discovery", Status::Skipped, "skipped"));
-            checks.push(Check::new("mcp", Status::Skipped, "skipped"));
-        }
+    let mut mcp = check_mcp(client, base, key.as_deref()).await;
+    if let Some(source) = key_source {
+        mcp.detail = format!("{} (using {})", mcp.detail, source.label());
     }
+    checks.push(mcp);
+    checks
+}
 
-    // public_url check only when configured.
-    if let (Some(c), Some(url)) = (&client, cfg.server.public_url.as_deref()) {
-        checks.push(check_public_url(c, url).await);
-    }
-
-    Report::new(checks)
+fn skipped_local_checks(detail: &str) -> [Check; 2] {
+    [
+        Check::new("oauth_discovery", Status::Skipped, detail),
+        Check::new("mcp", Status::Skipped, detail),
+    ]
 }
 
 // ── Check 1: config ──────────────────────────────────────────────────────
 
-/// Determine which config file is in use and whether it parses.
+/// Report the already-computed configuration selection or its typed failure.
 ///
-/// We do NOT reuse `Config::load` here. It now refuses to load a malformed
-/// config at all, which is right for booting the server but wrong for a
-/// diagnostic: `lific doctor` is exactly the tool you reach for when the
-/// config is broken, so it must report the parse failure as a FAIL check and
-/// carry on with the remaining checks. So we re-run the same search order and
-/// parse the found file directly.
-fn check_config(explicit_config: Option<&Path>) -> Check {
-    // The search is re-done here (rather than trusting the already-loaded
-    // config) to report provenance and catch parse errors the loader hides. If
-    // an explicit `--config` was given, it wins and is the only candidate — a
-    // broken explicit file must be a hard fail, not a silent fall-through.
-    let candidates = config_candidates(explicit_config);
-    for (label, path) in &candidates {
-        if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(contents) => match toml::from_str::<Config>(&contents) {
-                    Ok(_) => {
-                        return Check::new(
-                            "config",
-                            Status::Pass,
-                            format!("using {} ({})", path.display(), label),
-                        );
-                    }
-                    Err(e) => {
-                        return Check::new(
-                            "config",
-                            Status::Fail,
-                            format!("{} exists but failed to parse: {e}", path.display()),
-                        );
-                    }
-                },
-                Err(e) => {
-                    return Check::new(
-                        "config",
-                        Status::Fail,
-                        format!("{} exists but is unreadable: {e}", path.display()),
-                    );
-                }
-            }
-        } else if *label == "--config" {
-            // An explicit --config that doesn't exist is a user error, not a
-            // silent fall-back to defaults.
-            return Check::new(
+/// Doctor keeps running after a configuration error so it can report other
+/// independent checks, but it never hides the failed selection behind defaults.
+fn check_config(
+    resolution: &Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+) -> Check {
+    match resolution {
+        Err(error) => Check::new("config", Status::Fail, error.to_string()),
+        Ok(resolved) if resolved.source == crate::config::ConfigSource::BuiltInDefault => {
+            Check::new(
                 "config",
-                Status::Fail,
-                format!("--config {} does not exist", path.display()),
-            );
+                Status::Warn,
+                "no lific.toml found — using built-in defaults (run `lific init`)",
+            )
+        }
+        Ok(resolved) => {
+            let path = resolved
+                .path
+                .as_deref()
+                .expect("non-default config resolution must have a path");
+            Check::new(
+                "config",
+                Status::Pass,
+                format!("using {} ({})", path.display(), resolved.source.label()),
+            )
         }
     }
-    Check::new(
-        "config",
-        Status::Warn,
-        "no lific.toml found — using built-in defaults (run `lific init`)",
-    )
-}
-
-/// The config-file search order, mirroring `Config::load`. An explicit
-/// `--config` path, if provided, is the sole candidate (matching the loader,
-/// which searches nothing else when `--config` is set).
-fn config_candidates(explicit_config: Option<&Path>) -> Vec<(&'static str, std::path::PathBuf)> {
-    if let Some(p) = explicit_config {
-        return vec![("--config", p.to_path_buf())];
-    }
-    let mut c = vec![("./lific.toml", std::path::PathBuf::from("lific.toml"))];
-    if let Some(dir) = dirs::config_dir() {
-        c.push((
-            "~/.config/lific/lific.toml",
-            dir.join("lific").join("lific.toml"),
-        ));
-    }
-    c
 }
 
 // ── Check 2: database ────────────────────────────────────────────────────
 
-fn check_database(cfg: &Config) -> Check {
-    let path = &cfg.database.path;
+#[derive(Clone, Copy)]
+enum DatabaseCheckMode {
+    ReadOnly,
+    Repair,
+}
+
+fn check_database(cfg: &Config, mode: DatabaseCheckMode) -> Check {
+    check_database_at(&cfg.database.path, mode)
+}
+
+fn check_database_at(path: &Path, mode: DatabaseCheckMode) -> Check {
     if !path.exists() {
-        // Missing is fine if the server could create it; the deciding factor is
+        // Missing is fine if init could create it; the deciding factor is
         // whether the parent directory is writable.
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
         let parent_writable = match parent {
@@ -366,7 +399,7 @@ fn check_database(cfg: &Config) -> Check {
                 "database",
                 Status::Warn,
                 format!(
-                    "{} does not exist yet — will be created on first start",
+                    "{} does not exist yet; run `lific init` to create it",
                     path.display()
                 ),
             )
@@ -382,14 +415,65 @@ fn check_database(cfg: &Config) -> Check {
         };
     }
 
-    // File exists: open it (runs migrations, same as `lific start`) to confirm
-    // it's a healthy lific DB at the current schema.
+    match mode {
+        DatabaseCheckMode::ReadOnly => check_database_read_only(path),
+        DatabaseCheckMode::Repair => check_database_with_repair(path),
+    }
+}
+
+fn check_database_read_only(path: &Path) -> Check {
+    // Doctor must not run migrations or change schema or application data,
+    // because those operations mutate the instance being diagnosed.
+    describe_inspection(path, inspect_database(path))
+}
+
+fn describe_inspection(path: &Path, result: anyhow::Result<Inspection>) -> Check {
+    match result {
+        Ok(Inspection::Lific { version }) => Check::new(
+            "database",
+            Status::Pass,
+            format!(
+                "{} opens read-only (schema v{version}); no migrations run",
+                path.display()
+            ),
+        ),
+        Ok(Inspection::NotLific) => Check::new(
+            "database",
+            Status::Fail,
+            format!("{} is not a Lific database", path.display()),
+        ),
+        // A lock held by another process says nothing about the database's
+        // health, so this is inconclusive rather than a failure.
+        Ok(Inspection::Busy(reason)) => Check::new(
+            "database",
+            Status::Warn,
+            format!(
+                "{} is locked by another process, so its schema could not be read ({reason})",
+                path.display()
+            ),
+        ),
+        Err(e) => Check::new(
+            "database",
+            Status::Fail,
+            format!("{} failed to inspect read-only: {e}", path.display()),
+        ),
+    }
+}
+
+fn check_database_with_repair(path: &Path) -> Check {
     match crate::db::open(path) {
-        Ok(pool) => match schema_version(&pool) {
-            Some(v) => Check::new(
+        Ok(pool) => match pool
+            .read()
+            .ok()
+            .and_then(|connection| schema_version(&connection).ok())
+        {
+            Some(version) => Check::new(
                 "database",
                 Status::Pass,
-                format!("{} opens; migrations applied (schema v{v})", path.display()),
+                format!(
+                    "{} opens; migrations applied (schema v{version})",
+                    path.display()
+                ),
             ),
             None => Check::new(
                 "database",
@@ -397,23 +481,101 @@ fn check_database(cfg: &Config) -> Check {
                 format!("{} opens; migrations applied", path.display()),
             ),
         },
-        Err(e) => Check::new(
+        Err(error) => Check::new(
             "database",
             Status::Fail,
-            format!("{} failed to open: {e}", path.display()),
+            format!("{} failed to open: {error}", path.display()),
         ),
     }
 }
 
-/// Read the highest applied migration version, if the table is present.
-fn schema_version(pool: &crate::db::DbPool) -> Option<i64> {
-    let conn = pool.read().ok()?;
-    conn.query_row(
+fn schema_version(connection: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    connection.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM _migrations",
         [],
         |row| row.get::<_, i64>(0),
     )
-    .ok()
+}
+
+/// What read-only inspection learned about a database file.
+#[derive(Debug)]
+enum Inspection {
+    /// A Lific database at the given schema version.
+    Lific { version: i64 },
+    /// The file opened as a database, but carries no `_migrations` table.
+    NotLific,
+    /// Another process holds a conflicting lock, so the answer is unknown.
+    Busy(String),
+}
+
+/// Inspect the migration marker without running migrations and without
+/// changing schema or application data.
+///
+/// The connection is opened `SQLITE_OPEN_READ_ONLY`, so SQLite refuses any
+/// write to the database itself. SQLite's own bookkeeping is still permitted:
+/// reading a WAL database requires the `-shm` index, and permitting it is what
+/// lets doctor observe rows that have not been checkpointed into the main file
+/// yet. Both facts are read inside one deferred transaction, so a concurrent
+/// writer cannot make the table probe and the version read disagree.
+fn inspect_database(path: &Path) -> anyhow::Result<Inspection> {
+    inspect_database_with_timeout(path, DATABASE_BUSY_TIMEOUT)
+}
+
+fn inspect_database_with_timeout(path: &Path, timeout: Duration) -> anyhow::Result<Inspection> {
+    let result = open_inspection_connection(path, timeout)
+        .and_then(|mut connection| inspect_connection(&mut connection));
+    Ok(classify_inspection(result)?)
+}
+
+fn open_inspection_connection(
+    path: &Path,
+    timeout: Duration,
+) -> rusqlite::Result<rusqlite::Connection> {
+    let connection = open_read_only_database(path)?;
+    // Bounded, so a busy instance makes doctor inconclusive rather than slow.
+    connection.busy_timeout(timeout)?;
+    Ok(connection)
+}
+
+/// Turn a lock conflict into an inconclusive result; every other error stays an
+/// error, because it means the file could not be read at all.
+fn classify_inspection(result: rusqlite::Result<Inspection>) -> rusqlite::Result<Inspection> {
+    match result {
+        Err(error) if is_busy(&error) => Ok(Inspection::Busy(error.to_string())),
+        other => other,
+    }
+}
+
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+fn inspect_connection(connection: &mut rusqlite::Connection) -> rusqlite::Result<Inspection> {
+    use rusqlite::OptionalExtension;
+
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+    let migration_table: Option<String> = transaction
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if migration_table.is_none() {
+        return Ok(Inspection::NotLific);
+    }
+    schema_version(&transaction).map(|version| Inspection::Lific { version })
+}
+
+fn open_read_only_database(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
 }
 
 /// Best-effort writability probe: try to create (and remove) a temp file in the
@@ -526,45 +688,47 @@ fn newest_backup_age_minutes(dir: &Path) -> Option<u64> {
 // ── Check 4: server reachability ─────────────────────────────────────────
 
 /// Result of probing the server's health endpoint.
-pub struct ServerProbe {
-    pub reachable: bool,
-    pub status: Option<u16>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerProbe {
+    Reachable(reqwest::StatusCode),
+    Unreachable,
 }
 
-/// Probe `GET {base}/api/health`. `Some(probe)` always (reachable flags whether
-/// a connection succeeded). Kept separate from the `Check` so the follow-on
-/// HTTP checks can gate on `reachable` without re-parsing a detail string.
-pub async fn http_server_reachable(client: &reqwest::Client, base: &str) -> Option<ServerProbe> {
+/// Probe `GET {base}/api/health`. Kept separate from the `Check` so the
+/// follow-on HTTP checks can gate on `reachable` without re-parsing a detail
+/// string.
+async fn http_server_reachable(client: &reqwest::Client, base: &str) -> ServerProbe {
     let url = format!("{}/api/health", base.trim_end_matches('/'));
     match client.get(&url).send().await {
-        Ok(resp) => Some(ServerProbe {
-            reachable: true,
-            status: Some(resp.status().as_u16()),
-        }),
-        Err(_) => Some(ServerProbe {
-            reachable: false,
-            status: None,
-        }),
+        Ok(response) => ServerProbe::Reachable(response.status()),
+        Err(_) => ServerProbe::Unreachable,
     }
 }
 
 fn server_check_result(probe: &ServerProbe) -> Check {
-    if probe.reachable {
-        let ver = env!("CARGO_PKG_VERSION");
-        Check::new(
+    match probe {
+        ServerProbe::Reachable(status) if status.is_success() => Check::new(
             "server",
             Status::Pass,
             format!(
-                "reachable (health {}); this binary is lific {ver}",
-                probe.status.unwrap_or(0)
+                "reachable (health {}); this binary is lific {}",
+                status.as_u16(),
+                env!("CARGO_PKG_VERSION")
             ),
-        )
-    } else {
-        Check::new(
+        ),
+        ServerProbe::Reachable(status) => Check::new(
+            "server",
+            Status::Warn,
+            format!(
+                "reachable, but health returned HTTP {}; server checks will continue",
+                status.as_u16()
+            ),
+        ),
+        ServerProbe::Unreachable => Check::new(
             "server",
             Status::Warn,
             "not running (start it with `lific start`) — server checks skipped",
-        )
+        ),
     }
 }
 
@@ -572,48 +736,50 @@ fn server_check_result(probe: &ServerProbe) -> Check {
 
 /// `GET {base}/.well-known/oauth-protected-resource/mcp` → 200 + JSON with a
 /// `resource` field.
-pub async fn check_oauth_discovery(client: &reqwest::Client, base: &str) -> Check {
+async fn check_oauth_discovery(client: &reqwest::Client, base: &str) -> Check {
     let url = format!(
         "{}/.well-known/oauth-protected-resource/mcp",
         base.trim_end_matches('/')
     );
-    match client.get(&url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                return Check::new(
-                    "oauth_discovery",
-                    Status::Fail,
-                    format!("discovery endpoint returned HTTP {}", status.as_u16()),
-                );
-            }
-            match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    if let Some(resource) = body.get("resource").and_then(|r| r.as_str()) {
-                        Check::new(
-                            "oauth_discovery",
-                            Status::Pass,
-                            format!("advertised, resource = {resource}"),
-                        )
-                    } else {
-                        Check::new(
-                            "oauth_discovery",
-                            Status::Fail,
-                            "200 but JSON is missing the `resource` field",
-                        )
-                    }
-                }
-                Err(e) => Check::new(
-                    "oauth_discovery",
-                    Status::Fail,
-                    format!("200 but body was not JSON: {e}"),
-                ),
-            }
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return Check::new(
+                "oauth_discovery",
+                Status::Fail,
+                format!("request failed: {error}"),
+            );
         }
-        Err(e) => Check::new(
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return Check::new(
             "oauth_discovery",
             Status::Fail,
-            format!("request failed: {e}"),
+            format!("discovery endpoint returned HTTP {}", status.as_u16()),
+        );
+    }
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => check_oauth_discovery_body(body),
+        Err(error) => Check::new(
+            "oauth_discovery",
+            Status::Fail,
+            format!("200 but body was not JSON: {error}"),
+        ),
+    }
+}
+
+fn check_oauth_discovery_body(body: serde_json::Value) -> Check {
+    match body.get("resource").and_then(serde_json::Value::as_str) {
+        Some(resource) => Check::new(
+            "oauth_discovery",
+            Status::Pass,
+            format!("advertised, resource = {resource}"),
+        ),
+        None => Check::new(
+            "oauth_discovery",
+            Status::Fail,
+            "200 but JSON is missing the `resource` field",
         ),
     }
 }
@@ -638,7 +804,25 @@ fn initialize_body() -> serde_json::Value {
 /// `POST {base}/mcp` an `initialize`. Without a key we expect a 401 carrying a
 /// `WWW-Authenticate` header (auth enforced, discovery advertised). With a key
 /// we expect a 200 whose JSON-RPC result contains `serverInfo`.
-pub async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) -> Check {
+async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) -> Check {
+    let response = match send_mcp_initialize(client, base, key).await {
+        Ok(response) => response,
+        Err(error) => {
+            return Check::new("mcp", Status::Fail, format!("request failed: {error}"));
+        }
+    };
+
+    match key {
+        None => check_mcp_auth_response(&response),
+        Some(_) => check_mcp_authorized_response(response).await,
+    }
+}
+
+async fn send_mcp_initialize(
+    client: &reqwest::Client,
+    base: &str,
+    key: Option<&str>,
+) -> Result<reqwest::Response, reqwest::Error> {
     let url = format!("{}/mcp", base.trim_end_matches('/'));
     let mut req = client
         .post(&url)
@@ -648,95 +832,92 @@ pub async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) 
     if let Some(k) = key {
         req = req.bearer_auth(k);
     }
+    req.send().await
+}
 
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return Check::new("mcp", Status::Fail, format!("request failed: {e}"));
-        }
-    };
-
-    let status = resp.status();
-    let has_www_auth = resp
+fn check_mcp_auth_response(response: &reqwest::Response) -> Check {
+    let status = response.status();
+    let has_www_auth = response
         .headers()
         .contains_key(reqwest::header::WWW_AUTHENTICATE);
 
-    match key {
-        None => {
-            // No key: the correct, healthy behavior is a 401 that advertises
-            // where to discover auth.
-            if status == reqwest::StatusCode::UNAUTHORIZED && has_www_auth {
-                Check::new(
-                    "mcp",
-                    Status::Pass,
-                    "auth enforced (401 + WWW-Authenticate); discovery advertised",
-                )
-            } else if status == reqwest::StatusCode::UNAUTHORIZED {
-                Check::new(
-                    "mcp",
-                    Status::Warn,
-                    "401 but no WWW-Authenticate header — discovery not advertised",
-                )
-            } else {
-                Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!(
-                        "expected 401 without a key, got HTTP {} (auth may be disabled)",
-                        status.as_u16()
-                    ),
-                )
-            }
-        }
-        Some(_) => {
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Check::new(
-                    "mcp",
-                    Status::Fail,
-                    "provided key was rejected (401) — wrong or revoked key",
-                );
-            }
-            if !status.is_success() {
-                return Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!("initialize returned HTTP {}", status.as_u16()),
-                );
-            }
-            // json_response mode: the body is a plain JSON-RPC envelope.
-            match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    if body
-                        .get("result")
-                        .and_then(|r| r.get("serverInfo"))
-                        .is_some()
-                    {
-                        let name = body
-                            .pointer("/result/serverInfo/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("lific");
-                        Check::new(
-                            "mcp",
-                            Status::Pass,
-                            format!("authorized initialize succeeded (serverInfo: {name})"),
-                        )
-                    } else if body.get("error").is_some() {
-                        Check::new(
-                            "mcp",
-                            Status::Fail,
-                            format!("initialize returned a JSON-RPC error: {}", body["error"]),
-                        )
-                    } else {
-                        Check::new("mcp", Status::Fail, "200 but result had no serverInfo")
-                    }
-                }
-                Err(e) => Check::new(
-                    "mcp",
-                    Status::Fail,
-                    format!("200 but body was not JSON: {e}"),
-                ),
-            }
-        }
+    // No key: the correct, healthy behavior is a 401 that advertises where to
+    // discover auth.
+    if status == reqwest::StatusCode::UNAUTHORIZED && has_www_auth {
+        Check::new(
+            "mcp",
+            Status::Pass,
+            "auth enforced (401 + WWW-Authenticate); discovery advertised",
+        )
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
+        Check::new(
+            "mcp",
+            Status::Warn,
+            "401 but no WWW-Authenticate header — discovery not advertised",
+        )
+    } else {
+        Check::new(
+            "mcp",
+            Status::Fail,
+            format!(
+                "expected 401 without a key, got HTTP {} (auth may be disabled)",
+                status.as_u16()
+            ),
+        )
+    }
+}
+
+async fn check_mcp_authorized_response(response: reqwest::Response) -> Check {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Check::new(
+            "mcp",
+            Status::Fail,
+            "provided key was rejected (401) — wrong or revoked key",
+        );
+    }
+    if !status.is_success() {
+        return Check::new(
+            "mcp",
+            Status::Fail,
+            format!("initialize returned HTTP {}", status.as_u16()),
+        );
+    }
+
+    // json_response mode: the body is a plain JSON-RPC envelope.
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => check_mcp_json_response(body),
+        Err(error) => Check::new(
+            "mcp",
+            Status::Fail,
+            format!("200 but body was not JSON: {error}"),
+        ),
+    }
+}
+
+fn check_mcp_json_response(body: serde_json::Value) -> Check {
+    if body
+        .get("result")
+        .and_then(|result| result.get("serverInfo"))
+        .is_some()
+    {
+        let name = body
+            .pointer("/result/serverInfo/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("lific");
+        Check::new(
+            "mcp",
+            Status::Pass,
+            format!("authorized initialize succeeded (serverInfo: {name})"),
+        )
+    } else if let Some(error) = body.get("error") {
+        Check::new(
+            "mcp",
+            Status::Fail,
+            format!("initialize returned a JSON-RPC error: {error}"),
+        )
+    } else {
+        Check::new("mcp", Status::Fail, "200 but result had no serverInfo")
     }
 }
 
@@ -809,6 +990,8 @@ fn print_report(report: &Report, json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{prop_assert, prop_assert_eq};
+    use rusqlite::OptionalExtension;
 
     fn check(name: &str, status: Status) -> Check {
         Check::new(name, status, "")
@@ -843,6 +1026,31 @@ mod tests {
         ]);
         assert!(r.ok);
         assert_eq!(r.fail_count(), 0);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn report_failure_state_matches_every_status_set(values in proptest::collection::vec(0u8..4, 0..64)) {
+            let statuses = values.into_iter().map(|value| match value {
+                0 => Status::Pass,
+                1 => Status::Warn,
+                2 => Status::Fail,
+                _ => Status::Skipped,
+            });
+            let checks: Vec<_> = statuses
+                .enumerate()
+                .map(|(index, status)| Check::new(&index.to_string(), status, ""))
+                .collect();
+            let expected_failures = checks
+                .iter()
+                .filter(|check| check.status == Status::Fail)
+                .count();
+
+            let report = Report::new(checks);
+
+            prop_assert_eq!(report.fail_count(), expected_failures);
+            prop_assert_eq!(report.ok, expected_failures == 0);
+        }
     }
 
     // ── Summary text ─────────────────────────────────────────────────────
@@ -945,17 +1153,53 @@ mod tests {
 
     #[test]
     fn config_check_fails_on_unparseable_file() {
-        // A file that exists but is broken TOML must surface as a FAIL rather
-        // than aborting the run. We exercise the parse branch directly.
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let path = dir.join("bad.toml");
+        let path = tmp.path().join("bad.toml");
         std::fs::write(&path, "{{{ not toml").unwrap();
 
-        // Reproduce the inner parse logic the check uses.
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let parsed = toml::from_str::<Config>(&contents);
-        assert!(parsed.is_err(), "broken toml must fail to parse");
+        let resolution = Config::resolve(Some(&path));
+        assert!(matches!(
+            resolution,
+            Err(crate::config::ConfigError::Parse { .. })
+        ));
+        let check = check_config(&resolution);
+
+        assert_eq!(check.status, Status::Fail);
+        assert!(
+            check.detail.contains("bad.toml"),
+            "detail: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn config_check_warns_for_built_in_defaults() {
+        let resolution = crate::config::ResolvedConfig {
+            config: Config::default(),
+            path: None,
+            source: crate::config::ConfigSource::BuiltInDefault,
+        };
+
+        let check = check_config(&Ok(resolution));
+
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.detail.contains("built-in defaults"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn every_explicit_config_failure_is_reported_as_a_fail(
+            name in "[a-zA-Z0-9_-]{1,24}"
+        ) {
+            let error = crate::config::ConfigError::MissingExplicit {
+                path: std::path::PathBuf::from(format!("{name}.toml")),
+            };
+
+            let check = check_config(&Err(error));
+
+            prop_assert_eq!(check.status, Status::Fail);
+            prop_assert!(check.detail.contains("does not exist"));
+        }
     }
 
     // ── database check ───────────────────────────────────────────────────
@@ -967,9 +1211,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.database.path = dir.join("nope.db");
 
-        let c = check_database(&cfg);
+        let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Warn, "detail: {}", c.detail);
-        assert!(c.detail.contains("first start"));
+        assert!(c.detail.contains("lific init"), "detail: {}", c.detail);
     }
 
     #[test]
@@ -977,7 +1221,7 @@ mod tests {
         let mut cfg = Config::default();
         // A path under a directory that does not exist → parent not writable.
         cfg.database.path = std::path::PathBuf::from("/nonexistent-lific-doctor-xyz/deep/lific.db");
-        let c = check_database(&cfg);
+        let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
     }
 
@@ -991,9 +1235,294 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.database.path = db_path;
-        let c = check_database(&cfg);
+        let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
         assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        assert!(c.detail.contains("migrations applied"));
+        assert!(c.detail.contains("no migrations run"));
+    }
+
+    #[test]
+    fn database_check_does_not_migrate_an_old_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("old.db");
+        create_unrecognized_database(&db_path);
+
+        let mut cfg = Config::default();
+        cfg.database.path = db_path.clone();
+        let c = check_database(&cfg, DatabaseCheckMode::ReadOnly);
+
+        assert_eq!(c.status, Status::Fail, "an unrecognized database must fail");
+        assert!(!has_migration_table(&db_path));
+        assert_no_database_sidecars(&db_path);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn read_only_database_checks_never_repair_arbitrary_paths(
+            name in "[a-zA-Z0-9 _#%é-]{1,24}"
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            // Keep generated paths valid on Windows and away from reserved
+            // device names such as CON and NUL.
+            let db_path = tmp.path().join(format!("db-{name}.db"));
+            create_unrecognized_database(&db_path);
+
+            let mut cfg = Config::default();
+            cfg.database.path = db_path.clone();
+
+            let check = check_database(&cfg, DatabaseCheckMode::ReadOnly);
+
+            prop_assert_eq!(check.status, Status::Fail);
+            prop_assert!(!has_migration_table(&db_path));
+            assert_no_database_sidecars(&db_path);
+        }
+    }
+
+    #[test]
+    fn read_only_inspection_leaves_data_and_schema_untouched() {
+        // The contract is logical, not byte-for-byte: SQLite may write its own
+        // `-shm` bookkeeping to read a WAL database, but nothing the operator
+        // stored may change.
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("active.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (9);
+                 CREATE TABLE issues (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+                 INSERT INTO issues VALUES ('LIF-1', 'stays put');",
+            )
+            .unwrap();
+        let before = logical_contents(&writer);
+
+        assert_version(inspect_database(&database).unwrap(), 9);
+
+        assert_eq!(
+            logical_contents(&writer),
+            before,
+            "read-only inspection must not change schema or application data"
+        );
+        assert_eq!(
+            journal_mode(&writer),
+            "wal",
+            "read-only inspection must not change the journal mode"
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_reads_an_uncheckpointed_wal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("wal.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (6);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let wal = sidecar(&database, "-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            0,
+            "the truncating checkpoint must empty the WAL"
+        );
+
+        // v7 now lives only in the WAL, never in the main database file.
+        writer
+            .execute("UPDATE _migrations SET version = 7", [])
+            .unwrap();
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+
+        assert_version(inspect_database(&database).unwrap(), 7);
+    }
+
+    #[test]
+    fn read_only_inspection_reads_both_facts_from_one_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("snapshot.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (3);",
+            )
+            .unwrap();
+
+        // Commit between the two production queries, after the table probe has
+        // established the snapshot but before the version query is prepared.
+        let mut reader = open_inspection_connection(&database, DATABASE_BUSY_TIMEOUT).unwrap();
+        let mut updated = false;
+        reader.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+            if !updated
+                && matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "_migrations",
+                        ..
+                    }
+                )
+            {
+                writer
+                    .execute_batch(
+                        "UPDATE _migrations SET version = 4; PRAGMA wal_checkpoint(PASSIVE);",
+                    )
+                    .unwrap();
+                updated = true;
+            }
+            rusqlite::hooks::Authorization::Allow
+        }));
+        assert_version(inspect_connection(&mut reader).unwrap(), 3);
+        drop(reader);
+
+        // A later check, with its own transaction, sees the new version.
+        assert_version(inspect_database(&database).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_locked_database_is_inconclusive_rather_than_a_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("locked.db");
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE _migrations (version INTEGER NOT NULL);
+                 INSERT INTO _migrations VALUES (5);",
+            )
+            .unwrap();
+        // Rollback-journal mode, where an exclusive lock shuts readers out
+        // outright instead of letting them read an older snapshot.
+        assert_eq!(journal_mode(&writer), "delete");
+        writer
+            .execute_batch("BEGIN EXCLUSIVE; UPDATE _migrations SET version = 6;")
+            .unwrap();
+
+        // A short timeout keeps the test fast; the production timeout only
+        // decides how long to wait, not how the outcome is classified.
+        let inspection =
+            inspect_database_with_timeout(&database, Duration::from_millis(50)).unwrap();
+
+        assert!(
+            matches!(inspection, Inspection::Busy(_)),
+            "a locked database must be reported busy, got {inspection:?}"
+        );
+        let check = describe_inspection(&database, Ok(inspection));
+        assert_eq!(check.status, Status::Warn, "detail: {}", check.detail);
+        assert!(
+            check.detail.contains("locked by another process"),
+            "detail: {}",
+            check.detail
+        );
+        writer.execute_batch("ROLLBACK;").unwrap();
+    }
+
+    fn assert_version(inspection: Inspection, expected: i64) {
+        match inspection {
+            Inspection::Lific { version } => assert_eq!(version, expected),
+            other => panic!("expected schema v{expected}, got {other:?}"),
+        }
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        sidecar.into()
+    }
+
+    fn journal_mode(connection: &rusqlite::Connection) -> String {
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .unwrap()
+    }
+
+    /// Everything an operator would care about: the schema, plus the rows of
+    /// every user table in it.
+    fn logical_contents(connection: &rusqlite::Connection) -> Vec<String> {
+        let names: Vec<(String, String)> = connection
+            .prepare("SELECT name, COALESCE(sql, '') FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let mut contents = Vec::new();
+        for (name, sql) in &names {
+            contents.push(format!("schema:{name}:{sql}"));
+        }
+        for (name, sql) in &names {
+            if !sql.starts_with("CREATE TABLE") {
+                continue;
+            }
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM \"{name}\""))
+                .unwrap();
+            let columns = statement.column_count();
+            let rows: Vec<String> = statement
+                .query_map([], |row| {
+                    let mut cells = Vec::new();
+                    for index in 0..columns {
+                        cells.push(format!("{:?}", row.get_ref(index)?));
+                    }
+                    Ok(cells.join(","))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            contents.push(format!("rows:{name}:{}", rows.join(";")));
+        }
+        contents
+    }
+
+    #[test]
+    fn database_check_repairs_an_old_database_only_when_requested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("old.db");
+        create_unrecognized_database(&db_path);
+
+        let mut cfg = Config::default();
+        cfg.database.path = db_path.clone();
+
+        let read_only = check_database(&cfg, DatabaseCheckMode::ReadOnly);
+        assert_eq!(read_only.status, Status::Fail);
+        assert!(
+            !has_migration_table(&db_path),
+            "read-only doctor must not repair"
+        );
+        assert_no_database_sidecars(&db_path);
+
+        let repaired = check_database(&cfg, DatabaseCheckMode::Repair);
+        assert_eq!(repaired.status, Status::Pass, "detail: {}", repaired.detail);
+        assert!(repaired.detail.contains("migrations applied"));
+    }
+
+    fn has_migration_table(path: &Path) -> bool {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_migrations'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+            .is_some()
+    }
+
+    fn create_unrecognized_database(path: &Path) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute("CREATE TABLE marker (value TEXT NOT NULL)", [])
+            .unwrap();
+    }
+
+    fn assert_no_database_sidecars(path: &Path) {
+        assert!(!sidecar(path, "-wal").exists());
+        assert!(!sidecar(path, "-shm").exists());
+        assert!(!path.with_extension("db.bak").exists());
     }
 
     // ── backups check ────────────────────────────────────────────────────
@@ -1095,13 +1624,25 @@ mod tests {
             .timeout(Duration::from_millis(500))
             .build()
             .unwrap();
-        // Port 1 is privileged and nothing listens there in test.
-        let probe = http_server_reachable(&client, "http://127.0.0.1:1")
-            .await
-            .unwrap();
-        assert!(!probe.reachable);
+        let addr = serve_reset_connections().await;
+        let probe = http_server_reachable(&client, &format!("http://{addr}")).await;
+        assert_eq!(probe, ServerProbe::Unreachable);
         let c = server_check_result(&probe);
         assert_eq!(c.status, Status::Warn);
+    }
+
+    #[test]
+    fn every_health_status_is_classified_by_success() {
+        for code in 100..=999 {
+            let probe = ServerProbe::Reachable(reqwest::StatusCode::from_u16(code).unwrap());
+            let expected = if (200..300).contains(&code) {
+                Status::Pass
+            } else {
+                Status::Warn
+            };
+
+            assert_eq!(server_check_result(&probe).status, expected, "HTTP {code}");
+        }
     }
 
     // ── HTTP integration: spin up a real server in-process ───────────────
@@ -1155,11 +1696,47 @@ mod tests {
         format!("http://127.0.0.1:{}", addr.port())
     }
 
+    /// Accept connections on an owned ephemeral port and reset them before an
+    /// HTTP response, deterministically exercising the transport-error path.
+    async fn serve_reset_connections() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        addr
+    }
+
     fn test_client() -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()
             .unwrap()
+    }
+
+    fn config_at(base: &str) -> Config {
+        let url = reqwest::Url::parse(base).unwrap();
+        let mut config = Config::default();
+        config.server.host = url.host_str().unwrap().into();
+        config.server.port = url.port().unwrap();
+        config
+    }
+
+    fn status_of(checks: &[Check], name: &str) -> Option<Status> {
+        checks
+            .iter()
+            .find(|check| check.name == name)
+            .map(|check| check.status)
+    }
+
+    fn initialize_response() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "serverInfo": { "name": "test" } }
+        }))
     }
 
     #[tokio::test]
@@ -1168,9 +1745,73 @@ mod tests {
         let app = build_test_app(pool, "http://127.0.0.1");
         let base = serve_ephemeral(app).await;
 
-        let probe = http_server_reachable(&test_client(), &base).await.unwrap();
-        assert!(probe.reachable);
-        assert_eq!(probe.status, Some(200));
+        let probe = http_server_reachable(&test_client(), &base).await;
+        assert_eq!(probe, ServerProbe::Reachable(reqwest::StatusCode::OK));
+    }
+
+    #[tokio::test]
+    async fn unhealthy_server_still_runs_dependent_checks() {
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async { reqwest::StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({ "resource": "http://example.test/mcp" }))
+                }),
+            )
+            .route(
+                "/mcp",
+                axum::routing::post(|| async { initialize_response() }),
+            );
+        let base = serve_ephemeral(app).await;
+        let config = config_at(&base);
+
+        let checks = check_remote(&config, Some("explicit-test-key")).await;
+        assert_eq!(status_of(&checks, "server"), Some(Status::Warn));
+        assert_eq!(status_of(&checks, "oauth_discovery"), Some(Status::Pass));
+        assert_eq!(status_of(&checks, "mcp"), Some(Status::Pass));
+    }
+
+    #[tokio::test]
+    async fn reachable_server_runs_mcp_when_discovery_fails() {
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async { reqwest::StatusCode::OK }),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(|| async { reqwest::StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/mcp",
+                axum::routing::post(|| async { initialize_response() }),
+            );
+        let base = serve_ephemeral(app).await;
+
+        let checks = check_remote(&config_at(&base), Some("explicit-test-key")).await;
+
+        assert_eq!(status_of(&checks, "server"), Some(Status::Pass));
+        assert_eq!(status_of(&checks, "oauth_discovery"), Some(Status::Fail));
+        assert_eq!(status_of(&checks, "mcp"), Some(Status::Pass));
+    }
+
+    #[tokio::test]
+    async fn unreachable_server_skips_local_checks_without_loading_credentials() {
+        let addr = serve_reset_connections().await;
+        let checks = check_remote(
+            &config_at(&format!("http://{addr}")),
+            Some("explicit-test-key"),
+        )
+        .await;
+
+        assert_eq!(status_of(&checks, "server"), Some(Status::Warn));
+        assert_eq!(status_of(&checks, "oauth_discovery"), Some(Status::Skipped));
+        assert_eq!(status_of(&checks, "mcp"), Some(Status::Skipped));
+        assert_eq!(status_of(&checks, "credentials"), None);
     }
 
     #[tokio::test]
@@ -1226,22 +1867,21 @@ mod tests {
 
     #[tokio::test]
     async fn full_report_offline_has_no_fails_and_skips_http() {
-        // build_report reaches credentials::load_with_source, which reads
-        // LIFIC_TOKEN from the process env. Other tests mutate that variable
-        // with unsafe setenv; an unsynchronized getenv racing one of those
-        // can observe a reallocated environ. Hold the crate-wide lock across
-        // the whole report build (LIF-401).
-        let _env = crate::test_env::lock_lific_token_env().await;
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let mut cfg = Config::default();
         cfg.database.path = dir.join("lific.db");
-        // Point at a port nothing listens on.
-        cfg.server.host = "127.0.0.1".into();
-        cfg.server.port = 1;
+        let addr = serve_reset_connections().await;
+        cfg.server.host = addr.ip().to_string();
+        cfg.server.port = addr.port();
         cfg.backup.enabled = false;
 
-        let report = build_report(&cfg, None).await;
+        let resolution = Ok(crate::config::ResolvedConfig {
+            config: cfg,
+            path: Some(dir.join("lific.toml")),
+            source: crate::config::ConfigSource::Explicit,
+        });
+        let report = build_report(resolution, None, None, DatabaseCheckMode::ReadOnly).await;
         assert_eq!(report.fail_count(), 0, "offline run must not fail");
         assert!(report.ok);
 
@@ -1250,5 +1890,189 @@ mod tests {
         assert_eq!(by("server"), Some(Status::Warn));
         assert_eq!(by("oauth_discovery"), Some(Status::Skipped));
         assert_eq!(by("mcp"), Some(Status::Skipped));
+    }
+
+    #[tokio::test]
+    async fn public_url_is_checked_when_the_local_server_is_offline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = build_test_app(crate::db::open_memory().unwrap(), "http://127.0.0.1");
+        let public_url = serve_ephemeral(app).await;
+        let mut config = Config::default();
+        config.database.path = tmp.path().join("missing.db");
+        config.backup.enabled = false;
+        let addr = serve_reset_connections().await;
+        config.server.host = addr.ip().to_string();
+        config.server.port = addr.port();
+        config.server.public_url = Some(public_url);
+        let resolution = Ok(crate::config::ResolvedConfig {
+            config,
+            path: Some(tmp.path().join("lific.toml")),
+            source: crate::config::ConfigSource::Explicit,
+        });
+
+        let report = build_report(
+            resolution,
+            None,
+            Some("unused-explicit-key"),
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+        let status = |name: &str| {
+            report
+                .checks
+                .iter()
+                .find(|check| check.name == name)
+                .map(|check| check.status)
+        };
+
+        assert_eq!(status("server"), Some(Status::Warn));
+        assert_eq!(status("oauth_discovery"), Some(Status::Skipped));
+        assert_eq!(status("mcp"), Some(Status::Skipped));
+        assert_eq!(status("public_url"), Some(Status::Pass));
+    }
+
+    // ── fail-closed on a configuration failure ───────────────────────────
+
+    fn detail_of(checks: &[Check], name: &str) -> String {
+        let Some(check) = checks.iter().find(|check| check.name == name) else {
+            panic!("no `{name}` check in the report");
+        };
+        check.detail.clone()
+    }
+
+    /// Every check that would have read a configured value, and so must be
+    /// skipped rather than run against built-in defaults.
+    fn assert_config_dependent_checks_skipped(report: &Report) {
+        for name in ["backups", "server", "oauth_discovery", "mcp"] {
+            assert_eq!(
+                status_of(&report.checks, name),
+                Some(Status::Skipped),
+                "`{name}` must be skipped after a configuration failure"
+            );
+            assert!(
+                detail_of(&report.checks, name).contains("configuration"),
+                "`{name}` must name why it was skipped"
+            );
+        }
+        assert_eq!(
+            status_of(&report.checks, "public_url"),
+            None,
+            "no public URL is known, so nothing may be dialed"
+        );
+        assert_eq!(status_of(&report.checks, "credentials"), None);
+    }
+
+    fn malformed_config_resolution(
+        dir: &Path,
+    ) -> Result<crate::config::ResolvedConfig, crate::config::ConfigError> {
+        let path = dir.join("bad.toml");
+        std::fs::write(&path, "{{{ not toml").unwrap();
+        Config::resolve(Some(&path))
+    }
+
+    #[tokio::test]
+    async fn a_malformed_config_never_repairs_the_default_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
+        assert!(
+            detail_of(&report.checks, "database").contains("--db"),
+            "the skip must say how to inspect a database anyway"
+        );
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok, "the configuration failure is retained");
+    }
+
+    #[tokio::test]
+    async fn a_missing_explicit_config_never_repairs_the_default_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolution = Config::resolve(Some(&tmp.path().join("missing.toml")));
+        assert!(matches!(
+            resolution,
+            Err(crate::config::ConfigError::MissingExplicit { .. })
+        ));
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::Repair).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Skipped));
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_is_still_inspected_after_a_config_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database_path = tmp.path().join("override.db");
+        drop(crate::db::open(&database_path).unwrap());
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(
+            resolution,
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::ReadOnly,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        let detail = detail_of(&report.checks, "database");
+        assert!(detail.contains(database_path.to_str().unwrap()), "{detail}");
+        assert!(detail.contains("no migrations run"), "{detail}");
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok, "the configuration failure is retained");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_database_can_still_be_repaired_after_a_config_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database_path = tmp.path().join("old.db");
+        create_unrecognized_database(&database_path);
+        let resolution = malformed_config_resolution(tmp.path());
+
+        let report = build_report(
+            resolution,
+            Some(&database_path),
+            None,
+            DatabaseCheckMode::Repair,
+        )
+        .await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Fail));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Pass));
+        assert!(detail_of(&report.checks, "database").contains("migrations applied"));
+        assert!(has_migration_table(&database_path));
+        assert_config_dependent_checks_skipped(&report);
+        assert!(!report.ok);
+    }
+
+    #[tokio::test]
+    async fn built_in_defaults_still_run_every_check() {
+        // A successful resolution with no config file on disk is a warning, not
+        // a failure, so the defaults it yields stay fully diagnosable.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.database.path = tmp.path().join("lific.db");
+        let addr = serve_reset_connections().await;
+        config.server.host = addr.ip().to_string();
+        config.server.port = addr.port();
+        let resolution = Ok(crate::config::ResolvedConfig {
+            config,
+            path: None,
+            source: crate::config::ConfigSource::BuiltInDefault,
+        });
+
+        let report = build_report(resolution, None, None, DatabaseCheckMode::ReadOnly).await;
+
+        assert_eq!(status_of(&report.checks, "config"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "database"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "backups"), Some(Status::Warn));
+        assert_eq!(status_of(&report.checks, "server"), Some(Status::Warn));
+        assert!(report.ok);
     }
 }
