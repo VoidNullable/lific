@@ -3,6 +3,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::IntoResponse;
+use futures_util::StreamExt;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::OwnedSemaphorePermit;
@@ -239,20 +240,25 @@ fn stream_body(
     receiver: tokio::sync::mpsc::Receiver<Bytes>,
     terminal: tokio::sync::oneshot::Receiver<std::io::Result<()>>,
 ) -> Body {
-    Body::from_stream(futures_util::stream::unfold(
-        (receiver, Some(terminal)),
-        |(mut receiver, mut terminal)| async move {
-            if let Some(chunk) = receiver.recv().await {
-                return Some((Ok::<_, std::io::Error>(chunk), (receiver, terminal)));
-            }
-            let result = terminal.take()?.await.unwrap_or_else(|_| {
-                Err(std::io::Error::other(
-                    "export stream task ended without a result",
-                ))
-            });
-            result.err().map(|error| (Err(error), (receiver, terminal)))
-        },
-    ))
+    // Compression can poll for trailers after EOF. Unfold alone panics on
+    // that second terminal poll; fuse keeps the completed body exhausted.
+    Body::from_stream(
+        futures_util::stream::unfold(
+            (receiver, Some(terminal)),
+            |(mut receiver, mut terminal)| async move {
+                if let Some(chunk) = receiver.recv().await {
+                    return Some((Ok::<_, std::io::Error>(chunk), (receiver, terminal)));
+                }
+                let result = terminal.take()?.await.unwrap_or_else(|_| {
+                    Err(std::io::Error::other(
+                        "export stream task ended without a result",
+                    ))
+                });
+                result.err().map(|error| (Err(error), (receiver, terminal)))
+            },
+        )
+        .fuse(),
+    )
 }
 
 fn content_disposition(filename: &str) -> Result<HeaderValue, LificError> {
@@ -375,6 +381,26 @@ mod tests {
         json_post, parse_json, seed_project, setup_membership_test, test_app,
     };
     use crate::error::LificError;
+
+    #[tokio::test]
+    async fn export_body_remains_exhausted_when_polled_after_eof() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
+        sender
+            .send(Bytes::from_static(b"export content"))
+            .await
+            .unwrap();
+        drop(sender);
+        terminal_sender.send(Ok(())).unwrap();
+        let mut body = super::stream_body(receiver, terminal_receiver);
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "export content"
+        );
+        for _ in 0..3 {
+            assert!(body.frame().await.is_none());
+        }
+    }
 
     #[tokio::test]
     async fn export_issue_returns_markdown_attachment() {
