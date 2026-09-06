@@ -107,7 +107,12 @@ pub struct Cli {
 
     /// API key for the HTTP backend (also read from LIFIC_API_KEY; login
     /// credentials are used when this is omitted).
-    #[arg(long = "api-key", global = true, env = "LIFIC_API_KEY")]
+    #[arg(
+        long = "api-key",
+        global = true,
+        env = "LIFIC_API_KEY",
+        hide_env_values = true
+    )]
     pub api_key: Option<String>,
 
     #[command(subcommand)]
@@ -202,7 +207,7 @@ pub enum Command {
         /// API key to test an authorized MCP round-trip. Falls back to the
         /// LIFIC_API_KEY environment variable. Without a key, doctor still
         /// verifies that auth is enforced and discovery is advertised.
-        #[arg(long, env = "LIFIC_API_KEY")]
+        #[arg(long, env = "LIFIC_API_KEY", hide_env_values = true)]
         key: Option<String>,
 
         /// Apply pending database migrations while checking the database.
