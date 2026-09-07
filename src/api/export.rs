@@ -236,7 +236,7 @@ async fn stream_response_with_timeouts(
     Ok((headers, body).into_response())
 }
 
-fn stream_body(
+pub(super) fn stream_body(
     receiver: tokio::sync::mpsc::Receiver<Bytes>,
     terminal: tokio::sync::oneshot::Receiver<std::io::Result<()>>,
 ) -> Body {

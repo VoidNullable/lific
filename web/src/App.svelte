@@ -19,6 +19,7 @@
   import ProjectActivity from "./routes/ProjectActivity.svelte";
   import Insights from "./routes/Insights.svelte";
   import DependencyGraph from "./routes/DependencyGraph.svelte";
+  import PublicProject from "./routes/PublicProject.svelte"; // LIF-465
   import Layout from "./lib/Layout.svelte";
   import ErrorState from "./lib/ErrorState.svelte";
   import Toaster from "./lib/toast/Toaster.svelte"; // LIF-243
@@ -72,7 +73,17 @@
     );
   }
 
-  let route = $state(pathRoute ?? (window.location.hash.slice(1) || "/"));
+  const initialRoute = pathRoute ?? (window.location.hash.slice(1) || "/");
+  let route = $state(initialRoute);
+
+  // LIF-465: is this a public, login-free page? Answered from the URL before
+  // anything else, because it decides whether the private bootstrap runs at
+  // all: no instance probe, no auto-login, no realtime socket, no /login
+  // redirect. A stranger and a signed-in maintainer get the same page, which
+  // is the only way the public view can be trusted to look the same to all.
+  const PUBLIC_ROUTE_RE =
+    /^\/public\/([A-Za-z][A-Za-z0-9_-]*)(?:\/([A-Za-z][A-Za-z0-9_-]*-\d+))?$/;
+  let isPublicRoute = $derived(PUBLIC_ROUTE_RE.test(route.split("?")[0]));
 
   // LIF-434: a detail view opened as the app's entry point (an issue link
   // tapped in a chat, a new tab, a PWA launch) has no in-app history under
@@ -123,7 +134,10 @@
   // session before the redirect logic can bounce us to /login. We start
   // "bootstrapping" only when there's no session, so the logged-in common case
   // never shows a spinner.
-  let bootstrapping = $state(!hasSession());
+  // LIF-465: a public page has nothing to bootstrap, so no spinner either.
+  let bootstrapping = $state(
+    !PUBLIC_ROUTE_RE.test(initialRoute.split("?")[0]) && !hasSession(),
+  );
   // LIF-443: the socket itself lives in the sync client, which shares one
   // connection across every tab of this browser (and falls back to a
   // per-tab socket where Web Locks are unavailable). Everything around it —
@@ -173,6 +187,13 @@
   }
 
   onMount(async () => {
+    // LIF-465: none of the requests below may run for a public page.
+    // `autoLogin()` would mint an admin session for whoever opened the link
+    // on a single-user instance.
+    if (isPublicRoute) {
+      bootstrapping = false;
+      return;
+    }
     // Probe the instance once; its auto-login flag decides single-user mode.
     const inst = await getInstance();
 
@@ -232,6 +253,9 @@
 
   // Redirect logic
   $effect(() => {
+    // LIF-465: the one route reachable without a session. Guarded here, not
+    // in the comparisons below, because this effect's default is to redirect.
+    if (isPublicRoute) return;
     // Hold off until the single-user auto-login probe resolves, so we don't
     // flash /login and then bounce into the app once the session lands.
     if (!bootstrapping) {
@@ -289,7 +313,11 @@
   }
 
   function syncRealtimeSocket() {
-    const shouldConnect = !realtimeDisposed && hasSession() && !bootstrapping;
+    // LIF-465: no socket on a public page. The realtime endpoint is
+    // cookie-authenticated, and the page must behave the same for a
+    // signed-in reader as for a stranger.
+    const shouldConnect =
+      !realtimeDisposed && hasSession() && !bootstrapping && !isPublicRoute;
     if (shouldConnect) {
       // Idempotent: joins the existing connection, wins the election, or
       // reopens the leader's socket, whichever applies.
@@ -426,6 +454,10 @@
 
   type ParsedRoute =
     | { type: "auth"; page: "login" | "signup" }
+    // LIF-465: the anonymous project view. Its own top-level kind, not an
+    // `app` page, because `app` pages render inside `Layout` and behind the
+    // session redirect, the two things this one must not do.
+    | { type: "public"; project: string; issue: string | null }
     | { type: "app"; page: "home" }
     | { type: "app"; page: "settings" }
     | { type: "app"; page: "instance-settings" }
@@ -464,6 +496,17 @@
 
     if (r === "/login" || r === "/signup") {
       return { type: "auth", page: r.slice(1) as "login" | "signup" };
+    }
+
+    // LIF-465: /public/{PROJECT} and /public/{PROJECT}/{ISSUE-ID}. Matched
+    // before the project-scoped patterns below so no project could shadow it.
+    const publicMatch = r.match(PUBLIC_ROUTE_RE);
+    if (publicMatch) {
+      return {
+        type: "public",
+        project: publicMatch[1],
+        issue: publicMatch[2] ?? null,
+      };
     }
     // LIF-237: bare root — the "My Work" home dashboard.
     if (r === "/") {
@@ -632,7 +675,16 @@
   }
 </script>
 
-{#if bootstrapping}
+{#if parsed.type === "public"}
+  <!-- LIF-465: ahead of `bootstrapping` so a public link never flashes the
+       session spinner, and ahead of every Layout-wrapped branch so no
+       signed-in chrome is mounted on a page a stranger can load. -->
+  <PublicProject
+    {navigate}
+    projectIdentifier={parsed.project}
+    issueIdentifier={parsed.issue}
+  />
+{:else if bootstrapping}
   <div class="min-h-dvh flex items-center justify-center">
     <div
       class="size-6 rounded-full border-2 border-[var(--border)]

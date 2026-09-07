@@ -507,6 +507,86 @@ impl AttachmentStore {
         })
     }
 
+    /// Open a regular blob without following links. Unix reads are anchored to
+    /// an open store directory, so replacing its path cannot redirect the read.
+    pub(crate) fn open_blob(&self, sha256: &str) -> Result<(std::fs::File, u64), LificError> {
+        let path = self.path_for(sha256)?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            use std::os::unix::fs::OpenOptionsExt;
+            let dir = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+                .open(&self.dir)
+                .map_err(|e| LificError::Internal(format!("open attachment directory: {e}")))?;
+            let name = std::ffi::CString::new(sha256).expect("validated hash");
+            // `dir` stays open across openat; `name` is a validated single hash.
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                // openat returned a new descriptor whose ownership moves here.
+                Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+            }
+        };
+        #[cfg(not(unix))]
+        let file = {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+                // Reject junctions as well as symlinks in the store path.
+                for parent in self.dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+                    let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
+                        LificError::Internal(format!("inspect attachment directory: {e}"))
+                    })?;
+                    if metadata.file_attributes() & 0x400 != 0 {
+                        return Err(LificError::Internal(
+                            "attachment directory is a reparse point".into(),
+                        ));
+                    }
+                }
+                options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+            }
+            options.open(&path)
+        };
+        #[cfg(unix)]
+        let _ = path;
+        let file = file.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                LificError::NotFound("attachment bytes not found on disk".into())
+            } else {
+                LificError::Internal(format!("open attachment: {e}"))
+            }
+        })?;
+        let meta = file
+            .metadata()
+            .map_err(|e| LificError::Internal(format!("stat attachment: {e}")))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if meta.file_attributes() & 0x400 != 0 {
+                return Err(LificError::NotFound(
+                    "attachment bytes not found on disk".into(),
+                ));
+            }
+        }
+        if !meta.is_file() {
+            return Err(LificError::NotFound(
+                "attachment bytes not found on disk".into(),
+            ));
+        }
+        Ok((file, meta.len()))
+    }
+
     /// Delete the sidecar file for a content hash. Missing file is treated as
     /// success (idempotent) — the GC only calls this once no DB row references
     /// the hash, so a double-delete or a manual prior removal is fine.
@@ -1176,6 +1256,45 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::png_image;
     use super::*;
+
+    #[test]
+    fn streaming_blob_handle_reads_only_regular_files() {
+        let (store, _tmp) = tmp_store();
+        let hash = store.write(b"streamed bytes").unwrap();
+        let (mut file, size) = store.open_blob(&hash).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"streamed bytes");
+        assert_eq!(size, 14);
+        assert!(store.open_blob("../outside").is_err());
+        drop(file);
+        let path = store.path_for(&hash).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(path).unwrap();
+        assert!(store.open_blob(&hash).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_blob_open_rejects_links_and_fifos_without_blocking() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let (store, tmp) = tmp_store();
+        let hash = store.write(b"public bytes").unwrap();
+        let alias = tmp.path().join("alias");
+        symlink(store.dir(), &alias).unwrap();
+        assert!(AttachmentStore::new(alias).open_blob(&hash).is_err());
+        let outside = tmp.path().join("private");
+        std::fs::write(&outside, b"private bytes").unwrap();
+        let path = store.path_for(&hash).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(outside, &path).unwrap();
+        assert!(store.open_blob(&hash).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // The temporary path is NUL-terminated and owned for this call.
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert!(store.open_blob(&hash).is_err());
+    }
 
     /// A store rooted in a fresh scratch directory. The caller must keep the
     /// returned [`TempDir`] alive for as long as it uses the store; dropping

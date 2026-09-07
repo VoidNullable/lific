@@ -34,6 +34,7 @@
   import LabelManager from "../lib/LabelManager.svelte";
   import ProjectMembers from "../lib/ProjectMembers.svelte";
   import ImportPanel from "../lib/ImportPanel.svelte";
+  import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import { loadListState, saveListState } from "../lib/issues/persistence";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
@@ -52,7 +53,7 @@
   // LIF-234: role-aware affordance gating. `canManage` = lead/admin (or
   // enforcement off) — settings edits, danger zone, members, and import are
   // all lead-level. `canEdit` = maintainer/admin — label management.
-  import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
+  import { projectRole, loadProjectRole, deriveCanPublish } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
 
   const topbarCtx = getContext<{
@@ -407,6 +408,22 @@
   // read-only overview.
   const canManage = $derived(projectRole.canManage);
 
+  // LIF-465: publication is NOT a `canManage` affordance. `canManage` is true
+  // for everyone while `authz_enforced` is off, but the server's publication
+  // gate is the Lead gate, the one check legacy mode still enforces. Showing
+  // the publish panel on `canManage` therefore offered a disclosure control to
+  // people the server would refuse. Derived from the real answer instead:
+  // instance admin, a `lead` membership, or the project's own lead pointer
+  // (which a pre-LIF-195 project can have without a membership row).
+  const canPublish = $derived(
+    deriveCanPublish({
+      role: projectRole.role,
+      enforced: projectRole.enforced,
+      isAdmin: projectRole.isAdmin,
+      isLead: project != null && currentUserId != null && project.lead_user_id === currentUserId,
+    }),
+  );
+
   function gotoOpenIssues() {
     navigate(`/${projectIdentifier}/issues`);
   }
@@ -745,6 +762,18 @@
         <!-- LIF-234: members management is a lead-level operation. Hidden
              entirely for non-leads (its own read-only-notice path was for the
              flag-off era; now the whole panel only shows when manageable). -->
+        <!-- ── PUBLIC ISSUE VIEW (LIF-465) ──────────────── -->
+        <!-- Gated on `canPublish`, deliberately NOT on `canManage`: see the
+             derivation above. The panel is not in the danger zone either:
+             publishing is a normal thing to do deliberately, not a
+             destructive action, and burying it would bury its warning too. -->
+        {#if canPublish}
+          <PublishPanel
+            {project}
+            onChange={(updated) => { project = updated; }}
+          />
+        {/if}
+
         {#if canManage}
           <ProjectMembers projectId={project.id} />
 

@@ -246,6 +246,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project archives",
         include_str!("../../migrations/050_project_archive.sql"),
     ),
+    (
+        51,
+        "public projects",
+        include_str!("../../migrations/051_public_projects.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

@@ -552,6 +552,8 @@ impl HttpBackend {
                     description: description.clone(),
                     emoji: None,
                     lead_user_id: None,
+                    // Ordinary CLI edits must not change publication.
+                    is_public: None,
                 };
                 self.send_json(Method::PUT, &format!("/api/projects/{id}"), &body)
                     .await
@@ -3228,6 +3230,7 @@ mod tests {
             description: Some("Reference material".into()),
             emoji: None,
             lead_user_id: None,
+            is_public: None,
         })
         .unwrap();
 
@@ -3236,6 +3239,10 @@ mod tests {
         assert!(body.get("identifier").is_none());
         assert!(body.get("emoji").is_none());
         assert!(body.get("lead_user_id").is_none());
+        // LIF-465: a project update from the CLI must never carry a
+        // publication decision, not even `false`. An absent key leaves the
+        // flag alone; `false` sent by accident would silently unpublish.
+        assert!(body.get("is_public").is_none());
     }
 
     #[test]

@@ -58,6 +58,19 @@ export function deriveCanManage(i: RoleInputs): boolean {
   return i.role === "lead";
 }
 
+/**
+ * May the user publish this project to the open internet (LIF-465)?
+ *
+ * The one capability here that does NOT widen when enforcement is off. The
+ * server gate is `require_role(.., Lead)`, the only level legacy mode still
+ * denies, so `canManage` would show the publish panel to people the server
+ * refuses. `isLead` is separate because a project whose lead predates LIF-195
+ * can have `lead_user_id` set without a `project_members` row.
+ */
+export function deriveCanPublish(i: RoleInputs & { isLead?: boolean }): boolean {
+  return i.isAdmin || i.role === "lead" || i.isLead === true;
+}
+
 /** May the user comment? Comments are Viewer-gated server-side (LIF-197),
  *  so ANY project member (viewer+) can comment — as can everyone when
  *  enforcement is off, and workspace admins. The only case that can't is a

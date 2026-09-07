@@ -509,6 +509,9 @@ export interface Project {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /** LIF-465: whether anyone can read this project's current issues at
+   *  `/public/{identifier}` without an account. Default false. */
+  is_public: boolean;
 }
 
 export async function listProjects() {
@@ -551,6 +554,10 @@ export interface UpdateProjectInput {
   // Omit key = "don't change", null = "set to NULL".
   emoji?: string | null;
   lead_user_id?: number | null;
+  /** LIF-465: publish or unpublish the anonymous issue view. Omit the key to
+   *  leave publication alone. Sending `false` from a form that only meant to
+   *  rename the project would take a published project down. */
+  is_public?: boolean;
 }
 
 export async function updateProject(id: number, input: UpdateProjectInput) {
@@ -2220,3 +2227,158 @@ export async function getProjectChanges(
   if (limit !== undefined) params.set("limit", String(limit));
   return request<ChangesPage>(`/projects/${projectId}/changes?${params}`);
 }
+
+// ── Public project view (LIF-465) ───────────────────────────
+//
+// A separate client for the anonymous surface. It does not go through
+// `request()` above, which attaches the stored bearer token: sending a private
+// credential to a route that never wants one would also make the public view
+// behave differently for a signed-in reader than for a stranger, which is the
+// difference that hides bugs in a boundary like this. Plain fetch, no
+// Authorization header, `credentials: "omit"` so the session cookie stays home.
+
+const PUBLIC_BASE = "/public/api";
+
+export interface PublicProject {
+  identifier: string;
+  name: string;
+  description: string;
+  emoji: string | null;
+}
+
+/** An attachment a public reader may fetch. The server re-derives that
+ *  permission on every download; this list is what the view may link. */
+export interface PublicAttachment {
+  id: number;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  alt_text: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+/** No author: the public view carries no account metadata. */
+export interface PublicComment {
+  id: number;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  attachments: PublicAttachment[];
+}
+
+export interface PublicIssue {
+  identifier: string;
+  title: string;
+  status: string;
+  priority: string;
+  module: string | null;
+  labels: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicIssueList {
+  project: PublicProject;
+  issues: PublicIssue[];
+  /** Echoed back, so a caller can see that its `limit` was clamped. */
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface PublicIssueDetail extends PublicIssue {
+  project: PublicProject;
+  description: string;
+  attachments: PublicAttachment[];
+}
+
+export interface PublicComments {
+  comments: PublicComment[];
+  /** Live comments on the issue, so the view can show what paging will reach. */
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+async function publicRequest<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<RequestResult<T>> {
+  try {
+    const res = await fetch(`${PUBLIC_BASE}${path}`, {
+      credentials: "omit",
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: body?.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    return { ok: true, data: body as T };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      return { ok: false, error: "aborted", status: null };
+    }
+    return {
+      ok: false,
+      error: "Couldn't reach the server. Check your connection and try again.",
+      status: null,
+    };
+  }
+}
+
+/** One page of a published project's current issues. The server clamps
+ *  `limit` rather than rejecting it. */
+export async function getPublicIssues(
+  project: string,
+  offset = 0,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ offset: String(offset) });
+  return publicRequest<PublicIssueList>(
+    `/projects/${encodeURIComponent(project)}/issues?${params}`,
+    signal,
+  );
+}
+
+export async function getPublicIssue(
+  project: string,
+  identifier: string,
+  signal?: AbortSignal,
+) {
+  return publicRequest<PublicIssueDetail>(
+    `/projects/${encodeURIComponent(project)}/issues/${encodeURIComponent(identifier)}`,
+    signal,
+  );
+}
+
+/** One page of an issue's current comments. */
+export async function getPublicComments(
+  project: string,
+  identifier: string,
+  offset = 0,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ offset: String(offset) });
+  return publicRequest<PublicComments>(
+    `/projects/${encodeURIComponent(project)}/issues/${encodeURIComponent(identifier)}/comments?${params}`,
+    signal,
+  );
+}
+
+/** The download URL for an attachment, scoped to the project it is public
+ *  through. The server refuses an id that is not reachable from a live issue
+ *  or comment in that project, so a URL built with the wrong project 404s. */
+export function publicAttachmentUrl(project: string, id: number): string {
+  return `${PUBLIC_BASE}/projects/${encodeURIComponent(project)}/attachments/${id}`;
+}
+
+/** Ceiling on pages the public list view will walk on its own, so a broken or
+ *  hostile server cannot keep a tab fetching forever. */
+export const PUBLIC_MAX_PAGES = 50;

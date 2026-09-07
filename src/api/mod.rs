@@ -16,6 +16,8 @@ mod pages;
 mod plans;
 mod project_groups;
 mod projects;
+// Mounted separately from the authenticated API by server::build_app.
+pub mod public;
 mod repo_bindings;
 mod resources;
 mod sync;

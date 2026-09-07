@@ -20,7 +20,7 @@ pub struct ProjectAgentStats {
 
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at
+        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at, is_public
          FROM projects ORDER BY sort_order, name",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -34,6 +34,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
             sort_order: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            is_public: row.get(9)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -117,7 +118,7 @@ pub fn resolve_project_identifier(conn: &Connection, identifier: &str) -> Result
 
 pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
     conn.query_row(
-        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at
+        "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at, is_public
          FROM projects WHERE id = ?1",
         params![id],
         |row| {
@@ -131,6 +132,7 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
                 sort_order: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                is_public: row.get(9)?,
             })
         },
     )
@@ -310,6 +312,13 @@ pub fn update_project(
             if let Some(uid) = lead {
                 super::members::upsert_member(conn, id, uid, Role::Lead)?;
             }
+        }
+        // A separate update fires the publication audit trigger only when set.
+        if let Some(is_public) = input.is_public {
+            conn.execute(
+                "UPDATE projects SET is_public = ?1 WHERE id = ?2",
+                params![is_public, id],
+            )?;
         }
         // LIF-409: hydrated inside the savepoint. See `create_project`.
         get_project(conn, id)

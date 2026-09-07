@@ -13,6 +13,9 @@ pub struct Project {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Anonymous issue access. Defaults to false when reading an older server.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 /// LIF-233: payload for `PUT /api/projects/reorder` — the full project id list
@@ -63,6 +66,9 @@ pub struct UpdateProject {
         skip_serializing_if = "Option::is_none"
     )]
     pub lead_user_id: Option<Option<i64>>,
+    /// Absent leaves publication unchanged; only Lead or admin may set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_public: Option<bool>,
 }
 
 /// A user's named group of projects in the sidebar. `project_ids` is derived,

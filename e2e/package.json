@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "smoke": "bun smoke.ts"
+    "smoke": "bun smoke.ts",
+    "public": "bun public-projects.ts"
   },
   "devDependencies": {
     "playwright": "^1.58.0"

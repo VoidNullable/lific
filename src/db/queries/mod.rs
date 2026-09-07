@@ -9,6 +9,8 @@ mod pages;
 pub(crate) mod plans;
 pub(crate) mod project_groups;
 mod projects;
+/// Anonymous reads use explicit project publication predicates.
+pub(crate) mod public;
 pub(crate) mod repo_bindings;
 mod resources;
 mod search;
