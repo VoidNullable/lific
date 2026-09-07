@@ -30,6 +30,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { checkDiscordFeedback } from "./discord-feedback";
+import { checkPaletteSearch } from "./palette-search";
 import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -222,6 +223,10 @@ async function main(): Promise<number> {
     }
 
     await checkDiscordFeedback(context, base);
+
+    // LIF-445: seeds its own PAL project, so it must run after the DEMO
+    // assertions above.
+    await checkPaletteSearch(context, base);
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------
     // A detail view opened as the app's entry point gets a synthesized

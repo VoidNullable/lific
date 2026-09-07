@@ -1320,7 +1320,11 @@
 
   <!-- LIF-159: cmd+k / ctrl+p jump-anywhere. Mounted here (once, above
        routes) so its session catalog cache survives navigation. -->
-  <CommandPalette bind:this={palette} {navigate} actions={paletteActions} />
+  <!-- `route` is passed because the palette outlives every route: it needs
+       the authoritative current path to know which project's read model to
+       search, and to invalidate in-flight results when that project
+       changes underneath it (LIF-445). -->
+  <CommandPalette bind:this={palette} {navigate} {route} actions={paletteActions} />
   <!-- LIF-245: shortcut help overlay, mounted once so "?" works from any
        route. -->
   <ShortcutHelp />

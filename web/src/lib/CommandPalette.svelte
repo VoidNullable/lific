@@ -5,9 +5,16 @@
   //   "OMN156" / "omn 156" / "OMN-156"  → issue OMN-156, resolved directly
   //   "lif doc 3" / "LIF-DOC-3"         → that page
   //   "156"                              → issue #156 probed in EVERY project
-  //   anything else                      → server FTS (issues+pages) merged
+  //   anything else                      → local search over the selected
+  //                                        project's warm read model, merged
   //                                        with client fuzzy over projects,
-  //                                        modules, and folders
+  //                                        modules and folders, then topped
+  //                                        up by server FTS if thin
+  //
+  // LIF-445: the local pass is synchronous and runs on the keystroke, so a
+  // warm project answers before the next frame. The server round trip is
+  // debounced and only fires when the in-memory answer is thin (fewer than
+  // LOCAL_HIT_SERVER_THRESHOLD issue/page hits) or the project is cold.
   //
   // Mounted once in Layout so the session-cached catalog (projects ×
   // modules × folders) survives route changes. Selection navigates;
@@ -25,6 +32,16 @@
     type Folder,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
+  import {
+    LOCAL_HIT_SERVER_THRESHOLD,
+    dedupeByIdentifier,
+    dedupeByKey,
+    isStaleSearch,
+    localScoreToPaletteScore,
+    preserveSelection,
+    searchLocalDocsPerKind,
+  } from "./paletteSearch";
+  import { cachedProject, getProjectModel } from "./sync/readModel.svelte";
   import { safeLabelColor } from "./labelColors";
   import { commandPaletteState } from "./commandPaletteState.svelte";
   import { shortcutHelpState } from "./shortcutHelpState.svelte";
@@ -33,16 +50,21 @@
     Search, CircleDot, FileText, Layers, FolderClosed, Box, CornerDownLeft,
     Zap, ChevronRight, X,
   } from "lucide-svelte";
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import StatusIcon from "./StatusIcon.svelte";
   import PriorityIcon from "./PriorityIcon.svelte";
   import type { PaletteAction, PaletteActionChild } from "./palette";
 
   let {
     navigate,
+    route = "",
     actions = [],
   }: {
     navigate: (path: string) => void;
+    /** The current path, from Layout. The palette is mounted once and
+     *  outlives every route, so this prop (not the location bar) is the
+     *  authoritative answer to "which project am I in". */
+    route?: string;
     /** Context-aware actions registered by the current route (via
      *  Layout's "lific:palette" context → DocumentDetail). */
     actions?: PaletteAction[];
@@ -73,6 +95,7 @@
   async function show() {
     open = true;
     commandPaletteState.open = true;
+    cancelSearch();
     mode = { type: "root" };
     query = "";
     selectedIdx = 0;
@@ -87,6 +110,8 @@
   function hide() {
     open = false;
     commandPaletteState.open = false;
+    // A response that lands after the palette closes must not repopulate it.
+    cancelSearch();
     mode = { type: "root" };
   }
 
@@ -115,6 +140,7 @@
       return;
     }
     if (a.children) {
+      cancelSearch(); // a nav response must not land on top of the submenu
       mode = { type: "submenu", action: a };
       query = "";
       selectedIdx = 0;
@@ -122,6 +148,7 @@
       return;
     }
     if (a.prompt) {
+      cancelSearch();
       mode = { type: "prompt", action: a };
       query = a.prompt.initial ?? "";
       selectedIdx = 0;
@@ -204,6 +231,7 @@
     emoji?: string | null;
     route: string;
     score: number;
+    remote?: boolean;
   };
 
   type SnippetSegment = { text: string; highlighted: boolean };
@@ -297,13 +325,15 @@
   let grouped = $derived.by(() => {
     // Nav results sit after the action list in the flat selection order.
     let flatIdx = mode.type === "root" ? actionHits.length : 0;
-    const groups = GROUP_ORDER.map((kind, gi) => {
-      const rs = results.filter((r) => r.kind === kind);
-      return { kind, gi, rs, best: rs.reduce((m, r) => Math.max(m, r.score), 0) };
-    }).filter((g) => g.rs.length > 0);
-    groups.sort((a, b) => b.best - a.best || a.gi - b.gi);
+    const groups = [false, true].flatMap((remote) => {
+      const section = GROUP_ORDER.map((kind, gi) => {
+        const rs = results.filter((r) => r.kind === kind && Boolean(r.remote) === remote);
+        return { kind, gi, rs, remote, best: rs.reduce((m, r) => Math.max(m, r.score), 0) };
+      }).filter((g) => g.rs.length > 0);
+      return section.sort((a, b) => b.best - a.best || a.gi - b.gi);
+    });
     return groups.map((g) => ({
-      label: GROUP_LABEL[g.kind],
+      label: g.remote ? `${GROUP_LABEL[g.kind]} (server)` : GROUP_LABEL[g.kind],
       entries: g.rs.map((r) => ({ r, flatIdx: flatIdx++ })),
     }));
   });
@@ -447,12 +477,106 @@
     return hits;
   }
 
-  async function runSearch(q: string) {
-    const gen = ++searchGen;
+  // ── Local pass (LIF-445) ─────────────────────────────
+  //
+  // Which project's read model we search is derived reactively from the
+  // `route` prop, so navigating out from under an open palette both cancels
+  // the in-flight request and re-runs the local pass against the new
+  // project — rather than merging project A's local rows with project B's
+  // server rows.
+
+  let activeProjectIdent = $derived(
+    route.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\//)?.[1] ?? null,
+  );
+
+  function activeProject(): Project | null {
+    const ident = activeProjectIdent;
+    if (!ident) return null;
+    return projectByIdent(ident) ?? cachedProject(ident);
+  }
+
+  /** Issue + page hits from the selected project's read model, but only when
+   *  it is `ready`. A loading or cold model has nothing to say, and guessing
+   *  from a half-filled replica would rank worse than the server. */
+  function localHits(q: string): PaletteResult[] {
+    const project = activeProject();
+    if (!project) return [];
+    const model = getProjectModel(project.id);
+    if (model.status !== "ready") return [];
+
+    // Per kind, not a shared budget: pages must not be crowded out by a
+    // project whose issues all match.
+    const docs = [...model.issueList, ...model.pageList];
+    return searchLocalDocsPerKind(q, docs, GROUP_CAP).map(({ doc, score }) => ({
+      kind: doc.kind,
+      title: doc.title,
+      identifier: doc.identifier,
+      sub: doc.preview || project.name,
+      route:
+        doc.kind === "page"
+          ? `/${project.identifier}/pages/${doc.id}`
+          : `/${project.identifier}/issues/${doc.identifier}`,
+      score: localScoreToPaletteScore(score),
+    }));
+  }
+
+  /** Stable identity for a result row, matching the `{#each}` key. */
+  function resultKey(r: PaletteResult): string {
+    return r.route + (r.identifier ?? r.title);
+  }
+
+  function flatKey(it: FlatItem): string {
+    if (it.t === "action") return `a:${it.a.id}`;
+    if (it.t === "child") return `c:${it.c.title}`;
+    return `n:${resultKey(it.r)}`;
+  }
+
+  /** Sort, cap per group, and publish. */
+  function publish(merged: PaletteResult[], keepSelection: boolean) {
+    const previousKey = keepSelection
+      ? (flatItems[selectedIdx] ? flatKey(flatItems[selectedIdx]) : null)
+      : null;
+    const previousIdx = selectedIdx;
+
+    merged.sort((a, b) => b.score - a.score);
+    // Sort THEN dedupe: the identifier fast path and the read model both
+    // answer "LIF-445" with the same row, and the higher-scoring exact
+    // reference is the one worth keeping. Two rows sharing a `{#each}` key
+    // is a Svelte runtime error, so this is not optional.
+    const unique = dedupeByKey(merged, resultKey);
+
+    const counts = new Map<string, number>();
+    results = unique.filter((r) => {
+      const c = counts.get(r.kind) ?? 0;
+      if (c >= GROUP_CAP) return false;
+      counts.set(r.kind, c + 1);
+      return true;
+    });
+
+    selectedIdx = keepSelection
+      ? preserveSelection(previousKey, flatItems.map(flatKey), previousIdx)
+      : 0;
+  }
+
+  // The synchronous half of the last search, replayed when the server half
+  // lands so a slow response never drops the local answer.
+  let pendingQuery = "";
+  let pendingLocal: PaletteResult[] = [];
+  let pendingCatalog: PaletteResult[] = [];
+  /** The project the pending local rows were computed from. A response is
+   *  only allowed to merge with local rows from the same project. */
+  let pendingProjectIdent: string | null = null;
+
+  /** Everything answerable without a network call. Renders immediately. */
+  function runLocal(q: string): number {
     const trimmed = q.trim();
 
     // Empty query: quick project switcher.
     if (!trimmed) {
+      pendingQuery = "";
+      pendingLocal = [];
+      pendingCatalog = [];
+      pendingProjectIdent = activeProjectIdent;
       results = catalog.projects.map((p) => ({
         kind: "project" as const,
         title: p.name,
@@ -462,24 +586,58 @@
         score: 1,
       }));
       selectedIdx = 0;
-      return;
+      return 0;
     }
 
+    pendingQuery = trimmed;
+    pendingProjectIdent = activeProjectIdent;
+    pendingLocal = localHits(trimmed);
+    pendingCatalog = catalogHits(trimmed);
+    publish([...pendingLocal, ...pendingCatalog], false);
+    return pendingLocal.length;
+  }
+
+  /** The network half: identifier fast paths always, server FTS only when
+   *  the local answer was thin. Both are guarded by `gen` and by the project
+   *  they were issued against. */
+  async function runRemote(q: string, gen: number, wantFts: boolean) {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    const issued = { gen, projectIdent: activeProjectIdent };
+
     searching = true;
-    const [idHits, ftsRes] = await Promise.all([
-      identifierHits(trimmed),
-      searchApi(trimmed),
-    ]);
-    if (gen !== searchGen) return; // superseded by a newer keystroke
+    let idHits: PaletteResult[] = [];
+    let fts: Awaited<ReturnType<typeof searchApi>> | null = null;
+    try {
+      [idHits, fts] = await Promise.all([
+        identifierHits(trimmed),
+        wantFts ? searchApi(trimmed) : Promise.resolve(null),
+      ]);
+    } finally {
+      if (gen === searchGen) searching = false;
+    }
 
-    const merged: PaletteResult[] = [...idHits];
-    const seen = new Set(idHits.map((h) => h.identifier));
+    // Superseded by a newer keystroke, a mode change, a close, or a project
+    // switch. `searchGen` covers the first three; the project check covers
+    // navigating out from under an in-flight request.
+    if (isStaleSearch(issued, { gen: searchGen, projectIdent: activeProjectIdent })) {
+      return;
+    }
+    // The local rows must come from the same project as this response, or
+    // the merge would splice project A's issues into project B's results.
+    if (pendingProjectIdent !== issued.projectIdent || pendingQuery !== trimmed) return;
 
-    if (ftsRes.ok) {
-      // FTS rank is positional — decay the score with position so
-      // identifier hits and strong catalog matches outrank weak FTS tails.
-      ftsRes.data.forEach((r, i) => {
-        if (r.identifier && seen.has(r.identifier)) return;
+    const merged: PaletteResult[] = [...idHits, ...pendingLocal, ...pendingCatalog];
+
+    if (fts?.ok) {
+      // FTS rank is positional — decay the score with position so identifier
+      // hits, local hits and strong catalog matches outrank weak FTS tails.
+      // A failed request is simply not merged: the local results stand.
+      const fresh = dedupeByIdentifier(fts.data, [
+        ...idHits.map((h) => h.identifier),
+        ...pendingLocal.map((h) => h.identifier),
+      ]);
+      fresh.forEach((r, i) => {
         const project = catalog.projects.find((p) => p.id === r.project_id);
         const route =
           r.result_type === "page"
@@ -498,26 +656,45 @@
           subIsSnippet: Boolean(r.snippet),
           route,
           score: 1 - i * 0.03,
+          remote: true,
         });
       });
     }
 
-    merged.push(...catalogHits(trimmed));
-    merged.sort((a, b) => b.score - a.score);
+    publish(merged, true);
+  }
 
-    // Cap per group.
-    const counts = new Map<string, number>();
-    results = merged.filter((r) => {
-      const c = counts.get(r.kind) ?? 0;
-      if (c >= GROUP_CAP) return false;
-      counts.set(r.kind, c + 1);
-      return true;
-    });
-    selectedIdx = 0;
+  /** Cancel the debounce AND invalidate any response already in flight, so a
+   *  stale answer cannot land after the query, mode or project moved on. */
+  function cancelSearch() {
+    searchGen++;
+    if (debounce) {
+      clearTimeout(debounce);
+      debounce = null;
+    }
     searching = false;
   }
 
-  // Debounced search on keystroke.
+  function runSearch(q: string) {
+    cancelSearch();
+    const gen = searchGen;
+    const local = runLocal(q);
+    if (!q.trim()) return;
+    void runRemote(q, gen, local < LOCAL_HIT_SERVER_THRESHOLD);
+  }
+
+  // The route can move under an open palette (a peek panel, a background
+  // navigation). When it crosses a project boundary the pending local rows
+  // are from the wrong replica, so cancel whatever is in flight and redo the
+  // search against the new project instead of letting the two merge.
+  $effect(() => {
+    const ident = activeProjectIdent;
+    if (!open || mode.type !== "root") return;
+    if (ident === pendingProjectIdent) return;
+    untrack(() => runSearch(query));
+  });
+
+  // Local results render on the keystroke; only the server half is debounced.
   let debounce: ReturnType<typeof setTimeout> | null = null;
   function onInput() {
     if (mode.type === "prompt") return; // prompt input isn't a search
@@ -525,8 +702,15 @@
       selectedIdx = 0; // childHits derives from query directly
       return;
     }
-    if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => runSearch(query), 120);
+    cancelSearch();
+    const gen = searchGen;
+    const q = query;
+    const local = runLocal(q);
+    if (!q.trim()) return;
+    debounce = setTimeout(() => {
+      debounce = null;
+      void runRemote(q, gen, local < LOCAL_HIT_SERVER_THRESHOLD);
+    }, 120);
   }
 
   // ── Selection + dispatch ─────────────────────────────
