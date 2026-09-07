@@ -28,7 +28,7 @@ mod storage;
 #[cfg(test)]
 mod test_env;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
 
@@ -95,7 +95,11 @@ fn needs_existing_database(cmd: &Command) -> bool {
         | Command::Connect { .. }
         | Command::AgentsMd { .. }
         | Command::Completion { .. } => false,
-        Command::Mcp { remote, .. } => !remote,
+        // `Mcp --instances` is the multi-instance stdio proxy. Like `--remote`
+        // every alias points at a server, so no local database is needed.
+        Command::Mcp {
+            remote, instances, ..
+        } => !remote && instances.is_none(),
         Command::Service { action } => matches!(action, cli::ServiceAction::Install),
         _ => true,
     }
@@ -169,7 +173,14 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    // Via `ArgMatches` rather than `Cli::parse()` so a value's source stays
+    // answerable: `lific mcp --instances` rejects a typed `--url` but ignores
+    // an exported `LIFIC_URL`. Behaviour is otherwise identical.
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
 
     // Rust ignores SIGPIPE process-wide, which makes println!/stdout writes
     // PANIC when piped into a closed reader (`lific completion fish | head`,
@@ -574,9 +585,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
+        // One stdio connection, several separately authenticated instances.
+        // Matched before the single-instance arms.
+        Command::Mcp {
+            instances: Some(instances),
+            remote: _,
+            url: _,
+        } => {
+            // clap refuses `--remote`. `--url` is refused here instead,
+            // because the global `--url` also answers to LIFIC_URL and an
+            // exported value must not fail a launch that never reads it.
+            if cli::mcp_url_was_explicit(&matches) {
+                return Err(
+                    "lific mcp --instances cannot be combined with --url: every instance \
+                            carries its own url in the config file"
+                        .into(),
+                );
+            }
+
+            // Logs on stderr only: a stray stdout line corrupts the session.
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
+                )
+                .with_writer(std::io::stderr)
+                .init();
+
+            return cli::mcp_instances::run(&instances).await;
+        }
+
         Command::Mcp {
             remote: true,
             url: mcp_url,
+            instances: None,
         } => {
             // LIF-453: the stdio proxy. No database, no local MCP server —
             // just JSON-RPC forwarded to a remote instance's /mcp endpoint,
@@ -609,6 +651,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Mcp {
             remote: false,
             url: _,
+            instances: None,
         } => {
             tracing_subscriber::fmt()
                 .with_env_filter(

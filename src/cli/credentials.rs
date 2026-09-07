@@ -886,6 +886,24 @@ pub fn load_with_source(
     }
 }
 
+/// Load a token for `base_url` from the on-disk stores only: keyring, then
+/// file. `LIFIC_TOKEN` is not consulted.
+///
+/// [`load`] gives an origin-matching `LIFIC_TOKEN` highest precedence, which is
+/// right for a typed CLI invocation and wrong for the multi-instance MCP proxy
+/// (LIF-466): there it would become the credential for every alias sharing that
+/// origin. An alias that wants an env var names it with `token_env`.
+pub fn load_stored(base_url: &str) -> Result<Option<String>, PlaintextCredentialFileError> {
+    let key = CredentialStoreKey::from_base_url(base_url);
+    if let Some(token) = keyring_load(key.as_str()) {
+        return Ok(Some(token));
+    }
+    match default_file_path() {
+        Some(path) => PlaintextCredentialFileStore::new(path).load_credential_for_server_key(&key),
+        None => Ok(None),
+    }
+}
+
 /// Delete the stored credential for `base_url` from BOTH backends.
 ///
 /// The plaintext store is attempted first. That means a plaintext corruption

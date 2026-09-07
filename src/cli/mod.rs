@@ -10,11 +10,14 @@ pub mod import;
 pub mod instance;
 pub mod key;
 pub mod login;
+pub mod mcp_instances;
 pub mod mcp_proxy;
 pub mod member;
 pub mod render;
 pub mod service;
 pub mod term;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod ui;
 pub mod user;
 pub mod weblinks;
@@ -49,6 +52,21 @@ pub(super) fn split_csv(value: &str) -> impl Iterator<Item = &str> {
 #[must_use = "use the parsed label values"]
 pub(super) fn owned_labels(value: Option<&str>) -> Option<Vec<String>> {
     value.map(|value| split_csv(value).map(str::to_owned).collect())
+}
+
+/// Whether `--url` was typed for `lific mcp`, rather than arriving from
+/// `LIFIC_URL`.
+///
+/// The `mcp` subcommand's `--url` shares an id with the global one, so
+/// `Command::Mcp { url }` is populated by an exported `LIFIC_URL` too. That is
+/// right for `--remote` and wrong for `--instances`, which must refuse a
+/// conflicting flag without refusing to start under an exported variable.
+#[must_use]
+pub(crate) fn mcp_url_was_explicit(matches: &clap::ArgMatches) -> bool {
+    matches
+        .subcommand_matches("mcp")
+        .and_then(|mcp| mcp.value_source("url"))
+        == Some(clap::parser::ValueSource::CommandLine)
 }
 
 #[must_use = "use the resolved HTTP credential"]
@@ -149,6 +167,12 @@ pub enum Command {
         /// LIFIC_URL). Only meaningful with `--remote`.
         #[arg(long)]
         url: Option<String>,
+
+        /// Proxy stdio JSON-RPC to several separately authenticated Lific
+        /// instances named by this TOML file. Each alias carries its own URL
+        /// and credential, so no `--url` applies and no database is opened.
+        #[arg(long, conflicts_with = "remote")]
+        instances: Option<PathBuf>,
     },
 
     /// Sign in to a Lific server via the OAuth 2.0 device flow (RFC 8628).
@@ -1465,6 +1489,7 @@ mod tests {
 
     #[test]
     fn defaults_to_sql_backend_without_remote_options() {
+        let _env = test_env::EnvGuard::set(&[]);
         let cli = Cli::try_parse_from(["lific", "project", "list"])
             .expect("default backend options should parse");
 
@@ -1527,30 +1552,79 @@ mod tests {
 
     /// Backward compat: client configs written by `lific connect --stdio`
     /// pass no flags, so bare `lific mcp` must keep meaning the local server.
+    /// The guard is needed because `--url` reads `LIFIC_URL`.
     #[test]
     fn parse_mcp() {
+        let _env = test_env::EnvGuard::cleared(&["LIFIC_URL"]);
         let cli = Cli::try_parse_from(["lific", "mcp"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Mcp {
                 remote: false,
-                url: None
+                url: None,
+                instances: None
             }
         ));
     }
 
     #[test]
     fn parse_mcp_remote_with_url() {
+        let _env = test_env::EnvGuard::cleared(&["LIFIC_URL"]);
         let cli =
             Cli::try_parse_from(["lific", "mcp", "--remote", "--url", "https://lific.example"])
                 .unwrap();
         match cli.command {
-            Command::Mcp { remote, url } => {
+            Command::Mcp {
+                remote,
+                url,
+                instances,
+            } => {
                 assert!(remote);
                 assert_eq!(url.as_deref(), Some("https://lific.example"));
+                assert_eq!(instances, None, "--instances is opt-in");
             }
             _ => panic!("expected Mcp"),
         }
+    }
+
+    /// The multi-instance proxy takes a config path and nothing else.
+    #[test]
+    fn parse_mcp_instances() {
+        let _env = test_env::EnvGuard::cleared(&["LIFIC_URL"]);
+        let cli = Cli::try_parse_from(["lific", "mcp", "--instances", "/etc/lific/instances.toml"])
+            .unwrap();
+        match cli.command {
+            Command::Mcp {
+                remote,
+                url,
+                instances,
+            } => {
+                assert!(!remote, "--instances does not imply --remote");
+                assert_eq!(url, None);
+                assert_eq!(
+                    instances,
+                    Some(PathBuf::from("/etc/lific/instances.toml")),
+                    "the config path is the whole configuration"
+                );
+            }
+            _ => panic!("expected Mcp"),
+        }
+    }
+
+    /// Two answers to "where does this route?"; clap refuses the pair.
+    #[test]
+    fn mcp_instances_conflicts_with_remote() {
+        let error = Cli::try_parse_from([
+            "lific",
+            "mcp",
+            "--remote",
+            "--instances",
+            "/etc/lific/instances.toml",
+        ])
+        .err()
+        .map(|error| error.to_string())
+        .expect("--instances and --remote are mutually exclusive");
+        assert!(error.contains("cannot be used with"), "got: {error}");
     }
 
     #[test]

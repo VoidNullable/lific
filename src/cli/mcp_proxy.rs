@@ -43,14 +43,14 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 /// The message is already phrased for a human, because an agent will paste it
 /// in front of one verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ForwardError {
-    message: String,
+pub(crate) struct ForwardError {
+    pub(crate) message: String,
 }
 
 impl ForwardError {
     /// The remote could not be reached, or answered with something that is not
     /// a JSON-RPC response.
-    fn unreachable(detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn unreachable(detail: impl std::fmt::Display) -> Self {
         Self {
             message: format!("remote lific unreachable: {}", tidy(&detail.to_string())),
         }
@@ -58,7 +58,7 @@ impl ForwardError {
 
     /// The remote is up and said no. Name the two ways to fix a credential,
     /// since this string is the only thing the human will see.
-    fn rejected(status: StatusCode) -> Self {
+    pub(crate) fn rejected(status: StatusCode) -> Self {
         Self {
             message: format!(
                 "remote lific rejected the credential (HTTP {status}): run `lific login` for this \
@@ -71,7 +71,7 @@ impl ForwardError {
 /// Collapse an error detail to one short single-line fragment. Error bodies
 /// can be HTML pages or multi-line stack traces, and this string ends up
 /// inside a single-line JSON-RPC message.
-fn tidy(detail: &str) -> String {
+pub(crate) fn tidy(detail: &str) -> String {
     let mut cleaned: String = detail
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -155,7 +155,7 @@ impl Forwarder for HttpForwarder {
 }
 
 /// `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,…}}`
-fn parse_error_response(detail: &str) -> Value {
+pub(crate) fn parse_error_response(detail: &str) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
@@ -164,7 +164,7 @@ fn parse_error_response(detail: &str) -> Value {
 }
 
 /// `{"jsonrpc":"2.0","id":<id>,"error":{"code":-32603,…}}`
-fn internal_error_response(id: &Value, message: &str) -> Value {
+pub(crate) fn internal_error_response(id: &Value, message: &str) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id.clone(),
@@ -180,7 +180,7 @@ fn internal_error_response(id: &Value, message: &str) -> Value {
 /// can carry one. So a pretty-printed remote response is passed through byte
 /// for byte apart from its line breaks, rather than re-serialized (which would
 /// reorder keys and renormalize numbers on their way to the client).
-async fn write_line<W: AsyncWrite + Unpin + Send>(
+pub(crate) async fn write_line<W: AsyncWrite + Unpin + Send>(
     output: &mut W,
     payload: &str,
 ) -> std::io::Result<()> {
@@ -204,11 +204,11 @@ async fn write_line<W: AsyncWrite + Unpin + Send>(
 /// entry point people reach for when their data lives on a server they did
 /// not set up, so "you could bind this" is news, and one sentence is cheap
 /// next to an agent guessing project identifiers.
-const UNBOUND_BINDING_NOTE: &str = " No repository binding resolved for this directory; run \
-     'lific bind' here to bind it to a project.";
+pub(crate) const UNBOUND_BINDING_NOTE: &str = " No repository binding resolved for this directory; \
+     run 'lific bind' here to bind it to a project.";
 
 /// The wire name for an alias kind, matching what `/api/repos/resolve` takes.
-fn alias_kind(kind: &crate::repo_identity::AliasKind) -> &'static str {
+pub(crate) fn alias_kind(kind: &crate::repo_identity::AliasKind) -> &'static str {
     match kind {
         crate::repo_identity::AliasKind::Remote => "remote",
         crate::repo_identity::AliasKind::Root => "root",
@@ -219,7 +219,7 @@ fn alias_kind(kind: &crate::repo_identity::AliasKind) -> &'static str {
 ///
 /// `"none"` is the common, uninteresting case (an unbound checkout) and stays
 /// quiet. `"conflict"` is a state only a human can settle, so it says so.
-fn binding_from_resolution(resolved: &Value) -> Option<String> {
+pub(crate) fn binding_from_resolution(resolved: &Value) -> Option<String> {
     match resolved["resolution"].as_str().unwrap_or_default() {
         "one" => resolved["project"]["identifier"]
             .as_str()
@@ -242,7 +242,7 @@ fn binding_from_resolution(resolved: &Value) -> Option<String> {
 /// identity, an unreachable or unauthenticated server, a conflict. Each one
 /// logs a single stderr line and the session proceeds unbound, behaving
 /// exactly as the proxy did before this feature existed.
-async fn resolve_binding(
+pub(crate) async fn resolve_binding(
     client: &reqwest::Client,
     url: &str,
     credential: Option<&str>,
@@ -328,7 +328,7 @@ async fn resolve_binding(
 /// [`crate::mcp::tools::project_fallback_applies`]), an argument the client
 /// set explicitly, and any params shape that is not what `tools/call`
 /// declares. Malformed params are the server's to reject, not the proxy's.
-fn inject_bound_project(message: &Value, bound: Option<&str>) -> Option<String> {
+pub(crate) fn inject_bound_project(message: &Value, bound: Option<&str>) -> Option<String> {
     let bound = bound?;
     if message.get("method").and_then(Value::as_str) != Some("tools/call") {
         return None;
@@ -375,7 +375,7 @@ fn augment_initialize(response: &Value, bound: Option<&str>) -> Option<String> {
 
 /// Serialize a response this module built. Constructed `json!` values always
 /// serialize, but a proxy that dies on stdout is worse than one that says so.
-fn encode(value: &Value) -> String {
+pub(crate) fn encode(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
         r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"lific proxy could not serialize a response"}}"#
             .to_owned()
