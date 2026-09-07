@@ -42,7 +42,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use crate::db::DbPool;
-use crate::db::models::{Status, UpdateIssue};
+use crate::db::models::{AttachmentActor, Status, UpdateIssue};
 use crate::db::queries;
 use crate::error::LificError;
 use crate::issue_refs;
@@ -186,6 +186,12 @@ pub fn close_referenced<S: AsRef<str>>(
                 issue.id,
                 &UpdateIssue {
                     status: Some(Status::Done),
+                    // LIF-409: closing rewrites nothing, but it re-scans the
+                    // description exactly as `issue update` does, so this
+                    // backend's git hook stays indistinguishable from a
+                    // hand-typed close. A direct-SQL caller is the trusted
+                    // local operator.
+                    attachments: AttachmentActor::TrustedLocal,
                     ..Default::default()
                 },
             )?;

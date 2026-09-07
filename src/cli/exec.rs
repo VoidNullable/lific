@@ -2,25 +2,92 @@ use crate::db::DbPool;
 use crate::db::models::*;
 use crate::db::queries;
 use crate::error::LificError;
+use crate::links::IssueLinkContext;
 
 use super::render;
+use super::weblinks::{self, IssueLinkOutput, ResourceKind};
 use super::*;
+
+/// Whoever runs `lific` against the database file directly.
+///
+/// This backend has no authentication, and needs none: opening the SQLite file
+/// for writing already grants every row. So the operator is a *trusted local
+/// operator* for authorization purposes ([`AttachmentActor::TrustedLocal`]),
+/// and separately resolves to a real user only for the things that genuinely
+/// need one — a comment's author, a new project's lead.
+///
+/// Only **active humans** are candidates. A bot is somebody's tool, not a
+/// person who can be handed a project to lead or credited with a comment, and
+/// a deactivated account is one an administrator has deliberately taken out of
+/// circulation — resurrecting either by position in a list is how an
+/// unattended CLI ends up attributing work to an account nobody is watching.
+///
+/// Among those, the established local-CLI operator wins: the first active
+/// human administrator. With no administrator at all, a lone active human is
+/// unambiguous and is used. Several equally plausible non-administrators is
+/// genuinely ambiguous, and the guess is refused out loud rather than resolved
+/// by row order.
+///
+/// `None` means the database has no active human at all. That is a real state
+/// on a freshly initialized database, handled explicitly at each call site
+/// rather than by inventing a user: `comment add` refuses (a comment must have
+/// an author), `project create` proceeds leaderless (a project need not have
+/// one, and the first administrator created can reach it anyway).
+fn effective_operator(conn: &rusqlite::Connection) -> Result<Option<CommentActor>, LificError> {
+    let users = queries::users::list_users(conn)?;
+    let humans: Vec<_> = users.iter().filter(|u| u.is_active && !u.is_bot).collect();
+
+    let actor = |u: &crate::db::models::User| CommentActor {
+        user_id: u.id,
+        is_admin: u.is_admin,
+    };
+
+    if let Some(admin) = humans.iter().find(|u| u.is_admin) {
+        return Ok(Some(actor(admin)));
+    }
+    match humans.as_slice() {
+        [] => Ok(None),
+        [only] => Ok(Some(actor(only))),
+        several => Err(LificError::BadRequest(format!(
+            "cannot infer which user to act as: {} active non-admin users and no admin. \
+             Pass --user, or promote one of them to admin",
+            several.len()
+        ))),
+    }
+}
+
+fn require_operator(conn: &rusqlite::Connection) -> Result<CommentActor, LificError> {
+    effective_operator(conn)?
+        .ok_or_else(|| LificError::NotFound("no users exist; create a user first".into()))
+}
 
 /// Run a CLI CRUD command against the database.
 /// Returns Ok(()) on success, printing output to stdout.
-pub fn run(pool: &DbPool, command: &Command, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `links` is the web UI this instance is reachable at, from
+/// `server.public_url`. It is `None` when that is unset, and then JSON output
+/// simply carries no `web_url`: this backend talks to a database file, not to
+/// a server, so there is no origin to infer and fabricating one would hand out
+/// links that go nowhere.
+pub fn run(
+    pool: &DbPool,
+    command: &Command,
+    json: bool,
+    links: Option<&IssueLinkContext>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out = Output { json, links };
     match command {
-        Command::Issue { action } => issue(pool, action, json),
-        Command::Project { action } => project(pool, action, json),
-        Command::Page { action } => page(pool, action, json),
+        Command::Issue { action } => issue(pool, action, out),
+        Command::Project { action } => project(pool, action, out),
+        Command::Page { action } => page(pool, action, out),
         Command::Export { action } => export(pool, action, json),
         Command::Search {
             query,
             project,
             limit,
-        } => search(pool, query, project.as_deref(), *limit, json),
-        Command::Comment { action } => comment(pool, action, json),
-        Command::Module { action } => module(pool, action, json),
+        } => search(pool, query, project.as_deref(), *limit, out),
+        Command::Comment { action } => comment(pool, action, out),
+        Command::Module { action } => module(pool, action, out),
         Command::Label { action } => label(pool, action, json),
         Command::Folder { action } => folder(pool, action, json),
         Command::Bind { project, create } => Ok(super::bind::run_sql(
@@ -39,6 +106,69 @@ pub fn run(pool: &DbPool, command: &Command, json: bool) -> Result<(), Box<dyn s
             "non-CRUD commands are dispatched by main.rs to their own modules \
              (cli::instance, cli::key, cli::user, cli::member, server::run, ...)"
         ),
+    }
+}
+
+/// Where a command's output goes, and what it may be enriched with.
+///
+/// Only the JSON side is enriched. Human output already renders identifiers
+/// the way this backend has always rendered them, and the HTTP backend's
+/// markdown mode exists to make identifiers clickable in an agent's transcript
+/// — a different job from "machine output carries a link".
+#[derive(Clone, Copy)]
+struct Output<'a> {
+    json: bool,
+    links: Option<&'a IssueLinkContext>,
+}
+
+impl Output<'_> {
+    /// Serialize, enrich, print. Split from the three `enrich_*` helpers so the
+    /// enrichment can be asserted against the HTTP backend's without capturing
+    /// stdout.
+    fn emit(self, value: serde_json::Value) {
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+    }
+
+    /// Serialization of our own models cannot fail.
+    fn value<T: serde::Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    fn enrich_resources(self, value: serde_json::Value, kind: ResourceKind) -> serde_json::Value {
+        match self.links {
+            Some(context) => weblinks::linked_resources(value, context, IssueLinkOutput::Url, kind),
+            None => value,
+        }
+    }
+
+    fn json_resources<T: serde::Serialize>(self, value: &T, kind: ResourceKind) {
+        self.emit(self.enrich_resources(Self::value(value), kind));
+    }
+
+    fn enrich_comments(self, value: serde_json::Value, identifier: &str) -> serde_json::Value {
+        match self.links {
+            Some(context) => {
+                weblinks::linked_comments(value, context, IssueLinkOutput::Url, identifier)
+            }
+            None => value,
+        }
+    }
+
+    fn json_comments<T: serde::Serialize>(self, value: &T, identifier: &str) {
+        self.emit(self.enrich_comments(Self::value(value), identifier));
+    }
+
+    fn enrich_modules(self, value: serde_json::Value, project: &str) -> serde_json::Value {
+        match self.links {
+            Some(context) => {
+                weblinks::linked_modules(value, context, IssueLinkOutput::Url, project)
+            }
+            None => value,
+        }
+    }
+
+    fn json_modules<T: serde::Serialize>(self, value: &T, project: &str) {
+        self.emit(self.enrich_modules(Self::value(value), project));
     }
 }
 
@@ -92,8 +222,9 @@ fn page_folder_id(
 fn issue(
     pool: &DbPool,
     action: &IssueAction,
-    json: bool,
+    out: Output<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     match action {
         IssueAction::List {
             project,
@@ -127,7 +258,7 @@ fn issue(
             )?;
 
             if json {
-                print_json(&issues);
+                out.json_resources(&issues, ResourceKind::Issue);
             } else {
                 let module_name = |id: i64| queries::get_module_name(&conn, id).ok();
                 print!("{}", render::issue_list(&issues, &module_name));
@@ -140,7 +271,7 @@ fn issue(
             let issue = queries::get_issue(&conn, id)?;
 
             if json {
-                print_json(&issue);
+                out.json_resources(&issue, ResourceKind::Issue);
             } else {
                 let module_name = |id: i64| queries::get_module_name(&conn, id).ok();
                 print!("{}", render::issue_detail(&issue, &module_name));
@@ -176,13 +307,18 @@ fn issue(
                     priority: priority.parse()?,
                     module_id,
                     labels: label_list,
+                    // LIF-409: the description's attachment references are
+                    // linked by `create_issue` itself. A direct-SQL caller is
+                    // past every gate already, so every reference that names a
+                    // real attachment is honoured.
+                    attachments: AttachmentActor::TrustedLocal,
                     ..Default::default()
                 },
             )?;
             drop(conn);
 
             if json {
-                print_json(&issue);
+                out.json_resources(&issue, ResourceKind::Issue);
             } else {
                 print!("{}", render::issue_created(&issue));
             }
@@ -222,13 +358,16 @@ fn issue(
                     // skips (no clear), so map Some(id) -> Some(Some(id)).
                     module_id: module_id.map(Some),
                     labels: label_list,
+                    // LIF-409: see `issue create`. An edit that drops a
+                    // reference drops its link, same as every other backend.
+                    attachments: AttachmentActor::TrustedLocal,
                     ..Default::default()
                 },
             )?;
             drop(conn);
 
             if json {
-                print_json(&issue);
+                out.json_resources(&issue, ResourceKind::Issue);
             } else {
                 print!("{}", render::issue_updated(&issue));
             }
@@ -242,15 +381,16 @@ fn issue(
 fn project(
     pool: &DbPool,
     action: &ProjectAction,
-    json: bool,
+    out: Output<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     match action {
         ProjectAction::List => {
             let conn = pool.read()?;
             let projects = queries::list_projects(&conn)?;
 
             if json {
-                print_json(&projects);
+                out.json_resources(&projects, ResourceKind::Project);
             } else {
                 print!("{}", render::project_list(&projects));
             }
@@ -262,7 +402,7 @@ fn project(
             let project = queries::get_project(&conn, id)?;
 
             if json {
-                print_json(&project);
+                out.json_resources(&project, ResourceKind::Project);
             } else {
                 print!("{}", render::project_detail(&project));
             }
@@ -274,19 +414,30 @@ fn project(
             description,
         } => {
             let conn = pool.write()?;
+            // LIF-409: match `POST /api/projects`, where the creator leads the
+            // project it just made and gets the matching `lead` membership
+            // row. Without this the CLI produced an unowned project that only
+            // an administrator could administer — the LIF-102 bug, still alive
+            // on this backend long after REST was fixed.
+            //
+            // The creator here is the effective local operator. On a database
+            // with no users at all there is nobody to name, and the project is
+            // created leaderless rather than pointing at an invented id.
+            let lead_user_id = effective_operator(&conn)?.map(|operator| operator.user_id);
             let project = queries::create_project(
                 &conn,
                 &CreateProject {
                     name: name.clone(),
                     identifier: identifier.clone(),
                     description: description.clone(),
+                    lead_user_id,
                     ..Default::default()
                 },
             )?;
             drop(conn);
 
             if json {
-                print_json(&project);
+                out.json_resources(&project, ResourceKind::Project);
             } else {
                 print!("{}", render::project_created(&project));
             }
@@ -311,7 +462,7 @@ fn project(
             drop(conn);
 
             if json {
-                print_json(&project);
+                out.json_resources(&project, ResourceKind::Project);
             } else {
                 print!("{}", render::project_updated(&project));
             }
@@ -322,7 +473,12 @@ fn project(
 
 // ── Page ─────────────────────────────────────────────────────
 
-fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn page(
+    pool: &DbPool,
+    action: &PageAction,
+    out: Output<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     match action {
         PageAction::List {
             project,
@@ -353,7 +509,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             )?;
 
             if json {
-                print_json(&pages);
+                out.json_resources(&pages, ResourceKind::Page);
             } else {
                 print!("{}", render::page_list(&pages));
             }
@@ -365,7 +521,7 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
             let page = queries::get_page(&conn, id)?;
 
             if json {
-                print_json(&page);
+                out.json_resources(&page, ResourceKind::Page);
             } else {
                 print!("{}", render::page_detail(&page));
             }
@@ -401,13 +557,15 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     title: title.clone(),
                     content: content.clone(),
                     labels: label_list,
+                    // LIF-409: see `issue create`.
+                    attachments: AttachmentActor::TrustedLocal,
                     ..Default::default()
                 },
             )?;
             drop(conn);
 
             if json {
-                print_json(&page);
+                out.json_resources(&page, ResourceKind::Page);
             } else {
                 print!("{}", render::page_created(&page));
             }
@@ -439,13 +597,15 @@ fn page(pool: &DbPool, action: &PageAction, json: bool) -> Result<(), Box<dyn st
                     content: content.clone(),
                     folder_id,
                     labels: label_list,
+                    // LIF-409: see `issue update`.
+                    attachments: AttachmentActor::TrustedLocal,
                     ..Default::default()
                 },
             )?;
             drop(conn);
 
             if json {
-                print_json(&page);
+                out.json_resources(&page, ResourceKind::Page);
             } else {
                 print!("{}", render::page_updated(&page));
             }
@@ -461,8 +621,9 @@ fn search(
     query: &str,
     project: Option<&str>,
     limit: Option<i64>,
-    json: bool,
+    out: Output<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     let conn = pool.read()?;
     let project_id = project
         .map(|ident| queries::resolve_project_identifier(&conn, ident))
@@ -479,7 +640,7 @@ fn search(
     )?;
 
     if json {
-        print_json(&results);
+        out.json_resources(&results, ResourceKind::Search);
     } else {
         print!("{}", render::search_results(&results));
     }
@@ -522,8 +683,9 @@ fn comment_page(
 fn comment(
     pool: &DbPool,
     action: &CommentAction,
-    json: bool,
+    out: Output<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     match action {
         CommentAction::List {
             identifier,
@@ -536,7 +698,7 @@ fn comment(
             let (comments, continuation) = comment_page(&conn, id, *limit, *offset, order)?;
 
             if json {
-                print_json(&comments);
+                out.json_comments(&comments, identifier);
             } else {
                 print!(
                     "{}",
@@ -552,34 +714,45 @@ fn comment(
         } => {
             let conn = pool.write()?;
             let issue_id = queries::resolve_identifier(&conn, identifier)?;
+            let parent = queries::comments::CommentParent::Issue(issue_id);
 
-            // Resolve user: either explicit --user or fall back to first admin
-            let user_id = if let Some(username) = user {
+            // The comment's *author*: either explicit --user, or the effective
+            // local operator. A comment cannot exist without one, so an empty
+            // user table is an error here rather than a silent fallback.
+            let author = if let Some(username) = user {
                 let u = queries::users::get_user_by_username(&conn, username)?;
-                u.id
+                CommentActor {
+                    user_id: u.id,
+                    is_admin: u.is_admin,
+                }
             } else {
-                // Fall back to first admin user
-                let users = queries::users::list_users(&conn)?;
-                users
-                    .iter()
-                    .find(|u| u.is_admin && !u.is_bot)
-                    .or_else(|| users.first())
-                    .map(|u| u.id)
-                    .ok_or_else(|| {
-                        LificError::NotFound("no users exist; create a user first".into())
-                    })?
+                require_operator(&conn)?
             };
 
-            let comment = queries::comments::create_comment(
+            // LIF-409: the shared create path, so a CLI comment resolves its
+            // @mentions and links its attachment references exactly as a
+            // comment posted through REST or MCP does. It self-transacts, so
+            // the comment, its mentions and its links land together on this
+            // connection, which has no transaction of its own.
+            //
+            // Authorization stays the trusted local operator's, not the named
+            // author's: `--user` says who wrote it, not whose permissions the
+            // body's references borrow.
+            let project_id = parent.project_id(&conn)?;
+            let member_scoped = crate::authz::authz_enforced_conn(&conn)?;
+            let comment = queries::comments::create_comment_with_mentions(
                 &conn,
-                queries::comments::CommentParent::Issue(issue_id),
-                user_id,
+                parent,
+                project_id,
+                author,
+                AttachmentActor::TrustedLocal,
                 content,
+                member_scoped,
             )?;
             drop(conn);
 
             if json {
-                print_json(&comment);
+                out.json_comments(&comment, identifier);
             } else {
                 print!("{}", render::comment_added(&comment, identifier));
             }
@@ -593,8 +766,9 @@ fn comment(
 fn module(
     pool: &DbPool,
     action: &ModuleAction,
-    json: bool,
+    out: Output<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = out.json;
     match action {
         ModuleAction::List { project } => {
             let conn = pool.read()?;
@@ -602,7 +776,7 @@ fn module(
             let modules = queries::list_modules(&conn, project_id)?;
 
             if json {
-                print_json(&modules);
+                out.json_modules(&modules, project);
             } else {
                 print!("{}", render::module_list(&modules, project));
             }
@@ -629,7 +803,7 @@ fn module(
             drop(conn);
 
             if json {
-                print_json(&module);
+                out.json_modules(&module, project);
             } else {
                 print!("{}", render::module_created(&module, project));
             }
@@ -658,7 +832,7 @@ fn module(
             drop(conn);
 
             if json {
-                print_json(&module);
+                out.json_modules(&module, project);
             } else {
                 print!("{}", render::module_updated(&module));
             }
@@ -913,7 +1087,7 @@ mod tests {
                 description: "A test".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Verify it was created
         let conn = pool.read().unwrap();
@@ -930,7 +1104,7 @@ mod tests {
             action: ProjectAction::List,
         };
         // Should not panic
-        run(&pool, &cmd, true).unwrap();
+        run(&pool, &cmd, true, None).unwrap();
     }
 
     #[test]
@@ -949,7 +1123,7 @@ mod tests {
                 labels: None,
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Get it
         let cmd = Command::Issue {
@@ -957,7 +1131,7 @@ mod tests {
                 identifier: "TST-1".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -977,7 +1151,7 @@ mod tests {
                 labels: None,
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         let conn = pool.read().unwrap();
         let id = queries::resolve_identifier(&conn, "TST-1").unwrap();
@@ -1028,7 +1202,7 @@ mod tests {
                 limit: None,
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1042,7 +1216,7 @@ mod tests {
             project: Some("TST".into()),
             limit: None,
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1059,14 +1233,14 @@ mod tests {
                 labels: None,
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         let cmd = Command::Page {
             action: PageAction::Get {
                 identifier: "TST-DOC-1".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1084,6 +1258,7 @@ mod tests {
                 },
             },
             true,
+            None,
         )
         .unwrap();
 
@@ -1099,6 +1274,7 @@ mod tests {
                 },
             },
             true,
+            None,
         )
         .unwrap_err();
 
@@ -1122,7 +1298,7 @@ mod tests {
                 output: tmp.clone(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         let issue_path = tmp.join("TST/issues/tst-1-export-this-issue.md");
         assert!(issue_path.exists());
@@ -1144,7 +1320,7 @@ mod tests {
                 user: Some("testuser".into()),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         let cmd = Command::Comment {
             action: CommentAction::List {
@@ -1154,7 +1330,7 @@ mod tests {
                 order: "desc".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     /// Seed `n` comments on TST-1 with distinct timestamps, so ordering
@@ -1304,7 +1480,7 @@ mod tests {
                 status: "active".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // List
         let cmd = Command::Module {
@@ -1312,7 +1488,7 @@ mod tests {
                 project: "TST".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Update
         let cmd = Command::Module {
@@ -1324,7 +1500,7 @@ mod tests {
                 status: Some("done".into()),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Delete
         let cmd = Command::Module {
@@ -1333,7 +1509,7 @@ mod tests {
                 name: "Core DB".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1349,7 +1525,7 @@ mod tests {
                 color: "#EF4444".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // List
         let cmd = Command::Label {
@@ -1357,7 +1533,7 @@ mod tests {
                 project: "TST".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Update
         let cmd = Command::Label {
@@ -1368,7 +1544,7 @@ mod tests {
                 color: None,
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Delete
         let cmd = Command::Label {
@@ -1377,7 +1553,7 @@ mod tests {
                 name: "defect".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1392,7 +1568,7 @@ mod tests {
                 name: "Docs".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // List
         let cmd = Command::Folder {
@@ -1400,7 +1576,7 @@ mod tests {
                 project: "TST".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Update
         let cmd = Command::Folder {
@@ -1410,7 +1586,7 @@ mod tests {
                 new_name: "Documentation".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         // Delete
         let cmd = Command::Folder {
@@ -1419,7 +1595,7 @@ mod tests {
                 name: "Documentation".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1462,7 +1638,7 @@ mod tests {
                 labels: Some("bug,urgent".into()),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
 
         let conn = pool.read().unwrap();
         let id = queries::resolve_identifier(&conn, "TST-1").unwrap();
@@ -1484,7 +1660,7 @@ mod tests {
                 identifier: "TST-1".into(),
             },
         };
-        run(&pool, &cmd, true).unwrap();
+        run(&pool, &cmd, true, None).unwrap();
     }
 
     #[test]
@@ -1497,7 +1673,7 @@ mod tests {
                 identifier: "TST".into(),
             },
         };
-        run(&pool, &cmd, false).unwrap();
+        run(&pool, &cmd, false, None).unwrap();
     }
 
     #[test]
@@ -1509,6 +1685,521 @@ mod tests {
                 identifier: "NOPE-1".into(),
             },
         };
-        assert!(run(&pool, &cmd, false).is_err());
+        assert!(run(&pool, &cmd, false, None).is_err());
+    }
+
+    // ── LIF-409 ──────────────────────────────────────────────
+
+    /// An attachment uploaded by `uploader` (or by nobody, when `None`).
+    fn seed_attachment(pool: &DbPool, label: &str, uploader: Option<i64>) -> i64 {
+        let conn = pool.write().unwrap();
+        queries::attachments::create_attachment(
+            &conn,
+            &crate::storage::AttachmentStore::hash_bytes(label.as_bytes()),
+            &format!("{label}.txt"),
+            "text/plain",
+            label.len() as i64,
+            uploader,
+        )
+        .unwrap()
+        .id
+    }
+
+    fn linked_attachment_ids(pool: &DbPool, entity: AttachmentEntity, entity_id: i64) -> Vec<i64> {
+        let conn = pool.read().unwrap();
+        queries::attachments::list_for_entity(&conn, entity, entity_id)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect()
+    }
+
+    fn body(attachment_id: i64) -> String {
+        format!("see ![shot](/api/attachments/{attachment_id})")
+    }
+
+    /// The bug LIF-409 names: the direct-SQL backend wrote issue bodies
+    /// without ever reconciling the attachments they referenced, so a file
+    /// embedded via the CLI stayed unlinked and the orphan sweep eventually
+    /// deleted it out from under a live document.
+    #[test]
+    fn cli_issue_create_and_update_reconcile_attachment_links() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        let first = seed_attachment(&pool, "first", None);
+        let second = seed_attachment(&pool, "second", None);
+
+        run(
+            &pool,
+            &Command::Issue {
+                action: IssueAction::Create {
+                    project: "TST".into(),
+                    title: "With an attachment".into(),
+                    description: body(first),
+                    status: "todo".into(),
+                    priority: "none".into(),
+                    module: None,
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        let issue_id = {
+            let conn = pool.read().unwrap();
+            queries::resolve_identifier(&conn, "TST-1").unwrap()
+        };
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Issue, issue_id),
+            vec![first],
+            "a CLI-created issue must link what its description references"
+        );
+
+        // Editing to a different attachment drops the old link and adds the
+        // new one: re-scan on save, same as REST and MCP.
+        run(
+            &pool,
+            &Command::Issue {
+                action: IssueAction::Update {
+                    identifier: "TST-1".into(),
+                    title: None,
+                    description: Some(body(second)),
+                    status: None,
+                    priority: None,
+                    module: None,
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Issue, issue_id),
+            vec![second]
+        );
+
+        // An update that does not touch the description leaves the link alone
+        // rather than reconciling against an empty body.
+        run(
+            &pool,
+            &Command::Issue {
+                action: IssueAction::Update {
+                    identifier: "TST-1".into(),
+                    title: Some("Renamed".into()),
+                    description: None,
+                    status: None,
+                    priority: None,
+                    module: None,
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Issue, issue_id),
+            vec![second]
+        );
+    }
+
+    #[test]
+    fn cli_page_create_and_update_reconcile_attachment_links() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        let diagram = seed_attachment(&pool, "diagram", None);
+
+        run(
+            &pool,
+            &Command::Page {
+                action: PageAction::Create {
+                    title: "Design".into(),
+                    project: Some("TST".into()),
+                    folder: None,
+                    content: body(diagram),
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        let page_id = {
+            let conn = pool.read().unwrap();
+            queries::resolve_page_identifier(&conn, "TST-DOC-1").unwrap()
+        };
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Page, page_id),
+            vec![diagram]
+        );
+
+        run(
+            &pool,
+            &Command::Page {
+                action: PageAction::Update {
+                    identifier: "TST-DOC-1".into(),
+                    title: None,
+                    content: Some("the diagram is gone".into()),
+                    folder: None,
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            linked_attachment_ids(&pool, AttachmentEntity::Page, page_id).is_empty(),
+            "dropping the reference must drop the link"
+        );
+    }
+
+    /// `comment add` used to call bare `create_comment`, so a CLI comment
+    /// resolved no `@mentions` and linked no attachments while the identical
+    /// comment posted through REST did both. It now goes through the shared
+    /// path, and this asserts the parity directly.
+    #[test]
+    fn cli_comment_add_matches_the_shared_mention_and_attachment_path() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Test issue");
+        seed_user(&pool);
+        let shot = seed_attachment(&pool, "shot", None);
+
+        run(
+            &pool,
+            &Command::Comment {
+                action: CommentAction::Add {
+                    identifier: "TST-1".into(),
+                    content: format!("@testuser look at {}", body(shot)),
+                    user: Some("testuser".into()),
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        let conn = pool.read().unwrap();
+        let issue_id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+        let comments = queries::comments::list_comments(
+            &conn,
+            queries::comments::CommentParent::Issue(issue_id),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 1);
+        let comment = &comments[0];
+        let author_id = queries::users::get_user_by_username(&conn, "testuser")
+            .unwrap()
+            .id;
+        assert_eq!(comment.user_id, author_id, "--user names the author");
+        assert_eq!(
+            queries::comments::list_mention_user_ids(&conn, comment.id).unwrap(),
+            vec![author_id],
+            "a CLI comment resolves its mentions like every other backend"
+        );
+        drop(conn);
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Comment, comment.id),
+            vec![shot]
+        );
+    }
+
+    /// The trusted-local operator is past every gate the ownership policy
+    /// could apply, because they can write the link row by hand. An
+    /// authenticated caller in the same position is not, and the same
+    /// attachment stays unlinked for them.
+    #[test]
+    fn a_foreign_attachment_links_for_the_local_operator_and_not_for_a_stranger() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_user(&pool);
+        let owner_id = {
+            let conn = pool.read().unwrap();
+            queries::users::list_users(&conn).unwrap()[0].id
+        };
+        let foreign = seed_attachment(&pool, "foreign", Some(owner_id));
+
+        // A stranger's authenticated write: refused, silently, as designed.
+        let stranger = AttachmentActor::Authenticated(CommentActor {
+            user_id: owner_id + 1,
+            is_admin: false,
+        });
+        let stranger_issue = {
+            let conn = pool.write().unwrap();
+            let project_id = queries::resolve_project_identifier(&conn, "TST").unwrap();
+            queries::create_issue(
+                &conn,
+                &CreateIssue {
+                    project_id,
+                    title: "stranger".into(),
+                    description: body(foreign),
+                    attachments: stranger,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        };
+        assert!(
+            linked_attachment_ids(&pool, AttachmentEntity::Issue, stranger_issue).is_empty(),
+            "another user's unlinked upload must not follow a reference into a stranger's issue"
+        );
+
+        // The same body through the CLI: linked.
+        run(
+            &pool,
+            &Command::Issue {
+                action: IssueAction::Create {
+                    project: "TST".into(),
+                    title: "operator".into(),
+                    description: body(foreign),
+                    status: "todo".into(),
+                    priority: "none".into(),
+                    module: None,
+                    labels: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        let operator_issue = {
+            let conn = pool.read().unwrap();
+            queries::resolve_identifier(&conn, "TST-2").unwrap()
+        };
+        assert_eq!(
+            linked_attachment_ids(&pool, AttachmentEntity::Issue, operator_issue),
+            vec![foreign]
+        );
+    }
+
+    /// LIF-102's fix, finally applied to this backend: the creator leads the
+    /// project it just made, with the matching membership row, exactly as
+    /// `POST /api/projects` does. Otherwise the CLI leaves behind a project
+    /// `require_project_lead` rejects everyone but administrators for.
+    #[test]
+    fn cli_project_create_leads_with_the_effective_operator() {
+        let pool = test_pool();
+        seed_user(&pool);
+
+        run(
+            &pool,
+            &Command::Project {
+                action: ProjectAction::Create {
+                    name: "Test".into(),
+                    identifier: "TST".into(),
+                    description: String::new(),
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        let conn = pool.read().unwrap();
+        let admin_id = queries::users::get_user_by_username(&conn, "testuser")
+            .unwrap()
+            .id;
+        let project = queries::get_project(
+            &conn,
+            queries::resolve_project_identifier(&conn, "TST").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(project.lead_user_id, Some(admin_id));
+        assert_eq!(
+            queries::members::get_member_role(&conn, project.id, admin_id).unwrap(),
+            Some(Role::Lead),
+            "the lead pointer and the membership row are one fact, written together"
+        );
+    }
+
+    fn seed_named_user(pool: &DbPool, username: &str, is_admin: bool, is_bot: bool) -> i64 {
+        let conn = pool.write().unwrap();
+        queries::users::create_user(
+            &conn,
+            &CreateUser {
+                username: username.into(),
+                email: format!("{username}@test.com"),
+                password: "testpass123".into(),
+                display_name: Some(username.into()),
+                is_admin,
+                is_bot,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn operator_of(pool: &DbPool) -> Result<Option<CommentActor>, LificError> {
+        let conn = pool.read().unwrap();
+        effective_operator(&conn)
+    }
+
+    /// A bot is somebody's tool, not a person: it must never be handed a
+    /// project to lead or credited with a comment just because it sorts first.
+    /// A deactivated account is one an administrator took out of circulation,
+    /// and resurrecting it by row order is the same mistake.
+    #[test]
+    fn the_local_operator_is_never_a_bot_or_a_deactivated_account() {
+        let pool = test_pool();
+        seed_named_user(&pool, "botuser", true, true);
+        assert_eq!(
+            operator_of(&pool).unwrap(),
+            None,
+            "an admin bot is still a tool, not somebody to act as"
+        );
+
+        // `retired` sorts before `keeper`, so only the is_active filter can
+        // keep the deactivated account from winning.
+        let retired = seed_named_user(&pool, "retired", true, false);
+        let keeper = seed_named_user(&pool, "keeper", true, false);
+        {
+            let conn = pool.write().unwrap();
+            queries::users::set_active(&conn, retired, false).unwrap();
+        }
+        assert_eq!(
+            operator_of(&pool).unwrap().map(|a| a.user_id),
+            Some(keeper),
+            "a deactivated admin is out of circulation and stays out"
+        );
+    }
+
+    /// With no administrator at all, one active human is unambiguous. Several
+    /// are not, and the guess is refused out loud rather than settled by row
+    /// order — picking one would silently attribute work to whoever happened
+    /// to sign up first.
+    #[test]
+    fn a_sole_human_acts_but_an_ambiguous_pair_refuses() {
+        let pool = test_pool();
+        let only = seed_named_user(&pool, "solo", false, false);
+        assert_eq!(
+            operator_of(&pool).unwrap().map(|a| a.user_id),
+            Some(only),
+            "one active human is unambiguous"
+        );
+
+        seed_named_user(&pool, "second", false, false);
+        let error = operator_of(&pool).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot infer which user"),
+            "got: {error}"
+        );
+
+        // An admin resolves it: the established operator wins outright.
+        let admin = seed_named_user(&pool, "boss", true, false);
+        assert_eq!(operator_of(&pool).unwrap().map(|a| a.user_id), Some(admin));
+    }
+
+    /// A freshly initialized database has no users at all. That is a real
+    /// state, not an error, and it must not be papered over by naming an
+    /// arbitrary id: the project is simply created leaderless.
+    #[test]
+    fn cli_project_create_without_users_is_leaderless_rather_than_arbitrary() {
+        let pool = test_pool();
+
+        run(
+            &pool,
+            &Command::Project {
+                action: ProjectAction::Create {
+                    name: "Test".into(),
+                    identifier: "TST".into(),
+                    description: String::new(),
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        let conn = pool.read().unwrap();
+        let project = queries::get_project(
+            &conn,
+            queries::resolve_project_identifier(&conn, "TST").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(project.lead_user_id, None);
+        assert!(
+            queries::members::list_members(&conn, project.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `comment add` on a database with no users refuses rather than picking
+    /// somebody: a comment must have an author.
+    #[test]
+    fn cli_comment_add_without_users_refuses() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Test issue");
+
+        let error = run(
+            &pool,
+            &Command::Comment {
+                action: CommentAction::Add {
+                    identifier: "TST-1".into(),
+                    content: "orphan".into(),
+                    user: None,
+                },
+            },
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no users exist"), "got: {error}");
+    }
+
+    /// The same object, the same configured base URL, the same `web_url` on
+    /// either backend. The SQL backend used to emit none at all, which made
+    /// `lific issue get --json` answer differently depending on how it reached
+    /// the data.
+    #[test]
+    fn sql_json_web_url_matches_the_http_backend() {
+        let pool = test_pool();
+        seed_project(&pool, "TST");
+        seed_issue(&pool, "TST", "Linkable");
+
+        let context = IssueLinkContext::parse("https://tracker.example/lific").unwrap();
+        let issue = {
+            let conn = pool.read().unwrap();
+            let id = queries::resolve_identifier(&conn, "TST-1").unwrap();
+            queries::get_issue(&conn, id).unwrap()
+        };
+        let value = Output::value(&issue);
+
+        let sql = Output {
+            json: true,
+            links: Some(&context),
+        }
+        .enrich_resources(value.clone(), ResourceKind::Issue);
+        // Exactly what `HttpBackend::execute` does to an issue response.
+        let http = weblinks::linked_resources(
+            value.clone(),
+            &context,
+            IssueLinkOutput::Url,
+            ResourceKind::Issue,
+        );
+
+        assert_eq!(sql, http);
+        assert_eq!(
+            sql["web_url"],
+            "https://tracker.example/lific/TST/issues/TST-1"
+        );
+
+        // No configured public URL means no link, rather than one built on a
+        // guessed origin.
+        let unlinked = Output {
+            json: true,
+            links: None,
+        }
+        .enrich_resources(value, ResourceKind::Issue);
+        assert!(unlinked.get("web_url").is_none());
     }
 }

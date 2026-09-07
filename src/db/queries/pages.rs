@@ -343,14 +343,16 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
         )
         .unwrap_or(1)
     };
-    // Capture the page id from inside the savepoint closure and propagate
-    // it out — `conn.last_insert_rowid()` after the savepoint releases will
-    // reflect the most recent INSERT, which may be a page_labels row, not
-    // the page itself. `create_issue` uses the same shape (LIF-130).
-    let id = super::savepoint(conn, "create_page", || {
+    // The page id is captured inside the savepoint closure —
+    // `conn.last_insert_rowid()` after the savepoint releases would reflect
+    // the most recent INSERT, which may be a page_labels row, not the page
+    // itself. `create_issue` uses the same shape (LIF-130), including
+    // LIF-409's hydrating read inside the savepoint.
+    let content = unescape_text(&input.content);
+    super::savepoint(conn, "create_page", || {
         conn.execute(
             "INSERT INTO pages (project_id, folder_id, title, content, sequence, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![input.project_id, input.folder_id, input.title, unescape_text(&input.content), next_seq, input.status],
+            params![input.project_id, input.folder_id, input.title, content, next_seq, input.status],
         )?;
         let id = conn.last_insert_rowid();
 
@@ -367,9 +369,18 @@ pub fn create_page(conn: &Connection, input: &CreatePage) -> Result<Page, LificE
                 )?;
             }
         }
-        Ok(id)
-    })?;
-    get_page(conn, id)
+        // LIF-409: see `create_issue` — link reconciliation belongs to the
+        // write that stored the content, not to each transport in turn.
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Page,
+            id,
+            &content,
+            input.attachments,
+            input.project_id,
+        )?;
+        get_page(conn, id)
+    })
 }
 
 pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Page, LificError> {
@@ -377,7 +388,7 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
     if let Some(folder_id) = input.folder_id {
         validate_page_folder(conn, page.project_id, folder_id)?;
     }
-    super::savepoint(conn, "update_page", || {
+    super::savepoint::<_, Page>(conn, "update_page", || {
         // LIF-441: see `update_issue` — checked inside the savepoint so the
         // precondition and the write cannot be separated.
         if let Some(expected) = input.expected_seq {
@@ -448,9 +459,28 @@ pub fn update_page(conn: &Connection, id: i64, input: &UpdatePage) -> Result<Pag
                 }
             }
         }
-        Ok(())
-    })?;
-    get_page(conn, id)
+        // LIF-409: re-scan the stored content and reconcile links inside the
+        // same savepoint. Read back from the row so an update that leaves the
+        // content alone still reconciles against what is actually stored.
+        if !matches!(input.attachments, AttachmentActor::Unattributed) {
+            let (project_id, content): (Option<i64>, String) = conn.query_row(
+                "SELECT project_id, content FROM pages WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            super::attachments::sync_links(
+                conn,
+                AttachmentEntity::Page,
+                id,
+                &content,
+                input.attachments,
+                project_id,
+            )?;
+        }
+        // LIF-409: see `update_issue` — a failed final read must roll the
+        // update back, not report an error over a committed change.
+        get_page(conn, id)
+    })
 }
 
 /// Tombstone a page (LIF-438). See [`super::delete_issue`] for the rationale;

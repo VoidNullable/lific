@@ -17,6 +17,7 @@ pub mod service;
 pub mod term;
 pub mod ui;
 pub mod user;
+pub mod weblinks;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;

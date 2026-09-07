@@ -278,7 +278,7 @@ pub fn apply_issue(
 
         if let Some(bot) = bot_id {
             for comment in &issue.comments {
-                queries::comments::create_comment(
+                queries::comments::create_imported_comment(
                     &conn,
                     queries::comments::CommentParent::Issue(created.id),
                     bot,

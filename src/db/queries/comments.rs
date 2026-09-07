@@ -1,6 +1,6 @@
 use rusqlite::{Connection, params};
 
-use crate::db::models::{AttachmentEntity, Comment, CommentActor};
+use crate::db::models::{AttachmentActor, AttachmentEntity, Comment, CommentActor};
 use crate::error::LificError;
 
 use super::{TOMBSTONE_NOW, unescape_text};
@@ -100,8 +100,16 @@ impl CommentContext {
     }
 }
 
-/// Create a comment attached to an issue or page.
-pub fn create_comment(
+/// Insert a comment row attached to an issue or page, and nothing else.
+///
+/// LIF-409: deliberately private. A comment body carries `@mentions` and
+/// `/api/attachments/{id}` references, and a comment written without resolving
+/// them is a comment that silently notifies nobody and leaves its attachments
+/// unlinked for the orphan sweep to collect. Every production write goes
+/// through [`create_comment_with_mentions`], which does all three inside one
+/// savepoint. Two callers are exempt and each has its own explicit door:
+/// [`create_imported_comment`] (bulk import, below) and tests.
+fn insert_comment_row(
     conn: &Connection,
     parent: CommentParent,
     user_id: i64,
@@ -140,6 +148,47 @@ pub fn create_comment(
 
     let id = conn.last_insert_rowid();
     get_comment(conn, id)
+}
+
+/// The historical bulk-import path (LIF-264/265), and the one production
+/// caller allowed to write a comment without reconciling it.
+///
+/// An imported comment is a verbatim record of something said in another
+/// tracker: its `@handles` name that tracker's users, not this one's, and its
+/// attachment references (if any) point at that tracker's URLs, so there is
+/// nothing here to resolve. Attributed to the import bot, never to a person.
+pub fn create_imported_comment(
+    conn: &Connection,
+    parent: CommentParent,
+    bot_id: i64,
+    content: &str,
+) -> Result<Comment, LificError> {
+    insert_comment_row(conn, parent, bot_id, content)
+}
+
+/// LIF-409: test-only handles on the unreconciled primitives, so a test can
+/// seed a comment row without exercising mention and attachment
+/// reconciliation. Absent from every non-test build, which is what keeps
+/// production honest: a new caller cannot reach them by accident, because
+/// outside `cfg(test)` these names do not exist.
+#[cfg(test)]
+pub(crate) fn create_comment(
+    conn: &Connection,
+    parent: CommentParent,
+    user_id: i64,
+    content: &str,
+) -> Result<Comment, LificError> {
+    insert_comment_row(conn, parent, user_id, content)
+}
+
+/// See [`create_comment`].
+#[cfg(test)]
+pub(crate) fn update_comment(
+    conn: &Connection,
+    id: i64,
+    content: &str,
+) -> Result<Comment, LificError> {
+    write_comment_content(conn, id, content)
 }
 
 /// Get a single comment by ID (with author info). Parent-agnostic.
@@ -373,8 +422,12 @@ pub fn list_comments_keyset(
     })
 }
 
-/// Update a comment's content. Parent-agnostic.
-pub fn update_comment(conn: &Connection, id: i64, content: &str) -> Result<Comment, LificError> {
+/// Overwrite a comment's content, and nothing else. Parent-agnostic.
+///
+/// LIF-409: private for the same reason as [`insert_comment_row`] — an edit
+/// that skips reconciliation strands the mentions and links the previous body
+/// established. Production edits go through [`update_comment_with_mentions`].
+fn write_comment_content(conn: &Connection, id: i64, content: &str) -> Result<Comment, LificError> {
     let content = unescape_text(content);
     validate_comment_content(&content)?;
 
@@ -578,49 +631,67 @@ pub fn sync_mentions(
 
 /// Create a comment and reconcile everything derived from its body in one
 /// write: resolved mentions and attachment links.
+///
+/// `author` is who the comment belongs to; `attachments` is whose reach its
+/// `/api/attachments/{id}` references inherit. They are separate arguments on
+/// purpose (LIF-409): the direct-SQL CLI attributes the comment to a fallback
+/// administrator without granting that administrator's reach.
+///
+/// LIF-409: runs in its own SAVEPOINT so the comment, its mentions and its
+/// links are all-or-nothing on any caller's connection, whether or not that
+/// caller opened a transaction of its own. The CLI, which writes without one,
+/// used to leave a comment behind when mention resolution failed.
 pub fn create_comment_with_mentions(
     conn: &Connection,
     parent: CommentParent,
     project_id: Option<i64>,
-    actor: CommentActor,
+    author: CommentActor,
+    attachments: AttachmentActor,
     content: &str,
     member_scoped: bool,
 ) -> Result<Comment, LificError> {
-    let candidates = mention_candidates(conn, project_id, member_scoped)?;
-    let comment = create_comment(conn, parent, actor.user_id, content)?;
-    sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-    super::attachments::sync_links_scoped(
-        conn,
-        AttachmentEntity::Comment,
-        comment.id,
-        &comment.content,
-        actor,
-        project_id,
-    )?;
-    Ok(comment)
+    super::savepoint(conn, "create_comment_with_mentions", || {
+        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let comment = insert_comment_row(conn, parent, author.user_id, content)?;
+        sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+            attachments,
+            project_id,
+        )?;
+        Ok(comment)
+    })
 }
 
 /// Edit a comment's content and re-derive its mentions and attachment links.
+/// See [`create_comment_with_mentions`] for the `author` / `attachments`
+/// split and the savepoint. An edit reconciles with the *editor's* reach, not
+/// the original author's: introducing a reference is the editor's act.
 pub fn update_comment_with_mentions(
     conn: &Connection,
     comment_id: i64,
     project_id: Option<i64>,
-    actor: CommentActor,
+    attachments: AttachmentActor,
     content: &str,
     member_scoped: bool,
 ) -> Result<Comment, LificError> {
-    let candidates = mention_candidates(conn, project_id, member_scoped)?;
-    let comment = update_comment(conn, comment_id, content)?;
-    sync_mentions(conn, comment.id, &comment.content, &candidates)?;
-    super::attachments::sync_links_scoped(
-        conn,
-        AttachmentEntity::Comment,
-        comment.id,
-        &comment.content,
-        actor,
-        project_id,
-    )?;
-    Ok(comment)
+    super::savepoint(conn, "update_comment_with_mentions", || {
+        let candidates = mention_candidates(conn, project_id, member_scoped)?;
+        let comment = write_comment_content(conn, comment_id, content)?;
+        sync_mentions(conn, comment.id, &comment.content, &candidates)?;
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Comment,
+            comment.id,
+            &comment.content,
+            attachments,
+            project_id,
+        )?;
+        Ok(comment)
+    })
 }
 
 /// The user ids currently recorded as mentioned by a comment. Test-only
@@ -850,6 +921,7 @@ mod tests {
             CommentParent::Issue(issue_id),
             Some(project_id),
             editor,
+            AttachmentActor::Authenticated(editor),
             &content,
             true,
         )
@@ -867,8 +939,15 @@ mod tests {
             issue_id,
         )
         .unwrap();
-        update_comment_with_mentions(&conn, comment.id, Some(project_id), editor, &content, true)
-            .unwrap();
+        update_comment_with_mentions(
+            &conn,
+            comment.id,
+            Some(project_id),
+            AttachmentActor::Authenticated(editor),
+            &content,
+            true,
+        )
+        .unwrap();
         assert_eq!(
             queries::attachments::list_for_entity(&conn, AttachmentEntity::Comment, comment.id,)
                 .unwrap()

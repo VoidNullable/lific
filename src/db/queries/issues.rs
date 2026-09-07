@@ -552,12 +552,18 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
     // failed label attach can't leave a half-created issue behind. The id is
     // captured inside the closure because `last_insert_rowid()` after the
     // label loop would reflect the last issue_labels row, not the issue.
-    let id = super::savepoint(conn, "create_issue", || {
+    //
+    // LIF-409: the hydrating read is inside the savepoint too. A `get_issue`
+    // that fails after the savepoint released would leave the row committed
+    // and report an error, which is exactly the split the savepoint exists to
+    // prevent — the caller would see a failure and the database a success.
+    let description = unescape_text(&input.description);
+    super::savepoint(conn, "create_issue", || {
         conn.execute(
             "INSERT INTO issues (project_id, sequence, title, description, status, priority, module_id, start_date, target_date, source)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                input.project_id, next_seq, input.title, unescape_text(&input.description),
+                input.project_id, next_seq, input.title, description,
                 input.status, input.priority, input.module_id, input.start_date, input.target_date,
                 input.source,
             ],
@@ -572,10 +578,20 @@ pub fn create_issue(conn: &Connection, input: &CreateIssue) -> Result<Issue, Lif
                 params![id, input.project_id, label_name],
             )?;
         }
-        Ok(id)
-    })?;
-
-    get_issue(conn, id)
+        // LIF-409: attachment links are derived from the description, so they
+        // are reconciled here rather than by each transport afterwards. Inside
+        // this savepoint a failed link rolls the whole issue back, which is
+        // what "the row and its links agree" has to mean.
+        super::attachments::sync_links(
+            conn,
+            AttachmentEntity::Issue,
+            id,
+            &description,
+            input.attachments,
+            Some(input.project_id),
+        )?;
+        get_issue(conn, id)
+    })
 }
 
 pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<Issue, LificError> {
@@ -585,7 +601,7 @@ pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<I
         validate_module_project(conn, issue.project_id, module_id)?;
     }
 
-    super::savepoint(conn, "update_issue", || {
+    super::savepoint::<_, Issue>(conn, "update_issue", || {
         // LIF-441: the precondition is checked inside the savepoint, on the
         // same connection and transaction that writes, so no one can slip a
         // write between the check and the update. Re-read rather than reusing
@@ -667,10 +683,30 @@ pub fn update_issue(conn: &Connection, id: i64, input: &UpdateIssue) -> Result<I
                 )?;
             }
         }
-        Ok(())
-    })?;
-
-    get_issue(conn, id)
+        // LIF-409: re-scan the stored description (edited or not) and
+        // reconcile links, in the same savepoint as the edit itself. Read back
+        // from the row rather than from `input`, so an update that leaves the
+        // description alone still reconciles against what is actually stored.
+        if !matches!(input.attachments, AttachmentActor::Unattributed) {
+            let (project_id, description): (i64, String) = conn.query_row(
+                "SELECT project_id, description FROM issues WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            super::attachments::sync_links(
+                conn,
+                AttachmentEntity::Issue,
+                id,
+                &description,
+                input.attachments,
+                Some(project_id),
+            )?;
+        }
+        // LIF-409: hydrated inside the savepoint, so a failed final read rolls
+        // the whole update back rather than committing a change the caller was
+        // told had failed.
+        get_issue(conn, id)
+    })
 }
 
 /// Tombstone an issue (LIF-438).

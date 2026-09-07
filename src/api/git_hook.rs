@@ -122,27 +122,23 @@ fn close_issue(
     id: i64,
 ) -> Result<(), LificError> {
     let issue = db.transaction(|conn| {
-        let issue = crate::db::queries::update_issue(
+        // The gate ran on a read connection before this write began; re-run it
+        // here against the issue's project as it stands inside the
+        // transaction, so a revocation cannot slip in between.
+        let project_id = crate::db::queries::get_issue(conn, id)?.project_id;
+        authz::require_role_conn(conn, identity, project_id, Role::Maintainer)?;
+        crate::db::queries::update_issue(
             conn,
             id,
             &UpdateIssue {
                 status: Some(Status::Done),
+                // LIF-409: closing an issue rewrites nothing, but it still
+                // re-scans the description, exactly as `PUT /api/issues/{id}`
+                // does, and with the pusher's reach rather than an inferred one.
+                attachments: AttachmentActor::Authenticated(CommentActor::from(user)),
                 ..Default::default()
             },
-        )?;
-        // The gate ran on a read connection before this write began; re-run it
-        // here against the issue's project as it stands inside the
-        // transaction, so a revocation cannot slip in between.
-        authz::require_role_conn(conn, identity, issue.project_id, Role::Maintainer)?;
-        super::attachments::sync_links_scoped(
-            conn,
-            AttachmentEntity::Issue,
-            issue.id,
-            &issue.description,
-            user,
-            Some(issue.project_id),
-        )?;
-        Ok(issue)
+        )
     })?;
     realtime.send_with_seq(
         RealtimeEvent::IssueUpdated {

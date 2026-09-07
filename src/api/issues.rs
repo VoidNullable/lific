@@ -54,27 +54,20 @@ pub(super) async fn create_issue(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<CreateIssue>,
+    Json(mut input): Json<CreateIssue>,
 ) -> Result<Json<Issue>, LificError> {
     authz::require_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    // LIF-262/LIF-409: the description's attachment references are linked by
+    // `create_issue` itself, inside its savepoint, with the caller's reach.
+    input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
     let issue = db.transaction(|conn| {
-        let issue = crate::db::queries::create_issue(conn, &input)?;
         // The gate above ran on a read connection before this write began.
         // Re-run it here so the role that decides which attachment references
         // may be linked is read on the connection that writes those links,
         // inside one immediate transaction: no revocation can slip between.
-        authz::require_role_conn(conn, &identity, issue.project_id, Role::Maintainer)?;
-        // LIF-262: link any attachments the description references.
-        super::attachments::sync_links_scoped(
-            conn,
-            AttachmentEntity::Issue,
-            issue.id,
-            &issue.description,
-            &user,
-            Some(issue.project_id),
-        )?;
-        Ok(issue)
+        authz::require_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
+        crate::db::queries::create_issue(conn, &input)
     })?;
     realtime.send_with_seq(
         RealtimeEvent::IssueCreated {
@@ -91,26 +84,22 @@ pub(super) async fn update_issue(
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
-    Json(input): Json<UpdateIssue>,
+    Json(mut input): Json<UpdateIssue>,
 ) -> Result<Json<Issue>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
     let issue = db.transaction(|conn| {
-        let issue = crate::db::queries::update_issue(conn, id, &input)?;
         // Same recheck as the create path, against the issue's project as it
         // stands inside this transaction rather than as it read a moment ago.
-        authz::require_role_conn(conn, &identity, issue.project_id, Role::Maintainer)?;
-        // LIF-262: re-scan the (possibly edited) description and reconcile links.
-        super::attachments::sync_links_scoped(
-            conn,
-            AttachmentEntity::Issue,
-            issue.id,
-            &issue.description,
-            &user,
-            Some(issue.project_id),
-        )?;
-        Ok(issue)
+        // An update cannot move an issue between projects, so reading it here
+        // and writing below are the same project by construction.
+        let project_id = crate::db::queries::get_issue(conn, id)?.project_id;
+        authz::require_role_conn(conn, &identity, project_id, Role::Maintainer)?;
+        // LIF-262: `update_issue` re-scans the stored description and
+        // reconciles links in the same savepoint as the edit.
+        crate::db::queries::update_issue(conn, id, &input)
     })?;
     realtime.send_with_seq(
         RealtimeEvent::IssueUpdated {

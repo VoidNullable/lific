@@ -334,6 +334,10 @@ pub struct CreateIssue {
     /// Import provenance marker (LIF-264/265). `None` for hand-created issues.
     #[serde(default)]
     pub source: Option<String>,
+    /// LIF-409: whose reach the description's attachment references inherit.
+    /// Never deserialized — a request body cannot name its own actor.
+    #[serde(skip)]
+    pub attachments: AttachmentActor,
 }
 
 /// See [`UpdateProject`] for why this serializes with `skip_serializing_if`.
@@ -370,6 +374,9 @@ pub struct UpdateIssue {
     /// [`crate::error::LificError::UpdateConflict`] and nothing is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_seq: Option<i64>,
+    /// LIF-409: see [`CreateIssue::attachments`].
+    #[serde(skip)]
+    pub attachments: AttachmentActor,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -536,6 +543,9 @@ pub struct CreatePage {
     /// project_id), since labels are project-scoped (LIF-105).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// LIF-409: see [`CreateIssue::attachments`].
+    #[serde(skip)]
+    pub attachments: AttachmentActor,
 }
 
 /// Hand-written for the same reason as [`CreateIssue`]'s: `status` must come
@@ -549,6 +559,7 @@ impl Default for CreatePage {
             content: String::new(),
             status: default_page_status(),
             labels: Vec::new(),
+            attachments: AttachmentActor::default(),
         }
     }
 }
@@ -584,6 +595,9 @@ pub struct UpdatePage {
     /// [`UpdateIssue`]. `None` keeps last-writer-wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_seq: Option<i64>,
+    /// LIF-409: see [`CreateIssue::attachments`].
+    #[serde(skip)]
+    pub attachments: AttachmentActor,
 }
 
 fn default_page_status() -> String {
@@ -777,6 +791,37 @@ impl From<&AuthUser> for CommentActor {
             is_admin: user.is_admin,
         }
     }
+}
+
+/// Whose reach decides which attachments a body's `/api/attachments/{id}`
+/// references are allowed to pull in (LIF-409).
+///
+/// Deliberately separate from the audit actor. Audit answers "who wrote this";
+/// this answers "whose permissions do the references inherit". Inferring one
+/// from the other is the bug this type exists to prevent: the direct-SQL CLI
+/// attributes its writes to a fallback administrator, and reading that
+/// attribution as an authorization would silently hand every CLI caller an
+/// administrator's reach over other people's unlinked uploads.
+///
+/// Carried on [`CreateIssue`] / [`UpdateIssue`] / [`CreatePage`] /
+/// [`UpdatePage`] as a `#[serde(skip)]` field so reconciliation happens inside
+/// the same savepoint as the write it derives from, and so no request body can
+/// ever name its own actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttachmentActor {
+    /// Leave the link table alone. The default, and the right answer for every
+    /// internal write that has no editing caller behind it: imports, retention
+    /// sweeps, migrations, test fixtures.
+    #[default]
+    Unattributed,
+    /// An authenticated REST or MCP caller. A newly referenced attachment is
+    /// linked only if this actor uploaded it, is an administrator, or the
+    /// attachment is already linked somewhere in the same project.
+    Authenticated(CommentActor),
+    /// The direct-SQL CLI. Whoever runs it already holds the database file
+    /// open for writing and can insert any row by hand, so an ownership gate
+    /// protects nothing: every referenced attachment that exists is linked.
+    TrustedLocal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

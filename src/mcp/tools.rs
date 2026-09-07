@@ -1355,7 +1355,7 @@ fn sync_link_actor_conn(
     conn: &rusqlite::Connection,
     project_id: Option<i64>,
     min: models::Role,
-) -> Result<(i64, bool), crate::error::LificError> {
+) -> Result<models::AttachmentActor, crate::error::LificError> {
     let actor = resolve_comment_actor_conn(conn)?;
     crate::authz::require_project_or_workspace_role_conn(
         conn,
@@ -1363,7 +1363,9 @@ fn sync_link_actor_conn(
         project_id,
         min,
     )?;
-    Ok((actor.user.id, actor.user.is_admin))
+    Ok(models::AttachmentActor::Authenticated(
+        models::CommentActor::from(&actor.user),
+    ))
 }
 
 fn visible_project_ids_mcp(
@@ -2078,7 +2080,11 @@ impl LificMcp {
         };
         drop(conn);
         let issue = self.transaction(|conn| {
-            let issue = queries::create_issue(
+            // LIF-369/LIF-409: resolve the actor and re-assert the role on the
+            // writing connection first; `create_issue` then links the
+            // description's references inside its own savepoint.
+            let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            queries::create_issue(
                 conn,
                 &models::CreateIssue {
                     project_id: pid,
@@ -2095,22 +2101,9 @@ impl LificMcp {
                     target_date: input.target_date.clone(),
                     labels: input.labels.clone().unwrap_or_default(),
                     source: None,
+                    attachments,
                 },
-            )?;
-            // LIF-369: link attachments the description references, same as
-            // the REST create path.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Issue,
-                issue.id,
-                &issue.description,
-                actor_id,
-                actor_is_admin,
-                Some(issue.project_id),
-            )?;
-            Ok(issue)
+            )
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueCreated {
@@ -2171,6 +2164,13 @@ impl LificMcp {
                 )?)),
                 None => None,
             };
+            // LIF-369/LIF-409: resolved before the write it authorizes, on the
+            // same connection and transaction, so no revocation can slip in.
+            let attachments = sync_link_actor_conn(
+                conn,
+                Some(previous_issue.project_id),
+                models::Role::Maintainer,
+            )?;
             let issue = queries::update_issue(
                 conn,
                 id,
@@ -2187,21 +2187,9 @@ impl LificMcp {
                     labels: input.labels.clone(),
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
+                    attachments,
                     ..Default::default()
                 },
-            )?;
-            // LIF-369: re-scan the (possibly edited) description and
-            // reconcile links, same as the REST update path.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Issue,
-                issue.id,
-                &issue.description,
-                actor_id,
-                actor_is_admin,
-                Some(issue.project_id),
             )?;
             let cascade_action = match (previous_issue.status.as_str(), issue.status.as_str()) {
                 (previous, "done") if previous != "done" => {
@@ -2347,6 +2335,9 @@ impl LificMcp {
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let issue = self.transaction(|conn| {
             let issue = queries::get_issue(conn, id)?;
+            // Read inside the transaction: the gate above ran on a read
+            // connection, and this is the project the write actually lands in.
+            let issue_project_id = issue.project_id;
 
             let field = input.field.as_deref().unwrap_or("description");
             // Normalize string-field inputs through the same proper-JSON
@@ -2383,21 +2374,12 @@ impl LificMcp {
                 "description" => patch.description = Some(updated),
                 _ => unreachable!(),
             }
+            // LIF-369: an edit can add or drop an attachment reference, and it
+            // does so with the editor's reach.
+            patch.attachments =
+                sync_link_actor_conn(conn, Some(issue_project_id), models::Role::Maintainer)?;
 
-            let issue = queries::update_issue(conn, id, &patch)?;
-            // LIF-369: an edit can add or drop an attachment reference.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, Some(issue.project_id), models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Issue,
-                issue.id,
-                &issue.description,
-                actor_id,
-                actor_is_admin,
-                Some(issue.project_id),
-            )?;
-            Ok(issue)
+            queries::update_issue(conn, id, &patch)
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
@@ -2726,7 +2708,11 @@ impl LificMcp {
         };
         drop(conn);
         let page = self.transaction(|conn| {
-            let page = queries::create_page(
+            // LIF-369/LIF-409: resolve the actor and re-assert the role on the
+            // writing connection first; `create_page` then links the content's
+            // references inside its own savepoint.
+            let attachments = sync_link_actor_conn(conn, project_id, models::Role::Maintainer)?;
+            queries::create_page(
                 conn,
                 &models::CreatePage {
                     project_id,
@@ -2735,22 +2721,9 @@ impl LificMcp {
                     content: input.content.clone().unwrap_or_default(),
                     status: input.status.clone().unwrap_or_else(|| "draft".into()),
                     labels: input.labels.clone().unwrap_or_default(),
+                    attachments,
                 },
-            )?;
-            // LIF-369: link attachments the content references, same as the
-            // REST create path.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Page,
-                page.id,
-                &page.content,
-                actor_id,
-                actor_is_admin,
-                page.project_id,
-            )?;
-            Ok(page)
+            )
         })?;
         if let Some(project_id) = page.project_id {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
@@ -2794,7 +2767,12 @@ impl LificMcp {
                 }
                 None => None,
             };
-            let page = queries::update_page(
+            // LIF-369/LIF-409: resolved before the write it authorizes,
+            // against the page's project as it stands inside this transaction.
+            let page_project_id = queries::get_page(conn, id)?.project_id;
+            let attachments =
+                sync_link_actor_conn(conn, page_project_id, models::Role::Maintainer)?;
+            queries::update_page(
                 conn,
                 id,
                 &models::UpdatePage {
@@ -2806,23 +2784,10 @@ impl LificMcp {
                     labels: input.labels.clone(),
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
+                    attachments,
                     ..Default::default()
                 },
-            )?;
-            // LIF-369: re-scan the (possibly edited) content and reconcile
-            // links, same as the REST update path.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Page,
-                page.id,
-                &page.content,
-                actor_id,
-                actor_is_admin,
-                page.project_id,
-            )?;
-            Ok(page)
+            )
         })?;
         if let Some(project_id) = page.project_id {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
@@ -2854,6 +2819,9 @@ impl LificMcp {
         require_page_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
         let page = self.transaction(|conn| {
             let page = queries::get_page(conn, id)?;
+            // Read inside the transaction: this is the project the write
+            // actually lands in, not the one a read connection saw earlier.
+            let page_project_id = page.project_id;
 
             let field = input.field.as_deref().unwrap_or("content");
             // Mirror update_page's proper-JSON heuristic on content so an
@@ -2889,21 +2857,12 @@ impl LificMcp {
                 "content" => patch.content = Some(updated),
                 _ => unreachable!(),
             }
+            // LIF-369: an edit can add or drop an attachment reference, and it
+            // does so with the editor's reach.
+            patch.attachments =
+                sync_link_actor_conn(conn, page_project_id, models::Role::Maintainer)?;
 
-            let page = queries::update_page(conn, id, &patch)?;
-            // LIF-369: an edit can add or drop an attachment reference.
-            let (actor_id, actor_is_admin) =
-                sync_link_actor_conn(conn, page.project_id, models::Role::Maintainer)?;
-            queries::attachments::sync_links(
-                conn,
-                models::AttachmentEntity::Page,
-                page.id,
-                &page.content,
-                actor_id,
-                actor_is_admin,
-                page.project_id,
-            )?;
-            Ok(page)
+            queries::update_page(conn, id, &patch)
         })?;
         if let Some(project_id) = page.project_id {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
@@ -3579,11 +3538,13 @@ impl LificMcp {
                 models::Role::Viewer,
             )?;
             let member_scoped = crate::authz::authz_enforced_conn(conn)?;
+            let author = models::CommentActor::from(&actor.user);
             let comment = queries::comments::create_comment_with_mentions(
                 conn,
                 parent,
                 project_id,
-                models::CommentActor::from(&actor.user),
+                author,
+                models::AttachmentActor::Authenticated(author),
                 &input.content,
                 member_scoped,
             )?;
@@ -3773,7 +3734,8 @@ impl LificMcp {
                 conn,
                 input.comment_id,
                 context.project_id(),
-                models::CommentActor::from(&actor.user),
+                // The editor's reach, not the original author's.
+                models::AttachmentActor::Authenticated(models::CommentActor::from(&actor.user)),
                 &input.content,
                 member_scoped,
             )?;

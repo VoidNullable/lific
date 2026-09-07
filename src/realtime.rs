@@ -1168,6 +1168,7 @@ mod tests {
                     target_date: None,
                     labels: vec![],
                     source: None,
+                    ..Default::default()
                 },
             )
             .unwrap();

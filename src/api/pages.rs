@@ -128,27 +128,20 @@ pub(super) async fn create_page(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Json(input): Json<CreatePage>,
+    Json(mut input): Json<CreatePage>,
 ) -> Result<Json<Page>, LificError> {
     require_page_role(&db, &identity, input.project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    // LIF-262/LIF-409: `create_page` links the content's attachment references
+    // inside its own savepoint, with the caller's reach.
+    input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
     let page = db.transaction(|conn| {
-        let page = crate::db::queries::create_page(conn, &input)?;
         // The gate above ran on a read connection before this write began.
         // Re-run it on the connection that writes the links, in one immediate
         // transaction, so the authorization deciding which references may be
         // linked cannot go stale between the check and the insert.
-        require_page_role_conn(conn, &identity, page.project_id, Role::Maintainer)?;
-        // LIF-262: link any attachments the content references.
-        super::attachments::sync_links_scoped(
-            conn,
-            AttachmentEntity::Page,
-            page.id,
-            &page.content,
-            &user,
-            page.project_id,
-        )?;
-        Ok(page)
+        require_page_role_conn(conn, &identity, input.project_id, Role::Maintainer)?;
+        crate::db::queries::create_page(conn, &input)
     })?;
     if let Some(project_id) = page.project_id {
         realtime.send_with_seq(RealtimeEvent::ProjectUpdated { project_id }, page.seq);
@@ -161,26 +154,21 @@ pub(super) async fn update_page(
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
-    Json(input): Json<UpdatePage>,
+    Json(mut input): Json<UpdatePage>,
 ) -> Result<Json<Page>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_page(conn, id))?.project_id;
     require_page_role(&db, &identity, project_id, Role::Maintainer)?;
     let user = super::require_user(&identity)?;
+    input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
     let page = db.transaction(|conn| {
-        let page = crate::db::queries::update_page(conn, id, &input)?;
         // Same recheck as the create path, against the page's project as it
         // stands inside this transaction rather than as it read a moment ago.
-        require_page_role_conn(conn, &identity, page.project_id, Role::Maintainer)?;
-        // LIF-262: re-scan the (possibly edited) content and reconcile links.
-        super::attachments::sync_links_scoped(
-            conn,
-            AttachmentEntity::Page,
-            page.id,
-            &page.content,
-            &user,
-            page.project_id,
-        )?;
-        Ok(page)
+        // An update cannot move a page between projects.
+        let project_id = crate::db::queries::get_page(conn, id)?.project_id;
+        require_page_role_conn(conn, &identity, project_id, Role::Maintainer)?;
+        // LIF-262: `update_page` re-scans the stored content and reconciles
+        // links in the same savepoint as the edit.
+        crate::db::queries::update_page(conn, id, &input)
     })?;
     if let Some(project_id) = page.project_id {
         realtime.send_with_seq(RealtimeEvent::ProjectUpdated { project_id }, page.seq);

@@ -2125,6 +2125,7 @@ mod authz_gating_tests {
                     target_date: None,
                     labels: vec![],
                     source: None,
+                    ..Default::default()
                 },
             )
             .unwrap()

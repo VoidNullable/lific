@@ -186,24 +186,32 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
     // LIF-233: append new projects below existing ones rather than letting them
     // default to rank 0 (which would jump them to the top once the user has
     // reordered). COALESCE handles the first-ever project (no rows yet).
-    conn.execute(
-        "INSERT INTO projects (name, identifier, description, emoji, lead_user_id, sort_order)
-         VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))",
-        params![
-            input.name,
-            input.identifier,
-            unescape_text(&input.description),
-            input.emoji,
-            input.lead_user_id
-        ],
-    )?;
-    let id = conn.last_insert_rowid();
-    // LIF-195: keep project_members in sync with the denormalized lead
-    // pointer — a project created with a lead gets a 'lead' membership row.
-    if let Some(lead_id) = input.lead_user_id {
-        super::members::upsert_member(conn, id, lead_id, Role::Lead)?;
-    }
-    get_project(conn, id)
+    // LIF-409: the row and its lead membership are one fact, so they are one
+    // savepoint. A rejected membership (an unknown lead id trips the foreign
+    // key) used to leave a leaderless project behind that only an admin could
+    // then reach.
+    super::savepoint(conn, "create_project", || {
+        conn.execute(
+            "INSERT INTO projects (name, identifier, description, emoji, lead_user_id, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))",
+            params![
+                input.name,
+                input.identifier,
+                unescape_text(&input.description),
+                input.emoji,
+                input.lead_user_id
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        // LIF-195: keep project_members in sync with the denormalized lead
+        // pointer — a project created with a lead gets a 'lead' membership row.
+        if let Some(lead_id) = input.lead_user_id {
+            super::members::upsert_member(conn, id, lead_id, Role::Lead)?;
+        }
+        // LIF-409: hydrated inside the savepoint, so a failed final read rolls
+        // the project and its membership back together.
+        get_project(conn, id)
+    })
 }
 
 /// LIF-233: reindex project `sort_order` to match the supplied id order
@@ -246,7 +254,7 @@ pub fn update_project(
     input: &UpdateProject,
 ) -> Result<Project, LificError> {
     get_project(conn, id)?;
-    super::savepoint(conn, "update_project", || {
+    super::savepoint::<_, Project>(conn, "update_project", || {
         if let Some(ref name) = input.name {
             conn.execute(
                 "UPDATE projects SET name = ?1 WHERE id = ?2",
@@ -303,9 +311,9 @@ pub fn update_project(
                 super::members::upsert_member(conn, id, uid, Role::Lead)?;
             }
         }
-        Ok(())
-    })?;
-    get_project(conn, id)
+        // LIF-409: hydrated inside the savepoint. See `create_project`.
+        get_project(conn, id)
+    })
 }
 
 pub fn delete_project(conn: &Connection, id: i64) -> Result<(), LificError> {

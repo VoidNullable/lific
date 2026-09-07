@@ -260,7 +260,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // clispec.dev: honor explicit --json, and auto-upgrade to JSON when
         // stdout is piped/redirected so scripts and agents get machine output.
         let json = cli::term::wants_json(cli.json);
-        return cli::exec::run(&pool, &cli.command, json);
+        // LIF-409: the same `server.public_url` the HTTP backend would be
+        // pointed at, so `--json` carries a `web_url` on either backend. Unset
+        // (or unusable) means no link rather than a guessed origin.
+        let links = cfg
+            .server
+            .public_url
+            .as_deref()
+            .and_then(links::IssueLinkContext::parse);
+        return cli::exec::run(&pool, &cli.command, json, links.as_ref());
     }
 
     match cli.command {

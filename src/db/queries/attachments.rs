@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use rusqlite::{Connection, OptionalExtension, named_params, params, types::Value};
 
 use crate::db::models::{
-    Attachment, AttachmentEntity, CommentActor, LinkedEntity, PendingOrphan, ProjectAttachment,
+    Attachment, AttachmentActor, AttachmentEntity, LinkedEntity, PendingOrphan, ProjectAttachment,
     ProjectAttachmentPage, ProjectAttachmentQuery,
 };
 use crate::error::LificError;
@@ -293,10 +293,15 @@ pub fn sync_entity_links(
     entity: AttachmentEntity,
     entity_id: i64,
     referenced_ids: &[i64],
-    user_id: i64,
-    is_admin: bool,
+    actor: AttachmentActor,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
+    // An unattributed write carries no editing caller, so it has nothing to
+    // reconcile on anyone's behalf and must not silently drop links either.
+    if matches!(actor, AttachmentActor::Unattributed) {
+        return Ok(());
+    }
+
     // Current links for this entity.
     let mut stmt = conn.prepare_cached(
         "SELECT attachment_id FROM attachment_links WHERE entity_type = ?1 AND entity_id = ?2",
@@ -315,65 +320,11 @@ pub fn sync_entity_links(
     // attachment row — a stale/typo reference in the text shouldn't create a
     // dangling link).
     for id in referenced_ids {
-        if !current.contains(id)
-            && attachment_allowed_for_entity(conn, *id, user_id, is_admin, project_id)?
-        {
+        if !current.contains(id) && attachment_admissible(conn, *id, actor, project_id)? {
             link_attachment(conn, *id, entity, entity_id)?;
         }
     }
     Ok(())
-}
-
-/// An attachment may be introduced into a document only by its uploader (or
-/// an administrator), or when it is already linked to another entity in the
-/// same project. This prevents a user who can edit one document from guessing
-/// another user's unlinked attachment id and importing it into that document.
-fn attachment_allowed_for_entity(
-    conn: &Connection,
-    attachment_id: i64,
-    user_id: i64,
-    is_admin: bool,
-    project_id: Option<i64>,
-) -> Result<bool, LificError> {
-    if is_admin {
-        return attachment_exists(conn, attachment_id);
-    }
-    let owned: Option<Option<i64>> = conn
-        .query_row(
-            "SELECT uploader_id FROM attachments WHERE id = ?1",
-            params![attachment_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if owned == Some(Some(user_id)) {
-        return Ok(true);
-    }
-    let Some(project_id) = project_id else {
-        return Ok(false);
-    };
-    let linked: Option<i64> = conn
-        .query_row(
-            "SELECT 1
-             FROM attachment_links l
-             WHERE l.attachment_id = ?1
-               AND (
-                 (l.entity_type = 'issue' AND EXISTS
-                    (SELECT 1 FROM issues i WHERE i.id = l.entity_id AND i.project_id = ?2))
-                 OR (l.entity_type = 'page' AND EXISTS
-                    (SELECT 1 FROM pages p WHERE p.id = l.entity_id AND p.project_id = ?2))
-                 OR (l.entity_type = 'comment' AND EXISTS
-                    (SELECT 1 FROM comments c
-                     LEFT JOIN issues i ON i.id = c.issue_id
-                     LEFT JOIN pages p ON p.id = c.page_id
-                     WHERE c.id = l.entity_id
-                       AND (i.project_id = ?2 OR p.project_id = ?2)))
-               )
-             LIMIT 1",
-            params![attachment_id, project_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(linked.is_some())
 }
 
 fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
@@ -387,16 +338,29 @@ fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
     Ok(exists.is_some())
 }
 
-/// Whether a caller may introduce an attachment link into `project_id`.
-/// Uploaders and administrators may place their attachment anywhere they can
-/// edit; other callers may only reuse attachments already linked in the same
-/// project.
-fn attachment_allowed_for_project(
+/// The one attachment-introduction policy, shared by REST, MCP and the CLI
+/// (LIF-409). Before this there were two near-identical predicates, one per
+/// transport, which is exactly how the two surfaces drift apart.
+///
+/// An authenticated caller may introduce an attachment only when they uploaded
+/// it, they are an administrator, or it is already linked to another entity in
+/// the same project. That is what stops a user who can edit one document from
+/// guessing another user's unlinked attachment id and importing it.
+///
+/// A trusted local operator (the direct-SQL CLI) is past every gate the moment
+/// they can open the database file, so the check collapses to "does the row
+/// exist" — a nonexistent id must still not produce a dangling link.
+fn attachment_admissible(
     conn: &Connection,
     attachment_id: i64,
-    actor: CommentActor,
+    actor: AttachmentActor,
     project_id: Option<i64>,
 ) -> Result<bool, LificError> {
+    let actor = match actor {
+        AttachmentActor::Unattributed => return Ok(false),
+        AttachmentActor::TrustedLocal => return attachment_exists(conn, attachment_id),
+        AttachmentActor::Authenticated(actor) => actor,
+    };
     Ok(conn.query_row(
         "SELECT EXISTS (
              SELECT 1
@@ -1125,49 +1089,26 @@ pub fn parse_referenced_ids(markdown: &str) -> Vec<i64> {
 }
 
 /// Re-scan an entity's markdown body for `/api/attachments/{id}` references
-/// and reconcile the link table to match (LIF-262 "re-scan on save"). Called
-/// from every issue/page/comment create+update path — REST handlers and MCP
-/// tools alike (LIF-369) — inside their write txn. The entity's own text is
-/// the source of truth for which attachments it uses; this makes the join
-/// table agree.
+/// and reconcile the link table to match (LIF-262 "re-scan on save").
+///
+/// LIF-409: called from inside the issue/page/comment write itself, in the
+/// same savepoint that stored the body, rather than being re-implemented once
+/// per transport. The entity's own text is the source of truth for which
+/// attachments it uses; this makes the join table agree, admitting new
+/// references only as far as `actor` reaches.
 pub fn sync_links(
     conn: &Connection,
     entity: AttachmentEntity,
     entity_id: i64,
     markdown: &str,
-    user_id: i64,
-    is_admin: bool,
+    actor: AttachmentActor,
     project_id: Option<i64>,
 ) -> Result<(), LificError> {
-    let ids = parse_referenced_ids(markdown);
-    sync_entity_links(conn, entity, entity_id, &ids, user_id, is_admin, project_id)
-}
-
-/// Reconcile attachment links without allowing references to import an
-/// attachment from another project or another user's unlinked upload.
-pub fn sync_links_scoped(
-    conn: &Connection,
-    entity: AttachmentEntity,
-    entity_id: i64,
-    markdown: &str,
-    actor: CommentActor,
-    project_id: Option<i64>,
-) -> Result<(), LificError> {
-    let mut allowed = Vec::new();
-    for attachment_id in parse_referenced_ids(markdown) {
-        if attachment_allowed_for_project(conn, attachment_id, actor, project_id)? {
-            allowed.push(attachment_id);
-        }
+    if matches!(actor, AttachmentActor::Unattributed) {
+        return Ok(());
     }
-    sync_entity_links(
-        conn,
-        entity,
-        entity_id,
-        &allowed,
-        actor.user_id,
-        actor.is_admin,
-        project_id,
-    )
+    let ids = parse_referenced_ids(markdown);
+    sync_entity_links(conn, entity, entity_id, &ids, actor, project_id)
 }
 
 #[cfg(test)]
@@ -1217,6 +1158,7 @@ mod tests {
                 target_date: None,
                 labels: vec![],
                 source: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1262,23 +1204,35 @@ mod tests {
         )
         .unwrap();
 
-        let uploader = CommentActor {
-            user_id: uploader_id,
-            is_admin: false,
+        let authenticated = |user_id, is_admin| {
+            AttachmentActor::Authenticated(crate::db::models::CommentActor { user_id, is_admin })
         };
-        let stranger = CommentActor {
-            user_id: uploader_id + 1,
-            is_admin: false,
-        };
-        let admin = CommentActor {
-            user_id: uploader_id + 1,
-            is_admin: true,
-        };
+        let uploader = authenticated(uploader_id, false);
+        let stranger = authenticated(uploader_id + 1, false);
+        let admin = authenticated(uploader_id + 1, true);
 
-        assert!(attachment_allowed_for_project(&conn, attachment.id, uploader, None).unwrap());
-        assert!(!attachment_allowed_for_project(&conn, attachment.id, stranger, None).unwrap());
-        assert!(attachment_allowed_for_project(&conn, attachment.id, admin, None).unwrap());
-        assert!(!attachment_allowed_for_project(&conn, i64::MAX, admin, None).unwrap());
+        assert!(attachment_admissible(&conn, attachment.id, uploader, None).unwrap());
+        assert!(!attachment_admissible(&conn, attachment.id, stranger, None).unwrap());
+        assert!(attachment_admissible(&conn, attachment.id, admin, None).unwrap());
+        assert!(!attachment_admissible(&conn, i64::MAX, admin, None).unwrap());
+
+        // LIF-409: the direct-SQL operator is past every gate that could apply
+        // — they can INSERT the link row by hand — so the policy collapses to
+        // "does the attachment exist". A nonexistent id must still be refused,
+        // or a typo in a body would create a dangling link.
+        assert!(
+            attachment_admissible(&conn, attachment.id, AttachmentActor::TrustedLocal, None)
+                .unwrap()
+        );
+        assert!(
+            !attachment_admissible(&conn, i64::MAX, AttachmentActor::TrustedLocal, None).unwrap()
+        );
+
+        // And an unattributed write introduces nothing at all.
+        assert!(
+            !attachment_admissible(&conn, attachment.id, AttachmentActor::Unattributed, None)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1324,6 +1278,95 @@ mod tests {
         assert_eq!(count_rows_for_sha(&conn, &test_sha("same")).unwrap(), 2);
     }
 
+    /// LIF-409: reconciliation now runs inside `create_issue`'s own savepoint,
+    /// which is the whole point — a link that cannot be written must take the
+    /// issue down with it rather than leaving a row whose body references an
+    /// attachment the join table has never heard of. The transports used to do
+    /// this afterwards, where only their own transaction covered it, and the
+    /// CLI had no transaction at all.
+    #[test]
+    fn a_failed_link_rolls_back_the_issue_that_referenced_it() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let issue = seed_issue(&conn);
+        let project_id = queries::get_issue(&conn, issue).unwrap().project_id;
+        let attachment =
+            create_attachment(&conn, &test_sha("boom"), "b.png", "image/png", 1, None).unwrap();
+
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_attachment_link BEFORE INSERT ON attachment_links
+             BEGIN SELECT RAISE(ABORT, 'link write failed'); END",
+        )
+        .unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        let failed = queries::create_issue(
+            &conn,
+            &crate::db::models::CreateIssue {
+                project_id,
+                title: "references a doomed link".into(),
+                description: format!("![x](/api/attachments/{})", attachment.id),
+                attachments: AttachmentActor::TrustedLocal,
+                ..Default::default()
+            },
+        );
+        assert!(failed.is_err(), "the link failure must fail the write");
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "no half-created issue may survive a failed link"
+        );
+    }
+
+    /// LIF-409: the hydrating read is inside the savepoint too. `get_issue`
+    /// joins `projects`, so a project that vanishes mid-write makes the final
+    /// read fail — and that failure has to take the row with it. Hydrating
+    /// after the savepoint released would commit the issue and still report an
+    /// error, telling the caller one thing and the database another.
+    #[test]
+    fn a_failed_hydrating_read_rolls_the_write_back() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let issue = seed_issue(&conn);
+        let project_id = queries::get_issue(&conn, issue).unwrap().project_id;
+
+        // Make the issue unreadable the instant it is written: `get_issue`
+        // filters tombstones, so the trigger's tombstone turns the hydrating
+        // read into a NotFound.
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER tombstone_new_issue AFTER INSERT ON issues
+             BEGIN UPDATE issues SET deleted_at = datetime('now') WHERE id = NEW.id; END",
+        )
+        .unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        let failed = queries::create_issue(
+            &conn,
+            &crate::db::models::CreateIssue {
+                project_id,
+                title: "unreadable the moment it exists".into(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(failed, Err(LificError::NotFound(_))),
+            "a failed hydrating read must surface as an error"
+        );
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "and must roll the row it could not read back out"
+        );
+    }
+
     #[test]
     fn sync_entity_links_reconciles() {
         let pool = test_db();
@@ -1339,8 +1382,7 @@ mod tests {
             AttachmentEntity::Issue,
             issue,
             &[a.id, b.id],
-            0,
-            true,
+            AttachmentActor::TrustedLocal,
             Some(1),
         )
         .unwrap();
@@ -1357,8 +1399,7 @@ mod tests {
             AttachmentEntity::Issue,
             issue,
             &[b.id, c.id],
-            0,
-            true,
+            AttachmentActor::TrustedLocal,
             Some(1),
         )
         .unwrap();
@@ -1384,8 +1425,7 @@ mod tests {
             AttachmentEntity::Issue,
             issue,
             &[99999],
-            0,
-            true,
+            AttachmentActor::TrustedLocal,
             Some(1),
         )
         .unwrap();
@@ -1421,6 +1461,10 @@ mod tests {
         let conn = pool.write().unwrap();
         let owner = seed_user(&conn, "owner");
         let editor = seed_user(&conn, "editor");
+        let editor_actor = AttachmentActor::Authenticated(crate::db::models::CommentActor {
+            user_id: editor,
+            is_admin: false,
+        });
         let issue = seed_issue(&conn);
         let att = create_attachment(
             &conn,
@@ -1437,8 +1481,7 @@ mod tests {
             AttachmentEntity::Issue,
             issue,
             &[att.id],
-            editor,
-            false,
+            editor_actor,
             Some(1),
         )
         .unwrap();
@@ -1464,6 +1507,7 @@ mod tests {
                 target_date: None,
                 labels: vec![],
                 source: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1473,8 +1517,7 @@ mod tests {
             AttachmentEntity::Issue,
             second,
             &[att.id],
-            editor,
-            false,
+            editor_actor,
             Some(1),
         )
         .unwrap();
@@ -1522,6 +1565,10 @@ mod tests {
             .unwrap();
             (issue, project_id, editor, mine.id, theirs.id)
         };
+        let editor_actor = AttachmentActor::Authenticated(crate::db::models::CommentActor {
+            user_id: editor,
+            is_admin: false,
+        });
 
         // Abort after the set is reconciled, standing in for the in-transaction
         // gate denying: nothing at all is left behind, not even the half that
@@ -1532,8 +1579,7 @@ mod tests {
                 AttachmentEntity::Issue,
                 issue,
                 &[mine, theirs],
-                editor,
-                false,
+                editor_actor,
                 Some(project_id),
             )?;
             Err(LificError::Forbidden("revoked mid-save".into()))
@@ -1556,8 +1602,7 @@ mod tests {
                 AttachmentEntity::Issue,
                 issue,
                 &[mine, theirs],
-                editor,
-                false,
+                editor_actor,
                 Some(project_id),
             )
         })

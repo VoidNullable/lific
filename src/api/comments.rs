@@ -125,11 +125,13 @@ fn create_for_parent(
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
         let member_scoped = authz::authz_enforced_conn(conn)?;
+        let actor = CommentActor::from(&user);
         let comment = comments::create_comment_with_mentions(
             conn,
             parent,
             project_id,
-            CommentActor::from(&user),
+            actor,
+            AttachmentActor::Authenticated(actor),
             content,
             member_scoped,
         )?;
@@ -247,11 +249,13 @@ pub(super) async fn update_comment_handler(
         // caller can't see never reveals whether they wrote it), now checked
         // in the same transaction as the write (PR #31).
         let member_scoped = authz::authz_enforced_conn(conn)?;
+        // The *editor's* reach, not the original author's: pulling a new
+        // attachment reference into the body is the editor's act.
         let comment = comments::update_comment_with_mentions(
             conn,
             id,
             project_id,
-            CommentActor::from(&user),
+            AttachmentActor::Authenticated(CommentActor::from(&user)),
             &input.content,
             member_scoped,
         )?;
