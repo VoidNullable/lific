@@ -850,8 +850,9 @@ pub(super) async fn refresh_session(
 /// bounced to /login, and that replacement token comes back in the response
 /// body for clients that hold it outside the cookie.
 ///
-/// Verification, lockdown and replacement all happen under one hold of the
-/// writer, inside one savepoint. SQLite serializes writers, so a credential
+/// Password verification and hashing run off the writer. Revalidation of the
+/// captured hash, lockdown and replacement share one transaction. SQLite
+/// serializes writers, so a credential
 /// creation racing this either lands entirely before it (and is revoked) or
 /// entirely after it (and revalidates against the post-lockdown state).
 // Axum handlers take their dependencies as extractors; the count is the

@@ -80,9 +80,7 @@ The plaintext key is shown once. Use it in an `Authorization: Bearer <key>` requ
 
 Lific also exposes OAuth authorization, token, registration, revocation, and device authorization routes when it runs with `lific start`. Set `server.public_url` to the public base URL so OAuth metadata advertises the URL clients use.
 
-`[auth] required` defaults to `true`. Do not set it to `false` for a public deployment. Lific refuses to start when authentication is disabled and `[server] host` is not a loopback address. The guard reads the bind host, not `server.public_url`. The database-backed `web_auto_login` setting is guarded the same way, and additionally logs a warning when it is enabled behind an HTTPS `public_url`.
-
-A loopback bind satisfies the guard, so an instance bound to `127.0.0.1` and published by a reverse proxy still starts with authentication off. The guard cannot see your proxy. Keep `required = true` whenever anything in front of Lific accepts requests from outside the machine.
+Keep `required = true` and `web_auto_login = false` whenever other people can reach Lific. Startup checks both the bind host and `server.public_url`. A public URL blocks passwordless access even behind a loopback bind. An undeclared proxy cannot be detected, so passing the check does not prove the deployment is private.
 
 ## Automatic backups
 

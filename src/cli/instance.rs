@@ -31,6 +31,17 @@ pub fn run(
             auto_login,
             authz_enforced,
         } => {
+            if auto_login == Some(true)
+                && let Some(exposure) =
+                    crate::server::Reachability::from_config(cfg).public_exposure()
+            {
+                return Err(crate::error::LificError::BadRequest(format!(
+                    "Cannot enable browser auto-login: {exposure}. Anyone who can reach this \
+                     instance would receive an admin session without a password. Keep auto-login \
+                     disabled on shared or public deployments."
+                ))
+                .into());
+            }
             let patch = db::queries::settings::InstanceSettingsPatch {
                 allow_signup: signups,
                 instance_name: name,
@@ -119,4 +130,77 @@ pub fn run(
         println!("  users:         {total} ({admins} admin)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(auto_login: Option<bool>) -> InstanceAction {
+        InstanceAction::Set {
+            name: Some("Changed".into()),
+            signups: None,
+            signup_domains: None,
+            session_days: None,
+            login_message: None,
+            auto_login,
+            authz_enforced: None,
+        }
+    }
+
+    #[test]
+    fn exposed_cli_auto_login_enable_refuses_the_whole_patch() {
+        for (host, public_url) in [
+            ("0.0.0.0", None),
+            ("127.0.0.1", Some("https://lific.example.com")),
+            ("127.0.0.1", Some("not-a-url")),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = Config::default();
+            cfg.database.path = dir.path().join("instance.db");
+            cfg.server.host = host.into();
+            cfg.server.public_url = public_url.map(str::to_string);
+            let error = run(&cfg, set(Some(true)), true).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Cannot enable browser auto-login")
+            );
+            let db = db::open(&cfg.database.path).unwrap();
+            let conn = db.read().unwrap();
+            let settings = db::queries::settings::get(&conn).unwrap();
+            assert!(!settings.web_auto_login);
+            assert_eq!(settings.instance_name, None);
+        }
+    }
+
+    #[test]
+    fn cli_auto_login_allows_local_enable_and_exposed_recovery() {
+        for public_url in [
+            None,
+            Some("http://localhost:3456"),
+            Some("http://192.168.1.2:3456"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = Config::default();
+            cfg.database.path = dir.path().join("instance.db");
+            cfg.server.host = "127.0.0.1".into();
+            cfg.server.public_url = public_url.map(str::to_string);
+            run(&cfg, set(Some(true)), true).unwrap();
+            let db = db::open(&cfg.database.path).unwrap();
+            assert!(
+                db::queries::settings::get(&db.read().unwrap())
+                    .unwrap()
+                    .web_auto_login
+            );
+            cfg.server.public_url = Some("https://lific.example.com".into());
+            run(&cfg, set(None), true).unwrap();
+            run(&cfg, set(Some(false)), true).unwrap();
+            assert!(
+                !db::queries::settings::get(&db.read().unwrap())
+                    .unwrap()
+                    .web_auto_login
+            );
+        }
+    }
 }

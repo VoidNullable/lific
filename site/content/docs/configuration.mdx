@@ -120,7 +120,7 @@ Automatic backups use the same archive format as `lific dump`.
 
 When `required = false`, a request with no credential is treated as an operator request. In the web UI, the browser automatically signs in as the first administrator; an instance with no accounts shows signup instead, so an attribution identity can be created. A request with an invalid credential still fails authentication.
 
-Lific refuses to start with `required = false` when `[server] host` is not loopback. The guard reads the bind host rather than `server.public_url`, so the check and the listening socket describe the same thing. The same rule applies to the database-backed `web_auto_login` setting: with auto-login enabled and a non-loopback bind, the server refuses to start. Behind a loopback bind with an HTTPS `public_url`, Lific starts and logs a warning instead.
+Lific refuses to start with `required = false` or `web_auto_login` enabled if `[server] host` is not loopback, or if a nonempty `server.public_url` cannot be identified as loopback or private-network. Public DNS names and unparseable URLs fail this check. A loopback bind alone does not exempt a public URL.
 
 `secure_cookies` is not a TOML key. Setting it under `[auth]` is now an unknown-key error; remove it if an older configuration file carries it. Lific derives the runtime value at startup: false only when `server.public_url` explicitly begins with `http://`, true for HTTPS and for an unset public URL.
 
@@ -133,7 +133,7 @@ On a fresh install, `lific init` resolves an auth mode and edits the configurati
 | `login-free` | `false` | `127.0.0.1` | enabled | passwordless |
 | `passwords` | `true` | unchanged | disabled | password you choose |
 
-`web_auto_login` lives in the database rather than in `lific.toml`; change it later with `lific instance set --auto-login <BOOLEAN>`. Login-free mode writes the loopback bind precisely so the startup guard above is satisfied by the instance it just created. Editing `host` afterwards to a non-loopback address makes that instance refuse to start.
+`web_auto_login` lives in the database rather than in `lific.toml`; change it later with `lific instance set --auto-login <BOOLEAN>`. Enabling it through the CLI checks the selected configuration using the same rule as startup and the web settings page. Disabling it remains available for recovery. Login-free mode writes a loopback bind; changing that bind or adding a public URL can make the instance refuse to start.
 
 ## Example public configuration
 

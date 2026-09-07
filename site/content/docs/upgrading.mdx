@@ -61,7 +61,7 @@ Stop the background service before replacing the binary or restoring a backup. K
 
 - Two migrations run automatically on first start. They add the per-tool identity plumbing behind connected agents, and there are no manual steps.
 - A configuration file that exists but cannot be read or parsed is now a fatal startup error, and unknown keys are rejected. A missing file still starts on the built-in defaults. Check that `lific.toml` parses before the rollout; `lific doctor` is the tool for it.
-- A server with `web_auto_login` enabled refuses to start when `[server] host` is not loopback. Bind `127.0.0.1` or turn auto-login off.
+- A server with `web_auto_login` enabled refuses to start when `[server] host` is not loopback. Version 2.7 also checks `server.public_url`, as described below.
 - REST authentication failures are uniformly `403` with the message `authentication required`. Endpoints for profile, password, sessions, API keys, connected tools, and comments previously answered `400` for this case. A client that reads `400` from those endpoints as "signed out" must key on `403` instead.
 - Remove `secure_cookies` from `[auth]` if your config sets it. It has never been read from the file, and unknown keys are now an error rather than being ignored.
 - `lific init` presents an auth-mode choice on a fresh install and creates the first administrator directly. An existing instance with users skips this entirely.
@@ -107,7 +107,7 @@ The largest upgrade since 2.0. Three things need an operator decision before you
 - **OAuth access tokens are refused on every credential-management route**, which covers API key create/list/revoke, connected-tool management, password change, session revocation, profile edits, user administration, and OAuth client and token management. A connected tool that called those endpoints gets a 403 and needs a browser session or a local CLI command. Ordinary reads and writes through MCP are unchanged.
 - **Editing or deleting a comment now requires access to its project**, not just authorship, on both REST and MCP. Someone removed from a project loses the ability to mutate the comments they left in it.
 - **Project identifiers resolve case-insensitively** across CLI, REST, and MCP, matching modules, folders, and usernames. Creating `abc` when `ABC` exists is now rejected, and a database that already holds a case collision (only reachable by raw SQL) has them renamed deterministically on upgrade.
-- **`web_auto_login` cannot be enabled on an instance that declares a `public_url`.** The guard used to look only at the bind host, which passed a loopback bind published through Tailscale Funnel or a same-host proxy. The request is refused with a 400 and not persisted.
+- **Passwordless startup and enabling browser auto-login require a loopback bind and an absent, empty, loopback, or private-network `public_url`.** The guard used to look only at the bind host, which passed a loopback bind published through Tailscale Funnel or a same-host proxy. To recover an exposed instance, run `lific instance set --auto-login false` and set `[auth] required = true` before restarting.
 - **The CLI refuses to send an API key over plaintext HTTP to a remote host.** What was a warning is an error. Use `https://` or a loopback target. `LIFIC_TOKEN` is now sent only to the origin named in `LIFIC_URL`, so a token plus a `--url` override, or a directory holding a `lific.toml` for a different server, falls back to stored credentials for that host.
 - **Uploads are validated by magic bytes** rather than the declared content type, capped at 10 MiB by default, and rate-limited to 30 per user per 10 minutes. A client uploading a type outside the allowlist is refused.
 - **MCP tool errors are generic.** Raw database text, which could carry table and column names and the database path, no longer reaches the client; it stays in the server log. A script matching on that text needs another signal.
@@ -142,7 +142,7 @@ lific instance set --authz-enforced true
 
 Before enabling it, ensure every human and bot that needs access has a project membership, and keep an operator-trusted key available for recovery. To roll back the setting on a private instance, use `--authz-enforced false` and then investigate the missing membership or role rather than distributing a broader key.
 
-For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe anywhere others can reach it; Lific refuses to start when it is set and `[server] host` is not loopback. Treat both settings as operator changes that require shell access and a verification step.
+For a private local deployment, `[auth] required = false` is a separate setting from project authorization. It grants credential-less operator access and is unsafe anywhere others can reach it. Startup requires a loopback bind and an absent, empty, loopback, or private-network `public_url`. Treat both settings as operator changes that require shell access and a verification step.
 
 ## If the upgrade fails
 
