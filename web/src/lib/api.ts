@@ -667,6 +667,8 @@ export interface Issue {
   blocks?: string[];
   blocked_by?: string[];
   relates_to?: string[];
+  duplicates?: string[];
+  duplicated_by?: string[];
 }
 
 export interface IssueFilters {

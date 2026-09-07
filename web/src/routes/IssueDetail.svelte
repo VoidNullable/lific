@@ -972,7 +972,7 @@
 
         <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
 
-        {#if (issue.blocks && issue.blocks.length > 0) || (issue.blocked_by && issue.blocked_by.length > 0) || (issue.relates_to && issue.relates_to.length > 0)}
+        {#if issue.blocks?.length || issue.blocked_by?.length || issue.relates_to?.length || issue.duplicates?.length || issue.duplicated_by?.length}
           <div class="issue-meta-relations">
             {#if issue.blocked_by && issue.blocked_by.length > 0}
               <div class="issue-meta-field">
@@ -1010,24 +1010,30 @@
                 </div>
               </div>
             {/if}
-            {#if issue.relates_to && issue.relates_to.length > 0}
-              <div class="issue-meta-field">
-                {@render sidebarField("Related")}
-                <div class="flex flex-wrap gap-1.5">
-                  {#each issue.relates_to as rel}
-                    <button
-                      class="text-caption font-mono text-[var(--text-muted)]
-                             bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
-                             hover:underline transition-colors"
-                      title="{rel}  ·  Shift-click to preview"
-                      onclick={(e) => openRelation(e, rel)}
-                    >
-                      {rel}
-                    </button>
-                  {/each}
+            {#each [
+              { label: "Related", relations: issue.relates_to },
+              { label: "Duplicate of", relations: issue.duplicates },
+              { label: "Duplicated by", relations: issue.duplicated_by },
+            ] as group (group.label)}
+              {#if group.relations?.length}
+                <div class="issue-meta-field">
+                  {@render sidebarField(group.label)}
+                  <div class="flex flex-wrap gap-1.5">
+                    {#each group.relations as rel}
+                      <button
+                        class="text-caption font-mono text-[var(--text-muted)]
+                               bg-[var(--bg-subtle)] px-1.5 py-0.5 rounded
+                               hover:underline transition-colors"
+                        title="{rel}  ·  Shift-click to preview"
+                        onclick={(e) => openRelation(e, rel)}
+                      >
+                        {rel}
+                      </button>
+                    {/each}
+                  </div>
                 </div>
-              </div>
-            {/if}
+              {/if}
+            {/each}
           </div>
 
           <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>

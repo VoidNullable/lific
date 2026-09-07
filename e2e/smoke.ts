@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { checkDiscordFeedback } from "./discord-feedback";
 import { checkPaletteSearch } from "./palette-search";
+import { checkDuplicateRelations } from "./duplicate-relations";
 import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -227,6 +228,7 @@ async function main(): Promise<number> {
     // LIF-445: seeds its own PAL project, so it must run after the DEMO
     // assertions above.
     await checkPaletteSearch(context, base);
+    await checkDuplicateRelations(context, base);
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------
     // A detail view opened as the app's entry point gets a synthesized
