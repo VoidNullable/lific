@@ -133,8 +133,9 @@ pub fn run(
             //
             // There is no realtime hub in the direct-DB CLI to push a
             // revocation from. Other processes notice on their own: web
-            // sockets revalidate on their periodic tick, and a long-running
-            // stdio MCP session revalidates its token on every tool call.
+            // sockets revalidate before protected deliveries (and on an idle
+            // timer). A long-running stdio MCP session revalidates its token
+            // on every tool call.
             db::queries::savepoint(&conn, "cli_set_password", || {
                 db::queries::users::update_password(&conn, user.id, &pw)?;
                 db::queries::users::lock_down_account(&conn, user.id)

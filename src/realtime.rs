@@ -30,9 +30,8 @@ const SERVER_PING_INTERVAL: Duration = Duration::from_secs(30);
 /// socket's task and its `SocketPermit` for as long as the peer cares to stall.
 /// On timeout the socket is dropped instead, releasing both.
 const SOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-// Kept short so a revoked session stops receiving events within a minute;
-// each tick is one indexed SQLite lookup per open socket, which is cheap at
-// this instance's scale.
+// Retire idle revoked sockets too. Protected deliveries revalidate separately,
+// so cross-process recovery does not wait for this timer to stop data access.
 const SESSION_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 /// Per-user cap on concurrent event sockets. Generous for real browser tabs,
 /// but stops one authenticated client from accumulating unbounded server
@@ -480,7 +479,8 @@ pub async fn serve_socket(
                 forward_event(
                     &mut socket,
                     &db,
-                    &auth_user,
+                    &session_token,
+                    &mut auth_user,
                     &mut visible_projects,
                     &mut client,
                     event,
@@ -488,8 +488,16 @@ pub async fn serve_socket(
                 .await
             }
             SocketInput::Message(message) => {
-                handle_client_message(&mut socket, &hub, &db, &auth_user, &mut client, message)
-                    .await
+                handle_client_message(
+                    &mut socket,
+                    &hub,
+                    &db,
+                    &session_token,
+                    &mut auth_user,
+                    &mut client,
+                    message,
+                )
+                .await
             }
             SocketInput::ProgressDeadline => close_socket(&mut socket).await,
         };
@@ -765,11 +773,15 @@ async fn revalidate_session(
 async fn forward_event(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
+    session_token: &str,
+    auth_user: &mut crate::db::models::AuthUser,
     visible_projects: &mut Option<HashSet<i64>>,
     client: &mut ClientState,
     event: Result<RealtimeMessage, RecvError>,
 ) -> SocketFlow {
+    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+        return SocketFlow::Close;
+    }
     match event {
         Ok(message) => {
             let visibility_db = db.clone();
@@ -826,7 +838,8 @@ async fn handle_client_message(
     socket: &mut WebSocket,
     hub: &RealtimeHub,
     db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
+    session_token: &str,
+    auth_user: &mut crate::db::models::AuthUser,
     client: &mut ClientState,
     message: Option<Result<Message, axum::Error>>,
 ) -> SocketFlow {
@@ -842,11 +855,20 @@ async fn handle_client_message(
                 ClientAction::Send(message) => send_bounded(socket, message).await,
                 ClientAction::ActivityBaseline => {
                     client.record_progress(now);
-                    send_activity_baseline(socket, db, auth_user, client).await
+                    send_activity_baseline(socket, db, session_token, auth_user, client).await
                 }
                 ClientAction::Resume { project_id, cursor } => {
                     client.record_progress(now);
-                    replay_for_client(socket, hub, db, auth_user, project_id, cursor).await
+                    replay_for_client(
+                        socket,
+                        hub,
+                        db,
+                        session_token,
+                        auth_user,
+                        project_id,
+                        cursor,
+                    )
+                    .await
                 }
                 ClientAction::Heartbeat | ClientAction::Pong => {
                     client.record_progress(now);
@@ -874,19 +896,22 @@ async fn handle_client_message(
 /// anything at or below the cursor I have already applied") makes a duplicate
 /// a no-op, while any scheme that risks dropping an event is unrecoverable.
 ///
-/// The visibility gate is the same `can_view_project` the live path applies
-/// per event, hoisted to one check: every buffered event is project-scoped
-/// and `Event`-audience by construction, so one answer covers the batch. A
+/// Credentials and project access are checked before each frame, since recovery
+/// or membership changes can commit while an earlier network send awaits. A
 /// client that cannot see the project gets `sync_required`, which tells it
 /// nothing it could not learn by calling `/changes` and being refused.
 async fn replay_for_client(
     socket: &mut WebSocket,
     hub: &RealtimeHub,
     db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
+    session_token: &str,
+    auth_user: &mut crate::db::models::AuthUser,
     project_id: i64,
     cursor: i64,
 ) -> SocketFlow {
+    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+        return SocketFlow::Close;
+    }
     if !project_visible(db, auth_user, project_id).await {
         return send_event(socket, &RealtimeEvent::SyncRequired { project_id }).await;
     }
@@ -896,6 +921,14 @@ async fn replay_for_client(
         }
         ResumeOutcome::Replay(messages) => {
             for message in messages {
+                if revalidate_session(socket, db, session_token, auth_user).await
+                    == SocketFlow::Close
+                {
+                    return SocketFlow::Close;
+                }
+                if !project_visible(db, auth_user, project_id).await {
+                    return send_event(socket, &RealtimeEvent::SyncRequired { project_id }).await;
+                }
                 if send_bounded(socket, message).await == SocketFlow::Close {
                     return SocketFlow::Close;
                 }
@@ -929,9 +962,17 @@ async fn project_visible(
 async fn send_activity_baseline(
     socket: &mut WebSocket,
     db: &crate::db::DbPool,
-    auth_user: &crate::db::models::AuthUser,
+    session_token: &str,
+    auth_user: &mut crate::db::models::AuthUser,
     client: &mut ClientState,
 ) -> SocketFlow {
+    let was_admin = auth_user.is_admin;
+    if revalidate_session(socket, db, session_token, auth_user).await == SocketFlow::Close {
+        return SocketFlow::Close;
+    }
+    if was_admin != auth_user.is_admin {
+        client.invalidate_activity_baseline();
+    }
     let now = Instant::now();
     let baseline = match client.cached_activity_baseline(now) {
         Some(event) => Ok(event),
@@ -1122,6 +1163,9 @@ impl RealtimeEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
