@@ -138,11 +138,11 @@ const COMMENT_COLUMNS: &str = "'comment', c.seq, (c.deleted_at IS NOT NULL),
             NULL, NULL,
             NULL, NULL,
             NULL, NULL,
-            c.issue_id, c.page_id, c.user_id, u.username,
+            c.issue_id, c.page_id, COALESCE(c.user_id, -1), COALESCE(c.imported_author, u.username),
             c.created_at, c.updated_at,
             NULL";
 
-const COMMENT_FROM: &str = "FROM comments c JOIN users u ON u.id = c.user_id";
+const COMMENT_FROM: &str = "FROM comments c LEFT JOIN users u ON u.id = c.user_id";
 
 /// A comment carries no `project_id` of its own — it hangs off an issue XOR a
 /// page — so its scope is recovered from whichever parent it has. The parent

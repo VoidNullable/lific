@@ -289,10 +289,11 @@ pub(crate) fn update_comment(
 /// Get a single comment by ID (with author info). Parent-agnostic.
 pub fn get_comment(conn: &Connection, id: i64) -> Result<Comment, LificError> {
     conn.query_row(
-        "SELECT c.id, c.issue_id, c.page_id, c.user_id, u.username, u.display_name,
+        "SELECT c.id, c.issue_id, c.page_id, COALESCE(c.user_id, -1),
+                COALESCE(c.imported_author, u.username), COALESCE(c.imported_author, u.display_name),
                 c.content, c.created_at, c.updated_at, c.seq
          FROM comments c
-         JOIN users u ON u.id = c.user_id
+         LEFT JOIN users u ON u.id = c.user_id
          WHERE c.id = ?1 AND c.deleted_at IS NULL",
         params![id],
         row_to_comment,
@@ -338,9 +339,9 @@ pub fn count_comments(
         conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM comments c
-                 JOIN users u ON u.id = c.user_id
+                 LEFT JOIN users u ON u.id = c.user_id
                  WHERE {parent_col} = ?1 AND c.deleted_at IS NULL
-                   AND u.username = ?2 COLLATE NOCASE"
+                   AND COALESCE(c.imported_author, u.username) = ?2 COLLATE NOCASE"
             ),
             params![id, username],
             |row| row.get(0),
@@ -711,13 +712,13 @@ impl CommentQuery {
         };
         let mut tail = format!(
             "FROM comments c
-             JOIN users u ON u.id = c.user_id
+             LEFT JOIN users u ON u.id = c.user_id
              WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
         );
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
         if let Some(username) = scan.author {
             tail.push_str(&format!(
-                " AND u.username = ?{} COLLATE NOCASE",
+                " AND COALESCE(c.imported_author, u.username) = ?{} COLLATE NOCASE",
                 values.len() + 1
             ));
             values.push(Box::new(username.to_string()));
@@ -838,7 +839,8 @@ impl CommentQuery {
         }
         let (limit_clause, extra) = self.bind(limit);
         let sql = format!(
-            "SELECT c.id, c.issue_id, c.page_id, c.user_id, u.username, u.display_name,
+            "SELECT c.id, c.issue_id, c.page_id, COALESCE(c.user_id, -1),
+                    COALESCE(c.imported_author, u.username), COALESCE(c.imported_author, u.display_name),
                     c.content, c.created_at, c.updated_at, c.seq {}{limit_clause}",
             self.tail
         );

@@ -97,8 +97,8 @@ fn ensure_issue_preflight(
             length(CAST(COALESCE(p.emoji, '') AS BLOB)) +
             COALESCE(length(CAST(m.name AS BLOB)), 0) +
             (SELECT COALESCE(SUM(length(CAST(c.content AS BLOB)) +
-                                 length(CAST(COALESCE(u.display_name, u.username) AS BLOB))), 0)
-               FROM comments c JOIN users u ON u.id = c.user_id WHERE c.issue_id = ?1 AND c.deleted_at IS NULL) +
+                                 length(CAST(COALESCE(c.imported_author, u.display_name, u.username) AS BLOB))), 0)
+               FROM comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.issue_id = ?1 AND c.deleted_at IS NULL) +
             (SELECT COALESCE(SUM(length(CAST(l.name AS BLOB))), 0)
                FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = ?1) +
             (SELECT COALESCE(SUM(length(CAST(other_project.identifier AS BLOB)) + 20), 0)
@@ -451,8 +451,8 @@ fn ensure_project_preflight(
                FROM issues i JOIN modules m ON m.id = i.module_id WHERE i.project_id = ?1 AND i.deleted_at IS NULL) +
             (SELECT COALESCE(SUM(length(CAST(name AS BLOB))), 0)
                FROM folders WHERE project_id = ?1) +
-            (SELECT COALESCE(SUM(length(CAST(COALESCE(u.display_name, u.username) AS BLOB))), 0)
-               FROM comments c JOIN issues i ON i.id = c.issue_id JOIN users u ON u.id = c.user_id
+            (SELECT COALESCE(SUM(length(CAST(COALESCE(c.imported_author, u.display_name, u.username) AS BLOB))), 0)
+               FROM comments c JOIN issues i ON i.id = c.issue_id LEFT JOIN users u ON u.id = c.user_id
               WHERE i.project_id = ?1 AND c.deleted_at IS NULL AND i.deleted_at IS NULL) +
             2 * (SELECT COALESCE(SUM(length(CAST(source_project.identifier AS BLOB)) +
                                      length(CAST(target_project.identifier AS BLOB)) + 40), 0)

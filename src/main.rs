@@ -17,6 +17,7 @@ mod links;
 mod mcp;
 mod oauth;
 mod preview;
+mod project_archive;
 mod ratelimit;
 mod realtime;
 mod repo_identity;
@@ -272,6 +273,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
+        Command::ProjectArchive { action } => {
+            if cli.backend != cli::BackendKind::Sql {
+                return Err("project-archive requires the local SQL backend".into());
+            }
+            let pool = db::open(&cfg.database.path)?;
+            let store = storage::AttachmentStore::from_db_path(&cfg.database.path);
+            let result = match action {
+                cli::ProjectArchiveAction::Export { project, out } => {
+                    project_archive::export(&pool, &store, &project, &out)?
+                }
+                cli::ProjectArchiveAction::Import { archive, user } => {
+                    project_archive::import(&pool, &store, &archive, &user)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
         Command::Init {
             no_service,
             here,

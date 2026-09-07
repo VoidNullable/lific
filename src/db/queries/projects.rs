@@ -153,7 +153,7 @@ pub fn get_project(conn: &Connection, id: i64) -> Result<Project, LificError> {
 /// - not the reserved word `DOC`, which marks page identifiers — a project
 ///   named DOC would make its issues (`DOC-1`) indistinguishable from
 ///   workspace pages
-fn validate_identifier(identifier: &str) -> Result<(), LificError> {
+pub(crate) fn validate_identifier(identifier: &str) -> Result<(), LificError> {
     if identifier.is_empty() {
         return Err(LificError::BadRequest(
             "identifier must not be empty".into(),

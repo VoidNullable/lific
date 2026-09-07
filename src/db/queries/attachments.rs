@@ -651,7 +651,8 @@ pub fn list_project_attachments(
         conditions.push(format!("({MIME_CLASS_SQL}) = :mime_class"));
     }
     if query.uploader.is_some() {
-        conditions.push("lower(u.username) = lower(:uploader)".to_string());
+        conditions
+            .push("lower(COALESCE(a.imported_author, u.username)) = lower(:uploader)".to_string());
     }
     let where_clause = conditions.join(" AND ");
 
@@ -671,7 +672,8 @@ pub fn list_project_attachments(
 
     let sql = format!(
         "SELECT a.id, a.filename, a.mime, ({MIME_CLASS_SQL}) AS mime_class, a.size_bytes,
-                a.uploader_id, u.username, u.display_name, a.created_at
+                a.uploader_id, COALESCE(a.imported_author, u.username),
+                COALESCE(a.imported_author, u.display_name), a.created_at
          FROM attachments a
          LEFT JOIN users u ON u.id = a.uploader_id
          WHERE {where_clause}

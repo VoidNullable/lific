@@ -241,6 +241,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "repo bindings",
         include_str!("../../migrations/049_repo_bindings.sql"),
     ),
+    (
+        50,
+        "project archives",
+        include_str!("../../migrations/050_project_archive.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -269,7 +274,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// before its savepoint releases, and `run_inner` repeats the check
 /// batch-wide before commit to cover every other migration that ran while
 /// enforcement was off.
-const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43];
+const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50];
 
 /// Highest migration version this binary knows how to apply. Used by
 /// `lific dump`/`restore` (LIF-266) to stamp and gate archives on schema
@@ -423,7 +428,15 @@ fn run_inner(conn: &Connection, fk_off: bool) -> Result<(), crate::error::LificE
             info!(version, name, "applying migration");
             let sp = format!("migrate_v{version}");
             crate::db::queries::savepoint(conn, &sp, || {
+                let triggers = if version == 50 {
+                    suspend_triggers(conn)?
+                } else {
+                    Vec::new()
+                };
                 conn.execute_batch(sql)?;
+                for sql in triggers {
+                    conn.execute_batch(&sql)?;
+                }
                 // A rebuild migration ran with enforcement off (see `run`);
                 // check it here so an orphaning bug rolls back just this
                 // savepoint with an error naming the migration.
@@ -530,6 +543,23 @@ fn verify_checksums(conn: &Connection) -> Result<(), crate::error::LificError> {
     Ok(())
 }
 
+/// Only trusted destination schema is suspended, inside a write transaction.
+/// Rollback restores the DDL too. Never call this with archive-supplied SQL.
+pub(crate) fn suspend_triggers(conn: &Connection) -> Result<Vec<String>, crate::error::LificError> {
+    let mut statement = conn.prepare(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY rowid",
+    )?;
+    let triggers = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, _) in &triggers {
+        conn.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))?;
+    }
+    Ok(triggers.into_iter().map(|(_, sql)| sql).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,8 +595,16 @@ mod tests {
             if version >= stop {
                 break;
             }
+            let triggers = if version == 50 {
+                suspend_triggers(&conn).unwrap()
+            } else {
+                Vec::new()
+            };
             conn.execute_batch(sql)
                 .unwrap_or_else(|e| panic!("migration {version} ({name}): {e}"));
+            for sql in triggers {
+                conn.execute_batch(&sql).unwrap();
+            }
             conn.execute(
                 "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
                 rusqlite::params![version, name],
@@ -590,6 +628,95 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run(&conn).expect("initial migration");
         conn
+    }
+
+    #[test]
+    fn project_archive_migration_preserves_populated_comments_and_their_dependents() {
+        let conn = migrated_up_to(50);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES(1,'before','before@test','hash');
+             INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO comments(id,issue_id,user_id,content) VALUES(1,1,1,'A preserved comment');
+             INSERT INTO comment_mentions(comment_id,user_id) VALUES(1,1);",
+        ).unwrap();
+        let before: (String, String, i64) = conn
+            .query_row(
+                "SELECT content,updated_at,seq FROM comments WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        run(&conn).unwrap();
+        let after = conn
+            .query_row(
+                "SELECT content,updated_at,seq FROM comments WHERE id=1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(count(&conn, "SELECT count(*) FROM comment_mentions"), 1);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM search_index WHERE entity_type='comment'"
+            ),
+            1
+        );
+        conn.execute("UPDATE comments SET content='Still indexed' WHERE id=1", [])
+            .unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM search_index WHERE entity_type='comment' AND body='Still indexed'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM pragma_foreign_key_check"),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_comments_issue_live','idx_comments_page_live','idx_comments_deleted_at')"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn project_archive_migration_never_reuses_deleted_comment_ids() {
+        for keep_survivor in [false, true] {
+            let conn = migrated_up_to(50);
+            conn.execute_batch(
+                "INSERT INTO users(id,username,email,password_hash) VALUES(1,'owner','owner@test','hash');
+                 INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+                 INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+                 INSERT INTO comments(id,issue_id,user_id,content) VALUES(1,1,1,'Survivor');
+                 INSERT INTO comments(id,issue_id,user_id,content) VALUES(42,1,1,'Deleted');
+                 DELETE FROM comments WHERE id=42;",
+            )
+            .unwrap();
+            if !keep_survivor {
+                conn.execute("DELETE FROM comments", []).unwrap();
+            }
+
+            run(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO comments(issue_id,user_id,content) VALUES(1,1,'New comment')",
+                [],
+            )
+            .unwrap();
+            assert_eq!(conn.last_insert_rowid(), 43);
+        }
     }
 
     fn stored_checksum(conn: &Connection, version: i64) -> Option<String> {

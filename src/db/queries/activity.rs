@@ -126,7 +126,8 @@ pub fn list_activity(
     sp.push(Box::new(offset));
 
     let sql = format!(
-        "SELECT a.id, a.ts, a.actor_user_id, u.username, u.display_name,
+        "SELECT a.id, a.ts, a.actor_user_id,
+                COALESCE(a.imported_author, u.username), COALESCE(a.imported_author, u.display_name),
                 COALESCE(u.is_bot, 0), a.transport, a.entity_type, a.entity_id,
                 a.entity_label, a.project_id, a.issue_id, a.page_id,
                 a.action, a.field, a.old_value, a.new_value

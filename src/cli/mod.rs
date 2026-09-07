@@ -122,6 +122,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Copy a complete project between local Lific databases.
+    ProjectArchive {
+        #[command(subcommand)]
+        action: ProjectArchiveAction,
+    },
     /// Start the HTTP API + MCP server
     Start {
         /// Port to listen on (overrides config)
@@ -549,6 +554,23 @@ pub enum Command {
     Import {
         #[command(subcommand)]
         action: ImportAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectArchiveAction {
+    /// Write a private project archive, including deleted content and history.
+    Export {
+        project: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Import as a new private project. Existing identifiers are rejected.
+    Import {
+        archive: PathBuf,
+        /// Active destination admin who will own the imported project.
+        #[arg(long)]
+        user: String,
     },
 }
 
