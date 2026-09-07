@@ -49,6 +49,44 @@ fn finish_response(output: String, result: fmt::Result) -> String {
     }
 }
 
+fn encoded_tool_result_bytes(output: &str) -> Result<usize, String> {
+    let result = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(output)]);
+    serde_json::to_vec(&result)
+        .map(|bytes| bytes.len())
+        .map_err(|error| format!("failed to encode response: {error}"))
+}
+
+// Query paging bounds the rows we load. Rendering adds links and MCP escaping,
+// so select the longest prefix that also fits the actual encoded tool result.
+fn bounded_comment_response(
+    count: usize,
+    oversized: impl FnOnce() -> String,
+    render: impl Fn(usize, bool) -> String,
+) -> Result<String, String> {
+    let budget = queries::comments::MAX_COMMENT_RESPONSE_BYTES - 1024;
+    let full = render(count, false);
+    if encoded_tool_result_bytes(&full)? <= budget {
+        return Ok(full);
+    }
+    let mut low = 0;
+    let mut high = count;
+    let mut best = None;
+    while low < high {
+        let shown = low + (high - low) / 2;
+        let output = render(shown, true);
+        if encoded_tool_result_bytes(&output)? <= budget {
+            best = Some((shown, output));
+            low = shown + 1;
+        } else {
+            high = shown;
+        }
+    }
+    match best {
+        Some((shown, output)) if shown > 0 || count == 0 => Ok(output),
+        _ => Err(oversized()),
+    }
+}
+
 /// LIF-376: the single place a tool's `Err` becomes its returned text. Every
 /// `*_inner` returns the bare message; this stamps the `Error: ` prefix every
 /// MCP tool response has always carried, so the wrappers stay one-liners and
@@ -1880,31 +1918,14 @@ impl LificMcp {
             "recent" => Some(3),
             _ => Some(queries::MAX_PAGE_LIMIT),
         };
-        // Authorization already passed, so a failure here is a real database
-        // fault and must surface rather than silently render a comment-less
-        // issue that reads like an issue with no comments.
-        let (total, comments) = self.read(|conn| {
-            let total = queries::comments::count_comments(conn, parent, None)?;
-            let comments = match window {
-                None => Vec::new(),
-                Some(limit) => {
-                    // Newest-first off the index, then flipped: the display
-                    // order is chronological, the *selection* is the tail.
-                    let mut newest = queries::comments::list_comments_paginated(
-                        conn,
-                        parent,
-                        None,
-                        Some("desc"),
-                        Some(limit),
-                        Some(0),
-                    )?;
-                    newest.reverse();
-                    newest
-                }
-            };
-            Ok((total, comments))
-        })?;
-        Ok(render_response(|output| {
+        // The preamble is rendered and measured *before* the comment trail is
+        // read (LIF-421). The 2 MiB budget is a promise about the whole
+        // response, and this tool's response is not only comments: a long
+        // description, a wall of relations and their rendered URLs are all
+        // bytes an agent's context window pays for. Charging them to the
+        // budget first is the difference between a bounded response and a
+        // bounded *half* of one.
+        let preamble = try_render(|output| {
             writeln!(
                 output,
                 "{} — {}\nStatus: {} | Priority: {} | Module: {}",
@@ -1945,46 +1966,112 @@ impl LificMcp {
             })?;
             (!issue.description.is_empty())
                 .then(|| writeln!(output, "\n{}", issue.description))
-                .transpose()?;
-            // `none` is a request for the count, so it answers with the count
-            // even when that count is zero: "0, omitted" is the fact the
-            // caller asked for, and suppressing it means the one mode whose
-            // entire job is reporting the number silently reports nothing.
-            // `recent` and `all` are requests for comments, and an issue with
-            // none of those keeps its clean, header-free output.
-            if total == 0 && comment_mode != "none" {
-                return Ok(());
-            }
-            let shown = comments.len() as i64;
-            match comment_mode {
-                "none" => writeln!(
-                    output,
-                    "\n--- Comments ({total}, omitted — use list_comments) ---"
-                )?,
-                "recent" if shown < total => writeln!(
-                    output,
-                    "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
-                )?,
-                // `all` past the cap. Say plainly that this is a window, not
-                // the thread, and name the tool that pages the rest.
-                _ if shown < total => writeln!(
-                    output,
-                    "\n--- Comments ({total}, showing the most recent {shown}; \
-                     use list_comments to page the rest) ---"
-                )?,
-                _ => writeln!(output, "\n--- Comments ({total}) ---")?,
-            }
-            write!(
-                output,
-                "{}",
-                CommentLines {
-                    comments: &comments,
-                    parent_identifier: &issue.identifier,
-                    parent,
-                    context: context.as_deref(),
+                .transpose()
+                .map(|_| ())
+        })
+        .map_err(|error| format!("failed to format response: {error}"))?;
+        // An issue too big to render before a single comment is refused by
+        // name rather than served as a truncated document. Nothing here is
+        // silently cut.
+        let allowance = queries::comments::remaining_budget(
+            encoded_tool_result_bytes(&preamble)?,
+            &issue.identifier,
+        )
+        .map_err(|error| error.to_string())?;
+
+        // Authorization already passed, so a failure here is a real database
+        // fault and must surface rather than silently render a comment-less
+        // issue that reads like an issue with no comments.
+        let (total, comments, budget_limited) = self.read(|conn| {
+            let total = queries::comments::count_comments(conn, parent, None)?;
+            let (comments, budget_limited) = match window {
+                None => (Vec::new(), false),
+                Some(limit) => {
+                    // Newest-first off the index, then flipped: the display
+                    // order is chronological, the *selection* is the tail.
+                    // LIF-421: byte-budgeted, so the window is bounded by what
+                    // the response can carry as well as by the row cap.
+                    let page = queries::comments::list_comments_page_within(
+                        conn,
+                        parent,
+                        None,
+                        Some("desc"),
+                        Some(limit),
+                        Some(0),
+                        allowance,
+                    )?;
+                    let mut newest = page.items;
+                    newest.reverse();
+                    (newest, page.budget_limited)
                 }
-            )
-        }))
+            };
+            Ok((total, comments, budget_limited))
+        })?;
+        bounded_comment_response(
+            comments.len(),
+            || {
+                format!(
+                    "{} and its newest comment cannot fit the encoded response budget. Use list_comments to read the thread separately.",
+                    issue.identifier
+                )
+            },
+            |shown, encoded_limit| {
+                let comments = &comments[comments.len() - shown..];
+                let budget_limited = budget_limited || encoded_limit;
+                let mut output = preamble.clone();
+                let result = (|output: &mut String| {
+                    // `none` is a request for the count, so it answers with the count
+                    // even when that count is zero: "0, omitted" is the fact the
+                    // caller asked for, and suppressing it means the one mode whose
+                    // entire job is reporting the number silently reports nothing.
+                    // `recent` and `all` are requests for comments, and an issue with
+                    // none of those keeps its clean, header-free output.
+                    if total == 0 && comment_mode != "none" {
+                        return Ok(());
+                    }
+                    let shown = comments.len() as i64;
+                    match comment_mode {
+                        "none" => writeln!(
+                            output,
+                            "\n--- Comments ({total}, omitted — use list_comments) ---"
+                        )?,
+                        "recent" if shown < total => writeln!(
+                            output,
+                            "\n--- Comments ({total}, showing last {shown} — use list_comments) ---"
+                        )?,
+                        // `all` past the cap, or past the response-byte budget. Say
+                        // plainly that this is a window, not the thread, and name the
+                        // tool that pages the rest. When bytes rather than rows ended
+                        // it, say so: "3 of 40" is otherwise unexplainable next to a
+                        // 500-row cap, and an agent has no way to tell whether asking
+                        // again would help.
+                        _ if shown < total && budget_limited => writeln!(
+                            output,
+                            "\n--- Comments ({total}, showing the most recent {shown}; \
+                     the rest did not fit the response size budget — \
+                     use list_comments to page them) ---"
+                        )?,
+                        _ if shown < total => writeln!(
+                            output,
+                            "\n--- Comments ({total}, showing the most recent {shown}; \
+                     use list_comments to page the rest) ---"
+                        )?,
+                        _ => writeln!(output, "\n--- Comments ({total}) ---")?,
+                    }
+                    write!(
+                        output,
+                        "{}",
+                        CommentLines {
+                            comments,
+                            parent_identifier: &issue.identifier,
+                            parent,
+                            context: context.as_deref(),
+                        }
+                    )
+                })(&mut output);
+                finish_response(output, result)
+            },
+        )
     }
 
     #[tool(
@@ -3613,19 +3700,29 @@ impl LificMcp {
             }
         };
 
+        // This response is comments plus one header line and one continuation
+        // line, both of which are still bytes the 2 MiB budget promised. They
+        // cannot be rendered before their own counts are known, so what they
+        // will cost is reserved instead: the two lines are a fixed template
+        // around a parent identifier and a rendered URL, and this reserve is
+        // an order of magnitude past the longest either can be.
+        const HEADING_RESERVE: usize = 4 * 1024;
+        let allowance = queries::comments::remaining_budget(HEADING_RESERVE, &parent_identifier)
+            .map_err(|error| error.to_string())?;
+
         let (page, total) = self.read(|conn| {
-            let comments = queries::comments::list_comments_page(
+            let comments = queries::comments::list_comments_page_within(
                 conn,
                 parent,
                 input.author.as_deref(),
                 Some(order),
                 Some(limit),
                 Some(offset),
+                allowance,
             )?;
             let total = queries::comments::count_comments(conn, parent, input.author.as_deref())?;
             Ok((comments, total))
         })?;
-        let has_more = page.has_more;
         let comments = page.items;
         if comments.is_empty() {
             return Ok(if total == 0 {
@@ -3640,61 +3737,87 @@ impl LificMcp {
                 )
             });
         }
-        let shown = comments.len() as i64;
-        Ok(render_response(|output| {
-            match (offset, shown < total) {
-                (0, true) => {
-                    let edge = if order == "desc" {
-                        "most recent"
-                    } else {
-                        "oldest"
-                    };
-                    writeln!(
+        bounded_comment_response(
+            comments.len(),
+            || {
+                format!(
+                    "Comment #{} cannot fit the encoded response budget. To deliberately skip it, call list_comments with the same author/order and offset={}.",
+                    comments[0].id,
+                    offset + 1
+                )
+            },
+            |shown, encoded_limit| {
+                let has_more = page.has_more || shown < comments.len();
+                let budget_limited = page.budget_limited || encoded_limit;
+                let next_offset = offset + shown as i64;
+                let comments = &comments[..shown];
+                let shown = shown as i64;
+                render_response(|output| {
+                    match (offset, shown < total) {
+                        (0, true) => {
+                            let edge = if order == "desc" {
+                                "most recent"
+                            } else {
+                                "oldest"
+                            };
+                            writeln!(
+                                output,
+                                "Showing {shown} {edge} of {total} comment(s) on {}:",
+                                reference_with_context(link_context.as_deref(), parent_kind)
+                            )?;
+                        }
+                        (offset, _) if offset > 0 => {
+                            writeln!(
+                                output,
+                                "Showing comments {}-{} of {total} on {} ({} first):",
+                                offset + 1,
+                                offset + shown,
+                                reference_with_context(link_context.as_deref(), parent_kind),
+                                if order == "desc" { "newest" } else { "oldest" }
+                            )?;
+                        }
+                        _ => {
+                            writeln!(
+                                output,
+                                "{total} comment(s) on {}:",
+                                reference_with_context(link_context.as_deref(), parent_kind)
+                            )?;
+                        }
+                    }
+                    write!(
                         output,
-                        "Showing {shown} {edge} of {total} comment(s) on {}:",
-                        reference_with_context(link_context.as_deref(), parent_kind)
+                        "{}",
+                        CommentLines {
+                            comments,
+                            parent_identifier: &parent_identifier,
+                            parent,
+                            context: link_context.as_deref(),
+                        }
                     )?;
-                }
-                (offset, _) if offset > 0 => {
-                    writeln!(
-                        output,
-                        "Showing comments {}-{} of {total} on {} ({} first):",
-                        offset + 1,
-                        offset + shown,
-                        reference_with_context(link_context.as_deref(), parent_kind),
-                        if order == "desc" { "newest" } else { "oldest" }
-                    )?;
-                }
-                _ => {
-                    writeln!(
-                        output,
-                        "{total} comment(s) on {}:",
-                        reference_with_context(link_context.as_deref(), parent_kind)
-                    )?;
-                }
-            }
-            write!(
-                output,
-                "{}",
-                CommentLines {
-                    comments: &comments,
-                    parent_identifier: &parent_identifier,
-                    parent,
-                    context: link_context.as_deref(),
-                }
-            )?;
-            has_more
+                    has_more
                 .then(|| {
-                    let next_offset = offset + shown;
+                    // The continuation offset counts rows actually returned,
+                    // not the limit that was asked for. When the byte budget
+                    // cut the page short those two differ, and using the limit
+                    // would skip every row the budget refused to send.
                     let remaining = total.saturating_sub(next_offset);
-                    writeln!(
-                        output,
-                        "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}"
-                    )
+                    if budget_limited {
+                        writeln!(
+                            output,
+                            "\n... {remaining} more comment(s) — this page stopped at the response size budget, not the row limit; call again with the same author/order/limit and offset={next_offset}"
+                        )
+                    } else {
+                        writeln!(
+                            output,
+                            "\n... {remaining} more comment(s) — call again with the same author/order/limit and offset={next_offset}"
+                        )
+                    }
                 })
                 .transpose()
                 .map(|_| ())
-        }))
+                })
+            },
+        )
     }
 
     #[tool(
@@ -4772,6 +4895,39 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
+        let row = format!(
+            "[comment](https://example.com/{})\n{}",
+            "x".repeat(1000),
+            "\0".repeat(100_000)
+        );
+        let render = |shown: usize, limited: bool| {
+            format!(
+                "{}\nnext offset={shown}; limited={limited}",
+                row.repeat(shown)
+            )
+        };
+        assert!(
+            super::encoded_tool_result_bytes(&render(4, false)).unwrap()
+                > crate::db::queries::comments::MAX_COMMENT_RESPONSE_BYTES
+        );
+        let output = super::bounded_comment_response(4, || "oversized".into(), render).unwrap();
+        assert!(output.ends_with("next offset=3; limited=true"));
+        assert!(
+            super::encoded_tool_result_bytes(&output).unwrap()
+                <= crate::db::queries::comments::MAX_COMMENT_RESPONSE_BYTES
+        );
+        assert!(
+            super::bounded_comment_response(
+                1,
+                || "cannot fit first row".into(),
+                |_, _| "\0".repeat(400_000)
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
@@ -7806,6 +7962,163 @@ mod tests {
                 content: format!("comment number {i}"),
             }));
         }
+    }
+
+    // ── LIF-421: bytes end a page, and the hint says so ──
+
+    /// Post `n` comments of `size` bytes each on PRJ-1.
+    fn seed_large_comments(m: &LificMcp, n: usize, size: usize) {
+        for i in 1..=n {
+            m.add_comment(Parameters(AddCommentInput {
+                identifier: "PRJ-1".into(),
+                content: format!("body {i} {}", "x".repeat(size)),
+            }));
+        }
+    }
+
+    #[test]
+    fn a_comment_listing_that_runs_out_of_budget_says_so_and_names_the_next_offset() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Heavy thread");
+        let _guard = seed_user(&m);
+        // Ten 250 KiB comments: 2.5 MiB of bodies against a 2 MiB budget, so
+        // the default page cannot carry the thread however many rows it asks
+        // for.
+        seed_large_comments(&m, 10, 250 * 1024);
+
+        let listing = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            ..Default::default()
+        }));
+        // Bodies are never cut in half to fit — whole comments or none.
+        assert!(
+            listing.bytes().filter(|byte| *byte == b'x').count() % (250 * 1024) == 0,
+            "a rendered comment is whole, never cut mid-body"
+        );
+        assert!(
+            listing.contains("stopped at the response size budget"),
+            "got: {}",
+            &listing[listing.len().saturating_sub(400)..]
+        );
+        // The continuation offset counts rows sent, not the limit asked for.
+        let offset: i64 = listing
+            .rsplit("offset=")
+            .next()
+            .and_then(|tail| tail.trim().parse().ok())
+            .expect("a continuation offset");
+        assert!(offset > 0 && offset < 10, "got offset={offset}");
+
+        // Following it lands on the next comment, with nothing skipped.
+        let next = m.list_comments(Parameters(ListCommentsInput {
+            identifier: "PRJ-1".into(),
+            offset: Some(offset),
+            ..Default::default()
+        }));
+        assert!(
+            !next.starts_with("No comments"),
+            "got: {}",
+            &next[..80.min(next.len())]
+        );
+    }
+
+    #[test]
+    fn a_rendered_response_stays_inside_the_budget_preamble_included() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Heavy thread");
+        let _guard = seed_user(&m);
+        seed_large_comments(&m, 10, 250 * 1024);
+
+        // The same issue, read twice: once with nothing but comments to pay
+        // for, then again once its description has taken most of the budget.
+        let lean = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+
+        m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "PRJ-1".into(),
+            description: Some("d".repeat(900 * 1024)),
+            ..Default::default()
+        }));
+        let heavy = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+
+        for (name, rendered) in [("lean", &lean), ("heavy", &heavy)] {
+            assert!(
+                rendered.len() <= queries::comments::MAX_COMMENT_RESPONSE_BYTES,
+                "{name} rendered {} bytes, budget is {}",
+                rendered.len(),
+                queries::comments::MAX_COMMENT_RESPONSE_BYTES
+            );
+            assert!(
+                rendered.contains("did not fit the response size budget"),
+                "{name} must say why its trail is short"
+            );
+        }
+
+        // The description was not the thing sacrificed: it is whole, in one
+        // unbroken run rather than a truncated head, and the comment trail is
+        // what shrank around it.
+        assert!(heavy.bytes().filter(|byte| *byte == b'd').count() >= 900 * 1024);
+        assert!(heavy.contains(&"d".repeat(8 * 1024)));
+        assert!(
+            heavy.matches("body ").count() < lean.matches("body ").count(),
+            "a preamble that costs 900 KiB has to buy fewer comments"
+        );
+    }
+
+    #[test]
+    fn an_issue_too_large_to_render_is_refused_by_name() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Enormous");
+        let _guard = seed_user(&m);
+        // Past the whole budget before comments are even reached. Rendering it
+        // with an empty comment trail would report "no comments" about a
+        // thread that exists, and truncating the description would hand back a
+        // document that looks whole and is not.
+        m.update_issue(Parameters(UpdateIssueInput {
+            identifier: "PRJ-1".into(),
+            description: Some("d".repeat(3 * 1024 * 1024)),
+            ..Default::default()
+        }));
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+        assert!(result.starts_with("Error: "), "{}", &result[..80]);
+        assert!(result.contains("PRJ-1"), "the refusal names the issue");
+        assert!(
+            result.contains("comments=none"),
+            "and a way to read it anyway"
+        );
+    }
+
+    #[test]
+    fn get_issue_all_reports_a_window_the_budget_cut_short() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Proj", "PRJ");
+        seed_issue(&m, "PRJ", "Heavy thread");
+        let _guard = seed_user(&m);
+        seed_large_comments(&m, 10, 250 * 1024);
+
+        let result = m.get_issue(Parameters(GetIssueInput {
+            identifier: "PRJ-1".into(),
+            include_comments: Some("all".into()),
+        }));
+        assert!(
+            result.contains("did not fit the response size budget"),
+            "an agent has to be told why it got a window, not the thread"
+        );
+        assert!(
+            result.contains("use list_comments"),
+            "and how to read the rest"
+        );
     }
 
     #[test]

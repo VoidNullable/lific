@@ -371,6 +371,140 @@ test("infers hasMore from the over-fetched row without ever showing it", async (
   expect(res.data.nextCursor?.id).toBe(1000 - COMMENT_PAGE_SIZE + 1);
 });
 
+test("trusts the server about what lies past a page the byte budget cut short", async () => {
+  // The server stopped after three comments because the response-byte budget
+  // ran out, not because the thread ended. Inferring hasMore from the row
+  // count would hide 997 comments behind a Load older button that never
+  // renders, so the header is the authority here.
+  const calls: string[] = [];
+  globalThis.fetch = (async (url) => {
+    calls.push(String(url));
+    const rows = [3, 2, 1].map((id) => comment({ id, content: `comment ${id}` }));
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: {
+        "x-comment-has-more": "true",
+        "x-comment-next-offset": "3",
+        "x-comment-returned": "3",
+      },
+    });
+  }) as typeof fetch;
+
+  const res = await listComments(7);
+
+  expect(res.ok).toBe(true);
+  if (!res.ok) return;
+  expect(res.data.items).toHaveLength(3);
+  expect(res.data.hasMore).toBe(true);
+  // The next page is asked for by cursor, from the oldest row actually shown,
+  // so nothing between the pages is skipped.
+  expect(res.data.nextCursor).toEqual({ created_at: "2026-08-13 10:00:00", id: 1 });
+});
+
+test("the cursor the client pages by is the row the server named", async () => {
+  // The server sends the boundary it would page from; the client derives the
+  // same pair from the oldest row it is about to display. They have to agree,
+  // or a budget-shortened page would leave a gap between what was shown and
+  // what is fetched next.
+  const rows = [9, 8, 7].map((id) =>
+    comment({ id, created_at: `2026-08-13 10:00:0${id % 10}` }),
+  );
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: {
+        "x-comment-has-more": "true",
+        "x-comment-next-created-at": rows[rows.length - 1].created_at,
+        "x-comment-next-id": String(rows[rows.length - 1].id),
+      },
+    })) as typeof fetch;
+
+  const res = await listComments(7);
+
+  expect(res.ok).toBe(true);
+  if (!res.ok) return;
+  expect(res.data.hasMore).toBe(true);
+  expect(res.data.nextCursor).toEqual({
+    created_at: rows[rows.length - 1].created_at,
+    id: rows[rows.length - 1].id,
+  });
+  // And that row is on screen: the cursor names something the reader has, not
+  // a row skipped past.
+  expect(res.data.items[0].id).toBe(rows[rows.length - 1].id);
+});
+
+test("a short page from a server that says nothing is still the end of the thread", async () => {
+  // No header at all: an older server, or one that answered a genuinely final
+  // page. Falling back to the over-fetch inference keeps that case working.
+  globalThis.fetch = (async () => {
+    const rows = [2, 1].map((id) => comment({ id }));
+    return new Response(JSON.stringify(rows), { status: 200 });
+  }) as typeof fetch;
+
+  const res = await listComments(7);
+
+  expect(res.ok).toBe(true);
+  if (!res.ok) return;
+  expect(res.data.items).toHaveLength(2);
+  expect(res.data.hasMore).toBe(false);
+});
+
+test("a full page is more comments even when the header disagrees", async () => {
+  // The client asked for one row past the page it wanted and got it. That row
+  // exists and is not being shown, so there is more to load no matter what the
+  // server's own lookahead concluded past the end of its budget.
+  globalThis.fetch = (async () => {
+    const rows = Array.from({ length: COMMENT_PAGE_SIZE + 1 }, (_, i) =>
+      comment({ id: 1000 - i }),
+    );
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: { "x-comment-has-more": "false", "x-comment-next-offset": "51" },
+    });
+  }) as typeof fetch;
+
+  const res = await listComments(7);
+
+  expect(res.ok).toBe(true);
+  if (!res.ok) return;
+  expect(res.data.items).toHaveLength(COMMENT_PAGE_SIZE);
+  expect(res.data.hasMore).toBe(true);
+});
+
+test("paging a budget-limited thread walks it whole, without repeats", async () => {
+  // Every request comes back with two rows and "there is more", which is what
+  // a thread of large comments looks like from the client's side.
+  const server = Array.from({ length: 9 }, (_, i) => comment({ id: i + 1 }));
+  globalThis.fetch = (async (url) => {
+    const params = new URL(String(url), "http://localhost").searchParams;
+    const beforeId = params.get("before_id");
+    const eligible = [...server]
+      .sort((a, b) => b.id - a.id)
+      .filter((row) => beforeId === null || row.id < Number(beforeId));
+    const rows = eligible.slice(0, 2);
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: { "x-comment-has-more": String(eligible.length > rows.length) },
+    });
+  }) as typeof fetch;
+
+  let loaded: Comment[] = [];
+  let hasMore = true;
+  let requests = 0;
+  while (hasMore && requests < 20) {
+    const res = await listComments(7, olderCursor(loaded));
+    requests += 1;
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    loaded = prependOlderComments(loaded, res.data.items);
+    hasMore = res.data.hasMore;
+  }
+
+  expect(loaded.map((c) => c.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  expect(new Set(loaded.map((c) => c.id)).size).toBe(loaded.length);
+  expect(requests).toBe(5);
+});
+
 test("sends the keyset cursor pair for older pages and never exceeds the cap", async () => {
   const calls = stubThread(1000);
 

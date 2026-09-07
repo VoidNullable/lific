@@ -4,7 +4,9 @@ mod activity;
 /// module is crate-visible even though its handlers stay `pub(super)`.
 pub(crate) mod attachments;
 mod auth;
-mod comments;
+// `pub` only for the three comment paging header names, which the global CORS
+// layer in `server` has to expose by the same names this module sets them by.
+pub mod comments;
 mod export;
 mod git_hook;
 mod insights;
@@ -392,6 +394,17 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             .allow_headers([
                 axum::http::header::CONTENT_TYPE,
                 axum::http::header::AUTHORIZATION,
+            ])
+            // LIF-421: comment paging metadata rides in headers so the body
+            // stays the bare array it always was. A browser cannot read a
+            // response header it was not told about, so a cross-origin web
+            // client would silently fall back to guessing `has_more`.
+            .expose_headers([
+                axum::http::HeaderName::from_static(comments::HAS_MORE_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_OFFSET_HEADER),
+                axum::http::HeaderName::from_static(comments::RETURNED_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_AT_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_ID_HEADER),
             ]),
         )
         .with_state(db)

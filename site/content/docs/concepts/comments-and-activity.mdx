@@ -11,11 +11,11 @@ An author can edit and delete their own comments. Over REST, an administrator ca
 
 Each comment has a stable anchor derived from its numeric id, so a single comment in a thread can be linked to directly.
 
-A comment body is limited to 262144 bytes (256 KiB) after Lific normalizes escaped newlines and tabs. A create or edit over that limit is rejected with a `400` and leaves any existing comment unchanged. Comments already stored above the limit stay readable and editable down to a body within it.
+New comment bodies are capped at 256 KiB after escaped-newline and tab normalization. Larger existing bodies may be edited without growing. HTTP requests remain capped at 2 MiB; direct database and stdio operations are not subject to that transport limit. Bodies allow at most 256 distinct mention tokens and 256 distinct attachment IDs. Excess references cause an explicit refusal, including on older comments: reduce them before saving.
 
 ## Reading a thread
 
-No surface returns an unbounded thread. Every comment list is a page of at most 500 comments, and each surface has its own default:
+Interactive reads return at most 500 comments within a 2 MiB budget. Byte limits can shorten any page, so follow continuation instructions rather than assuming a short page ends the thread. Exports use a separate exhaustive query with their own limits. Each surface has its own default:
 
 | Surface | Default page | Default order |
 | --- | --- | --- |
@@ -31,6 +31,8 @@ Page with `offset`. The MCP tool and the CLI print the offset of the next page w
 REST comment lists additionally accept a keyset cursor (`before_created_at` plus `before_id`) that pages backwards from a comment already seen. It exists because an offset drifts under a live thread: one comment posted above a reader shifts every offset by one, so the next page repeats a comment or skips one. The web UI uses the cursor for exactly that reason.
 
 `get_issue` carries a comment trail too, and it is bounded the same way: `recent` (the default) shows the last three, `all` shows the most recent 500, and `none` reports only the count, including when that count is zero. A thread longer than the `all` window says so and points at `list_comments`.
+
+MCP includes rendered links, escaped text, and the `get_issue` preamble in its encoded response budget. If a comment cannot fit by itself, the read fails explicitly with instructions for continuing; it does not silently skip the comment.
 
 ## Mentions
 

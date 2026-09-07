@@ -11,6 +11,7 @@ use std::{
     io::Write,
     net::IpAddr,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -76,6 +77,50 @@ struct HttpBackend {
     base_url: String,
     link_context: IssueLinkContext,
     api_key: Option<String>,
+    /// What the last comment listing's paging headers said (LIF-421).
+    ///
+    /// A command is fetched and then rendered in two passes, and only the
+    /// fetch sees the response headers. Rather than thread a second return
+    /// value through every arm of a dispatch that has nothing to do with
+    /// comments, the one arm that has an answer leaves it here for the one
+    /// renderer that wants it, which then takes it.
+    comment_paging: Mutex<Option<CommentPaging>>,
+}
+
+/// The server's own answer about what lies past a comment page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommentPaging {
+    has_more: bool,
+    next_offset: i64,
+}
+
+impl CommentPaging {
+    /// Read the LIF-421 paging headers, or `None` from a server that does not
+    /// send them (or sends half of them, which is the same thing: a partial
+    /// answer here would be a confident wrong one).
+    fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        let value = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+        let has_more = match value(crate::api::comments::HAS_MORE_HEADER)? {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        let next_offset = value(crate::api::comments::NEXT_OFFSET_HEADER)?
+            .parse::<i64>()
+            .ok()?;
+        Some(Self {
+            has_more,
+            next_offset,
+        })
+    }
+
+    fn continuation(self) -> render::CommentContinuation {
+        if self.has_more {
+            render::CommentContinuation::Next(self.next_offset)
+        } else {
+            render::CommentContinuation::End
+        }
+    }
 }
 
 impl HttpBackend {
@@ -121,6 +166,7 @@ impl HttpBackend {
             base_url: base_url.to_owned(),
             link_context,
             api_key: api_key.map(str::to_owned),
+            comment_paging: Mutex::new(None),
         })
     }
 
@@ -835,9 +881,14 @@ impl HttpBackend {
                     ("offset", Cow::Owned(offset.to_string())),
                     ("order", Cow::Borrowed(order.as_str())),
                 ];
-                self.get_json(&format!("/api/issues/{}/comments", issue.id), &params)
-                    .await
-                    .map(|value| (value, issue.identifier))
+                let (value, headers) = self
+                    .get_json_with_headers(&format!("/api/issues/{}/comments", issue.id), &params)
+                    .await?;
+                // LIF-421: the server answers the continuation question in
+                // headers. Remember what it said so the render pass can use it
+                // instead of paying for the probe request below.
+                self.remember_comment_paging(CommentPaging::from_headers(&headers));
+                Ok((value, issue.identifier))
             }
             CommentAction::Add {
                 identifier,
@@ -863,14 +914,37 @@ impl HttpBackend {
         }
     }
 
+    /// Store what the server's paging headers said about the page just
+    /// fetched, for the render pass that follows.
+    fn remember_comment_paging(&self, paging: Option<CommentPaging>) {
+        if let Ok(mut slot) = self.comment_paging.lock() {
+            *slot = paging;
+        }
+    }
+
+    /// Take it back out. Taking rather than reading: a remembered answer
+    /// belongs to exactly one page, and a stale one would be worse than none.
+    fn take_comment_paging(&self) -> Option<CommentPaging> {
+        self.comment_paging
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
     /// What lies past the comment page just fetched.
     ///
-    /// `GET /api/issues/{id}/comments` answers with a bare array, so a *full*
-    /// page is ambiguous: it is either the end of the thread or the start of
-    /// the next one. Only that case costs a request, a one-row probe just
-    /// past the page. A short page is self-evidently the end. Doing it this
-    /// way rather than over-fetching `limit + 1` keeps the answer correct at
-    /// `limit = 500`, where the extra row would be clamped away (LIF-388).
+    /// A server that sends the LIF-421 paging headers has already answered
+    /// this, authoritatively, and its answer is the only correct one now that
+    /// a page can end early on the response-byte budget: a short page no
+    /// longer implies the end of the thread. The probe below is the fallback
+    /// for a server too old to say.
+    ///
+    /// `GET /api/issues/{id}/comments` answers with a bare array, so to an
+    /// older server a *full* page is ambiguous: it is either the end of the
+    /// thread or the start of the next one. Only that case costs a request, a
+    /// one-row probe just past the page. Doing it this way rather than
+    /// over-fetching `limit + 1` keeps the answer correct at `limit = 500`,
+    /// where the extra row would be clamped away (LIF-388).
     ///
     /// The probe is a *rendering* nicety, so a failed one must not fail the
     /// command or change its JSON. It reports
@@ -885,6 +959,9 @@ impl HttpBackend {
         order: &str,
     ) -> render::CommentContinuation {
         use render::CommentContinuation;
+        if let Some(paging) = self.take_comment_paging() {
+            return paging.continuation();
+        }
         if (comments.len() as i64) < limit {
             return CommentContinuation::End;
         }
@@ -1243,10 +1320,21 @@ impl HttpBackend {
     }
 
     async fn get_json(&self, path: &str, params: &[QueryParam<'_>]) -> Result<Value> {
+        Ok(self.get_json_with_headers(path, params).await?.0)
+    }
+
+    /// [`get_json`](Self::get_json) keeping the response headers, for the
+    /// endpoints whose answer is not entirely in the body.
+    async fn get_json_with_headers(
+        &self,
+        path: &str,
+        params: &[QueryParam<'_>],
+    ) -> Result<(Value, HeaderMap)> {
         let response = self
             .send(self.request_builder(Method::GET, path).query(params))
             .await?;
-        Ok(response.json().await?)
+        let headers = response.headers().clone();
+        Ok((response.json().await?, headers))
     }
 
     async fn send_json<T: Serialize + Sync + ?Sized>(
@@ -2188,6 +2276,113 @@ mod tests {
         server.abort();
     }
 
+    /// LIF-421: the server answers the continuation question in headers, and
+    /// this backend believes it rather than probing or guessing.
+    #[tokio::test]
+    async fn a_comment_page_follows_the_servers_own_paging_answer() {
+        let fixture = spawn_real_api_server().await;
+        let backend = HttpBackend::new(&fixture.url, None).unwrap();
+        let issue = fixture.issue_identifier.clone();
+        for content in ["one", "two", "three"] {
+            backend
+                .execute(
+                    &Command::Comment {
+                        action: CommentAction::Add {
+                            identifier: issue.clone(),
+                            content: content.into(),
+                            user: None,
+                        },
+                    },
+                    IssueLinkOutput::Url,
+                )
+                .await
+                .unwrap();
+        }
+
+        let listing = |limit: i64| Command::Comment {
+            action: CommentAction::List {
+                identifier: issue.clone(),
+                limit,
+                offset: 0,
+                order: "asc".into(),
+            },
+        };
+
+        // A full page: the header says more remains, and the offset it names
+        // is the row count actually returned.
+        let command = listing(2);
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
+        let rendered = backend.human(&command, &value).await;
+        assert!(
+            rendered.contains("More comments available. Next page: --offset 2"),
+            "{rendered}"
+        );
+
+        // The last page. Nothing was probed and nothing is claimed to be
+        // unknown: the server said it was the end.
+        let command = listing(50);
+        let value = backend
+            .execute(&command, IssueLinkOutput::Url)
+            .await
+            .unwrap();
+        let rendered = backend.human(&command, &value).await;
+        assert!(!rendered.contains("More comments"), "{rendered}");
+        assert!(!rendered.contains("Could not check"), "{rendered}");
+
+        fixture.server.abort();
+    }
+
+    /// A server too old to send the headers still gets a correct answer, from
+    /// the probe this backend has always used. The metadata is an improvement
+    /// on the fallback, not a requirement.
+    #[tokio::test]
+    async fn a_server_without_paging_headers_falls_back_to_the_probe() {
+        let paging = super::CommentPaging::from_headers(&HeaderMap::new());
+        assert!(paging.is_none(), "no headers means no remembered answer");
+
+        // Half an answer is not an answer: a client that read `has_more` and
+        // invented the offset would skip rows.
+        let mut partial = HeaderMap::new();
+        partial.insert(
+            crate::api::comments::HAS_MORE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        assert!(super::CommentPaging::from_headers(&partial).is_none());
+
+        let mut full = partial.clone();
+        full.insert(
+            crate::api::comments::NEXT_OFFSET_HEADER,
+            HeaderValue::from_static("7"),
+        );
+        assert_eq!(
+            super::CommentPaging::from_headers(&full)
+                .unwrap()
+                .continuation(),
+            render::CommentContinuation::Next(7)
+        );
+
+        // A short page whose header says the thread continues (the byte budget
+        // ended it) must not render as the end of the thread.
+        let mut budgeted = HeaderMap::new();
+        budgeted.insert(
+            crate::api::comments::HAS_MORE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        budgeted.insert(
+            crate::api::comments::NEXT_OFFSET_HEADER,
+            HeaderValue::from_static("3"),
+        );
+        assert_eq!(
+            super::CommentPaging::from_headers(&budgeted)
+                .unwrap()
+                .continuation(),
+            render::CommentContinuation::Next(3)
+        );
+    }
+
     /// LIF-341: every list command prints the same thing through either
     /// backend, not just `issue list`. Each of these goes out over HTTP and
     /// is compared against the shared renderer fed straight from the
@@ -2348,7 +2543,7 @@ mod tests {
                 .unwrap(),
             ),
             render::comment_list(
-                &queries::comments::list_comments_paginated(
+                &queries::comments::list_comments_exhaustive(
                     &conn,
                     queries::comments::CommentParent::Issue(issue_id),
                     None,

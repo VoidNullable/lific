@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{Connection, OptionalExtension, named_params, params, types::Value};
+use rusqlite::{Connection, OptionalExtension, params, types::Value};
 
 use crate::db::models::{
     Attachment, AttachmentActor, AttachmentEntity, LinkedEntity, PendingOrphan, ProjectAttachment,
@@ -201,21 +201,6 @@ pub fn link_attachment(
     Ok(())
 }
 
-/// Remove one link. Silent when the link doesn't exist.
-pub fn unlink_attachment(
-    conn: &Connection,
-    attachment_id: i64,
-    entity: AttachmentEntity,
-    entity_id: i64,
-) -> Result<(), LificError> {
-    conn.execute(
-        "DELETE FROM attachment_links
-         WHERE attachment_id = ?1 AND entity_type = ?2 AND entity_id = ?3",
-        params![attachment_id, entity.as_str(), entity_id],
-    )?;
-    Ok(())
-}
-
 /// List the attachments linked to a given entity, newest-linked last (stable
 /// display order for the detail-view "Attachments (n)" section).
 pub fn list_for_entity(
@@ -282,12 +267,33 @@ pub fn list_for_project(conn: &Connection, project_id: i64) -> Result<Vec<Attach
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// The most distinct `/api/attachments/{id}` references one body may carry
+/// (LIF-421).
+///
+/// Reconciliation is proportional to this number, and it used to be
+/// proportional to its square: `Vec::contains` on both sides of the set
+/// difference, plus one admissibility query per new id. A 256 KiB body can
+/// name tens of thousands of distinct ids, so the cap is what makes a save a
+/// bounded amount of work; the batching below is what makes it a cheap one.
+///
+/// Past the cap the write is **refused**, not truncated. Reconciling a
+/// truncated reference set would unlink attachments the body still references,
+/// and the orphan sweep deletes an unlinked blob 24 hours later: silent,
+/// permanent data loss dressed up as a successful save. Refusing is the only
+/// safe answer, so a legacy body past the cap must have its references reduced
+/// before it can be edited at all. That is a deliberate, documented corner —
+/// 256 distinct attachments in one body is far past anything a person writes.
+pub const MAX_BODY_REFERENCES: usize = 256;
+
 /// Replace an entity's link set to exactly the given attachment ids. Adds
 /// missing links, removes ones no longer referenced. Called after an
 /// issue/page description or a comment is saved, with the ids parsed out of the
 /// markdown (`/api/attachments/{id}` references). This is the "re-scan on save"
 /// mechanism: the source of truth for which attachments an entity uses is the
 /// entity's own text, and this reconciles the join table to match.
+///
+/// LIF-421: the reconciliation is a set difference over hash sets and two
+/// batched statements, not a scan and a query per reference.
 pub fn sync_entity_links(
     conn: &Connection,
     entity: AttachmentEntity,
@@ -301,46 +307,81 @@ pub fn sync_entity_links(
     if matches!(actor, AttachmentActor::Unattributed) {
         return Ok(());
     }
+    if referenced_ids.len() > MAX_BODY_REFERENCES {
+        return Err(LificError::BadRequest(format!(
+            "this {} references more than {MAX_BODY_REFERENCES} distinct attachments; \
+             reduce them before saving (reconciling a partial set would unlink \
+             attachments the text still uses)",
+            entity.as_str()
+        )));
+    }
+    let referenced: HashSet<i64> = referenced_ids.iter().copied().collect();
 
     // Current links for this entity.
     let mut stmt = conn.prepare_cached(
         "SELECT attachment_id FROM attachment_links WHERE entity_type = ?1 AND entity_id = ?2",
     )?;
-    let current: Vec<i64> = stmt
+    let current: HashSet<i64> = stmt
         .query_map(params![entity.as_str(), entity_id], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(stmt);
 
     // Remove links whose attachment id is no longer referenced.
-    for existing in &current {
-        if !referenced_ids.contains(existing) {
-            unlink_attachment(conn, *existing, entity, entity_id)?;
-        }
+    let stale: Vec<i64> = current.difference(&referenced).copied().collect();
+    if !stale.is_empty() {
+        unlink_all(conn, entity, entity_id, &stale)?;
     }
-    // Add newly-referenced links (skip ids that don't correspond to a real
-    // attachment row — a stale/typo reference in the text shouldn't create a
-    // dangling link).
-    for id in referenced_ids {
-        if !current.contains(id) && attachment_admissible(conn, *id, actor, project_id)? {
-            link_attachment(conn, *id, entity, entity_id)?;
-        }
+
+    // Add newly-referenced links, in the order the body named them so link
+    // order stays deterministic. Ids that don't correspond to a real (or
+    // reachable) attachment row are skipped rather than linked — a stale or
+    // typo'd reference must not create a dangling link — and admissibility is
+    // resolved for the whole set in one query.
+    let missing: Vec<i64> = referenced_ids
+        .iter()
+        .copied()
+        .filter(|id| !current.contains(id))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let admissible = admissible_ids(conn, &missing, actor, project_id)?;
+    for id in missing.iter().filter(|id| admissible.contains(id)) {
+        link_attachment(conn, *id, entity, entity_id)?;
     }
     Ok(())
 }
 
-fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM attachments WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(exists.is_some())
+/// Drop several of an entity's links in one statement.
+fn unlink_all(
+    conn: &Connection,
+    entity: AttachmentEntity,
+    entity_id: i64,
+    attachment_ids: &[i64],
+) -> Result<(), LificError> {
+    let sql = format!(
+        "DELETE FROM attachment_links
+          WHERE entity_type = ?1 AND entity_id = ?2
+            AND attachment_id IN ({})",
+        super::placeholders(attachment_ids.len())
+    );
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(entity.as_str().to_owned()), Box::new(entity_id)];
+    values.extend(
+        attachment_ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
+    );
+    let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    conn.execute(&sql, refs.as_slice())?;
+    Ok(())
 }
 
+/// Which of `ids` this actor may introduce.
+///
 /// The one attachment-introduction policy, shared by REST, MCP and the CLI
-/// (LIF-409). Before this there were two near-identical predicates, one per
-/// transport, which is exactly how the two surfaces drift apart.
+/// (LIF-409). Before that there were two near-identical predicates, one per
+/// transport, which is exactly how two surfaces drift apart.
 ///
 /// An authenticated caller may introduce an attachment only when they uploaded
 /// it, they are an administrator, or it is already linked to another entity in
@@ -350,54 +391,100 @@ fn attachment_exists(conn: &Connection, id: i64) -> Result<bool, LificError> {
 /// A trusted local operator (the direct-SQL CLI) is past every gate the moment
 /// they can open the database file, so the check collapses to "does the row
 /// exist" — a nonexistent id must still not produce a dangling link.
+///
+/// LIF-421: resolved for the whole set in one query rather than once per
+/// reference, since the correlated `EXISTS` is the expensive half of a save.
+/// `ids` is bounded by [`MAX_BODY_REFERENCES`], comfortably inside SQLite's
+/// 999-parameter default, so this never needs chunking.
+fn admissible_ids(
+    conn: &Connection,
+    ids: &[i64],
+    actor: AttachmentActor,
+    project_id: Option<i64>,
+) -> Result<HashSet<i64>, LificError> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let actor = match actor {
+        AttachmentActor::Unattributed => return Ok(HashSet::new()),
+        // A trusted local operator is past every gate the moment they can open
+        // the database file, so the question collapses to "does the row exist".
+        AttachmentActor::TrustedLocal => {
+            let sql = format!(
+                "SELECT id FROM attachments WHERE id IN ({})",
+                super::placeholders(ids.len())
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let values: Vec<&dyn rusqlite::types::ToSql> = ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::types::ToSql)
+                .collect();
+            return stmt
+                .query_map(values.as_slice(), |row| row.get::<_, i64>(0))?
+                .collect::<Result<HashSet<_>, _>>()
+                .map_err(Into::into);
+        }
+        AttachmentActor::Authenticated(actor) => actor,
+    };
+    // The ids take parameters 1..=n; the three actor parameters follow. All
+    // positional, so there is one numbering scheme to keep straight.
+    let n = ids.len();
+    let sql = format!(
+        "SELECT a.id
+           FROM attachments a
+          WHERE a.id IN ({ids})
+            AND (
+                ?{is_admin}
+                OR a.uploader_id = ?{actor_id}
+                OR EXISTS (
+                    SELECT 1
+                    FROM attachment_links l
+                    LEFT JOIN issues i ON l.entity_type = 'issue' AND i.id = l.entity_id
+                    LEFT JOIN pages p ON l.entity_type = 'page' AND p.id = l.entity_id
+                    LEFT JOIN comments c ON l.entity_type = 'comment' AND c.id = l.entity_id
+                    LEFT JOIN issues ci ON ci.id = c.issue_id
+                    LEFT JOIN pages cp ON cp.id = c.page_id
+                    WHERE l.attachment_id = a.id
+                      AND ?{project} IN (
+                          i.project_id,
+                          p.project_id,
+                          ci.project_id,
+                          cp.project_id
+                      )
+                )
+            )",
+        ids = super::placeholders(n),
+        is_admin = n + 1,
+        actor_id = n + 2,
+        project = n + 3,
+    );
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = ids
+        .iter()
+        .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    values.push(Box::new(actor.is_admin));
+    values.push(Box::new(actor.user_id));
+    values.push(Box::new(project_id));
+    let bound: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(bound.as_slice(), |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// [`admissible_ids`] for a single attachment.
+///
+/// Test-only: production reconciliation always has a set in hand and resolves
+/// it in one query. Kept so the introduction policy itself stays directly
+/// testable, one actor and one attachment at a time.
+#[cfg(test)]
 fn attachment_admissible(
     conn: &Connection,
     attachment_id: i64,
     actor: AttachmentActor,
     project_id: Option<i64>,
 ) -> Result<bool, LificError> {
-    let actor = match actor {
-        AttachmentActor::Unattributed => return Ok(false),
-        AttachmentActor::TrustedLocal => return attachment_exists(conn, attachment_id),
-        AttachmentActor::Authenticated(actor) => actor,
-    };
-    Ok(conn.query_row(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM attachments a
-             WHERE a.id = :attachment_id
-               AND (
-                   :is_admin
-                   OR a.uploader_id = :actor_id
-                   OR EXISTS (
-                       SELECT 1
-                       FROM attachment_links l
-                       LEFT JOIN issues i
-                         ON l.entity_type = 'issue' AND i.id = l.entity_id
-                       LEFT JOIN pages p
-                         ON l.entity_type = 'page' AND p.id = l.entity_id
-                       LEFT JOIN comments c
-                         ON l.entity_type = 'comment' AND c.id = l.entity_id
-                       LEFT JOIN issues ci ON ci.id = c.issue_id
-                       LEFT JOIN pages cp ON cp.id = c.page_id
-                       WHERE l.attachment_id = a.id
-                         AND :project_id IN (
-                             i.project_id,
-                             p.project_id,
-                             ci.project_id,
-                             cp.project_id
-                         )
-                   )
-               )
-         )",
-        named_params! {
-            ":attachment_id": attachment_id,
-            ":actor_id": actor.user_id,
-            ":is_admin": actor.is_admin,
-            ":project_id": project_id,
-        },
-        |row| row.get(0),
-    )?)
+    Ok(admissible_ids(conn, &[attachment_id], actor, project_id)?.contains(&attachment_id))
 }
 
 // ── Orphan GC ────────────────────────────────────────────────
@@ -1067,6 +1154,10 @@ pub fn unindexed_text_attachments(conn: &Connection) -> Result<Vec<(i64, String)
 /// the composer can insert.
 pub fn parse_referenced_ids(markdown: &str) -> Vec<i64> {
     let mut ids = Vec::new();
+    // Hash dedup, not `Vec::contains` (LIF-421): a body repeating references
+    // made the scan quadratic in the number of occurrences, which is the one
+    // thing a 256 KiB attacker-controlled body can turn into real CPU.
+    let mut seen: HashSet<i64> = HashSet::new();
     let needle = "/api/attachments/";
     let bytes = markdown.as_bytes();
     let mut search_from = 0;
@@ -1079,9 +1170,15 @@ pub fn parse_referenced_ids(markdown: &str) -> Vec<i64> {
         }
         if end > start
             && let Ok(id) = markdown[start..end].parse::<i64>()
-            && !ids.contains(&id)
+            && seen.insert(id)
         {
             ids.push(id);
+            // One past the cap is enough to prove the body is over it, and
+            // stopping there bounds the scan. `sync_entity_links` turns that
+            // extra id into the refusal.
+            if ids.len() > MAX_BODY_REFERENCES {
+                return ids;
+            }
         }
         search_from = end.max(search_from + rel + needle.len());
     }
@@ -1259,7 +1356,7 @@ mod tests {
         );
         assert_eq!(listed[0].id, att.id);
 
-        unlink_attachment(&conn, att.id, AttachmentEntity::Issue, issue).unwrap();
+        unlink_all(&conn, AttachmentEntity::Issue, issue, &[att.id]).unwrap();
         assert!(
             list_for_entity(&conn, AttachmentEntity::Issue, issue)
                 .unwrap()

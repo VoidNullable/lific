@@ -669,6 +669,12 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
         .expose_headers([
             header::WWW_AUTHENTICATE,
             HeaderName::from_static("mcp-session-id"),
+            // LIF-421: comment paging metadata. See `api::comments`.
+            HeaderName::from_static(crate::api::comments::HAS_MORE_HEADER),
+            HeaderName::from_static(crate::api::comments::NEXT_OFFSET_HEADER),
+            HeaderName::from_static(crate::api::comments::RETURNED_HEADER),
+            HeaderName::from_static(crate::api::comments::NEXT_CURSOR_AT_HEADER),
+            HeaderName::from_static(crate::api::comments::NEXT_CURSOR_ID_HEADER),
         ])
         .max_age(std::time::Duration::from_secs(86400));
 

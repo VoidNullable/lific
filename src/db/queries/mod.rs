@@ -140,6 +140,19 @@ pub fn over_fetch(limit: i64) -> i64 {
     }
 }
 
+/// `?,?,?…` for `count` bound parameters, for the queries whose `IN` list is
+/// only known at runtime. Every value is still bound, never formatted in.
+pub(crate) fn placeholders(count: usize) -> String {
+    let mut out = String::with_capacity(count * 2);
+    for i in 0..count {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('?');
+    }
+    out
+}
+
 /// SQL predicate restricting `column` (a project id, or an expression that
 /// resolves to one) to the projects the caller may see, plus the ids to bind.
 ///

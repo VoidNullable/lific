@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::models::{AttachmentActor, AttachmentEntity, Comment, CommentActor};
 use crate::error::LificError;
@@ -10,13 +10,108 @@ use super::{TOMBSTONE_NOW, unescape_text};
 /// single row loaded by a detail view.
 pub const MAX_COMMENT_BYTES: usize = 256 * 1024;
 
-pub fn validate_comment_content(content: &str) -> Result<(), LificError> {
-    if content.len() > MAX_COMMENT_BYTES {
-        return Err(LificError::BadRequest(format!(
-            "comment is too large (max {MAX_COMMENT_BYTES} bytes)"
-        )));
+/// The response-byte ceiling for one interactive page of comments (LIF-421).
+///
+/// A row cap alone does not bound a response: 50 rows of 256 KiB is 12.5 MiB,
+/// and the row cap is 500. This is the number that actually binds, and it is
+/// counted against the *serialized* page — every row's JSON, escaping and all
+/// — not the sum of the raw bodies, because that is what the transport,
+/// the browser and an agent's context window actually pay for.
+pub const MAX_COMMENT_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Held back from [`MAX_COMMENT_RESPONSE_BYTES`] for the parts of a response
+/// that are not comment rows: the array's own framing, the pagination headers,
+/// the status line, and the MCP envelope a rendered page is wrapped in. The
+/// budget is a promise about the whole response, so the parts that are not
+/// rows have to come out of it rather than be added on top.
+const RESPONSE_OVERHEAD_BYTES: usize = 8 * 1024;
+
+/// The most distinct `@username` tokens one body may carry.
+///
+/// LIF-421: mention reconciliation is per-token work against the candidate
+/// roster, so an adversarial body full of `@a @b @c ...` turns one write into
+/// tens of thousands of lookups. A body past this cap is **refused**, not
+/// quietly resolved as far as the cap and no further: resolving a prefix would
+/// drop the mention rows behind it, and a comment that says it notified
+/// someone while the row that does the notifying was silently discarded is a
+/// lie the author cannot see. The refusal names the cap, so the fix is
+/// visible.
+pub const MAX_MENTION_TOKENS: usize = 256;
+
+/// How many bytes of response one comment costs once serialized.
+///
+/// Measured, not estimated: the row is written through a counting sink, so
+/// JSON escaping (`"` → `\"`, a newline → `\n`, a control character → six
+/// bytes of `\u00XX`) and the field names are all counted at their real cost.
+/// A body of quotes and newlines is close to twice its own length on the wire,
+/// which is the difference between honouring a 2 MiB budget and overshooting
+/// it by a megabyte. The extra byte is the comma that joins this row to the
+/// next one in the array.
+pub fn response_cost(comment: &Comment) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    Ok(())
+    let mut counter = Counter(0);
+    // Serializing a `Comment` cannot fail for any value the database can
+    // hold (no maps with non-string keys, no non-finite floats), and the sink
+    // never errors. Fall back to the raw body length rather than panic.
+    match serde_json::to_writer(&mut counter, comment) {
+        Ok(()) => counter.0 + 1,
+        Err(_) => comment.content.len() + 1,
+    }
+}
+
+/// The row bytes available to one page, after reserving response overhead.
+fn row_budget() -> usize {
+    MAX_COMMENT_RESPONSE_BYTES - RESPONSE_OVERHEAD_BYTES
+}
+
+pub fn validate_comment_content(content: &str) -> Result<(), LificError> {
+    validate_comment_edit(content, None)
+}
+
+/// Size-check a body that is replacing `previous_bytes` of stored content.
+///
+/// LIF-421: a comment written before the cap existed (or imported from a
+/// tracker that had none) is over the limit through no act of its author, and
+/// refusing every edit to it makes the one thing they might reasonably want to
+/// do — shorten it, fix it, cut it down — impossible. So an edit is measured
+/// against `max(cap, what is already stored)`: a grandfathered comment may be
+/// rewritten and shrunk freely, it just may not grow. `previous_bytes` is
+/// `None` for a create, where the cap is the whole rule.
+///
+/// This is the *storage* rule and it does not widen the transport one. The
+/// HTTP server's global 2 MiB `DefaultBodyLimit` (`server::build_app`) still
+/// applies to the request carrying the edit, so a grandfathered comment larger
+/// than that cannot be rewritten at its full size over REST — the request is
+/// refused before this function is reached. That is deliberate: raising the
+/// global body limit to accommodate a handful of legacy rows would widen every
+/// endpoint's exposure to pay for one. Such a comment can still be
+/// **shortened** through REST (an edit only has to fit the request, not the
+/// stored body it replaces), and rewritten at its own size through a transport
+/// with no HTTP body limit: the direct-SQL CLI or MCP over stdio.
+pub fn validate_comment_edit(
+    content: &str,
+    previous_bytes: Option<usize>,
+) -> Result<(), LificError> {
+    let allowance = previous_bytes.unwrap_or(0).max(MAX_COMMENT_BYTES);
+    if content.len() <= allowance {
+        return Ok(());
+    }
+    Err(LificError::BadRequest(match previous_bytes {
+        Some(previous) if previous > MAX_COMMENT_BYTES => format!(
+            "comment is too large (max {MAX_COMMENT_BYTES} bytes; this comment predates \
+             the limit at {previous} bytes, so an edit may shrink it but not grow it)"
+        ),
+        _ => format!("comment is too large (max {MAX_COMMENT_BYTES} bytes)"),
+    }))
 }
 
 /// What a comment is attached to.
@@ -216,8 +311,8 @@ pub fn get_comment(conn: &Connection, id: i64) -> Result<Comment, LificError> {
 ///
 /// Test-only. No shipped read is unbounded any more: a comment body may be
 /// 256 KiB, so "the whole thread" is not a size anyone can reason about.
-/// Production callers pick a window through [`list_comments_page`] or
-/// [`list_comments_paginated`].
+/// Production callers pick a window through [`list_comments_page`], or ask
+/// for the whole thread deliberately through [`list_comments_exhaustive`].
 #[cfg(test)]
 pub fn list_comments(
     conn: &Connection,
@@ -225,7 +320,7 @@ pub fn list_comments(
     author: Option<&str>,
     order: Option<&str>,
 ) -> Result<Vec<Comment>, LificError> {
-    list_comments_paginated(conn, parent, author, order, None, None)
+    list_comments_exhaustive(conn, parent, author, order, None, None)
 }
 
 /// Count comments for an issue or page after applying the same optional
@@ -264,12 +359,20 @@ pub fn count_comments(
     }
 }
 
-/// List a page of comments for an issue or page. `limit` is clamped to
-/// 1..=[`MAX_PAGE_LIMIT`](super::MAX_PAGE_LIMIT) and `offset` to zero or
-/// greater, the same bounds every other paginated query uses. Passing neither
-/// preserves the unbounded behaviour used by exports and other internal
-/// callers.
-pub fn list_comments_paginated(
+/// Every comment the row bounds admit, with **no response-byte budget**.
+///
+/// LIF-421: the one deliberate exit from the byte budget, for the export
+/// path. An export is a file, not a response, and silently dropping comments
+/// out of it would be the exact failure the budget exists to prevent
+/// elsewhere: an artifact that looks complete and is not. Callers must carry
+/// their own bound instead — `export::bounded_issue_comments` refuses a thread
+/// past `MAX_EXPORT_COMMENTS` and `ensure_comment_sizes` refuses one past the
+/// aggregate export byte limit *before* calling this.
+///
+/// `limit` is clamped to 1..=[`MAX_PAGE_LIMIT`](super::MAX_PAGE_LIMIT) and
+/// `offset` to zero or greater, the same bounds every other paginated query
+/// uses; passing neither reads the whole thread.
+pub fn list_comments_exhaustive(
     conn: &Connection,
     parent: CommentParent,
     author: Option<&str>,
@@ -277,7 +380,19 @@ pub fn list_comments_paginated(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<Comment>, LificError> {
-    Ok(list_comments_page(conn, parent, author, order, limit, offset)?.items)
+    Ok(scan_comments(
+        conn,
+        &CommentScan {
+            parent,
+            author,
+            order,
+            limit,
+            offset,
+            before: None,
+            budget: None,
+        },
+    )?
+    .items)
 }
 
 /// A position in a comment thread, named by the ordering key itself.
@@ -309,7 +424,47 @@ impl CommentCursor {
     }
 }
 
-/// [`list_comments_paginated`] as a [`Page`](super::Page).
+/// One page of a comment thread, and everything a caller needs to ask for the
+/// next one (LIF-421).
+///
+/// `has_more` is authoritative: it is true when the row limit cut the page
+/// *or* when the response-byte budget did, so a client can trust it instead of
+/// inferring "the page came back full, so there is probably more". Inference
+/// is what breaks the moment the byte budget can end a page early — a
+/// three-row page is no longer evidence that the thread has three rows left.
+#[derive(Debug, Clone)]
+pub struct CommentPage {
+    /// The rows, in the order the query asked for.
+    pub items: Vec<Comment>,
+    /// Whether anything at all lies past this page.
+    pub has_more: bool,
+    /// Where the next offset-paged request starts: the offset this page began
+    /// at plus the number of rows actually returned. Counting returned rows
+    /// rather than the requested limit is what keeps continuation correct when
+    /// the byte budget shortened the page.
+    pub next_offset: i64,
+    /// True when the response-byte budget ended this page rather than the row
+    /// limit. Transports use it to say *why* a page is short.
+    pub budget_limited: bool,
+}
+
+/// What one scan of a comment thread asks for.
+///
+/// A struct rather than eight positional arguments: the byte budget joined a
+/// signature that was already at the limit, and `Some(500), Some(0), None`
+/// tells a reader nothing about which knob is which.
+struct CommentScan<'a> {
+    parent: CommentParent,
+    author: Option<&'a str>,
+    order: Option<&'a str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    before: Option<&'a CommentCursor>,
+    /// Response bytes this page may spend, or `None` for an exhaustive read.
+    budget: Option<usize>,
+}
+
+/// One page of comments for an issue or page, bounded by rows *and* bytes.
 ///
 /// LIF-388: the over-fetch that answers `has_more` happens here, after the
 /// clamp, rather than at the transport. A caller that asked for
@@ -323,7 +478,7 @@ pub fn list_comments_page(
     order: Option<&str>,
     limit: Option<i64>,
     offset: Option<i64>,
-) -> Result<super::Page<Comment>, LificError> {
+) -> Result<CommentPage, LificError> {
     list_comments_keyset(conn, parent, author, order, limit, offset, None)
 }
 
@@ -342,84 +497,389 @@ pub fn list_comments_keyset(
     limit: Option<i64>,
     offset: Option<i64>,
     before: Option<&CommentCursor>,
-) -> Result<super::Page<Comment>, LificError> {
-    let dir = match order {
-        None | Some("asc") => "ASC",
-        Some("desc") => "DESC",
-        Some(other) => {
-            return Err(LificError::BadRequest(format!(
-                "invalid order '{other}'. Use asc or desc."
-            )));
-        }
-    };
-    if before.is_some() {
-        if dir != "DESC" {
-            return Err(LificError::BadRequest(
-                "keyset paging requires order=desc".into(),
-            ));
-        }
-        if offset.is_some_and(|offset| offset != 0) {
-            return Err(LificError::BadRequest(
-                "keyset paging cannot be combined with a non-zero offset".into(),
-            ));
-        }
-    }
-    let (parent_col, id) = match parent {
-        CommentParent::Issue(id) => ("c.issue_id", id),
-        CommentParent::Page(id) => ("c.page_id", id),
-    };
-    let mut sql = format!(
-        "SELECT c.id, c.issue_id, c.page_id, c.user_id, u.username, u.display_name,
-                c.content, c.created_at, c.updated_at, c.seq
-         FROM comments c
-         JOIN users u ON u.id = c.user_id
-         WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
-    );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
-    if let Some(username) = author {
-        sql.push_str(&format!(
-            " AND u.username = ?{} COLLATE NOCASE",
-            param_values.len() + 1
-        ));
-        param_values.push(Box::new(username.to_string()));
-    }
-    if let Some(cursor) = before {
-        // Strictly older than the cursor under the same (created_at, id)
-        // ordering the query sorts by. Both halves are bound parameters; the
-        // cursor is caller-supplied and never reaches the SQL text.
-        sql.push_str(&format!(
-            " AND (c.created_at < ?{ts} OR (c.created_at = ?{ts} AND c.id < ?{id}))",
-            ts = param_values.len() + 1,
-            id = param_values.len() + 2
-        ));
-        param_values.push(Box::new(cursor.created_at.clone()));
-        param_values.push(Box::new(cursor.id));
-    }
-    // `dir` comes from the two-value whitelist above, never raw input.
-    sql.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
+) -> Result<CommentPage, LificError> {
+    scan_comments(
+        conn,
+        &CommentScan {
+            parent,
+            author,
+            order,
+            limit,
+            offset,
+            before,
+            budget: Some(row_budget()),
+        },
+    )
+}
 
-    let mut page_limit = super::NO_LIMIT;
-    if limit.is_some() || offset.is_some() {
-        let (limit, offset) = super::page_unbounded(limit, offset);
-        page_limit = limit;
-        sql.push_str(&format!(
-            " LIMIT ?{} OFFSET ?{}",
-            param_values.len() + 1,
-            param_values.len() + 2
-        ));
-        param_values.push(Box::new(super::over_fetch(limit)));
-        param_values.push(Box::new(offset));
+/// [`list_comments_page`] with the response-byte allowance named explicitly.
+///
+/// For a caller whose response carries something other than comments. The
+/// budget is a promise about the *whole* response, so a renderer that has
+/// already spent 300 KiB on an issue's description and relations has 300 KiB
+/// less to spend on its comment trail, and it is the only party that knows
+/// that. [`remaining_budget`] turns what it has already written into what is
+/// left to pass here.
+pub fn list_comments_page_within(
+    conn: &Connection,
+    parent: CommentParent,
+    author: Option<&str>,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    budget: usize,
+) -> Result<CommentPage, LificError> {
+    scan_comments(
+        conn,
+        &CommentScan {
+            parent,
+            author,
+            order,
+            limit,
+            offset,
+            before: None,
+            budget: Some(budget),
+        },
+    )
+}
+
+/// What a response has left for comments after `spent` bytes of everything
+/// else, or the refusal when there is nothing left.
+///
+/// The error is deliberate and named after what actually happened: an issue
+/// whose own description and relations do not fit a 2 MiB response is not a
+/// comment problem, and quietly rendering it with an empty comment trail would
+/// report "no comments" about a thread that exists. `subject` names the
+/// entity so the message points at the thing to fix.
+pub fn remaining_budget(spent: usize, subject: &str) -> Result<usize, LificError> {
+    let budget = row_budget();
+    budget
+        .checked_sub(spent)
+        .filter(|left| *left > 0)
+        .ok_or_else(|| {
+            LificError::PayloadTooLarge(format!(
+                "{subject} is {spent} bytes before any comments, past the \
+             {budget}-byte response budget. Read it in narrower pieces \
+             (get_issue with comments=none, then list_comments)."
+            ))
+        })
+}
+
+/// [`list_comments_page_within`] for the tests that pin the prefix rule.
+///
+/// The shipped budget is 2 MiB, and pinning its behaviour with real 2 MiB
+/// pages would trade a slow test suite for no extra confidence: the prefix
+/// rule, the continuation offset and the oversized refusal behave the same at
+/// 500 bytes as at 2 MiB.
+#[cfg(test)]
+pub(crate) fn list_comments_within(
+    conn: &Connection,
+    parent: CommentParent,
+    order: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    budget: usize,
+) -> Result<CommentPage, LificError> {
+    list_comments_page_within(conn, parent, None, order, limit, offset, budget)
+}
+
+/// The one place a comment thread is read from (LIF-421).
+///
+/// Every transport reads through here, so the row cap, the author filter, the
+/// tombstone exclusion, the keyset cursor and the byte budget are applied
+/// once, in that order, and cannot drift apart per surface.
+///
+/// The budget takes the **longest contiguous prefix** that fits, and stops. It
+/// never skips a row to fit a later one: a page with a hole in it is not a
+/// page, and a client walking continuations would never come back for what was
+/// stepped over. A single row too large for the whole budget is therefore not
+/// something this can answer with a short page, and is refused explicitly
+/// rather than returned as an empty success that would leave a client asking
+/// for the same offset forever.
+///
+/// A budgeted read runs in two stages, and the order is the point. Stage one
+/// asks SQLite only for each candidate row's *size* — `length(CAST(content AS
+/// BLOB))`, never the content — and decides how many rows could possibly fit.
+/// Stage two fetches exactly those and measures them exactly. A 40 MiB legacy
+/// comment is therefore refused having never been read into memory: reading it
+/// in order to say it is too big to read would be the same denial of service
+/// the budget exists to prevent.
+fn scan_comments(conn: &Connection, scan: &CommentScan<'_>) -> Result<CommentPage, LificError> {
+    let query = CommentQuery::build(scan)?;
+    let Some(budget) = scan.budget else {
+        // Exhaustive: one query, no measuring, and no lookahead row either —
+        // "everything up to the caller's own limit" has nothing past it to
+        // report. See `list_comments_exhaustive` for who is allowed here.
+        let items = query.fetch(conn, query.page_limit)?;
+        let next_offset = query.start_offset.saturating_add(items.len() as i64);
+        return Ok(CommentPage {
+            items,
+            has_more: false,
+            next_offset,
+            budget_limited: false,
+        });
+    };
+
+    let plan = query.plan(conn, budget)?;
+    let mut items = query.fetch(conn, plan.admitted)?;
+
+    // Stage one measured stored bytes, which is a *lower* bound on what the
+    // row costs serialized: escaping only ever adds. So the prefix it admitted
+    // may still be one row too long once the real cost is known, and this is
+    // where that is settled. Rows are only ever dropped from the end.
+    let mut bytes = 0usize;
+    let mut trimmed = false;
+    for (index, comment) in items.iter().enumerate() {
+        let cost = response_cost(comment);
+        if bytes + cost > budget {
+            if index == 0 {
+                // Its stored length fit; its escaping did not. Rare, and still
+                // has to be a refusal rather than an empty page.
+                return Err(oversized_comment(
+                    comment.id,
+                    &comment.created_at,
+                    cost,
+                    budget,
+                    query.dir,
+                    query.start_offset,
+                ));
+            }
+            trimmed = true;
+            items.truncate(index);
+            break;
+        }
+        bytes += cost;
     }
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_refs.as_slice(), row_to_comment)?;
-    let rows: Vec<Comment> = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(match page_limit {
-        super::NO_LIMIT => super::Page::complete(rows),
-        limit => super::Page::from_over_fetch(rows, limit),
+    let next_offset = query.start_offset.saturating_add(items.len() as i64);
+    Ok(CommentPage {
+        items,
+        has_more: plan.has_more || trimmed,
+        next_offset,
+        budget_limited: plan.budget_limited || trimmed,
     })
+}
+
+/// How many rows a budgeted page may fetch, and what lies past them.
+struct CommentPlan {
+    /// Rows stage two is allowed to read.
+    admitted: i64,
+    has_more: bool,
+    budget_limited: bool,
+}
+
+/// One comment listing's `FROM`/`WHERE`/`ORDER BY`, ready to be run with
+/// either a metadata or a full column list.
+///
+/// The two stages have to filter and order identically or the sizes measured
+/// would belong to different rows than the ones returned, so the predicate is
+/// built once and both stages borrow it.
+struct CommentQuery {
+    tail: String,
+    values: Vec<Box<dyn rusqlite::types::ToSql>>,
+    dir: &'static str,
+    page_limit: i64,
+    start_offset: i64,
+}
+
+impl CommentQuery {
+    fn build(scan: &CommentScan<'_>) -> Result<Self, LificError> {
+        let dir = match scan.order {
+            None | Some("asc") => "ASC",
+            Some("desc") => "DESC",
+            Some(other) => {
+                return Err(LificError::BadRequest(format!(
+                    "invalid order '{other}'. Use asc or desc."
+                )));
+            }
+        };
+        if scan.before.is_some() {
+            if dir != "DESC" {
+                return Err(LificError::BadRequest(
+                    "keyset paging requires order=desc".into(),
+                ));
+            }
+            if scan.offset.is_some_and(|offset| offset != 0) {
+                return Err(LificError::BadRequest(
+                    "keyset paging cannot be combined with a non-zero offset".into(),
+                ));
+            }
+        }
+        let (parent_col, id) = match scan.parent {
+            CommentParent::Issue(id) => ("c.issue_id", id),
+            CommentParent::Page(id) => ("c.page_id", id),
+        };
+        let mut tail = format!(
+            "FROM comments c
+             JOIN users u ON u.id = c.user_id
+             WHERE {parent_col} = ?1 AND c.deleted_at IS NULL"
+        );
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
+        if let Some(username) = scan.author {
+            tail.push_str(&format!(
+                " AND u.username = ?{} COLLATE NOCASE",
+                values.len() + 1
+            ));
+            values.push(Box::new(username.to_string()));
+        }
+        if let Some(cursor) = scan.before {
+            // Strictly older than the cursor under the same (created_at, id)
+            // ordering the query sorts by. Both halves are bound parameters;
+            // the cursor is caller-supplied and never reaches the SQL text.
+            tail.push_str(&format!(
+                " AND (c.created_at < ?{ts} OR (c.created_at = ?{ts} AND c.id < ?{id}))",
+                ts = values.len() + 1,
+                id = values.len() + 2
+            ));
+            values.push(Box::new(cursor.created_at.clone()));
+            values.push(Box::new(cursor.id));
+        }
+        // `dir` comes from the two-value whitelist above, never raw input.
+        tail.push_str(&format!(" ORDER BY c.created_at {dir}, c.id {dir}"));
+
+        let (page_limit, start_offset) = match (scan.limit, scan.offset) {
+            (None, None) => (super::NO_LIMIT, 0),
+            _ => super::page_unbounded(scan.limit, scan.offset),
+        };
+        Ok(Self {
+            tail,
+            values,
+            dir,
+            page_limit,
+            start_offset,
+        })
+    }
+
+    /// The row limit including the over-fetched lookahead row.
+    fn over_fetched_limit(&self) -> i64 {
+        super::over_fetch(self.page_limit)
+    }
+
+    fn bind(&self, limit: i64) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let clause = format!(
+            " LIMIT ?{} OFFSET ?{}",
+            self.values.len() + 1,
+            self.values.len() + 2
+        );
+        (clause, vec![Box::new(limit), Box::new(self.start_offset)])
+    }
+
+    /// Stage one: how big is each candidate row, without reading any of them.
+    fn plan(&self, conn: &Connection, budget: usize) -> Result<CommentPlan, LificError> {
+        let (limit_clause, extra) = self.bind(self.over_fetched_limit());
+        let sql = format!(
+            "SELECT c.id, c.created_at, length(CAST(c.content AS BLOB)) {}{limit_clause}",
+            self.tail
+        );
+        let mut bound: Vec<&dyn rusqlite::types::ToSql> =
+            self.values.iter().map(|value| value.as_ref()).collect();
+        bound.extend(extra.iter().map(|value| &**value));
+
+        let row_cap = match self.page_limit {
+            super::NO_LIMIT => i64::MAX,
+            limit => limit,
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(bound.as_slice())?;
+        let mut admitted = 0i64;
+        let mut bytes = 0usize;
+        while let Some(row) = rows.next()? {
+            if admitted >= row_cap {
+                // The lookahead row: proof the thread continues, never part of
+                // the page, and never fetched.
+                return Ok(CommentPlan {
+                    admitted,
+                    has_more: true,
+                    budget_limited: false,
+                });
+            }
+            let id: i64 = row.get(0)?;
+            let created_at: String = row.get(1)?;
+            let stored: i64 = row.get(2)?;
+            // A lower bound on the serialized cost: the body's own bytes plus
+            // the comma that joins it to the next row. Escaping and the
+            // surrounding fields only add, so a row this rules out could never
+            // have fitted, and one it admits is re-measured exactly in stage
+            // two.
+            let floor = usize::try_from(stored)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            if bytes.saturating_add(floor) > budget {
+                if admitted == 0 {
+                    return Err(oversized_comment(
+                        id,
+                        &created_at,
+                        floor,
+                        budget,
+                        self.dir,
+                        self.start_offset,
+                    ));
+                }
+                return Ok(CommentPlan {
+                    admitted,
+                    has_more: true,
+                    budget_limited: true,
+                });
+            }
+            bytes += floor;
+            admitted += 1;
+        }
+        Ok(CommentPlan {
+            admitted,
+            has_more: false,
+            budget_limited: false,
+        })
+    }
+
+    /// Stage two: read the rows, bodies and all.
+    fn fetch(&self, conn: &Connection, limit: i64) -> Result<Vec<Comment>, LificError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (limit_clause, extra) = self.bind(limit);
+        let sql = format!(
+            "SELECT c.id, c.issue_id, c.page_id, c.user_id, u.username, u.display_name,
+                    c.content, c.created_at, c.updated_at, c.seq {}{limit_clause}",
+            self.tail
+        );
+        let mut bound: Vec<&dyn rusqlite::types::ToSql> =
+            self.values.iter().map(|value| value.as_ref()).collect();
+        bound.extend(extra.iter().map(|value| &**value));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(bound.as_slice(), row_to_comment)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+/// The refusal for a single row that cannot fit any page (LIF-421).
+///
+/// Only reachable for a comment written before the 256 KiB body cap, or
+/// imported past it. Three things have to be in the message or the caller is
+/// stuck: which comment (so it can be found and fixed), how big it is (so the
+/// number is not a mystery), and the exact way to page past it. Without that
+/// last part a client retries the same request forever, which is worse than
+/// the oversized row itself.
+fn oversized_comment(
+    id: i64,
+    created_at: &str,
+    bytes: usize,
+    budget: usize,
+    dir: &str,
+    offset: i64,
+) -> LificError {
+    let skip = if dir == "DESC" {
+        format!(
+            "before_created_at={created_at}&before_id={id} (keyset) or offset={}",
+            offset.saturating_add(1)
+        )
+    } else {
+        format!("offset={}", offset.saturating_add(1))
+    };
+    LificError::PayloadTooLarge(format!(
+        "comment {id} needs at least {bytes} bytes on its own, past the {budget}-byte \
+         page budget, so no page can include it. Read it directly with get_comment, \
+         or skip it with {skip}."
+    ))
 }
 
 /// Overwrite a comment's content, and nothing else. Parent-agnostic.
@@ -429,7 +889,22 @@ pub fn list_comments_keyset(
 /// established. Production edits go through [`update_comment_with_mentions`].
 fn write_comment_content(conn: &Connection, id: i64, content: &str) -> Result<Comment, LificError> {
     let content = unescape_text(content);
-    validate_comment_content(&content)?;
+    // SQLite's `length(TEXT)` counts characters; the cap counts UTF-8 bytes,
+    // so the stored body is measured through its BLOB form. Reading the length
+    // rather than the row keeps a 3 MiB legacy comment out of memory just to
+    // find out how long it is.
+    let previous_bytes: Option<i64> = conn
+        .query_row(
+            "SELECT length(CAST(content AS BLOB)) FROM comments
+              WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(previous_bytes) = previous_bytes else {
+        return Err(LificError::NotFound(format!("comment {id} not found")));
+    };
+    validate_comment_edit(&content, Some(usize::try_from(previous_bytes).unwrap_or(0)))?;
 
     let changed = conn.execute(
         "UPDATE comments SET content = ?1, updated_at = datetime('now')
@@ -493,8 +968,14 @@ pub fn comment_seq(conn: &Connection, id: i64) -> Result<i64, LificError> {
 ///
 /// Returns raw token strings (case preserved as typed); matching against
 /// real users happens later and is case-insensitive. Duplicates are
-/// collapsed. This is pure text parsing — it does not touch the DB, so it
-/// can be unit-tested in isolation.
+/// collapsed through a hash set, so a body repeating one handle ten thousand
+/// times costs one entry rather than a linear rescan per occurrence. This is
+/// pure text parsing — it does not touch the DB, so it can be unit-tested in
+/// isolation.
+///
+/// LIF-421: scanning stops one token past [`MAX_MENTION_TOKENS`], which is
+/// all [`sync_mentions`] needs to refuse the write. Bounded work either way:
+/// an adversarial body never costs more than the cap in lookups.
 pub fn extract_mention_usernames(body: &str) -> Vec<String> {
     let bytes = body.as_bytes();
     let is_username_char = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-';
@@ -520,6 +1001,13 @@ pub fn extract_mention_usernames(body: &str) -> Vec<String> {
                     let key = token.to_lowercase();
                     if seen.insert(key) {
                         out.push(token.to_string());
+                        // One past the cap is enough to prove the body is over
+                        // it, and stopping there bounds the scan.
+                        // `sync_mentions` turns that extra token into the
+                        // refusal.
+                        if out.len() > MAX_MENTION_TOKENS {
+                            return out;
+                        }
                     }
                     i = j;
                     continue;
@@ -584,12 +1072,22 @@ pub fn mention_candidates(
 ///
 /// Parses `body` for `@username` tokens, resolves each (case-insensitively)
 /// against `candidates` — the visible-member set the API layer built from
-/// the same rules as [`mention_candidates`] — and rewrites the comment's
+/// the same rules as [`mention_candidates`] — and reconciles the comment's
 /// `comment_mentions` rows to exactly that set. Called on both create and
 /// edit, so an edit that removes a mention drops its row and an edit that
 /// adds one inserts it (firing the audit trigger for the new "mention"
 /// activity event). Unmatched tokens are silently ignored; they remain
 /// literal text in the stored body.
+///
+/// LIF-421, two changes with the same reason. It is a **set difference in two
+/// batched statements**, not a `DELETE` of everything followed by an `INSERT`
+/// per mention: the old shape was one statement per mention on every edit, and
+/// worse, it deleted and re-inserted rows that had not changed, so every edit
+/// to a comment re-fired the audit trigger for mentions that were already
+/// there. A mention that did not change is now not touched at all. And a body
+/// past [`MAX_MENTION_TOKENS`] is refused rather than resolved as far as the
+/// cap, because a silently dropped mention is a notification the author
+/// believes they sent.
 ///
 /// Returns the user ids that were (re)mentioned, in body order.
 pub fn sync_mentions(
@@ -598,15 +1096,23 @@ pub fn sync_mentions(
     body: &str,
     candidates: &[crate::db::models::MentionCandidate],
 ) -> Result<Vec<i64>, LificError> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+    let tokens = extract_mention_usernames(body);
+    if tokens.len() > MAX_MENTION_TOKENS {
+        return Err(LificError::BadRequest(format!(
+            "this comment mentions more than {MAX_MENTION_TOKENS} distinct people; \
+             reduce them before saving (resolving only the first {MAX_MENTION_TOKENS} \
+             would drop the rest without saying so)"
+        )));
+    }
     let by_name: HashMap<String, i64> = candidates
         .iter()
         .map(|c| (c.username.to_lowercase(), c.user_id))
         .collect();
 
     let mut resolved: Vec<i64> = Vec::new();
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for token in extract_mention_usernames(body) {
+    let mut seen: HashSet<i64> = HashSet::new();
+    for token in tokens {
         if let Some(&uid) = by_name.get(&token.to_lowercase())
             && seen.insert(uid)
         {
@@ -614,17 +1120,50 @@ pub fn sync_mentions(
         }
     }
 
-    // Rewrite the set: clear then re-insert. Cheap (a comment has a handful
-    // of mentions at most) and keeps create/edit on one code path.
-    conn.execute(
-        "DELETE FROM comment_mentions WHERE comment_id = ?1",
-        params![comment_id],
-    )?;
-    for &uid in &resolved {
-        conn.execute(
-            "INSERT INTO comment_mentions (comment_id, user_id) VALUES (?1, ?2)",
-            params![comment_id, uid],
-        )?;
+    let mut stmt =
+        conn.prepare_cached("SELECT user_id FROM comment_mentions WHERE comment_id = ?1")?;
+    let current: HashSet<i64> = stmt
+        .query_map(params![comment_id], |row| row.get(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(stmt);
+
+    let stale: Vec<i64> = current.difference(&seen).copied().collect();
+    if !stale.is_empty() {
+        let sql = format!(
+            "DELETE FROM comment_mentions WHERE comment_id = ?1 AND user_id IN ({})",
+            super::placeholders(stale.len())
+        );
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(comment_id)];
+        values.extend(
+            stale
+                .iter()
+                .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
+        );
+        let bound: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|value| value.as_ref()).collect();
+        conn.execute(&sql, bound.as_slice())?;
+    }
+
+    let added: Vec<i64> = resolved
+        .iter()
+        .copied()
+        .filter(|uid| !current.contains(uid))
+        .collect();
+    if !added.is_empty() {
+        let rows = (0..added.len())
+            .map(|index| format!("(?1, ?{})", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("INSERT INTO comment_mentions (comment_id, user_id) VALUES {rows}");
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(comment_id)];
+        values.extend(
+            added
+                .iter()
+                .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
+        );
+        let bound: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|value| value.as_ref()).collect();
+        conn.execute(&sql, bound.as_slice())?;
     }
     Ok(resolved)
 }
@@ -1010,7 +1549,7 @@ mod tests {
             create_comment(&conn, CommentParent::Issue(issue_id), user_id, content).unwrap();
         }
 
-        let comments = list_comments_paginated(
+        let comments = list_comments_exhaustive(
             &conn,
             CommentParent::Issue(issue_id),
             None,
@@ -1038,7 +1577,7 @@ mod tests {
             .unwrap();
         }
 
-        let comments = list_comments_paginated(
+        let comments = list_comments_exhaustive(
             &conn,
             CommentParent::Issue(issue_id),
             None,
@@ -2038,5 +2577,497 @@ mod tests {
         assert_eq!(comments[0].author, "blake");
         assert_eq!(comments[1].author, "ada");
         assert_eq!(comments[1].author_display_name, "Ada");
+    }
+    // ── LIF-421: bytes, not just rows ───────────────────────────
+
+    /// Seed `count` comments whose bodies are `size` bytes each.
+    fn seed_sized(conn: &Connection, issue_id: i64, user_id: i64, count: usize, size: usize) {
+        for i in 0..count {
+            let body = format!("{i:04}{}", "x".repeat(size.saturating_sub(4)));
+            create_comment(conn, CommentParent::Issue(issue_id), user_id, &body).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_comment_costs_what_its_json_costs_not_what_its_body_measures() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        // Every character here needs escaping: a quote and a newline are two
+        // bytes each on the wire, a control character is six. Counting the raw
+        // body would under-count the response by more than half.
+        let hostile = "\"\n\u{1}".repeat(64);
+        let plain = "x".repeat(hostile.len());
+        let escaped =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, &hostile).unwrap();
+        let ordinary =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, &plain).unwrap();
+
+        assert!(
+            response_cost(&escaped) > response_cost(&ordinary),
+            "escaping has to be counted, or the budget is a guess"
+        );
+        // And the ordinary row already costs more than its body: field names,
+        // the author, the timestamps and the separating comma are response
+        // bytes too.
+        assert!(response_cost(&ordinary) > ordinary.content.len());
+        // Multi-byte UTF-8 survives the trip as its own byte length, not its
+        // character count.
+        let emoji =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, "🙂🙂🙂").unwrap();
+        assert!(response_cost(&emoji) >= 12);
+    }
+
+    #[test]
+    fn a_page_stops_at_the_longest_prefix_that_fits_the_budget() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        seed_sized(&conn, issue_id, user_id, 6, 1_000);
+
+        let whole = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(50),
+            Some(0),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(whole.items.len(), 6);
+        assert!(!whole.has_more);
+        assert!(!whole.budget_limited);
+
+        // A budget that fits two rows and part of a third.
+        let budget = response_cost(&whole.items[0]) + response_cost(&whole.items[1]) + 10;
+        let page = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(50),
+            Some(0),
+            budget,
+        )
+        .unwrap();
+
+        // A prefix, not a subset: the rows are the first two, in order, and
+        // the third was not skipped over to fit a smaller row behind it.
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].id, whole.items[0].id);
+        assert_eq!(page.items[1].id, whole.items[1].id);
+        assert!(page.has_more, "the budget ended the page, so more remains");
+        assert!(page.budget_limited);
+        // Continuation counts what was returned, not what was asked for.
+        assert_eq!(page.next_offset, 2);
+
+        // And following that offset resumes exactly where the page stopped,
+        // with nothing skipped and nothing repeated.
+        let next = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(50),
+            Some(page.next_offset),
+            budget,
+        )
+        .unwrap();
+        assert_eq!(next.items[0].id, whole.items[2].id);
+
+        // Walking the whole thread by continuation offset terminates and
+        // yields every comment exactly once.
+        let mut walked = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = list_comments_within(
+                &conn,
+                CommentParent::Issue(issue_id),
+                Some("asc"),
+                Some(50),
+                Some(offset),
+                budget,
+            )
+            .unwrap();
+            assert!(!page.items.is_empty(), "a page must never be empty-success");
+            walked.extend(page.items.iter().map(|c| c.id));
+            if !page.has_more {
+                break;
+            }
+            offset = page.next_offset;
+        }
+        assert_eq!(walked, whole.items.iter().map(|c| c.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_row_cap_still_binds_underneath_the_byte_budget() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        seed_sized(&conn, issue_id, user_id, 5, 10);
+
+        let page = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(2),
+            Some(0),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.has_more);
+        // Rows, not bytes, ended this one.
+        assert!(!page.budget_limited);
+        assert_eq!(page.next_offset, 2);
+    }
+
+    #[test]
+    fn a_row_too_large_for_any_page_is_refused_with_the_way_around_it() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        seed_sized(&conn, issue_id, user_id, 2, 1_000);
+        let first =
+            list_comments(&conn, CommentParent::Issue(issue_id), None, None).unwrap()[0].clone();
+
+        let error = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(50),
+            Some(0),
+            32,
+        )
+        .expect_err("a row that cannot fit any page is not a short page");
+        let crate::error::LificError::PayloadTooLarge(message) = error else {
+            panic!("an unreadable page is a size refusal, not a bad request");
+        };
+        // Names the row, its size, and how to get past it. Without the last
+        // part the caller retries the same offset forever.
+        assert!(
+            message.contains(&format!("comment {}", first.id)),
+            "{message}"
+        );
+        // The size named is the one the planner knew without ever reading the
+        // body: its stored bytes, plus the comma that would join it to a
+        // neighbour.
+        assert!(
+            message.contains(&(first.content.len() + 1).to_string()),
+            "{message}"
+        );
+        assert!(message.contains("offset=1"), "{message}");
+
+        // Newest-first reads get the keyset escape too, since that is what a
+        // keyset client would have to send.
+        let desc = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("desc"),
+            Some(50),
+            Some(0),
+            32,
+        )
+        .expect_err("same refusal in the other direction");
+        assert!(desc.to_string().contains("before_id="), "{desc}");
+    }
+
+    #[test]
+    fn an_unreadable_row_is_refused_without_ever_being_read() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        // Far past any budget, and written the way an import or a pre-cap
+        // release wrote one.
+        let huge = 8 * 1024 * 1024;
+        let id = seed_oversized(&conn, issue_id, user_id, huge);
+
+        let error = list_comments_within(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some("asc"),
+            Some(50),
+            Some(0),
+            1024,
+        )
+        .expect_err("8 MiB cannot fit a 1 KiB budget");
+        // The refusal knows the row's id and its size, both of which came from
+        // `length(CAST(content AS BLOB))`. Reading 8 MiB into memory in order
+        // to announce that 8 MiB is too much to read is the denial of service
+        // the budget exists to prevent.
+        let message = error.to_string();
+        assert!(message.contains(&format!("comment {id}")), "{message}");
+        assert!(message.contains(&(huge + 1).to_string()), "{message}");
+
+        // The planner reads sizes, not bodies: the statement it runs never
+        // names `c.content` except inside `length(...)`.
+        let query = CommentQuery::build(&CommentScan {
+            parent: CommentParent::Issue(issue_id),
+            author: None,
+            order: Some("asc"),
+            limit: Some(50),
+            offset: Some(0),
+            before: None,
+            budget: Some(1024),
+        })
+        .unwrap();
+        let (clause, _) = query.bind(1);
+        let planning_sql = format!(
+            "SELECT c.id, c.created_at, length(CAST(c.content AS BLOB)) {}{clause}",
+            query.tail
+        );
+        assert!(!planning_sql.contains("c.content,"), "{planning_sql}");
+    }
+
+    #[test]
+    fn an_export_read_is_exhaustive_on_purpose() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        // Well past the shipped 2 MiB budget: ten rows at 250 KiB each.
+        seed_sized(&conn, issue_id, user_id, 10, 250 * 1024);
+
+        let budgeted = list_comments_page(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            Some("asc"),
+            Some(50),
+            Some(0),
+        )
+        .unwrap();
+        assert!(
+            budgeted.items.len() < 10,
+            "the budget binds interactive reads"
+        );
+        assert!(budgeted.budget_limited);
+
+        let exhaustive = list_comments_exhaustive(
+            &conn,
+            CommentParent::Issue(issue_id),
+            None,
+            Some("asc"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            exhaustive.len(),
+            10,
+            "an export that silently dropped comments is the bug the budget exists to prevent"
+        );
+    }
+
+    // ── LIF-421: grandfathered bodies ───────────────────────────
+
+    /// Write a body straight past the cap, the way an import or a pre-cap
+    /// release did.
+    fn seed_oversized(conn: &Connection, issue_id: i64, user_id: i64, bytes: usize) -> i64 {
+        conn.execute(
+            "INSERT INTO comments (issue_id, user_id, content) VALUES (?1, ?2, ?3)",
+            params![issue_id, user_id, "y".repeat(bytes)],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_comment_that_predates_the_cap_may_shrink_but_never_grow() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let legacy = MAX_COMMENT_BYTES + 5_000;
+        let id = seed_oversized(&conn, issue_id, user_id, legacy);
+
+        // Rewriting it at its own size is allowed: an author must be able to
+        // fix a comment that was legal when they wrote it.
+        update_comment(&conn, id, &"z".repeat(legacy)).expect("an edit that does not grow it");
+        // As is shrinking it, all the way past the cap.
+        update_comment(&conn, id, "short").expect("shrinking is always allowed");
+        // But once it is inside the cap the ordinary limit applies again.
+        assert!(matches!(
+            update_comment(&conn, id, &"z".repeat(legacy)),
+            Err(crate::error::LificError::BadRequest(_))
+        ));
+
+        // Growing a grandfathered body by even one byte is refused, and the
+        // refusal explains why rather than restating the cap.
+        let id = seed_oversized(&conn, issue_id, user_id, legacy);
+        let error = update_comment(&conn, id, &"z".repeat(legacy + 1)).unwrap_err();
+        assert!(error.to_string().contains("predates"), "{error}");
+        assert_eq!(get_comment(&conn, id).unwrap().content.len(), legacy);
+    }
+
+    #[test]
+    fn shrinking_a_grandfathered_comment_needs_only_a_small_request() {
+        // The storage rule does not widen the transport one: the HTTP body
+        // limit still bounds the *edit*, and the edit that matters for a body
+        // nobody can send whole is the one that makes it smaller. Shrinking a
+        // comment far past the transport limit costs a request the size of the
+        // new body, not the old one.
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let id = seed_oversized(&conn, issue_id, user_id, 4 * 1024 * 1024);
+
+        let shrunk = update_comment(&conn, id, "sorry, pasted a log file").unwrap();
+        assert_eq!(shrunk.content, "sorry, pasted a log file");
+        // And it is an ordinary comment again afterwards.
+        assert!(matches!(
+            update_comment(&conn, id, &"z".repeat(MAX_COMMENT_BYTES + 1)),
+            Err(crate::error::LificError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn the_edit_allowance_is_measured_after_normalization() {
+        // `\n` in the input is two characters that become one byte, and the
+        // cap has always applied to what is stored, not what was typed.
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let id = seed_oversized(&conn, issue_id, user_id, MAX_COMMENT_BYTES + 10);
+        let escaped = format!("{}\\n", "z".repeat(MAX_COMMENT_BYTES + 9));
+        let stored = update_comment(&conn, id, &escaped).unwrap();
+        assert_eq!(stored.content.len(), MAX_COMMENT_BYTES + 10);
+    }
+
+    // ── LIF-421: bounded derived references ─────────────────────
+
+    #[test]
+    fn a_body_past_the_mention_cap_is_refused_rather_than_half_resolved() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        // The scan stops one token past the cap: enough to prove the body is
+        // over it, and bounded work either way.
+        let body = (0..MAX_MENTION_TOKENS + 50).fold(String::new(), |mut body, i| {
+            use std::fmt::Write;
+            let _ = write!(body, "@user{i} ");
+            body
+        });
+        assert_eq!(
+            extract_mention_usernames(&body).len(),
+            MAX_MENTION_TOKENS + 1
+        );
+
+        // And the write is refused, rather than resolving a prefix and
+        // dropping the rest without telling the author.
+        let error = sync_mentions(&conn, 1, &body, &[]).unwrap_err();
+        assert!(error.to_string().contains("distinct people"), "{error}");
+
+        // The cap counts *distinct* handles, so a body repeating one name ten
+        // thousand times still resolves that one name and is not refused.
+        let repeated = "@ada ".repeat(10_000);
+        assert_eq!(
+            extract_mention_usernames(&repeated),
+            vec!["ada".to_string()]
+        );
+        let comment =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, &repeated).unwrap();
+        sync_mentions(&conn, comment.id, &repeated, &[]).expect("one distinct handle is fine");
+    }
+
+    #[test]
+    fn reconciling_mentions_leaves_the_unchanged_ones_alone() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let roster: Vec<MentionCandidate> = ["ada", "bob", "cyd"]
+            .iter()
+            .map(|name| {
+                let user = queries::users::create_user(
+                    &conn,
+                    &CreateUser {
+                        username: (*name).into(),
+                        email: format!("{name}@test.com"),
+                        password: "testpassword1".into(),
+                        display_name: Some((*name).into()),
+                        is_admin: false,
+                        is_bot: false,
+                    },
+                )
+                .unwrap();
+                MentionCandidate {
+                    user_id: user.id,
+                    username: user.username,
+                    display_name: user.display_name,
+                }
+            })
+            .collect();
+        let comment =
+            create_comment(&conn, CommentParent::Issue(issue_id), user_id, "@ada @bob").unwrap();
+        sync_mentions(&conn, comment.id, "@ada @bob", &roster).unwrap();
+
+        let rowid_of = |user: &MentionCandidate| -> i64 {
+            conn.query_row(
+                "SELECT rowid FROM comment_mentions WHERE comment_id = ?1 AND user_id = ?2",
+                params![comment.id, user.user_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let ada_row = rowid_of(&roster[0]);
+
+        // Edit: bob out, cyd in, ada untouched.
+        let resolved = sync_mentions(&conn, comment.id, "@ada @cyd", &roster).unwrap();
+        assert_eq!(resolved, vec![roster[0].user_id, roster[2].user_id]);
+        let mut stored = list_mention_user_ids(&conn, comment.id).unwrap();
+        stored.sort_unstable();
+        let mut expected = vec![roster[0].user_id, roster[2].user_id];
+        expected.sort_unstable();
+        assert_eq!(stored, expected);
+        // Ada's row is the same row, not a delete and a re-insert. That is
+        // what keeps an unrelated edit from re-firing her mention in the
+        // activity feed every time somebody fixes a typo.
+        assert_eq!(rowid_of(&roster[0]), ada_row);
+    }
+
+    /// A body naming `count` distinct attachments.
+    fn reference_body(count: usize) -> String {
+        (1..=count).fold(String::new(), |mut body, id| {
+            use std::fmt::Write;
+            let _ = write!(body, "[f](/api/attachments/{id}) ");
+            body
+        })
+    }
+
+    #[test]
+    fn a_body_past_the_attachment_reference_cap_is_refused_whole() {
+        let (pool, issue_id, _, user_id) = setup();
+        let conn = pool.write().unwrap();
+        let project_id = queries::get_issue(&conn, issue_id).unwrap().project_id;
+        let actor = CommentActor {
+            user_id,
+            is_admin: true,
+        };
+        let comment = create_comment_with_mentions(
+            &conn,
+            CommentParent::Issue(issue_id),
+            Some(project_id),
+            actor,
+            AttachmentActor::Authenticated(actor),
+            "before",
+            false,
+        )
+        .unwrap();
+
+        let over_cap = reference_body(super::super::attachments::MAX_BODY_REFERENCES + 1);
+        let error = update_comment_with_mentions(
+            &conn,
+            comment.id,
+            Some(project_id),
+            AttachmentActor::Authenticated(actor),
+            &over_cap,
+            false,
+        )
+        .expect_err("reconciling a truncated reference set would unlink live attachments");
+        assert!(
+            error.to_string().contains("distinct attachments"),
+            "{error}"
+        );
+
+        // The refusal rolls the whole write back: the savepoint means the body
+        // is not left saved with a half-reconciled link set.
+        assert_eq!(get_comment(&conn, comment.id).unwrap().content, "before");
+
+        // One reference under the cap still saves.
+        let at_cap = reference_body(super::super::attachments::MAX_BODY_REFERENCES);
+        update_comment_with_mentions(
+            &conn,
+            comment.id,
+            Some(project_id),
+            AttachmentActor::Authenticated(actor),
+            &at_cap,
+            false,
+        )
+        .expect("the cap itself is allowed");
     }
 }

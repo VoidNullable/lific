@@ -85,6 +85,68 @@ fn parent_project_id(db: &DbPool, parent: CommentParent) -> Result<Option<i64>, 
     parent.project_id(&conn)
 }
 
+/// Whether more comments lie past the page just served.
+pub const HAS_MORE_HEADER: &str = "x-comment-has-more";
+/// The `offset` that starts the next page. Offset-paged reads only.
+pub const NEXT_OFFSET_HEADER: &str = "x-comment-next-offset";
+/// How many comments this response actually carries.
+pub const RETURNED_HEADER: &str = "x-comment-returned";
+/// The `before_created_at` half of the cursor that reads the next page.
+pub const NEXT_CURSOR_AT_HEADER: &str = "x-comment-next-created-at";
+/// The `before_id` half of it.
+pub const NEXT_CURSOR_ID_HEADER: &str = "x-comment-next-id";
+
+/// The paging answer for a comment page, carried in headers.
+///
+/// LIF-421: the body stays the bare `[Comment]` array it has always been —
+/// wrapping it in an envelope would break every shipped client — so the
+/// metadata rides alongside it. It is not a nicety: a page can now end early
+/// because the response-byte budget ran out, so "the page came back full" is
+/// no longer evidence of anything and "the page came back short" no longer
+/// means the thread ended. Only the server knows, and this is how it says so.
+///
+/// The continuation is named in whichever coordinate the request used, and
+/// never in the other one. `x-comment-next-offset` counts the rows actually
+/// returned, not the limit that was asked for, so a client that added its own
+/// limit to its own offset would skip precisely the comments the budget
+/// declined to send. It is **omitted entirely from a keyset read**: a keyset
+/// request has no offset origin, so a row count is not an offset into
+/// anything, and a client that took it for one would jump to an unrelated
+/// place in the thread. Those reads get the cursor headers instead, naming the
+/// last row actually returned — the same pair the client would derive from the
+/// rows, sent by the only party that knows whether the budget cut them short.
+fn paging_headers(
+    page: &comments::CommentPage,
+    cursor_paged: bool,
+    order_desc: bool,
+) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    let mut set = |name: &'static str, value: String| {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+            headers.insert(axum::http::HeaderName::from_static(name), value);
+        }
+    };
+    set(HAS_MORE_HEADER, page.has_more.to_string());
+    set(RETURNED_HEADER, page.items.len().to_string());
+    if cursor_paged {
+        // The boundary for the page before this one is the last row of a
+        // newest-first read: the oldest thing the caller now holds.
+        if let Some(last) = page.items.last() {
+            set(NEXT_CURSOR_AT_HEADER, last.created_at.clone());
+            set(NEXT_CURSOR_ID_HEADER, last.id.to_string());
+        }
+        return headers;
+    }
+    set(NEXT_OFFSET_HEADER, page.next_offset.to_string());
+    // A newest-first offset read can page by cursor too, and should: the
+    // offset moves under it every time somebody posts above the reader.
+    if order_desc && let Some(last) = page.items.last() {
+        set(NEXT_CURSOR_AT_HEADER, last.created_at.clone());
+        set(NEXT_CURSOR_ID_HEADER, last.id.to_string());
+    }
+    headers
+}
+
 /// LIF-382: listing an issue's comments and listing a page's comments differ
 /// only in how the parent's project is resolved, which `parent_project_id`
 /// already handles. Both routes share this body.
@@ -93,12 +155,12 @@ fn list_for_parent(
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
     parent: CommentParent,
     q: &ListCommentsQuery,
-) -> Result<Json<Vec<Comment>>, LificError> {
+) -> Result<(axum::http::HeaderMap, Json<Vec<Comment>>), LificError> {
     let cursor = q.cursor()?;
     let (limit, offset) = queries::page(q.limit, q.offset);
     let project_id = parent_project_id(db, parent)?;
     require_comment_viewer(db, identity, project_id)?;
-    with_read(db, |conn| {
+    let page = with_read(db, |conn| {
         comments::list_comments_keyset(
             conn,
             parent,
@@ -108,9 +170,9 @@ fn list_for_parent(
             Some(offset),
             cursor.as_ref(),
         )
-        .map(|page| page.items)
-    })
-    .map(Json)
+    })?;
+    let headers = paging_headers(&page, cursor.is_some(), q.order.as_deref() == Some("desc"));
+    Ok((headers, Json(page.items)))
 }
 
 fn create_for_parent(
@@ -154,7 +216,7 @@ pub(super) async fn list_comments(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(issue_id): Path<i64>,
     Query(q): Query<ListCommentsQuery>,
-) -> Result<Json<Vec<Comment>>, LificError> {
+) -> Result<(axum::http::HeaderMap, Json<Vec<Comment>>), LificError> {
     list_for_parent(&db, &identity, CommentParent::Issue(issue_id), &q)
 }
 
@@ -179,7 +241,7 @@ pub(super) async fn list_page_comments(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(page_id): Path<i64>,
     Query(q): Query<ListCommentsQuery>,
-) -> Result<Json<Vec<Comment>>, LificError> {
+) -> Result<(axum::http::HeaderMap, Json<Vec<Comment>>), LificError> {
     list_for_parent(&db, &identity, CommentParent::Page(page_id), &q)
 }
 
@@ -420,6 +482,119 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0]["content"], "Hello from test");
         assert_eq!(comments[1]["content"], "Second comment");
+    }
+
+    // ── LIF-421: the paging answer travels in headers ───────────
+
+    #[tokio::test]
+    async fn a_comment_page_carries_its_continuation_in_headers() {
+        let (app, issue_id, _) = setup_comment_test();
+        for content in ["first", "second", "third"] {
+            json_post(
+                &app,
+                &format!("/api/issues/{issue_id}/comments"),
+                serde_json::json!({"content": content}),
+            )
+            .await;
+        }
+
+        let page = |query: &str| {
+            let app = app.clone();
+            let uri = format!("/api/issues/{issue_id}/comments?{query}");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let header = |resp: &axum::response::Response, name: &str| {
+            resp.headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+
+        // A full page with more behind it.
+        let resp = page("limit=2&offset=0").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            header(&resp, super::HAS_MORE_HEADER).as_deref(),
+            Some("true")
+        );
+        // The next offset counts the rows returned, so following it lands on
+        // the row after the last one served.
+        assert_eq!(
+            header(&resp, super::NEXT_OFFSET_HEADER).as_deref(),
+            Some("2")
+        );
+        assert_eq!(header(&resp, super::RETURNED_HEADER).as_deref(), Some("2"));
+        // The body is still the bare array every shipped client expects.
+        let body = parse_json(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 2);
+
+        // The last page says so, rather than leaving a client to guess from a
+        // short array.
+        let resp = page("limit=2&offset=2").await;
+        assert_eq!(
+            header(&resp, super::HAS_MORE_HEADER).as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            header(&resp, super::NEXT_OFFSET_HEADER).as_deref(),
+            Some("3")
+        );
+        assert_eq!(header(&resp, super::RETURNED_HEADER).as_deref(), Some("1"));
+
+        // Past the end: no rows, no continuation, no loop.
+        let resp = page("limit=2&offset=9").await;
+        assert_eq!(
+            header(&resp, super::HAS_MORE_HEADER).as_deref(),
+            Some("false")
+        );
+        assert_eq!(header(&resp, super::RETURNED_HEADER).as_deref(), Some("0"));
+
+        // A newest-first read is offered both: the offset it could use, and
+        // the cursor it should, naming the last row it actually received.
+        let resp = page("order=desc&limit=2").await;
+        assert_eq!(
+            header(&resp, super::HAS_MORE_HEADER).as_deref(),
+            Some("true")
+        );
+        let cursor_id = header(&resp, super::NEXT_CURSOR_ID_HEADER).unwrap();
+        let rows = parse_json(resp).await;
+        let rows = rows.as_array().unwrap().clone();
+        assert_eq!(
+            cursor_id,
+            rows.last().unwrap()["id"].as_i64().unwrap().to_string(),
+            "the cursor names the last row the client was actually sent"
+        );
+
+        // A keyset read gets no offset at all. It has no offset origin, so a
+        // returned-row count is not an offset into anything, and a client that
+        // took it for one would jump somewhere unrelated in the thread.
+        let created_at = rows.last().unwrap()["created_at"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let resp = page(&format!(
+            "order=desc&limit=2&before_created_at={}&before_id={cursor_id}",
+            urlencoding::encode(&created_at)
+        ))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header(&resp, super::NEXT_OFFSET_HEADER), None);
+        assert_eq!(
+            header(&resp, super::HAS_MORE_HEADER).as_deref(),
+            Some("false")
+        );
+        let remaining = parse_json(resp).await;
+        let remaining = remaining.as_array().unwrap();
+        assert_eq!(remaining.len(), 1, "one comment sits before that cursor");
+        assert_eq!(remaining[0]["content"], "first");
     }
 
     #[tokio::test]

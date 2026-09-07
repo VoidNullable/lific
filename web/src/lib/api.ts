@@ -24,10 +24,16 @@ export type RequestResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; status: number | null };
 
-async function request<T>(
+/** A successful response's headers, for the few endpoints whose answer is not
+ *  entirely in the body (comment paging, LIF-421). */
+export type HeadedResult<T> =
+  | { ok: true; data: T; headers: Headers }
+  | { ok: false; error: string; status: number | null };
+
+async function requestWithHeaders<T>(
   path: string,
   options: RequestInit = {}
-): Promise<RequestResult<T>> {
+): Promise<HeadedResult<T>> {
   const token = localStorage.getItem("lific_token");
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -46,7 +52,7 @@ async function request<T>(
       return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
     }
 
-    return { ok: true, data: body as T };
+    return { ok: true, data: body as T, headers: res.headers };
   } catch (e) {
     return {
       ok: false,
@@ -54,6 +60,14 @@ async function request<T>(
       status: null,
     };
   }
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<RequestResult<T>> {
+  const res = await requestWithHeaders<T>(path, options);
+  return res.ok ? { ok: true, data: res.data } : res;
 }
 
 export async function download(path: string, filename?: string) {
@@ -1020,6 +1034,10 @@ export interface CommentPage {
   nextCursor: CommentCursor | null;
 }
 
+/** The server's authoritative answer about what lies past a comment page
+ *  (LIF-421). Absent from a server too old to send it. */
+const COMMENT_HAS_MORE_HEADER = "x-comment-has-more";
+
 /** Fetch one page of a comment thread, newest first, oldest-first on screen.
  *
  *  The REST default is `order=asc` for compatibility, which means the default
@@ -1027,7 +1045,15 @@ export interface CommentPage {
  *  opening an issue wants to see. So the UI always asks for `desc`, takes the
  *  newest window, and reverses it back into reading order. One extra row is
  *  requested so `hasMore` is an answer rather than a guess, and the request
- *  stays inside the server's 500-row cap either way. */
+ *  stays inside the server's 500-row cap either way.
+ *
+ *  `hasMore` is the *union* of two facts, and needs both. The over-fetched row
+ *  is the client's own evidence, and it is the only one that covers the row it
+ *  just dropped from the page. The header is the server's, and it is the only
+ *  one that covers a page cut short by the response-byte budget: since a page
+ *  of large comments can come back with three rows out of fifty, a short page
+ *  is no longer evidence that the thread ended. Trusting either alone hides
+ *  comments behind a Load older button that never appears. */
 async function commentPage(
   path: string,
   before: CommentCursor | null,
@@ -1039,10 +1065,12 @@ async function commentPage(
     params.set("before_created_at", before.created_at);
     params.set("before_id", String(before.id));
   }
-  const res = await request<Comment[]>(`${path}?${params}`);
+  const res = await requestWithHeaders<Comment[]>(`${path}?${params}`);
   if (!res.ok) return res;
-  const hasMore = res.data.length > size;
-  const items = (hasMore ? res.data.slice(0, size) : res.data).slice().reverse();
+  const overFetched = res.data.length > size;
+  const hasMore =
+    overFetched || res.headers?.get(COMMENT_HAS_MORE_HEADER) === "true";
+  const items = (overFetched ? res.data.slice(0, size) : res.data).slice().reverse();
   return {
     ok: true,
     data: {

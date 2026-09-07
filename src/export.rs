@@ -305,7 +305,10 @@ fn bounded_issue_comments(conn: &Connection, issue_id: i64) -> Result<Vec<Commen
             "issue has more than {MAX_EXPORT_COMMENTS} comments; export it in smaller slices"
         )));
     }
-    queries::comments::list_comments_paginated(
+    // Exhaustive on purpose (LIF-421): the two preflight checks above are the
+    // export's own bound, and a byte-budgeted read here would silently drop
+    // comments out of a file that claims to be the whole issue.
+    queries::comments::list_comments_exhaustive(
         conn,
         parent,
         None,
