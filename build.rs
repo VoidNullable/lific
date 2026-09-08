@@ -13,6 +13,10 @@ use std::path::Path;
 use std::time::SystemTime;
 
 fn main() {
+    // `web/dist/.gitkeep` keeps the embed directory present in clean checkouts.
+    // Do not create it here: builds must not mutate the source tree.
+    let dist = Path::new("web/dist");
+
     // The built bundle: changing it must trigger a re-embed.
     println!("cargo:rerun-if-changed=web/dist");
     // The frontend sources: changing them cannot rebuild the bundle for us,
@@ -20,7 +24,6 @@ fn main() {
     // to point out that web/dist no longer matches web/src.
     println!("cargo:rerun-if-changed=web/src");
 
-    let dist = Path::new("web/dist");
     let src = Path::new("web/src");
 
     match (newest_mtime(dist), newest_mtime(src)) {
@@ -44,6 +47,9 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
     let mut newest: Option<SystemTime> = None;
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
+        if entry.file_name() == ".gitkeep" {
+            continue;
+        }
         let path = entry.path();
         let candidate = if path.is_dir() {
             newest_mtime(&path)
@@ -57,4 +63,23 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
         }
     }
     newest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_mtime;
+
+    #[test]
+    fn checkout_placeholder_is_not_a_built_frontend() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitkeep"), "").unwrap();
+        assert_eq!(newest_mtime(dir.path()), None);
+
+        let bundle = dir.path().join("index.html");
+        std::fs::write(&bundle, "fixture frontend").unwrap();
+        assert_eq!(
+            newest_mtime(dir.path()),
+            Some(std::fs::metadata(bundle).unwrap().modified().unwrap())
+        );
+    }
 }
