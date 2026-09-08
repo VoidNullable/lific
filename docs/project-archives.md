@@ -4,10 +4,11 @@
 private project on the destination. It never merges projects, overwrites an
 existing identifier, or deletes the source.
 
-Run these commands on the machines that hold the database files. There is no
-HTTP or MCP archive interface. The local operator already has database access;
-export does not impersonate a web user. Import requires an explicit active human
-admin on the destination, even when instance authorization is disabled.
+Two interfaces exist: the CLI below, run on the machines that hold the database
+files, and a REST surface the web UI drives. There is no MCP archive interface.
+The local operator already has database access; export does not impersonate a
+web user. Import requires an explicit active human admin on the destination,
+even when instance authorization is disabled.
 
 ```sh
 lific --db /srv/private/lific.db project-archive export LIF --out /srv/backups/LIF.tar.gz
@@ -21,8 +22,9 @@ export. Both commands print a JSON report containing the project identifier,
 row and blob counts, and unresolved external references. Errors exit nonzero.
 
 The named destination admin becomes the project's lead. No source memberships
-or permission grants transfer. The new lead grant adds a destination CLI audit
-entry with no authenticated actor. Imported history remains unchanged.
+or permission grants transfer. The new lead grant adds a destination audit
+entry: over the CLI with no authenticated actor, over the web attributed to the
+signed-in admin who ran the import. Imported history remains unchanged.
 A published source project imports as private.
 Review descriptions, comments and files before enabling publication separately.
 Historical text can contain secrets removed from today's content. Treat the
@@ -88,22 +90,37 @@ only by regular `blobs/<sha256>` files. Format version 1 is independent of the
 database migration version. Table names and positional column definitions are
 compiled into Lific. Archive data cannot supply SQL, column names or schema.
 
-Limits apply to both export and import:
+Limits apply to both export and import, and depend on the interface. The CLI
+runs as the local operator, who already holds the database file. An HTTP caller
+runs on shared server resources and gets a much smaller budget.
 
-| Limit | Maximum |
-| --- | --- |
-| Compressed archive | 2 GiB |
-| Manifest JSON | 64 MiB |
-| Total rows | 200,000 |
-| Distinct blobs | 10,000 |
-| One blob | 256 MiB |
-| Combined blob bytes | 2 GiB |
-| Folder or step nesting | 128 levels |
+| Limit | CLI | Web |
+| --- | --- | --- |
+| Compressed archive | 2 GiB | 128 MiB |
+| Decompressed archive | 2 GiB plus framing | 256 MiB |
+| Manifest JSON | 64 MiB | 16 MiB |
+| Total rows | 200,000 | 50,000 |
+| Distinct blobs | 10,000 | 2,000 |
+| One blob | 256 MiB | 64 MiB |
+| Combined blob bytes | 2 GiB | 192 MiB |
+| Folder or step nesting | 128 levels | 128 levels |
 
-Generated reference reports are capped at 200,000 messages and 64 MiB of text.
-Rewritten content is capped at 64 MiB across all rows, including history. These
-limits are checked during processing, before the report or output can grow past
-them.
+`GET /api/project-archives` returns the web numbers as `max_upload_bytes`,
+`max_expanded_bytes`, `max_metadata_bytes`, `max_blob_bytes`,
+`max_blob_total_bytes`, `max_rows` and `max_blobs`, so a client can refuse an
+impossible archive before sending it. Use the CLI for anything larger.
+
+Over HTTP, exceeding any of these answers 413. A malformed, invalid or
+unsafe archive answers 400. The distinction is made from Lific's own record of
+which limit was hit, never from the text of an error, so an archive cannot
+choose its status code by writing limit-shaped strings into its data.
+
+Generated reference reports are capped at the row limit in messages and at the
+manifest limit in text: 200,000 messages and 64 MiB on the CLI, 50,000 and
+16 MiB over the web. Rewritten content is capped at the same text budget across
+all rows, including history. Every limit is checked during processing, before
+the report, the archive or the staged upload can grow past it. Nothing is
+measured after the fact.
 
 Parsing also bounds row widths, rejects nested JSON values in rows, and caps
 decompressed tar framing overhead. Unknown versions/tables/fields, duplicate
@@ -132,3 +149,80 @@ pages, inspect deleted content and history, and download an attachment. Stop
 writers on the source before the final export, then switch their configurations
 only after verifying the destination. Until that cutover, the source remains the
 authoritative project.
+
+## The HTTP interface
+
+Three routes, all under a single instance-wide slot: one archive export or
+import runs at a time, and a request that arrives while one is running is
+refused with 429 before its body is read.
+
+| Route | Who |
+| --- | --- |
+| `GET /api/project-archives` | Any signed-in person. Returns the limits above and `can_import`. |
+| `GET /api/project-archives/{identifier}` | The project's lead, or an instance admin. |
+
+| `POST /api/project-archives` | An instance admin, whether or not authorization enforcement is on. |
+
+**Only a browser session reaches these routes.** An API key, an unbound
+operator key, an OAuth connector token, a bot, and the first-admin identity an
+authentication-disabled instance hands to a credential-less request are all
+refused, because an archive is the project's entire history and the only
+credential allowed to ask for it is a human who signed in. The session is
+re-read from the database at every decision point, including inside the read
+transaction that takes the export snapshot and inside the write transaction
+that creates the imported project, so a sign-out or a demotion committed in
+between stops the request rather than being noticed afterwards.
+
+The upload is one `multipart/form-data` request with exactly one field named
+`archive`. Its filename and content type are ignored. Any additional field is
+refused. The bytes are counted as they stream to a private temporary file and
+the upload is cut off the moment it passes the limit. An upload has 120 seconds
+overall and 20 seconds between reads.
+
+`GET /api/project-archives/{identifier}` resolves the identifier to a row ID
+once and exports that ID. An identifier is a mutable label, so re-resolving it
+inside the snapshot could hand back a project the caller was never authorized
+for; the download is named after the identifier the snapshot itself saw.
+The response is `application/gzip` as `<IDENTIFIER>.lific.tar.gz` with
+`Cache-Control: no-store`. Authorization is rechecked after the archive is
+generated and before the first byte is sent, so a download that queued behind
+other work cannot outlive the permission that started it.
+
+A successful import answers 201 with the new project and a report: the
+identifier, per-table row counts, the blob count, up to the first 100
+unresolved external references, and `external_reference_count` for the total.
+The full list is stored in `project_archive_provenance` and comes back out in
+the next archive of that project. The CLI's own JSON report is unchanged.
+
+**An import whose connection is lost has an unknown result.** The server does
+not abandon a running import when the client disconnects, and it does not
+report a failure for work that committed. A client must not retry
+automatically. Check the project list first: if the project is there, the
+import succeeded.
+
+## Use project archives in the web UI
+
+Sign in as the project lead or an instance admin on the source. In the project
+overview, find **Project archive**, read the history warning, confirm it, and
+choose **Download project archive**. This downloads `<ID>.lific.tar.gz` and leaves
+the source unchanged. The toolbar's existing Markdown export is a separate format,
+not an archive you can import.
+
+On the destination, sign in as an instance admin. Open **New project**, then
+**Import a project archive**. This also works before the instance has any projects.
+Choose the `.tar.gz` file, check its filename and size, read the confirmation, and
+choose **Import as private project**. The page shows the server's current upload
+and expanded-size limits. Use the local CLI for archives above the web limits.
+
+Upload progress measures bytes sent. **Importing...** means the server is
+processing the archive; it is not a percentage estimate and cannot be canceled.
+Returning to the import page in the same tab keeps the current operation and its
+result. If the connection or page is lost, the import may still complete. Check
+the project list before uploading again. The UI never retries an import for you.
+
+The result stays on screen with record and file counts and unresolved references
+(up to the first 100, with the total shown). Review these before choosing
+**Open imported project**. Imported author names are inert text, not accounts.
+The destination is private and you become its lead. A duplicate identifier fails
+without merging or overwriting anything. Publishing remains a separate action;
+review the content and linked files before enabling it.

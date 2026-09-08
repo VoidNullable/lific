@@ -26,6 +26,13 @@ pub struct DbPool {
     readers: Arc<ArrayQueue<Connection>>,
     path: PathBuf,
     export_slots: Arc<Semaphore>,
+    /// LIF-467: whole-project archive export/import. One at a time per
+    /// instance, on its own semaphore rather than sharing `export_slots`,
+    /// because an archive run holds a temp file, the attachment-store lock
+    /// and (on import) the single writer for its whole duration. Letting two
+    /// share the ordinary export budget would let one archive starve every
+    /// issue/page export on the instance.
+    archive_slots: Arc<Semaphore>,
 }
 
 /// RAII guard that returns the read connection to the pool on drop.
@@ -56,6 +63,14 @@ impl DbPool {
             .clone()
             .try_acquire_owned()
             .map_err(|_| LificError::TooManyRequests("too many exports are already running".into()))
+    }
+
+    /// The single project-archive slot. Acquired before any body is read or
+    /// any temp file is created, so a rejected request costs nothing.
+    pub(crate) fn acquire_archive_slot(&self) -> Result<OwnedSemaphorePermit, LificError> {
+        self.archive_slots.clone().try_acquire_owned().map_err(|_| {
+            LificError::TooManyRequests("another project archive is already running".into())
+        })
     }
 
     /// The database file this pool was opened from. Callers that need to
@@ -230,6 +245,7 @@ pub fn open_memory() -> Result<DbPool, LificError> {
         readers: Arc::new(readers),
         path: PathBuf::from(&name),
         export_slots: Arc::new(Semaphore::new(2)),
+        archive_slots: Arc::new(Semaphore::new(1)),
     })
 }
 
@@ -269,6 +285,7 @@ pub fn open(path: &Path) -> Result<DbPool, LificError> {
         readers: Arc::new(readers),
         path: path.to_path_buf(),
         export_slots: Arc::new(Semaphore::new(2)),
+        archive_slots: Arc::new(Semaphore::new(1)),
     })
 }
 

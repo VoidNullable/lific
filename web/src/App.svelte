@@ -8,6 +8,7 @@
   import IssueDetail from "./routes/IssueDetail.svelte";
   import IssueNew from "./routes/IssueNew.svelte";
   import ProjectNew from "./routes/ProjectNew.svelte";
+  import ProjectImport from "./routes/ProjectImport.svelte";
   import ProjectSettings from "./routes/ProjectSettings.svelte";
   import PageList from "./routes/PageList.svelte";
   import Files from "./routes/Files.svelte";
@@ -462,6 +463,7 @@
     | { type: "app"; page: "settings" }
     | { type: "app"; page: "instance-settings" }
     | { type: "app"; page: "project-new" }
+    | { type: "app"; page: "project-import" }
     | { type: "app"; page: "project-settings"; project: string }
     | { type: "app"; page: "issues"; project: string }
     | { type: "app"; page: "board"; project: string }
@@ -520,6 +522,9 @@
     }
     if (r === "/projects/new") {
       return { type: "app", page: "project-new" };
+    }
+    if (r === "/projects/import") {
+      return { type: "app", page: "project-import" };
     }
 
     // Project-scoped: /{IDENTIFIER}/overview (the project dashboard).
@@ -747,6 +752,8 @@
       <InstanceSettings {navigate} />
     {:else if parsed.page === "project-new"}
       <ProjectNew {navigate} />
+    {:else if parsed.page === "project-import"}
+      <ProjectImport {navigate} />
     {:else if parsed.page === "project-settings"}
       <ProjectSettings {navigate} projectIdentifier={parsed.project} {onProjectChange} />
     {:else if parsed.page === "issues" || parsed.page === "board"}

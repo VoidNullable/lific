@@ -3,6 +3,7 @@
     createProject,
     assignProjectGroup,
     getInstance,
+    getArchiveCapabilities,
     me,
     type CreateProjectInput,
   } from "../lib/api";
@@ -39,6 +40,15 @@
   let error = $state("");
   let currentUserId = $state<number | null>(null);
   let webAutoLogin = $state(false);
+  let canImportArchive = $state(false);
+
+  onMount(() => {
+    let live = true;
+    getArchiveCapabilities().then((res) => {
+      if (live) canImportArchive = res.ok && res.data.can_import;
+    });
+    return () => { live = false; };
+  });
 
   type PendingCreate = {
     input: CreateProjectInput;
@@ -168,6 +178,12 @@
 <div class="h-full flex flex-col">
   <!-- Form -->
   <div class="flex-1 overflow-y-auto">
+    {#if canImportArchive}
+      <div class="mx-auto w-full max-w-[680px] px-6 pt-6 text-body-sm text-[var(--text-muted)]">
+        Moving a project from another Lific instance?
+        <button class="text-[var(--accent)] underline underline-offset-2" onclick={() => navigate("/projects/import")}>Import a project archive</button>
+      </div>
+    {/if}
     <ProjectForm
       bind:name
       bind:identifier

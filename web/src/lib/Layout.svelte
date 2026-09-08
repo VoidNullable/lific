@@ -712,6 +712,7 @@
     if (route === "/") return "Home";
     if (isActive("/settings")) return "Settings";
     if (route === "/projects/new") return "New project";
+    if (route === "/projects/import") return "Import archive";
     if (!activeProject) return null;
     const rest = route.slice(activeProject.length + 1);
     const slug = rest.split("/")[1] ?? "";

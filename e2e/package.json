@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "smoke": "bun smoke.ts",
-    "public": "bun public-projects.ts"
+    "public": "bun public-projects.ts",
+    "archives": "bun project-archives.ts"
   },
   "devDependencies": {
     "playwright": "^1.58.0"

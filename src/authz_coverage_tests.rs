@@ -393,6 +393,22 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("GET", "/api/export/issues/{identifier}"), Gated(Viewer)),
         (("GET", "/api/export/pages/{identifier}"), Gated(Viewer)),
         (("GET", "/api/export/projects/{identifier}"), Gated(Viewer)),
+        // ── Project archives (LIF-467) ──
+        // Export is the project's whole history including tombstones and the
+        // audit log, so it sits at Lead rather than Viewer. Import creates a
+        // project and grants a lead membership on it, which the project-role
+        // model has nothing to say about: it is instance admin, enforced on a
+        // freshly-read browser session in both modes. The capabilities read
+        // only describes the caller and the instance's limits.
+        (("GET", "/api/project-archives/{identifier}"), Gated(Lead)),
+        (
+            ("POST", "/api/project-archives"),
+            Exempt("instance admin on a live browser session; creates a project"),
+        ),
+        (
+            ("GET", "/api/project-archives"),
+            Exempt("describes the caller's own import capability and instance limits"),
+        ),
         // ── Structure: modules / labels / folders ──
         (("GET", "/api/modules"), Gated(Viewer)),
         (("POST", "/api/modules"), Gated(StructureRole)),

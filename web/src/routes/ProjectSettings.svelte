@@ -35,6 +35,7 @@
   import ProjectMembers from "../lib/ProjectMembers.svelte";
   import ImportPanel from "../lib/ImportPanel.svelte";
   import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
+  import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import ProgressRing from "../lib/ProgressRing.svelte";
@@ -772,6 +773,9 @@
             {project}
             onChange={(updated) => { project = updated; }}
           />
+          {#if project.identifier === projectIdentifier}
+            <ArchiveTransferPanel projectId={project.id} identifier={project.identifier} />
+          {/if}
         {/if}
 
         {#if canManage}

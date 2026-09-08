@@ -24,11 +24,20 @@ pub(super) struct ExportQuery {
     pub format: Option<String>,
 }
 
-struct PreparedExport {
-    temp_dir: tempfile::TempDir,
-    path: std::path::PathBuf,
-    content_type: HeaderValue,
-    download_name: Option<String>,
+/// A finished export sitting in a private temp directory, ready to stream.
+///
+/// LIF-467: crate-visible so the project-archive routes reuse this streaming
+/// path (its idle/total deadlines, its temp-dir-owning body, its slot
+/// handling) instead of growing a second one.
+pub(super) struct PreparedExport {
+    pub(super) temp_dir: tempfile::TempDir,
+    pub(super) path: std::path::PathBuf,
+    pub(super) content_type: HeaderValue,
+    pub(super) download_name: Option<String>,
+    /// Extra response headers this download needs. Empty for the ordinary
+    /// bundle exports; the archive download uses it for `Cache-Control:
+    /// no-store` and the sniffing/scripting defenses.
+    pub(super) extra_headers: HeaderMap,
 }
 
 impl PreparedExport {
@@ -41,6 +50,7 @@ impl PreparedExport {
             path,
             content_type: HeaderValue::from_static("application/json"),
             download_name: None,
+            extra_headers: HeaderMap::new(),
         })
     }
 
@@ -66,6 +76,7 @@ impl PreparedExport {
             path,
             content_type: HeaderValue::from_static("text/markdown; charset=utf-8"),
             download_name: Some(download_name),
+            extra_headers: HeaderMap::new(),
         })
     }
 
@@ -79,6 +90,7 @@ impl PreparedExport {
             path,
             content_type: HeaderValue::from_static("application/zip"),
             download_name: Some(download_name),
+            extra_headers: HeaderMap::new(),
         })
     }
 }
@@ -99,15 +111,17 @@ where
         .map_err(|error| LificError::Internal(format!("export worker failed: {error}")))?
 }
 
+/// LIF-467: also used by the project-archive tests, which need to hold a
+/// blocking worker open between "spawned" and "committed".
 #[cfg(test)]
-struct ExportTestGate {
+pub(super) struct ExportTestGate {
     started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 #[cfg(test)]
 impl ExportTestGate {
-    fn new(
+    pub(super) fn new(
         started: tokio::sync::oneshot::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
     ) -> Self {
@@ -128,10 +142,10 @@ impl ExportTestGate {
 
 #[cfg(test)]
 tokio::task_local! {
-    static EXPORT_TEST_GATE: std::sync::Arc<ExportTestGate>;
+    pub(super) static EXPORT_TEST_GATE: std::sync::Arc<ExportTestGate>;
 }
 
-async fn blocking_export<T>(
+pub(super) async fn blocking_export<T>(
     permit: OwnedSemaphorePermit,
     operation: impl FnOnce() -> Result<T, LificError> + Send + 'static,
 ) -> Result<(T, OwnedSemaphorePermit), LificError>
@@ -169,7 +183,7 @@ async fn single_file_response(
     stream_response(prepared, permit).await
 }
 
-async fn stream_response(
+pub(super) async fn stream_response(
     prepared: PreparedExport,
     permit: OwnedSemaphorePermit,
 ) -> Result<axum::response::Response, LificError> {
@@ -228,7 +242,7 @@ async fn stream_response_with_timeouts(
         let _ = terminal_sender.send(result);
     });
     let body = stream_body(receiver, terminal_receiver);
-    let mut headers = HeaderMap::new();
+    let mut headers = prepared.extra_headers;
     headers.insert(header::CONTENT_TYPE, prepared.content_type);
     if let Some(filename) = prepared.download_name {
         headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
@@ -261,7 +275,7 @@ pub(super) fn stream_body(
     )
 }
 
-fn content_disposition(filename: &str) -> Result<HeaderValue, LificError> {
+pub(super) fn content_disposition(filename: &str) -> Result<HeaderValue, LificError> {
     HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
         .map_err(|e| LificError::Internal(format!("invalid content-disposition header: {e}")))
 }
@@ -859,6 +873,7 @@ mod tests {
                 path,
                 content_type: axum::http::HeaderValue::from_static("text/markdown"),
                 download_name: None,
+                extra_headers: axum::http::HeaderMap::new(),
             },
             permit,
         )
@@ -887,6 +902,7 @@ mod tests {
                 path,
                 content_type: axum::http::HeaderValue::from_static("text/markdown"),
                 download_name: None,
+                extra_headers: axum::http::HeaderMap::new(),
             },
             permit,
             Duration::from_millis(20),
@@ -917,6 +933,7 @@ mod tests {
                 path,
                 content_type: axum::http::HeaderValue::from_static("text/markdown"),
                 download_name: None,
+                extra_headers: axum::http::HeaderMap::new(),
             },
             permit,
             Duration::from_secs(5),

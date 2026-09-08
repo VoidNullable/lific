@@ -476,9 +476,12 @@ fn project_archive_refuses_tar_traversal_links_devices_and_declared_expansion() 
         raw_entry(&path, "manifest.json", kind, 0);
         assert!(stage(&path).is_err(), "entry type {kind}");
     }
-    raw_entry(&path, "manifest.json", b'0', MAX_METADATA + 1);
+    raw_entry(&path, "manifest.json", b'0', Limits::CLI.max_metadata + 1);
     assert!(stage(&path).err().unwrap().to_string().contains("64 MiB"));
-    File::create(&path).unwrap().set_len(MAX_TOTAL + 1).unwrap();
+    File::create(&path)
+        .unwrap()
+        .set_len(Limits::CLI.max_compressed + 1)
+        .unwrap();
     assert!(
         stage(&path)
             .err()
@@ -522,7 +525,7 @@ fn project_archive_bounds_blob_sizes_and_disables_unresolved_local_attachment_id
     seed(&pool, &store);
     let c = pool.read().unwrap();
     let mut m = collect_manifest(&c, "LIF").unwrap();
-    m.blobs[0].size = MAX_BLOB + 1;
+    m.blobs[0].size = Limits::CLI.max_blob + 1;
     assert!(validate_manifest(&m).is_err());
     let m = collect_manifest(&c, "LIF").unwrap();
     let mut maps = source_maps(&m).unwrap();
@@ -846,7 +849,7 @@ fn project_archive_generated_reference_overflow_aborts_the_import_transaction() 
     let mut manifest = collect_manifest(&conn, "LIF").unwrap();
     manifest.external_references.clear();
     let mut body = String::new();
-    for id in 1..=MAX_ROWS + 2 {
+    for id in 1..=Limits::CLI.max_rows + 2 {
         write!(body, "/api/attachments/{id} ").unwrap();
     }
     let issues = manifest
@@ -1218,5 +1221,602 @@ fn project_archive_audits_the_destination_lead_grant_without_changing_source_tim
             .get::<_, String>(0))
             .unwrap(),
         "system"
+    );
+}
+
+// ── LIF-467: per-caller resource profiles ───────────────────────
+
+// Every profile below is small enough that the ordinary seeded project trips
+// the ceiling under test, so none of these need a large fixture.
+#[test]
+fn project_archive_limits_bound_metadata_rows_and_blobs_during_collection() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+
+    // Rows: the seed has well over five.
+    let profile = Limits {
+        max_rows: 5,
+        ..Limits::CLI
+    };
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &dir.path().join("rows.tar.gz"),
+        profile,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("too many rows"), "{error}");
+
+    // Metadata: text columns are counted as they are read, not after the
+    // manifest is serialized.
+    let profile = Limits {
+        max_metadata: 16,
+        ..Limits::CLI
+    };
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &dir.path().join("metadata.tar.gz"),
+        profile,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("metadata exceeds"), "{error}");
+
+    // One blob, and the combined blob budget.
+    let profile = Limits {
+        max_blob: 4,
+        ..Limits::CLI
+    };
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &dir.path().join("blob.tar.gz"),
+        profile,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("blob"), "{error}");
+
+    let profile = Limits {
+        max_blobs: 0,
+        ..Limits::CLI
+    };
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &dir.path().join("blobs.tar.gz"),
+        profile,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("too many blobs"), "{error}");
+
+    // Nothing was left behind by any of the refusals.
+    for name in ["rows", "metadata", "blob", "blobs"] {
+        assert!(!dir.path().join(format!("{name}.tar.gz")).exists());
+    }
+}
+
+#[test]
+fn project_archive_compressed_ceiling_stops_the_export_while_it_writes() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let out = dir.path().join("compressed.tar.gz");
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &out,
+        Limits {
+            max_compressed: 64,
+            ..Limits::CLI
+        },
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("compressed archive exceeds"),
+        "{error}"
+    );
+    assert!(!out.exists(), "a refused export leaves no file behind");
+}
+
+#[test]
+fn project_archive_expanded_ceiling_stops_the_export_while_it_writes() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let out = dir.path().join("expanded.tar.gz");
+    let error = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &out,
+        Limits {
+            max_expanded: 128,
+            ..Limits::CLI
+        },
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("archive contents exceed"),
+        "{error}"
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn project_archive_limits_bound_a_decompressed_import_before_it_is_staged() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+
+    // The compressed file is well under a kilobyte, so a byte-level
+    // expansion ceiling is the only thing that can reject it here.
+    let error = import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_expanded: 64,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("project archive"), "{error}");
+
+    let error = import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_compressed: 8,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("compressed archive exceeds"),
+        "{error}"
+    );
+
+    let error = import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_metadata: 16,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("metadata exceeds"), "{error}");
+
+    let error = import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_rows: 3,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("project archive"), "{error}");
+
+    let conn = dest.read().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "a refused import writes nothing"
+    );
+}
+
+#[test]
+fn project_archive_limits_do_not_leak_between_runs_on_one_thread() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let _ = export_with(
+        &pool,
+        &store,
+        "LIF",
+        &dir.path().join("tiny.tar.gz"),
+        Limits {
+            max_rows: 1,
+            ..Limits::CLI
+        },
+        &|_| Ok(()),
+    );
+    // The CLI profile is restored, so the next export on this thread is
+    // judged by its own limits and not the previous caller's.
+    export(&pool, &store, "LIF", &dir.path().join("normal.tar.gz")).unwrap();
+}
+
+#[test]
+fn project_archive_import_refuses_before_writing_when_the_hook_denies() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+    let error = import_with(&dest, &dest_store, &path, Limits::WEB, &|_| {
+        Err(LificError::Forbidden("no longer an admin".into()))
+    })
+    .unwrap_err();
+    assert!(matches!(error, LificError::Forbidden(_)));
+    let conn = dest.read().unwrap();
+    for table in ["projects", "issues", "project_members"] {
+        assert_eq!(
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "{table}"
+        );
+    }
+}
+
+#[test]
+fn project_archive_export_refuses_before_reading_when_the_hook_denies() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let out = dir.path().join("denied.tar.gz");
+    let error = export_with(&pool, &store, "LIF", &out, Limits::WEB, &|_| {
+        Err(LificError::Forbidden("lead was revoked".into()))
+    })
+    .unwrap_err();
+    assert!(matches!(error, LificError::Forbidden(_)));
+    assert!(!out.exists());
+}
+
+#[test]
+fn project_archive_import_reports_the_committed_project_and_per_table_rows() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+    {
+        // An unrelated project already occupies the low ID range, so a
+        // project resolved by name after the fact could not be assumed to be
+        // this one.
+        let conn = dest.write().unwrap();
+        conn.execute_batch("INSERT INTO projects(id,name,identifier) VALUES(500,'Other','OTH');")
+            .unwrap();
+    }
+    let outcome = import_with(&dest, &dest_store, &path, Limits::WEB, &|tx| {
+        cli_grant(tx, "owner")
+    })
+    .unwrap();
+
+    let conn = dest.read().unwrap();
+    let actual: i64 = conn
+        .query_row("SELECT id FROM projects WHERE identifier='LIF'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome.project_id, actual);
+    assert_eq!(outcome.report.project, "LIF");
+    assert_eq!(outcome.rows_by_table["projects"], 1);
+    assert_eq!(outcome.rows_by_table["issues"], 2);
+    assert_eq!(outcome.rows_by_table["attachments"], 1);
+    assert_eq!(
+        outcome.rows_by_table.values().sum::<usize>(),
+        outcome.report.rows
+    );
+    assert_eq!(
+        outcome.external_reference_count,
+        outcome.report.external_references.len()
+    );
+}
+
+#[test]
+fn project_archive_import_audits_the_lead_grant_with_the_caller_the_hook_names() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+    let outcome = import_with(&dest, &dest_store, &path, Limits::WEB, &|_| {
+        Ok(Grant {
+            user_id: 1,
+            transport: crate::actor::Transport::Web,
+            actor_user_id: Some(1),
+        })
+    })
+    .unwrap();
+
+    let conn = dest.read().unwrap();
+    let (transport, actor): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT transport, actor_user_id FROM audit_log
+             WHERE entity_type='member' OR action='member_added'
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(transport, "web");
+    assert_eq!(actor, Some(1));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM project_members WHERE project_id=?1 AND user_id=1 AND role='lead'",
+            [outcome.project_id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+/// The identifier a caller names and the project a snapshot exports must be
+/// tied together by the row ID. Resolving the label twice lets a rename plus a
+/// reassignment hand the second lookup somebody else's project.
+#[test]
+fn project_archive_exports_the_row_id_it_was_given_after_an_identifier_swap() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    // The ID a caller was authorized for, captured before the swap.
+    let authorized: i64 = {
+        let c = pool.read().unwrap();
+        resolve_project(&c, "LIF").unwrap()
+    };
+    {
+        let c = pool.write().unwrap();
+        c.execute_batch(
+            "UPDATE projects SET identifier='OLD' WHERE id=10;
+             UPDATE projects SET identifier='LIF' WHERE id=20;",
+        )
+        .unwrap();
+    }
+
+    let out = dir.path().join("swapped.tar.gz");
+    let report =
+        export_by_id_with(&pool, &store, authorized, &out, Limits::WEB, &|_| Ok(())).unwrap();
+    assert_eq!(report.project, "OLD", "the exported project is the ID's");
+
+    let staged = stage(&out).unwrap();
+    let json = serde_json::to_string(&staged.manifest).unwrap();
+    assert!(!json.contains("PRIVATE NEIGHBOR"));
+    assert!(!json.contains("PRIVATE ISSUE"));
+    assert!(json.contains("Portable issue"));
+
+    // The identifier path is the one that follows the label, and now lands on
+    // the other project. That is exactly why the web export does not use it.
+    let other = dir.path().join("by-name.tar.gz");
+    let report = export_with(&pool, &store, "LIF", &other, Limits::WEB, &|_| Ok(())).unwrap();
+    assert_eq!(report.project, "LIF");
+    assert_ne!(
+        report.rows,
+        std::fs::metadata(&out).unwrap().len() as usize,
+        "the two exports are different projects"
+    );
+}
+
+#[test]
+fn project_archive_export_by_id_refuses_a_project_that_disappeared() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let error = export_by_id_with(
+        &pool,
+        &store,
+        9_999,
+        &dir.path().join("gone.tar.gz"),
+        Limits::WEB,
+        &|_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("project not found"), "{error}");
+}
+
+/// A ceiling is a resource answer (413); a broken archive is a validity answer
+/// (400). The classification never comes from the archive author's text.
+#[test]
+fn project_archive_resource_ceilings_are_payload_too_large_and_invalid_data_is_not() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+
+    let budget = [
+        Limits {
+            max_rows: 3,
+            ..Limits::CLI
+        },
+        Limits {
+            max_metadata: 16,
+            ..Limits::CLI
+        },
+        Limits {
+            max_blob: 4,
+            ..Limits::CLI
+        },
+        Limits {
+            max_blob_total: 4,
+            ..Limits::CLI
+        },
+        Limits {
+            max_blobs: 0,
+            ..Limits::CLI
+        },
+        Limits {
+            max_compressed: 8,
+            ..Limits::CLI
+        },
+        Limits {
+            max_expanded: 64,
+            ..Limits::CLI
+        },
+    ];
+    for profile in budget {
+        let error = import_with(&dest, &dest_store, &path, profile, &|tx| {
+            cli_grant(tx, "owner")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, LificError::PayloadTooLarge(_)),
+            "{profile:?} should be a resource answer, got {error}"
+        );
+        let error = export_with(
+            &pool,
+            &store,
+            "LIF",
+            &dir.path().join("budget.tar.gz"),
+            profile,
+            &|_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, LificError::PayloadTooLarge(_)),
+            "{profile:?} on export should be a resource answer, got {error}"
+        );
+    }
+
+    // Malformed input keeps its 400 whatever the profile is.
+    let broken = dir.path().join("broken.tar.gz");
+    std::fs::write(&broken, b"not a gzip stream").unwrap();
+    assert!(matches!(
+        import_with(&dest, &dest_store, &broken, Limits::WEB, &|tx| cli_grant(
+            tx, "owner"
+        ))
+        .unwrap_err(),
+        LificError::BadRequest(_)
+    ));
+
+    let mut m = {
+        let c = pool.read().unwrap();
+        collect_manifest(&c, "LIF").unwrap()
+    };
+    m.format_version = 999;
+    assert!(matches!(
+        validate_manifest(&m).unwrap_err(),
+        LificError::BadRequest(_)
+    ));
+}
+
+/// The parser cannot carry a typed error, so it raises a marker instead. A
+/// hostile archive must not be able to pick its own status code by writing an
+/// error-shaped string into its data.
+#[test]
+fn project_archive_parser_budget_trips_are_typed_by_marker_not_by_message() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+    let (dest, _dest_dir, dest_store) = fixture();
+
+    // Only the deserializer can reject this: the row cap is reached while the
+    // manifest is being parsed, long before validate_manifest runs.
+    let error = import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_rows: 1,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, LificError::PayloadTooLarge(_)), "{error}");
+
+    // A project whose text says "too many rows" is still ordinary data, and a
+    // structural fault in the same archive is still a 400.
+    {
+        let c = pool.write().unwrap();
+        c.execute(
+            "UPDATE issues SET title='too many rows: too many list entries' WHERE id=30",
+            [],
+        )
+        .unwrap();
+    }
+    let claims = dir.path().join("claims.tar.gz");
+    export(&pool, &store, "LIF", &claims).unwrap();
+    let (second, _second_dir, second_store) = fixture();
+    import_with(&second, &second_store, &claims, Limits::CLI, &|tx| {
+        cli_grant(tx, "owner")
+    })
+    .unwrap();
+
+    let mut m = {
+        let c = pool.read().unwrap();
+        collect_manifest(&c, "LIF").unwrap()
+    };
+    m.tables[0].rows[0].push("extra".into());
+    assert!(matches!(
+        validate_manifest(&m).unwrap_err(),
+        LificError::BadRequest(_)
+    ));
+}
+
+/// The expansion budget is a ceiling, not a strict bound: an archive whose
+/// decompressed size is exactly the limit is legal. One byte more is a
+/// resource answer, never a "this file is broken" answer.
+#[test]
+fn project_archive_accepts_an_archive_whose_expansion_is_exactly_the_limit() {
+    let (pool, dir, store) = fixture();
+    seed(&pool, &store);
+    let path = dir.path().join("archive.tar.gz");
+    export(&pool, &store, "LIF", &path).unwrap();
+
+    // The real decompressed length of this archive, measured rather than
+    // assumed, so the boundary under test is the actual one.
+    let exact = {
+        let mut bytes = Vec::new();
+        flate2::bufread::GzDecoder::new(BufReader::new(File::open(&path).unwrap()))
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes.len() as u64
+    };
+    assert!(exact > 0);
+
+    let (dest, _dest_dir, dest_store) = fixture();
+    import_with(
+        &dest,
+        &dest_store,
+        &path,
+        Limits {
+            max_expanded: exact,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .expect("an archive that fits exactly is accepted");
+
+    let (tight, _tight_dir, tight_store) = fixture();
+    let error = import_with(
+        &tight,
+        &tight_store,
+        &path,
+        Limits {
+            max_expanded: exact - 1,
+            ..Limits::CLI
+        },
+        &|tx| cli_grant(tx, "owner"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, LificError::PayloadTooLarge(_)),
+        "one byte over the budget is a resource answer, got {error}"
+    );
+    let conn = tight.read().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }

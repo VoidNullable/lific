@@ -14,12 +14,101 @@ use crate::error::LificError;
 use crate::storage::{AttachmentStore, valid_sha256};
 
 const VERSION: u32 = 1;
-const MAX_METADATA: u64 = 64 * 1024 * 1024;
-const MAX_BLOB: u64 = 256 * 1024 * 1024;
-const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_BLOBS: usize = 10_000;
-const MAX_ROWS: usize = 200_000;
-const MAX_EXPANDED: u64 = MAX_TOTAL + MAX_METADATA + 16 * 1024 * 1024;
+
+/// One resource profile for a whole export or import.
+///
+/// Every ceiling in this module reads from the profile that is active on the
+/// current thread, so the local operator keeps the generous CLI budget while
+/// an HTTP caller gets a much smaller one. The limits are enforced while the
+/// work happens (row by row, entry by entry, byte by byte), never as a
+/// post-hoc size check on something already built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Manifest JSON bytes, in either direction.
+    pub max_metadata: u64,
+    /// One attachment blob.
+    pub max_blob: u64,
+    /// Every attachment blob added together.
+    pub max_blob_total: u64,
+    /// The gzip archive file itself.
+    pub max_compressed: u64,
+    /// Everything the gzip stream is allowed to decompress to.
+    pub max_expanded: u64,
+    /// Distinct blobs.
+    pub max_blobs: usize,
+    /// Rows across every table, and the cap on generated report messages.
+    pub max_rows: usize,
+}
+
+impl Limits {
+    /// The local operator's profile: they already hold the database file.
+    pub const CLI: Self = Self {
+        max_metadata: 64 * 1024 * 1024,
+        max_blob: 256 * 1024 * 1024,
+        max_blob_total: 2 * 1024 * 1024 * 1024,
+        max_compressed: 2 * 1024 * 1024 * 1024,
+        max_expanded: 2 * 1024 * 1024 * 1024 + 64 * 1024 * 1024 + 16 * 1024 * 1024,
+        max_blobs: 10_000,
+        max_rows: 200_000,
+    };
+
+    /// The HTTP profile. A browser upload runs on shared server resources, so
+    /// it gets budgets an instance can absorb rather than the operator's.
+    /// These exact numbers are the contract `GET /api/project-archives`
+    /// publishes; changing one changes that response.
+    pub const WEB: Self = Self {
+        max_metadata: 16 * 1024 * 1024,
+        max_blob: 64 * 1024 * 1024,
+        // Metadata plus blobs plus tar framing has to stay under
+        // `max_expanded`, or this profile could build an archive it would
+        // then refuse to read back.
+        max_blob_total: 192 * 1024 * 1024,
+        max_compressed: 128 * 1024 * 1024,
+        max_expanded: 256 * 1024 * 1024,
+        max_blobs: 2_000,
+        max_rows: 50_000,
+    };
+}
+
+thread_local! {
+    /// The profile in force for the current export/import. Both entry points
+    /// run their whole body synchronously on one thread (the CLI's own, or a
+    /// `spawn_blocking` worker), so a thread-local is the narrowest way to
+    /// reach the serde deserializers, which have no place to take an
+    /// argument.
+    static ACTIVE_LIMITS: std::cell::Cell<Limits> = const { std::cell::Cell::new(Limits::CLI) };
+}
+
+fn limits() -> Limits {
+    ACTIVE_LIMITS.with(std::cell::Cell::get)
+}
+
+/// Installs `limits` for as long as it is held, then restores the previous
+/// profile. Restoring matters because the CLI default has to survive a web
+/// import that ran earlier on the same pooled blocking thread.
+struct ActiveLimits(Limits);
+
+impl ActiveLimits {
+    fn enter(new: Limits) -> Self {
+        Self(ACTIVE_LIMITS.with(|cell| cell.replace(new)))
+    }
+}
+
+impl Drop for ActiveLimits {
+    fn drop(&mut self) {
+        ACTIVE_LIMITS.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Render a byte ceiling the way the error messages have always spelled it.
+fn size_label(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GIB && bytes.is_multiple_of(GIB) {
+        format!("{} GiB", bytes / GIB)
+    } else {
+        format!("{} MiB", bytes / (1024 * 1024))
+    }
+}
 
 type Result<T> = std::result::Result<T, LificError>;
 type Row = Vec<Value>;
@@ -30,6 +119,58 @@ fn invalid(message: impl Into<String>) -> LificError {
 }
 fn io(error: std::io::Error) -> LificError {
     LificError::Internal(format!("project archive I/O: {error}"))
+}
+/// A deliberate resource ceiling, not a malformed archive. 413, so a client
+/// can tell "too big for this instance" from "this file is broken".
+fn too_large(message: impl Into<String>) -> LificError {
+    LificError::PayloadTooLarge(format!("project archive: {}", message.into()))
+}
+
+thread_local! {
+    /// Set whenever a ceiling is hit somewhere that can only report an opaque
+    /// error: a serde visitor, or a `Write` impl. Read back by the caller to
+    /// classify the failure from our own flag rather than from error text the
+    /// archive author influences.
+    static BUDGET_TRIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn arm_budget_marker() {
+    BUDGET_TRIPPED.with(|tripped| tripped.set(false));
+}
+fn budget_marker_tripped() -> bool {
+    BUDGET_TRIPPED.with(std::cell::Cell::get)
+}
+/// Raise a deserializer error that the marker identifies as a budget trip.
+fn budget<E: serde::de::Error>(message: &'static str) -> E {
+    BUDGET_TRIPPED.with(|tripped| tripped.set(true));
+    E::custom(message)
+}
+fn metadata_too_large() -> LificError {
+    too_large(format!(
+        "metadata exceeds {}",
+        size_label(limits().max_metadata)
+    ))
+}
+fn blob_too_large() -> LificError {
+    too_large(format!("blob exceeds {}", size_label(limits().max_blob)))
+}
+/// Unreadable archive bytes are the caller's problem, not a server fault. A
+/// stream cut short by our own expansion budget is a resource answer, and the
+/// marker is what tells the two apart.
+fn malformed(error: std::io::Error) -> LificError {
+    if budget_marker_tripped() {
+        return too_large(format!(
+            "archive contents exceed {}",
+            size_label(limits().max_expanded)
+        ));
+    }
+    invalid(format!("unreadable archive: {error}"))
+}
+fn compressed_too_large() -> LificError {
+    too_large(format!(
+        "compressed archive exceeds {}",
+        size_label(limits().max_compressed)
+    ))
 }
 
 struct Spec {
@@ -234,8 +375,8 @@ fn parse_rows<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec
         fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> std::result::Result<Vec<Row>, A::Error> {
             let mut rows = Vec::new();
             while let Some(ParsedRow(row)) = a.next_element()? {
-                if rows.len() == MAX_ROWS {
-                    return Err(A::Error::custom("too many rows"));
+                if rows.len() == limits().max_rows {
+                    return Err(budget("too many rows"));
                 }
                 rows.push(row);
             }
@@ -266,7 +407,7 @@ struct Manifest {
 fn parse_tables<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Vec<Table>, D::Error> {
-    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::de::{SeqAccess, Visitor};
     struct V;
     impl<'de> Visitor<'de> for V {
         type Value = Vec<Table>;
@@ -281,8 +422,8 @@ fn parse_tables<'de, D: serde::Deserializer<'de>>(
             let mut rows = 0usize;
             while let Some(table) = a.next_element::<Table>()? {
                 rows += table.rows.len();
-                if tables.len() == SPECS.len() || rows > MAX_ROWS {
-                    return Err(A::Error::custom("too many tables or rows"));
+                if tables.len() == SPECS.len() || rows > limits().max_rows {
+                    return Err(budget("too many tables or rows"));
                 }
                 tables.push(table);
             }
@@ -292,12 +433,13 @@ fn parse_tables<'de, D: serde::Deserializer<'de>>(
     d.deserialize_seq(V)
 }
 
-fn bounded_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
+fn bounded_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
+    max: usize,
 ) -> std::result::Result<Vec<T>, D::Error> {
-    use serde::de::{Error, SeqAccess, Visitor};
-    struct V<T, const N: usize>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>, const N: usize> Visitor<'de> for V<T, N> {
+    use serde::de::{SeqAccess, Visitor};
+    struct V<T>(usize, std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for V<T> {
         type Value = Vec<T>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("a bounded list")
@@ -308,24 +450,24 @@ fn bounded_list<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>, const N: 
         ) -> std::result::Result<Self::Value, A::Error> {
             let mut values = Vec::new();
             while let Some(value) = a.next_element()? {
-                if values.len() == N {
-                    return Err(A::Error::custom("too many list entries"));
+                if values.len() == self.0 {
+                    return Err(budget("too many list entries"));
                 }
                 values.push(value);
             }
             Ok(values)
         }
     }
-    d.deserialize_seq(V::<T, N>(std::marker::PhantomData))
+    d.deserialize_seq(V::<T>(max, std::marker::PhantomData))
 }
 
 fn parse_blobs<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<Blob>, D::Error> {
-    bounded_list::<D, Blob, MAX_BLOBS>(d)
+    bounded_list::<D, Blob>(d, limits().max_blobs)
 }
 fn parse_references<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Vec<String>, D::Error> {
-    bounded_list::<D, String, MAX_ROWS>(d)
+    bounded_list::<D, String>(d, limits().max_rows)
 }
 impl Manifest {
     fn rows(&self, name: &str) -> &[Row] {
@@ -385,7 +527,7 @@ fn read_table(
         "SELECT {columns} FROM {} WHERE ({}) ORDER BY rowid LIMIT {}",
         s.name,
         s.scope,
-        MAX_ROWS + 1
+        limits().max_rows + 1
     );
     let mut stmt = conn.prepare(&sql)?;
     let count = s.cols().len();
@@ -403,8 +545,8 @@ fn read_table(
                     .into(),
                 ValueRef::Text(v) => {
                     *bytes += v.len() as u64;
-                    if *bytes > MAX_METADATA {
-                        return Err(invalid("metadata exceeds 64 MiB"));
+                    if *bytes > limits().max_metadata {
+                        return Err(metadata_too_large());
                     }
                     std::str::from_utf8(v)
                         .map_err(|_| invalid("invalid UTF-8 in database"))?
@@ -416,7 +558,7 @@ fn read_table(
         rows.push(values);
         *remaining_rows = remaining_rows
             .checked_sub(1)
-            .ok_or_else(|| invalid("too many rows"))?;
+            .ok_or_else(|| too_large("too many rows"))?;
     }
     Ok(Table {
         name: s.name.into(),
@@ -529,15 +671,30 @@ fn detach_external(m: &mut Manifest) -> Result<()> {
     Ok(())
 }
 
+fn resolve_project(conn: &Connection, identifier: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT id FROM projects WHERE identifier = ?1",
+        [identifier],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| invalid("project not found"))
+}
+
+#[cfg(test)]
 fn collect_manifest(conn: &Connection, project: &str) -> Result<Manifest> {
-    let id: i64 = conn
-        .query_row(
-            "SELECT id FROM projects WHERE identifier = ?1",
-            [project],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| invalid("project not found"))?;
+    collect_manifest_by_id(conn, resolve_project(conn, project)?)
+}
+
+/// Collect by row ID, never by identifier. An identifier is a mutable label:
+/// resolving it a second time can land on a different project than the one
+/// the caller was authorized for.
+fn collect_manifest_by_id(conn: &Connection, id: i64) -> Result<Manifest> {
+    conn.query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |r| {
+        r.get::<_, i64>(0)
+    })
+    .optional()?
+    .ok_or_else(|| invalid("project not found"))?;
     let mut m = Manifest {
         format_version: VERSION,
         exported_at: chrono::Utc::now().to_rfc3339(),
@@ -546,7 +703,7 @@ fn collect_manifest(conn: &Connection, project: &str) -> Result<Manifest> {
         external_references: Vec::new(),
     };
     let mut bytes = 0;
-    let mut remaining_rows = MAX_ROWS;
+    let mut remaining_rows = limits().max_rows;
     for s in SPECS {
         m.tables
             .push(read_table(conn, s, id, &mut bytes, &mut remaining_rows)?);
@@ -594,8 +751,9 @@ fn encode_manifest(m: &Manifest) -> Result<Vec<u8>> {
     struct Bounded(Vec<u8>);
     impl Write for Bounded {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.0.len() as u64 + bytes.len() as u64 > MAX_METADATA {
-                return Err(std::io::Error::other("metadata exceeds 64 MiB"));
+            if self.0.len() as u64 + bytes.len() as u64 > limits().max_metadata {
+                BUDGET_TRIPPED.with(|tripped| tripped.set(true));
+                return Err(std::io::Error::other("metadata budget exhausted"));
             }
             self.0.extend_from_slice(bytes);
             Ok(bytes.len())
@@ -605,7 +763,14 @@ fn encode_manifest(m: &Manifest) -> Result<Vec<u8>> {
         }
     }
     let mut out = Bounded(Vec::new());
-    serde_json::to_writer(&mut out, m).map_err(|e| invalid(e.to_string()))?;
+    arm_budget_marker();
+    serde_json::to_writer(&mut out, m).map_err(|e| {
+        if budget_marker_tripped() {
+            metadata_too_large()
+        } else {
+            invalid(e.to_string())
+        }
+    })?;
     Ok(out.0)
 }
 
@@ -650,8 +815,8 @@ fn check_store(store: &AttachmentStore) -> Result<()> {
 }
 
 fn verified_blob(path: &Path, size: u64, hash: &str) -> Result<Vec<u8>> {
-    if size > MAX_BLOB {
-        return Err(invalid("blob exceeds 256 MiB"));
+    if size > limits().max_blob {
+        return Err(blob_too_large());
     }
     let file = regular(path)?;
     if file.metadata().map_err(io)?.len() != size {
@@ -682,34 +847,184 @@ fn report(m: &Manifest) -> Result<Report> {
     })
 }
 
+/// A writer that refuses to grow past `max`, so a ceiling is hit while the
+/// archive is being produced rather than measured afterwards on a file that
+/// already occupies the disk. `overflowed` carries the reason out past the
+/// `io::Error` the `Write` trait forces us to return.
+struct BoundedWriter<W: Write> {
+    inner: W,
+    written: u64,
+    max: u64,
+    overflowed: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl<W: Write> BoundedWriter<W> {
+    fn new(inner: W, max: u64, overflowed: &std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max,
+            overflowed: std::rc::Rc::clone(overflowed),
+        }
+    }
+}
+
+/// [`BoundedWriter`] on the read side. Without it an over-budget stream is
+/// indistinguishable from a truncated archive, and a resource refusal would
+/// be reported as a broken file.
+struct BoundedReader<R: Read> {
+    inner: R,
+    read: u64,
+    max: u64,
+}
+
+impl<R: Read> BoundedReader<R> {
+    fn new(inner: R, max: u64) -> Self {
+        Self {
+            inner,
+            read: 0,
+            max,
+        }
+    }
+    fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.read = self.read.saturating_add(read as u64);
+        if self.read > self.max {
+            BUDGET_TRIPPED.with(|tripped| tripped.set(true));
+            return Err(std::io::Error::other("expansion budget exhausted"));
+        }
+        Ok(read)
+    }
+}
+
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let total = self.written.saturating_add(bytes.len() as u64);
+        if total > self.max {
+            self.overflowed.set(true);
+            return Err(std::io::Error::other("project archive exceeds its limit"));
+        }
+        let written = self.inner.write(bytes)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 pub fn export(pool: &DbPool, store: &AttachmentStore, project: &str, out: &Path) -> Result<Report> {
+    export_with(pool, store, project, out, Limits::CLI, &|_| Ok(()))
+}
+
+/// Export the project named by `project`, resolving the identifier inside the
+/// snapshot. For the local operator, who owns the database anyway.
+pub fn export_with(
+    pool: &DbPool,
+    store: &AttachmentStore,
+    project: &str,
+    out: &Path,
+    profile: Limits,
+    authorize: &dyn Fn(&Connection) -> Result<()>,
+) -> Result<Report> {
+    export_inner(
+        pool,
+        store,
+        out,
+        profile,
+        &|conn| resolve_project(conn, project),
+        authorize,
+    )
+}
+
+/// Export the project with this row ID. The ID is immutable, so a rename or a
+/// reassignment of the identifier between the caller's authorization check and
+/// this snapshot cannot redirect the export at a different project.
+pub fn export_by_id_with(
+    pool: &DbPool,
+    store: &AttachmentStore,
+    project_id: i64,
+    out: &Path,
+    profile: Limits,
+    authorize: &dyn Fn(&Connection) -> Result<()>,
+) -> Result<Report> {
+    export_inner(pool, store, out, profile, &|_| Ok(project_id), authorize)
+}
+
+/// `resolve` and `authorize` both run as the first statements of the read
+/// transaction that becomes the snapshot, before any project content, comment
+/// body or audit row is read, and the ID they agree on is the only thing the
+/// collection below uses.
+fn export_inner(
+    pool: &DbPool,
+    store: &AttachmentStore,
+    out: &Path,
+    profile: Limits,
+    resolve: &dyn Fn(&Connection) -> Result<i64>,
+    authorize: &dyn Fn(&Connection) -> Result<()>,
+) -> Result<Report> {
+    let _limits = ActiveLimits::enter(profile);
     check_store(store)?;
     store.with_lock(|store| {
         check_store(store)?;
         let conn = pool.read()?;
         let tx = conn.unchecked_transaction()?;
-        let m = collect_manifest(&tx, project)?;
+        let project_id = resolve(&tx)?;
+        authorize(&tx)?;
+        let m = collect_manifest_by_id(&tx, project_id)?;
         let metadata = encode_manifest(&m)?;
         let parent = out
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
-        {
-            let gzip =
-                flate2::write::GzEncoder::new(staged.as_file_mut(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(gzip);
-            append(&mut tar, "manifest.json", &metadata)?;
-            for blob in &m.blobs {
-                let bytes = verified_blob(&store.path_for(&blob.sha256)?, blob.size, &blob.sha256)?;
-                append(&mut tar, &format!("blobs/{}", blob.sha256), &bytes)?;
-            }
-            tar.into_inner().map_err(io)?.finish().map_err(io)?;
+        let compressed_over = std::rc::Rc::new(std::cell::Cell::new(false));
+        let expanded_over = std::rc::Rc::new(std::cell::Cell::new(false));
+        let written = {
+            let file = BoundedWriter::new(
+                staged.as_file_mut(),
+                limits().max_compressed,
+                &compressed_over,
+            );
+            let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(BoundedWriter::new(
+                gzip,
+                limits().max_expanded,
+                &expanded_over,
+            ));
+            (|| {
+                append(&mut tar, "manifest.json", &metadata)?;
+                for blob in &m.blobs {
+                    let bytes =
+                        verified_blob(&store.path_for(&blob.sha256)?, blob.size, &blob.sha256)?;
+                    append(&mut tar, &format!("blobs/{}", blob.sha256), &bytes)?;
+                }
+                tar.into_inner()
+                    .map_err(io)?
+                    .inner
+                    .finish()
+                    .map_err(io)?
+                    .flush()
+                    .map_err(io)
+            })()
+        };
+        if compressed_over.get() {
+            return Err(compressed_too_large());
         }
+        if expanded_over.get() {
+            return Err(too_large(format!(
+                "archive contents exceed {}",
+                size_label(limits().max_expanded)
+            )));
+        }
+        written?;
         staged.as_file().sync_all().map_err(io)?;
-        if staged.as_file().metadata().map_err(io)?.len() > MAX_TOTAL {
-            return Err(invalid("compressed archive exceeds 2 GiB"));
-        }
         tx.commit()?;
         staged.persist_noclobber(out).map_err(|e| io(e.error))?;
         sync_directory(parent)?;
@@ -728,8 +1043,8 @@ fn sync_directory(_path: &Path) -> Result<()> {
 }
 
 fn validate_manifest(m: &Manifest) -> Result<()> {
-    if m.external_references.len() > MAX_ROWS {
-        return Err(invalid("too many external references"));
+    if m.external_references.len() > limits().max_rows {
+        return Err(too_large("too many external references"));
     }
     if m.format_version != VERSION {
         return Err(invalid("unsupported format version"));
@@ -745,8 +1060,8 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
             return Err(invalid("duplicate table"));
         }
         total_rows += t.rows.len();
-        if total_rows > MAX_ROWS {
-            return Err(invalid("too many rows"));
+        if total_rows > limits().max_rows {
+            return Err(too_large("too many rows"));
         }
         for row in &t.rows {
             if row.len() != s.cols().len() {
@@ -894,21 +1209,24 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
             }
         }
     }
-    if m.blobs.len() > MAX_BLOBS {
-        return Err(invalid("too many blobs"));
+    if m.blobs.len() > limits().max_blobs {
+        return Err(too_large("too many blobs"));
     }
     let mut hashes = BTreeMap::new();
     let mut total = 0u64;
     for b in &m.blobs {
-        if !valid_sha256(&b.sha256)
-            || b.size > MAX_BLOB
-            || hashes.insert(b.sha256.as_str(), b.size).is_some()
-        {
+        if !valid_sha256(&b.sha256) || hashes.insert(b.sha256.as_str(), b.size).is_some() {
             return Err(invalid("invalid or duplicate blob descriptor"));
         }
+        if b.size > limits().max_blob {
+            return Err(blob_too_large());
+        }
         total += b.size;
-        if total > MAX_TOTAL {
-            return Err(invalid("blobs exceed 2 GiB"));
+        if total > limits().max_blob_total {
+            return Err(too_large(format!(
+                "blobs exceed {}",
+                size_label(limits().max_blob_total)
+            )));
         }
     }
     let s = spec("attachments")?;
@@ -939,17 +1257,19 @@ struct Staged {
     dir: tempfile::TempDir,
 }
 fn stage(path: &Path) -> Result<Staged> {
+    arm_budget_marker();
     let file = regular(path)?;
-    if file.metadata().map_err(io)?.len() > MAX_TOTAL {
-        return Err(invalid("compressed archive exceeds 2 GiB"));
+    if file.metadata().map_err(io)?.len() > limits().max_compressed {
+        return Err(compressed_too_large());
     }
-    let gzip = flate2::bufread::GzDecoder::new(BufReader::new(file.take(MAX_TOTAL + 1)));
-    let mut tar = tar::Archive::new(gzip.take(MAX_EXPANDED + 1));
+    let gzip =
+        flate2::bufread::GzDecoder::new(BufReader::new(file.take(limits().max_compressed + 1)));
+    let mut tar = tar::Archive::new(BoundedReader::new(gzip, limits().max_expanded));
     let dir = tempfile::tempdir().map_err(io)?;
     let mut manifest = None;
     let mut seen = BTreeSet::new();
-    for entry in tar.entries().map_err(io)?.raw(true) {
-        let mut entry = entry.map_err(io)?;
+    for entry in tar.entries().map_err(malformed)?.raw(true) {
+        let mut entry = entry.map_err(malformed)?;
         if !entry.header().entry_type().is_file() {
             return Err(invalid("only regular file entries are accepted"));
         }
@@ -959,27 +1279,33 @@ fn stage(path: &Path) -> Result<Staged> {
         if !seen.insert(name.clone()) {
             return Err(invalid("duplicate archive entry"));
         }
-        if seen.len() > MAX_BLOBS + 1 {
-            return Err(invalid("too many archive entries"));
+        if seen.len() > limits().max_blobs + 1 {
+            return Err(too_large("too many archive entries"));
         }
         if name == "manifest.json" {
             if manifest.is_some() || seen.len() != 1 {
                 return Err(invalid("manifest must be the first entry"));
             }
-            if entry.size() > MAX_METADATA {
-                return Err(invalid("metadata exceeds 64 MiB"));
+            if entry.size() > limits().max_metadata {
+                return Err(metadata_too_large());
             }
             let mut bytes = Vec::new();
             entry
                 .by_ref()
-                .take(MAX_METADATA + 1)
+                .take(limits().max_metadata + 1)
                 .read_to_end(&mut bytes)
-                .map_err(io)?;
-            if bytes.len() as u64 > MAX_METADATA {
-                return Err(invalid("metadata exceeds 64 MiB"));
+                .map_err(malformed)?;
+            if bytes.len() as u64 > limits().max_metadata {
+                return Err(metadata_too_large());
             }
-            let m: Manifest = serde_json::from_slice(&bytes)
-                .map_err(|e| invalid(format!("invalid manifest: {e}")))?;
+            arm_budget_marker();
+            let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+                if budget_marker_tripped() {
+                    too_large("manifest exceeds a resource limit")
+                } else {
+                    invalid(format!("invalid manifest: {e}"))
+                }
+            })?;
             validate_manifest(&m)?;
             manifest = Some(m);
         } else {
@@ -1007,7 +1333,7 @@ fn stage(path: &Path) -> Result<Staged> {
             let mut count = 0u64;
             let mut buf = [0u8; 64 * 1024];
             loop {
-                let n = entry.read(&mut buf).map_err(io)?;
+                let n = entry.read(&mut buf).map_err(malformed)?;
                 if n == 0 {
                     break;
                 }
@@ -1030,13 +1356,13 @@ fn stage(path: &Path) -> Result<Staged> {
     rest.by_ref()
         .take(1025)
         .read_to_end(&mut tail)
-        .map_err(io)?;
-    if tail.len() > 1024 || tail.iter().any(|b| *b != 0) || rest.limit() == 0 {
+        .map_err(malformed)?;
+    if tail.len() > 1024 || tail.iter().any(|b| *b != 0) {
         return Err(invalid("unexpected trailing archive data"));
     }
     let mut compressed = rest.into_inner().into_inner();
     let mut byte = [0];
-    if compressed.read(&mut byte).map_err(io)? != 0 {
+    if compressed.read(&mut byte).map_err(malformed)? != 0 {
         return Err(invalid("trailing compressed data or multiple gzip members"));
     }
     let m = manifest.ok_or_else(|| invalid("missing manifest"))?;
@@ -1076,9 +1402,9 @@ impl RewriteState {
             references: BTreeSet::new(),
             reference_bytes: 0,
             output_bytes: 0,
-            max_references: MAX_ROWS,
-            max_reference_bytes: MAX_METADATA as usize,
-            max_output_bytes: MAX_METADATA as usize,
+            max_references: limits().max_rows,
+            max_reference_bytes: limits().max_metadata as usize,
+            max_output_bytes: limits().max_metadata as usize,
         };
         for reference in references {
             state.record(&[reference])?;
@@ -1090,9 +1416,9 @@ impl RewriteState {
         let size = parts
             .iter()
             .try_fold(0usize, |n, part| n.checked_add(part.len()))
-            .ok_or_else(|| invalid("external reference size overflow"))?;
+            .ok_or_else(|| too_large("external reference size overflow"))?;
         if size > self.max_reference_bytes {
-            return Err(invalid("external reference byte limit exceeded"));
+            return Err(too_large("external reference byte limit exceeded"));
         }
         // This temporary is bounded even for a single malformed, enormous ID.
         // Duplicates remain legal after the count/total-byte budget is full.
@@ -1101,14 +1427,14 @@ impl RewriteState {
             return Ok(());
         }
         if self.references.len() >= self.max_references {
-            return Err(invalid("too many external references"));
+            return Err(too_large("too many external references"));
         }
         if size
             > self
                 .max_reference_bytes
                 .saturating_sub(self.reference_bytes)
         {
-            return Err(invalid("external reference byte limit exceeded"));
+            return Err(too_large("external reference byte limit exceeded"));
         }
         self.reference_bytes += size;
         self.references.insert(message);
@@ -1117,7 +1443,7 @@ impl RewriteState {
 
     fn append(&mut self, output: &mut String, part: &str) -> Result<()> {
         if part.len() > self.max_output_bytes.saturating_sub(self.output_bytes) {
-            return Err(invalid("rewritten content byte limit exceeded"));
+            return Err(too_large("rewritten content byte limit exceeded"));
         }
         self.output_bytes += part.len();
         output.push_str(part);
@@ -1295,22 +1621,97 @@ fn rebuild_derived(conn: &Connection, project: i64, maps: &IdMaps) -> Result<()>
     Ok(())
 }
 
+/// Who the destination project is handed to, and how that grant is audited.
+///
+/// The importer is resolved inside the writer transaction, so the answer is
+/// the database's answer at the moment of the write, not one read earlier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grant {
+    /// The destination human admin who becomes the project's lead.
+    pub user_id: i64,
+    /// The transport recorded on the audit row for the lead grant.
+    pub transport: crate::actor::Transport,
+    /// The actor the audit row attributes the grant to. `None` for the local
+    /// CLI, which has no authenticated user; `Some` for a browser session.
+    pub actor_user_id: Option<i64>,
+}
+
+/// Resolve `--user` the way the CLI always has: an active human admin named
+/// on the destination, with no authenticated actor behind the grant.
+pub fn cli_grant(conn: &Connection, user: &str) -> Result<Grant> {
+    let user_id: i64 = conn
+        .query_row(
+            "SELECT id FROM users WHERE username = ?1 COLLATE NOCASE
+             AND is_admin = 1 AND is_active = 1 AND is_bot = 0",
+            [user],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| invalid("--user must name an active destination human admin"))?;
+    Ok(Grant {
+        user_id,
+        transport: crate::actor::Transport::Cli,
+        actor_user_id: None,
+    })
+}
+
+/// Everything an import produced, for callers that need more than the CLI's
+/// report. The report itself keeps its published shape.
+#[derive(Debug)]
+pub struct ImportOutcome {
+    /// The CLI's JSON report, unchanged.
+    pub report: Report,
+    /// The destination project ID, read out of the committed transaction
+    /// rather than looked up by identifier afterwards, where another writer
+    /// could already have replaced it.
+    pub project_id: i64,
+    /// Imported row counts per archive table.
+    pub rows_by_table: BTreeMap<&'static str, usize>,
+    /// How many distinct external references were generated in total, which
+    /// can exceed the number a caller chooses to display.
+    pub external_reference_count: usize,
+}
+
 pub fn import(
     pool: &DbPool,
     store: &AttachmentStore,
     archive: &Path,
     user: &str,
 ) -> Result<Report> {
+    import_with(pool, store, archive, Limits::CLI, &|tx| cli_grant(tx, user))
+        .map(|outcome| outcome.report)
+}
+
+/// Import `archive` under `limits`, handing the new project to whoever
+/// `authorize` names.
+///
+/// `authorize` runs as the first statement of the immediate writer
+/// transaction. SQLite serializes writers, so a permission revoked
+/// concurrently is either already visible here (and the import fails) or
+/// lands after the commit (and revokes what was just granted). There is no
+/// interleaving that writes on the strength of a permission that is gone.
+pub fn import_with(
+    pool: &DbPool,
+    store: &AttachmentStore,
+    archive: &Path,
+    profile: Limits,
+    authorize: &dyn Fn(&Connection) -> Result<Grant>,
+) -> Result<ImportOutcome> {
+    let _limits = ActiveLimits::enter(profile);
     let staged = stage(archive)?;
     check_store(store)?;
     store.with_lock(|store| {
         check_store(store)?;
         let mut conn = pool.write()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let admin: i64 = tx.query_row("SELECT id FROM users WHERE username = ?1 COLLATE NOCASE AND is_admin = 1 AND is_active = 1 AND is_bot = 0", [user], |r| r.get(0))
-            .optional()?.ok_or_else(|| invalid("--user must name an active destination human admin"))?;
+        let grant = authorize(&tx)?;
+        let admin = grant.user_id;
         let m = &staged.manifest;
         let mut result = report(m)?;
+        let rows_by_table: BTreeMap<&'static str, usize> = SPECS
+            .iter()
+            .map(|s| Ok((s.name, m.rows(s.name).len())))
+            .collect::<Result<_>>()?;
         let collision: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE identifier = ?1 COLLATE NOCASE)", [&result.project], |r| r.get(0))?;
         if collision { return Err(invalid("project identifier already exists; import never merges or overwrites")); }
         let maps = allocate_maps(&tx, m)?;
@@ -1347,7 +1748,7 @@ pub fn import(
             "SELECT user_id,transport FROM _actor_state WHERE id=1", [],
             |row| Ok((row.get(0)?,row.get(1)?)),
         )?;
-        tx.execute("UPDATE _actor_state SET user_id=NULL,transport='cli' WHERE id=1", [])?;
+        tx.execute("UPDATE _actor_state SET user_id=?1,transport=?2 WHERE id=1", params![grant.actor_user_id, grant.transport.as_str()])?;
         tx.execute("INSERT INTO project_members(project_id,user_id,role) VALUES (?1,?2,'lead')", params![project,admin])?;
         tx.execute("UPDATE _actor_state SET user_id=?1,transport=?2 WHERE id=1", params![prior_actor.0,prior_actor.1])?;
         let violations: i64 = tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
@@ -1380,7 +1781,13 @@ pub fn import(
             }
             return Err(e);
         }
-        Ok(result)
+        let external_reference_count = result.external_references.len();
+        Ok(ImportOutcome {
+            report: result,
+            project_id: project,
+            rows_by_table,
+            external_reference_count,
+        })
     })
 }
 

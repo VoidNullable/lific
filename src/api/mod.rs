@@ -14,6 +14,7 @@ mod issues;
 mod members;
 mod pages;
 mod plans;
+mod project_archives;
 mod project_groups;
 mod projects;
 // Mounted separately from the authenticated API by server::build_app.
@@ -186,6 +187,23 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route(
             "/api/export/projects/{identifier}",
             get(export::export_project),
+        )
+        // Whole-project archives (LIF-467). Browser-session-only, and the
+        // only REST surface that refuses API keys, operator keys and OAuth
+        // tokens outright — see src/api/project_archives.rs. The upload route
+        // raises the transport body limit for itself alone; the handler
+        // enforces the real ceiling by counting bytes as they arrive.
+        .route(
+            "/api/project-archives",
+            get(project_archives::archive_capabilities)
+                .post(project_archives::import_project_archive)
+                .layer(DefaultBodyLimit::max(
+                    project_archives::ARCHIVE_UPLOAD_BODY_LIMIT,
+                )),
+        )
+        .route(
+            "/api/project-archives/{identifier}",
+            get(project_archives::export_project_archive),
         )
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))

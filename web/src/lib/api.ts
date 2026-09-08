@@ -104,6 +104,92 @@ export async function download(path: string, filename?: string) {
   return { ok: true as const };
 }
 
+export interface ArchiveCapabilities {
+  can_import: boolean;
+  max_upload_bytes: number;
+  max_expanded_bytes: number;
+  max_metadata_bytes: number;
+  max_blob_bytes: number;
+  /** Combined blob bytes. Not derivable from the others. */
+  max_blob_total_bytes: number;
+  max_rows: number;
+  max_blobs: number;
+}
+
+export interface ArchiveImportResult {
+  project: { id: number; identifier: string; is_public: false };
+  report: {
+    project: string;
+    rows: Record<string, number>;
+    blobs: number;
+    external_references: string[];
+    external_reference_count: number;
+  };
+}
+
+export const getArchiveCapabilities = () => request<ArchiveCapabilities>("/project-archives");
+
+export async function downloadProjectArchive(identifier: string, signal: AbortSignal) {
+  try {
+    const token = localStorage.getItem("lific_token");
+    const response = await fetch(`${BASE}/project-archives/${encodeURIComponent(identifier)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}, signal, cache: "no-store",
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      return { ok: false as const, error: body.error || `HTTP ${response.status}` };
+    }
+    return { ok: true as const, blob: await response.blob(), filename: `${identifier}.lific.tar.gz` };
+  } catch {
+    return { ok: false as const, error: "The archive download stopped. Check your connection and download it again." };
+  }
+}
+
+export function saveArchiveDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url; anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click(); anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export const ARCHIVE_UNKNOWN = "The import may have completed. Check the project list before uploading this archive again.";
+
+// No retry or cancellation: a disconnected request can still commit.
+export function importProjectArchive(
+  file: File,
+  onProgress: (percent: number | null) => void,
+  onProcessing: () => void,
+): Promise<RequestResult<ArchiveImportResult>> {
+  const token = localStorage.getItem("lific_token");
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/project-archives`);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.onprogress = (event) => onProgress(event.lengthComputable
+      ? Math.min(100, Math.round(event.loaded / event.total * 100)) : null);
+    xhr.upload.onload = onProcessing;
+    const unknown = () => resolve({ ok: false, error: ARCHIVE_UNKNOWN, status: null });
+    xhr.onerror = unknown;
+    xhr.ontimeout = unknown;
+    xhr.onabort = unknown;
+    xhr.onload = () => {
+      try {
+        const body = JSON.parse(xhr.responseText);
+        if (xhr.status === 201 && body.project && body.report) {
+          resolve({ ok: true, data: body });
+        } else if (xhr.status >= 400 && xhr.status < 500 && typeof body.error === "string") {
+          resolve({ ok: false, error: body.error, status: xhr.status });
+        } else unknown();
+      } catch { unknown(); }
+    };
+    const form = new FormData();
+    form.append("archive", file, file.name);
+    try { xhr.send(form); } catch { unknown(); }
+  });
+}
+
 /** Public, unauthenticated instance metadata the auth screen reads before
  *  anyone has a session. Drives whether signup is open and whether this is a
  *  brand-new instance vs one you are joining. Never includes user data, and
@@ -210,7 +296,7 @@ export async function refreshSession(password?: string) {
 
 export async function logout() {
   const result = await request("/auth/logout", { method: "POST" });
-  localStorage.removeItem("lific_token");
+  clearSession();
   return result;
 }
 
@@ -264,17 +350,35 @@ export async function changePassword(input: { current_password: string; new_pass
 export async function revokeAllSessions() {
   const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
   if (result.ok) {
-    localStorage.removeItem("lific_token");
+    clearSession();
   }
   return result;
 }
 
+const sessionListeners = new Set<() => void>();
+
 export function saveSession(token: string) {
   localStorage.setItem("lific_token", token);
+  for (const listener of sessionListeners) listener();
 }
 
 export function clearSession() {
   localStorage.removeItem("lific_token");
+  for (const listener of sessionListeners) listener();
+}
+
+export function onSessionChange(listener: () => void) {
+  sessionListeners.add(listener);
+  const storage = (event: StorageEvent) => {
+    if (event.key === "lific_token" || event.key === null) listener();
+  };
+  window.addEventListener("lific:session-change", listener);
+  window.addEventListener("storage", storage);
+  return () => {
+    sessionListeners.delete(listener);
+    window.removeEventListener("lific:session-change", listener);
+    window.removeEventListener("storage", storage);
+  };
 }
 
 export function hasSession(): boolean {
