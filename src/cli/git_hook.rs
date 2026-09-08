@@ -140,10 +140,14 @@ pub fn run_sql(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+            crate::cli::term::json_string(&value)
+                .map_err(|error| { crate::error::LificError::Internal(error.to_string()) })?
         );
     } else {
-        print!("{}", human(&value));
+        print!(
+            "{}",
+            crate::cli::ui::sanitize_terminal_block(&human(&value))
+        );
     }
     Ok(())
 }
@@ -218,22 +222,20 @@ pub fn human(value: &Value) -> String {
 
     let mut out = String::new();
     for identifier in acted {
-        let identifier = identifier.as_str().unwrap_or("?");
+        let identifier = crate::cli::ui::sanitize_terminal_line(identifier.as_str().unwrap_or("?"));
         let verb = if dry_run { "would close" } else { "closed" };
         let _ = writeln!(out, "  {verb} {identifier}");
     }
     for skip in skipped {
-        let _ = writeln!(
-            out,
-            "  skipped {} ({})",
-            skip["identifier"].as_str().unwrap_or("?"),
-            skip["reason"].as_str().unwrap_or("?")
-        );
+        let identifier =
+            crate::cli::ui::sanitize_terminal_line(skip["identifier"].as_str().unwrap_or("?"));
+        let reason = crate::cli::ui::sanitize_terminal_line(skip["reason"].as_str().unwrap_or("?"));
+        let _ = writeln!(out, "  skipped {identifier} ({reason})");
     }
 
     if acted.is_empty() && skipped.is_empty() {
         out.push_str("No issue references found in these commit messages.\n");
-        return out;
+        return crate::cli::ui::sanitize_terminal_block(&out);
     }
 
     let _ = writeln!(
@@ -243,7 +245,7 @@ pub fn human(value: &Value) -> String {
         if dry_run { "to close" } else { "closed" },
         skipped.len()
     );
-    out
+    crate::cli::ui::sanitize_terminal_block(&out)
 }
 
 #[cfg(test)]
@@ -447,6 +449,35 @@ mod tests {
         let text = human(&document(true, vec!["LIF-1".into()], Vec::new()));
         assert!(text.contains("would close LIF-1"), "{text}");
         assert!(text.contains("1 to close, 0 skipped."), "{text}");
+    }
+
+    #[test]
+    fn hostile_git_hook_http_fields_are_inert_in_human_output() {
+        let hostile = "\x1b]52;c;cHdu\x07\x1b[2J\u{009b}\u{202e}\u{2066}\u{200b}\u{feff}\r\n\t\u{0008}\u{007f}";
+        for key in ["closed", "would_close"] {
+            let value = json!({
+                key: [format!("LIF-1{hostile}")],
+                "skipped": [{
+                    "identifier": format!("LIF-2{hostile}"),
+                    "reason": format!("denied{hostile}")
+                }]
+            });
+            let text = human(&value);
+            for control in [
+                '\x1b', '\x07', '\u{009b}', '\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\r',
+                '\t', '\u{0008}', '\u{007f}',
+            ] {
+                assert!(!text.contains(control), "unsafe output: {text:?}");
+            }
+            assert_eq!(
+                text.lines().count(),
+                4,
+                "fields must not add rows: {text:?}"
+            );
+            assert!(text.lines().nth(1).unwrap().contains("denied"));
+            let encoded = crate::cli::term::json_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), value);
+        }
     }
 
     // ── ranges, against a real repository ────────────────────

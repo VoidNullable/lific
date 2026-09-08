@@ -726,6 +726,7 @@ mod tests {
             id: 1,
             name: "project\x1b]8;;https://evil\x1b\\".into(),
             identifier: "TST".into(),
+            is_public: false,
             description: "description\u{009b}2J".into(),
             emoji: None,
             lead_user_id: None,

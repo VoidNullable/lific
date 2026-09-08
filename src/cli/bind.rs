@@ -218,10 +218,14 @@ pub fn run_sql(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+            crate::cli::term::json_string(&value)
+                .map_err(|error| { crate::error::LificError::Internal(error.to_string()) })?
         );
     } else {
-        print!("{}", human(&value));
+        print!(
+            "{}",
+            crate::cli::ui::sanitize_terminal_block(&human(&value))
+        );
     }
     Ok(())
 }
@@ -409,8 +413,8 @@ fn claim_aliases(
 
 fn alias_lines(out: &mut String, aliases: &[Value], annotate: bool) {
     for alias in aliases {
-        let kind = alias["kind"].as_str().unwrap_or("?");
-        let value = alias["value"].as_str().unwrap_or("?");
+        let kind = crate::cli::ui::sanitize_terminal_line(alias["kind"].as_str().unwrap_or("?"));
+        let value = crate::cli::ui::sanitize_terminal_line(alias["value"].as_str().unwrap_or("?"));
         let note = if !annotate {
             ""
         } else if alias["matched"].as_bool().unwrap_or(false) {
@@ -423,10 +427,18 @@ fn alias_lines(out: &mut String, aliases: &[Value], annotate: bool) {
 }
 
 fn named(project: &Value) -> String {
-    let identifier = project["identifier"].as_str().unwrap_or("?");
+    let identifier =
+        crate::cli::ui::sanitize_terminal_line(project["identifier"].as_str().unwrap_or("?"));
     match project["name"].as_str() {
-        Some(name) if name != identifier => format!("{identifier} ({name})"),
-        _ => identifier.to_owned(),
+        Some(name) => {
+            let name = crate::cli::ui::sanitize_terminal_line(name);
+            if name != identifier {
+                format!("{identifier} ({name})")
+            } else {
+                identifier
+            }
+        }
+        None => identifier,
     }
 }
 
@@ -478,7 +490,7 @@ pub fn human(value: &Value) -> String {
             let _ = writeln!(out, "Bind it with `lific bind PROJECT`.");
         }
     }
-    out
+    crate::cli::ui::sanitize_terminal_block(&out)
 }
 
 fn w(out: &mut String) {
@@ -754,6 +766,69 @@ mod tests {
         // conflict can only be settled by merging or deleting a binding.
         assert!(text.contains("/api/repos/merge"), "{text}");
         assert!(text.contains("re-run `lific bind`"), "{text}");
+    }
+
+    #[test]
+    fn hostile_stored_bind_names_are_inert_in_human_output() {
+        let pool = pool();
+        let name = "Lific\x1b]52;c;cHdu\x07\x1b[2J\u{009b}\u{202e}\u{2066}\u{200b}\u{feff}\r\n\t\u{0008}\u{007f}";
+        project(&pool, "LIF", name);
+        project(&pool, "OTH", name);
+        let aliases = repo_aliases_fixture();
+        bind_to(&pool, &aliases[..1], "LIF", false);
+        let bound = resolve_or_bind(&pool, &aliases, None, false).unwrap();
+        bind_to(&pool, &aliases[1..], "OTH", false);
+        let conflict = resolve_or_bind(&pool, &aliases, None, false).unwrap();
+
+        assert_eq!(bound["project"]["name"], name);
+        assert_eq!(conflict["projects"][0]["name"], name);
+        for (value, rows) in [(bound, 4), (conflict, 9)] {
+            let text = human(&value);
+            for control in [
+                '\x1b', '\x07', '\u{009b}', '\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\r',
+                '\t', '\u{0008}', '\u{007f}',
+            ] {
+                assert!(!text.contains(control), "unsafe output: {text:?}");
+            }
+            assert_eq!(
+                text.lines().count(),
+                rows,
+                "name must not create a new row: {text:?}"
+            );
+            let encoded = crate::cli::term::json_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn hostile_bind_response_fields_cannot_add_rows() {
+        let aliases = vec![alias("remote\n\t\x1b", "v1:host/repo\r\n\u{009b}\u{202e}")];
+        let project = json!({"identifier": "LIF\n\x1b", "name": "Name\n\u{202e}"});
+        for (value, rows) in [
+            (unbound_json(&aliases), 5),
+            (
+                bound_json(project.clone(), &aliases, &HashSet::new(), true),
+                4,
+            ),
+            (conflict_json(vec![project], &aliases), 7),
+        ] {
+            let text = human(&value);
+            for control in ['\x1b', '\u{009b}', '\u{202e}', '\r', '\t'] {
+                assert!(!text.contains(control), "unsafe output: {text:?}");
+            }
+            assert_eq!(
+                text.lines().count(),
+                rows,
+                "fields must not add rows: {text:?}"
+            );
+            assert!(
+                text.lines()
+                    .any(|line| line.contains("remote") && line.contains("v1:host/repo")),
+                "{text:?}"
+            );
+            let encoded = crate::cli::term::json_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), value);
+        }
     }
 
     // ── identity, against real repositories ──────────────────

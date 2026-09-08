@@ -35,7 +35,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SanitizedStderr {
     }
 }
 
-pub(crate) struct SanitizedWriter<W> {
+pub(crate) struct SanitizedWriter<W: Write> {
     inner: W,
     pending: Vec<u8>,
 }
@@ -52,13 +52,20 @@ impl<W: Write> Write for SanitizedWriter<W> {
             let text = String::from_utf8_lossy(&line);
             let has_trailing_newline = text.ends_with('\n');
             let text = text.strip_suffix('\n').unwrap_or(&text);
-            let safe = crate::cli::ui::sanitize_terminal_line(text);
-            self.inner.write_all(safe.as_bytes())?;
+            let mut safe = crate::cli::ui::sanitize_terminal_line(text);
             if has_trailing_newline {
-                self.inner.write_all(b"\n")?;
+                safe.push('\n');
             }
+            self.inner.write_all(safe.as_bytes())?;
         }
         self.inner.flush()
+    }
+}
+// tracing drops its per-event writer without flushing it. Publish the complete
+// event here so embedded newlines and split UTF-8 cannot escape sanitization.
+impl<W: Write> Drop for SanitizedWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -107,17 +114,7 @@ pub fn json_string<T: serde::Serialize>(value: &T) -> Result<String, serde_json:
 }
 
 fn json_terminal_control(ch: char) -> bool {
-    ch.is_control()
-        || ch == '\u{007f}'
-        || matches!(
-            ch,
-            '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'
-                | '\u{2066}'..='\u{206f}'
-                | '\u{feff}'
-        )
+    crate::cli::ui::is_terminal_control(ch)
 }
 
 /// Whether stdout is connected to an interactive terminal.
@@ -235,6 +232,53 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    proptest! {
+        #[test]
+        fn tracing_writer_preserves_chunked_unicode_and_publishes_once(
+            text in proptest::collection::vec(any::<char>(), 0..256)
+                .prop_map(String::from_iter),
+            chunk_size in 1usize..16,
+            explicit_flush in any::<bool>(),
+            trailing_newline in any::<bool>(),
+        ) {
+            let mut event = text;
+            // The formatter owns the final newline, not the untrusted field.
+            if trailing_newline {
+                event.push('\n');
+            }
+            let mut output = Vec::new();
+            {
+                let mut writer = SanitizedWriter {
+                    inner: &mut output,
+                    pending: Vec::new(),
+                };
+                for chunk in event.as_bytes().chunks(chunk_size) {
+                    writer.write_all(chunk).unwrap();
+                }
+                if explicit_flush {
+                    writer.flush().unwrap();
+                    writer.flush().unwrap();
+                }
+            }
+            let expected = if let Some(body) = event.strip_suffix('\n') {
+                format!("{}\n", body.terminal_line())
+            } else {
+                event.terminal_line().to_string()
+            };
+            prop_assert_eq!(String::from_utf8(output).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn tracing_writer_propagates_explicit_flush_errors() {
+        let mut writer = SanitizedWriter {
+            inner: &mut [][..],
+            pending: Vec::new(),
+        };
+        writer.write_all(b"event").unwrap();
+        assert_eq!(writer.flush().unwrap_err().kind(), io::ErrorKind::WriteZero);
+    }
+
     fn assert_json_strings_contain_no_terminal_controls(encoded: &str) {
         let mut in_string = false;
         let mut escaped = false;
@@ -260,7 +304,7 @@ mod tests {
     #[test]
     fn json_string_escapes_terminal_controls_losslessly() {
         let value = serde_json::json!({
-            "text": "\u{001b}]52;c;clipboard\u{0007}\u{009b}2J\u{007f}\u{202e}\u{200b}\u{feff}"
+            "text": "\u{001b}]52;c;clipboard\u{0007}\u{009b}2J\u{007f}\u{202e}\u{200b}\u{feff}\u{00ad}\u{180e}\u{2061}\u{fff9}"
         });
         let encoded = json_string(&value).unwrap();
 
@@ -268,6 +312,10 @@ mod tests {
         assert!(encoded.contains("\\u007f"));
         assert!(encoded.contains("\\u202e"));
         assert!(encoded.contains("\\ufeff"));
+        assert!(encoded.contains("\\u00ad"));
+        assert!(encoded.contains("\\u180e"));
+        assert!(encoded.contains("\\u2061"));
+        assert!(encoded.contains("\\ufff9"));
 
         let without_layout = encoded.replace('\n', "");
         assert!(!without_layout.chars().any(json_terminal_control));
@@ -359,6 +407,37 @@ mod tests {
     }
 
     #[test]
+    fn tracing_subscriber_publishes_sanitized_events_without_explicit_flush() {
+        use std::io::{Read, Seek};
+
+        let mut output = tempfile::tempfile().unwrap();
+        let capture = output.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_level(false)
+            .with_writer(move || SanitizedWriter {
+                inner: capture.try_clone().unwrap(),
+                pending: Vec::new(),
+            })
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("path: café\nforged\x1b]52;c;clipboard\x07\u{009b}2J\u{202e}");
+            tracing::warn!("still logging");
+        });
+
+        output.rewind().unwrap();
+        let mut rendered = String::new();
+        output.read_to_string(&mut rendered).unwrap();
+        assert_eq!(
+            rendered,
+            "path: café forged\\x1b]52;c;clipboard\\x07\\u{9b}2J \nstill logging\n"
+        );
+    }
+
+    #[test]
     fn tracing_writer_neutralizes_control_sequences() {
         use std::io::Write;
 
@@ -370,7 +449,7 @@ mod tests {
             .write_all("path: evil\nforged\x1b]8;;https://evil\x1b\\\u{009b}2J\n".as_bytes())
             .unwrap();
         writer.flush().unwrap();
-        let rendered = String::from_utf8(writer.inner).unwrap();
+        let rendered = String::from_utf8(std::mem::take(&mut writer.inner)).unwrap();
         assert_eq!(rendered, "path: evil forged^[]8;;https://evil^[\\ 2J\n");
         assert!(
             rendered
@@ -394,15 +473,25 @@ mod tests {
             "src/cli/login.rs",
             "src/cli/connect/mod.rs",
             "src/cli/connect/writer.rs",
+            "src/cli/bind.rs",
+            "src/cli/git_hook.rs",
+            "src/cli/service.rs",
         ] {
             let source = std::fs::read_to_string(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
             )
             .unwrap();
-            assert!(
-                !source.contains("serde_json::to_string_pretty"),
-                "{path} must use term::json_string for terminal JSON"
-            );
+            for forbidden in [
+                "serde_json::to_string_pretty",
+                "serde_json::to_string(",
+                "serde_json::to_writer",
+                "serde_json::to_vec",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{path} must use term::json_string for terminal JSON"
+                );
+            }
         }
     }
 

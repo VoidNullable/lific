@@ -478,6 +478,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
         )
+        .with_ansi(false)
         .with_writer(crate::cli::term::sanitized_stderr())
         .init();
 

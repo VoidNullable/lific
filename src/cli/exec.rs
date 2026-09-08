@@ -126,7 +126,7 @@ impl Output<'_> {
     /// enrichment can be asserted against the HTTP backend's without capturing
     /// stdout.
     fn emit(self, value: serde_json::Value) {
-        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        println!("{}", term::json_string(&value).unwrap());
     }
 
     /// Serialization of our own models cannot fail.

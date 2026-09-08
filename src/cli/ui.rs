@@ -102,6 +102,26 @@ pub(crate) fn sanitize_terminal_block(s: &str) -> String {
     s.terminal_block().to_string()
 }
 
+/// Whether a character can alter or obscure terminal output.
+pub(crate) fn is_terminal_control(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+        )
+}
+
 pub(crate) trait TerminalDisplay: Display + Sized {
     fn terminal_line(self) -> impl Display {
         Terminal {
@@ -142,19 +162,7 @@ fn sanitize_terminal_text(input: &str, preserve_layout: bool) -> String {
         match ch {
             '\n' | '\t' if preserve_layout => output.push(ch),
             '\x1b' => output.push_str("^["),
-            ch if ch.is_control()
-                || matches!(
-                    ch,
-                    '\u{061c}'
-                        | '\u{200b}'..='\u{200f}'
-                        | '\u{2028}'..='\u{202e}'
-                        | '\u{2060}'
-                        | '\u{2066}'..='\u{206f}'
-                        | '\u{feff}'
-                ) =>
-            {
-                output.push(' ');
-            }
+            ch if is_terminal_control(ch) => output.push(' '),
             _ => output.push(ch),
         }
     }
@@ -163,21 +171,8 @@ fn sanitize_terminal_text(input: &str, preserve_layout: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::TerminalDisplay;
+    use super::{TerminalDisplay, is_terminal_control};
     use proptest::prelude::*;
-
-    fn terminal_formatting_control(ch: char) -> bool {
-        ch.is_control()
-            || matches!(
-                ch,
-                '\u{061c}'
-                    | '\u{200b}'..='\u{200f}'
-                    | '\u{2028}'..='\u{202e}'
-                    | '\u{2060}'
-                    | '\u{2066}'..='\u{206f}'
-                    | '\u{feff}'
-            )
-    }
 
     #[test]
     fn block_controls_are_neutralized_without_flattening_layout() {
@@ -187,6 +182,12 @@ mod tests {
                 .to_string(),
             "name^[[2J     \nnext\tline "
         );
+    }
+
+    #[test]
+    fn default_ignorable_controls_are_neutralized() {
+        let controls = "\u{00ad}\u{061c}\u{06dd}\u{070f}\u{0890}\u{180e}\u{2061}\u{fff9}";
+        assert_eq!(controls.terminal_line().to_string(), "        ");
     }
 
     #[test]
@@ -216,7 +217,7 @@ mod tests {
                 .prop_map(String::from_iter)
         ) {
             let rendered = input.terminal_line().to_string();
-            prop_assert!(rendered.chars().all(|ch| !terminal_formatting_control(ch)));
+            prop_assert!(rendered.chars().all(|ch| !is_terminal_control(ch)));
         }
 
         #[test]
@@ -226,7 +227,7 @@ mod tests {
         ) {
             let rendered = input.terminal_block().to_string();
             let safe = rendered.chars().all(|ch| {
-                !terminal_formatting_control(ch) || ch == '\n' || ch == '\t'
+                !is_terminal_control(ch) || ch == '\n' || ch == '\t'
             });
             prop_assert!(safe);
         }

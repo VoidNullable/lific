@@ -92,16 +92,8 @@ fn reject_control_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Result
 }
 
 fn path_contains_control(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.to_str().is_none() || path.as_os_str().as_bytes().iter().any(u8::is_ascii_control)
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_str()
-            .is_none_or(|value| value.chars().any(char::is_control))
-    }
+    path.to_str()
+        .is_none_or(|value| value.chars().any(char::is_control))
 }
 
 /// Detect the available service manager. Returns None in environments without
@@ -317,8 +309,8 @@ pub fn install(manager: Manager, plan: &ServicePlan) -> Result<InstallReport, St
             // refused; that's fine — report, don't fail.
             let linger = Command::new("loginctl")
                 .arg("enable-linger")
-                .status()
-                .is_ok_and(|s| s.success());
+                .output()
+                .is_ok_and(|output| output.status.success());
             Ok(InstallReport {
                 manager: manager.label().into(),
                 definition: path.display().to_string(),
@@ -386,8 +378,8 @@ pub fn status(manager: Manager) -> Result<StatusReport, String> {
     let active = match manager {
         Manager::SystemdUser => Command::new("systemctl")
             .args(["--user", "is-active", "--quiet", SYSTEMD_UNIT_NAME])
-            .status()
-            .is_ok_and(|s| s.success()),
+            .output()
+            .is_ok_and(|output| output.status.success()),
         Manager::Launchd => Command::new("launchctl")
             .args(["print", &format!("{}/{LAUNCHD_LABEL}", launchd_domain()?)])
             .output()
@@ -505,6 +497,17 @@ mod tests {
             "unit was:\n{unit}"
         );
         assert!(unit.contains("/home/u/$data%%dir"), "unit was:\n{unit}");
+    }
+
+    #[test]
+    fn service_paths_reject_every_c0_and_c1_control_on_all_platforms() {
+        for control in ('\0'..='\u{009f}').filter(|ch| ch.is_control()) {
+            let path = PathBuf::from(format!("config{control}.toml"));
+            assert!(
+                reject_control_paths([path.as_path()]).is_err(),
+                "{control:?}"
+            );
+        }
     }
 
     #[test]
