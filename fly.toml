@@ -1,0 +1,43 @@
+# Fly.io deployment for the community Lific instance. Builds the repo's own
+# Dockerfile; runtime config is deploy/fly/lific.toml, injected at boot.
+
+app = "lific-community"
+primary_region = "ord"
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile"
+
+# The image's ENTRYPOINT is `lific --db /data/lific.db`; this is its argv.
+[processes]
+  app = "--config /etc/lific/lific.toml start"
+
+[[files]]
+  guest_path = "/etc/lific/lific.toml"
+  local_path = "deploy/fly/lific.toml"
+
+# One SQLite writer, one machine, one volume. Never scale this past 1.
+[[mounts]]
+  source = "lific_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 3456
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

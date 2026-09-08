@@ -17,3 +17,4 @@ dev-backend.sh
 *~
 .*-autosave.kra
 discord.env
+fly.env
