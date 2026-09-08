@@ -472,7 +472,7 @@ fn project_archive_refuses_tar_traversal_links_devices_and_declared_expansion() 
         raw_entry(&path, name, b'0', 0);
         assert!(stage(&path).is_err(), "{name}");
     }
-    for kind in [b'1', b'2', b'3', b'4', b'5', b'6', b'L', b'x', b'g'] {
+    for kind in *b"123456Lxg" {
         raw_entry(&path, "manifest.json", kind, 0);
         assert!(stage(&path).is_err(), "entry type {kind}");
     }
