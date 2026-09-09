@@ -423,6 +423,21 @@ pub fn has_human_users(conn: &Connection) -> Result<bool, LificError> {
     Ok(exists)
 }
 
+/// Whether a human *administrator* exists.
+///
+/// Narrower than [`has_human_users`] on purpose (LIF-468): an instance holding
+/// only non-admin people is still one nobody can administer, so first-boot
+/// initialization treats it as unfinished rather than as somebody else's
+/// instance. Bots are excluded for the same reason they are there.
+pub fn has_human_admin(conn: &Connection) -> Result<bool, LificError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE is_bot = 0 AND is_admin = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 fn row_to_user(row: &rusqlite::Row) -> Result<User, rusqlite::Error> {
     Ok(User {
         id: row.get(0)?,

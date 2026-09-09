@@ -154,6 +154,16 @@ pub enum Command {
         /// Host to bind to (overrides config)
         #[arg(long)]
         host: Option<String>,
+
+        /// Create and migrate the database when it does not exist yet,
+        /// instead of refusing to start (container first boot). Requires a
+        /// deliberate location (an explicit --config/--db, or a config file
+        /// that was found) and both LIFIC_INIT_ADMIN_NAME and
+        /// LIFIC_INIT_ADMIN_PASSWORD, which become the first admin: a new
+        /// instance is never created without one. A no-op once the database
+        /// exists.
+        #[arg(long = "init-if-missing")]
+        init_if_missing: bool,
     },
 
     /// Run MCP server over stdio (for AI assistants)
@@ -1519,9 +1529,14 @@ mod tests {
         assert!(cli.db.is_none());
         assert!(!cli.json);
         match cli.command {
-            Command::Start { port, host } => {
+            Command::Start {
+                port,
+                host,
+                init_if_missing,
+            } => {
                 assert!(port.is_none());
                 assert!(host.is_none());
+                assert!(!init_if_missing, "first-boot init is opt-in");
             }
             _ => panic!("expected Start"),
         }
@@ -1542,9 +1557,14 @@ mod tests {
         .unwrap();
         assert_eq!(cli.db, Some(PathBuf::from("/tmp/test.db")));
         match cli.command {
-            Command::Start { port, host } => {
+            Command::Start {
+                port,
+                host,
+                init_if_missing,
+            } => {
                 assert_eq!(port, Some(8080));
                 assert_eq!(host, Some("127.0.0.1".into()));
+                assert!(!init_if_missing);
             }
             _ => panic!("expected Start"),
         }

@@ -384,7 +384,23 @@ You don't need Docker to run Lific; it's one binary. The `Dockerfile` in the rep
 
 ```bash
 docker build -t lific .
-docker run -p 3456:3456 -v lific-data:/data lific
+docker run -p 3456:3456 -v lific-data:/data \
+  -e LIFIC_INIT_ADMIN_NAME="Your Name" \
+  -e LIFIC_INIT_ADMIN_PASSWORD="a long password" \
+  lific
+```
+
+The database lives at `/data/lific.db`, so mount a volume there to keep it. The image runs `start --init-if-missing`, which creates and migrates that file on first boot and does nothing on every boot after.
+
+Both environment variables are **required for that first boot**, and they create the first admin. Leave either one out and the container refuses to start instead of creating an empty instance: an instance with no users has signup open, makes whoever loads the page first its administrator, and prints an unbound operator API key into the container log. An existing database ignores both variables, so they can stay in your compose file or machine config.
+
+Authentication is required either way. First-boot init creates a database; it never turns auth off.
+
+If an instance somehow ends up with no administrator, create one from inside the container (`docker exec <container> ...`, or `fly ssh console` on Fly):
+
+```bash
+lific --db /data/lific.db user create \
+  --username <name> --email <address> --password <password> --admin
 ```
 
 ## Community

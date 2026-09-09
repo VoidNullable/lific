@@ -3349,6 +3349,7 @@ mod tests {
                 &Command::Start {
                     port: None,
                     host: None,
+                    init_if_missing: false,
                 },
                 IssueLinkOutput::Url,
             )

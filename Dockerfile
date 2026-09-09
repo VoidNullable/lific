@@ -6,9 +6,33 @@
 # to deploy.
 #
 #   docker build -t lific .
-#   docker run -p 3456:3456 -v lific-data:/data lific
+#   docker run -p 3456:3456 -v lific-data:/data \
+#     -e LIFIC_INIT_ADMIN_NAME="Your Name" \
+#     -e LIFIC_INIT_ADMIN_PASSWORD="a long password" \
+#     lific
 #
 # The database lives at /data/lific.db; mount a volume there to persist it.
+# The first boot creates and migrates it, because the CMD below passes
+# --init-if-missing (only `lific init` creates a database otherwise, and a
+# container has nowhere to run that).
+#
+# Creating that database REQUIRES two environment variables, read once and
+# never logged:
+#
+#   LIFIC_INIT_ADMIN_NAME      display name of the first admin
+#   LIFIC_INIT_ADMIN_PASSWORD  its password
+#
+# Without both, the container refuses to start rather than creating an
+# instance with no users: that instance would have signup open, would make
+# whoever loaded the page first its administrator, and would mint and print
+# an unbound operator API key into this log. An EXISTING database ignores
+# both variables. Authentication stays required either way. First-boot init
+# creates a database, it never opens the instance up.
+#
+# Recovering an instance that somehow has no administrator:
+#
+#   docker exec <container> lific --db /data/lific.db user create \
+#     --username <name> --email <address> --password <password> --admin
 
 # Stage 1: web UI, embedded into the binary via rust-embed.
 # vite reads ../Cargo.toml for the version, so it's copied alongside.
@@ -40,4 +64,7 @@ COPY --from=build --chown=65532:65532 /data /data
 VOLUME /data
 EXPOSE 3456
 ENTRYPOINT ["/usr/local/bin/lific", "--db", "/data/lific.db"]
-CMD ["start"]
+# --init-if-missing: create + migrate /data/lific.db on first boot, and seed
+# the first admin from LIFIC_INIT_ADMIN_NAME/LIFIC_INIT_ADMIN_PASSWORD when
+# both are set (see the header). A no-op on every later start.
+CMD ["start", "--init-if-missing"]
