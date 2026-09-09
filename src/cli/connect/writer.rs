@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use super::clients::{CompiledEntry, Format};
+use crate::cli::{term, ui};
 
 /// What a write did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,21 @@ impl Action {
 pub struct Rendered {
     pub contents: String,
     pub action: Action,
+}
+
+/// Encode rendered configuration for human terminal display without changing
+/// the configuration that will be written. JSON is parsed and re-serialized
+/// through the terminal-safe JSON encoder so its displayed value remains
+/// lossless; TOML/YAML stay text-native so comments and layout are preserved.
+pub(crate) fn terminal_contents(format: &str, contents: &str) -> String {
+    if format == "json"
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(contents)
+        && let Ok(encoded) = term::json_string(&value)
+    {
+        return encoded;
+    }
+
+    ui::sanitize_terminal_block(contents)
 }
 
 /// Error from a writer that a caller should surface as a per-client failure
@@ -358,7 +374,7 @@ fn render_json(existing: &str, entry: &CompiledEntry) -> Result<String, WriteErr
     // Insert/replace only our own server entry, preserving siblings.
     top_map.insert(entry.name.clone(), entry.value.clone());
 
-    let mut out = crate::cli::term::json_string(&root)
+    let mut out = serde_json::to_string_pretty(&root)
         .map_err(|e| WriteError::new(format!("failed to serialize JSON: {e}")))?;
     out.push('\n');
     Ok(out)
@@ -369,7 +385,7 @@ fn manual_json_snippet(entry: &CompiledEntry) -> String {
     let snippet = serde_json::json!({
         entry.top_key.clone(): { entry.name.clone(): entry.value.clone() }
     });
-    crate::cli::term::json_string(&snippet).unwrap_or_default()
+    serde_json::to_string_pretty(&snippet).unwrap_or_default()
 }
 
 // ── TOML (Codex) ─────────────────────────────────────────────
@@ -610,6 +626,35 @@ mod tests {
         assert_eq!(v["mcp"]["lific"]["type"], "remote");
     }
 
+    #[test]
+    fn terminal_json_encoding_preserves_values_and_escapes_controls() {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "key\u{009b}2J\u{202e}\u{200b}".to_owned(),
+            serde_json::json!("value\u{0001}\u{0085}\u{2066}\u{200d}"),
+        );
+        let contents = serde_json::to_string_pretty(&value).unwrap();
+
+        let displayed = terminal_contents("json", &contents);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&displayed).unwrap(),
+            serde_json::Value::Object(value)
+        );
+        assert!(!displayed.contains('\u{009b}'));
+        assert!(!displayed.contains('\u{202e}'));
+        assert!(!displayed.contains('\u{200b}'));
+        assert!(!displayed.contains('\u{200d}'));
+    }
+
+    #[test]
+    fn terminal_text_encoding_preserves_non_json_layout() {
+        let contents = "# keep this comment\nkey = \"value\u{009b}\"\n";
+        let displayed = terminal_contents("toml", contents);
+        assert!(displayed.starts_with("# keep this comment\n"));
+        assert!(displayed.contains("key = \"value"));
+        assert!(!displayed.contains('\u{009b}'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn secret_config_is_owner_only_and_atomic() {
@@ -660,7 +705,7 @@ mod tests {
         // Pre-existing config with another MCP server and unrelated top keys.
         std::fs::write(
             &path,
-            crate::cli::term::json_string(&serde_json::json!({
+            serde_json::to_string_pretty(&serde_json::json!({
                 "theme": "dark",
                 "mcp": {
                     "other": { "type": "remote", "url": "http://other" }
@@ -692,7 +737,7 @@ mod tests {
         let path = dir.join("opencode.json");
         std::fs::write(
             &path,
-            crate::cli::term::json_string(&serde_json::json!({
+            serde_json::to_string_pretty(&serde_json::json!({
                 "mcp": { "lific": { "type": "remote", "url": "http://stale" } }
             }))
             .unwrap(),
@@ -727,6 +772,18 @@ mod tests {
         assert!(snippet.contains("lific"));
         // File must be byte-for-byte unchanged.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn manual_json_snippet_preserves_machine_values() {
+        let entry = find_client("opencode")
+            .unwrap()
+            .compile(&ServerConfig::remote("https://host/\u{202e}forged", "key"));
+        let snippet = manual_json_snippet(&entry);
+        let value: serde_json::Value = serde_json::from_str(&snippet).unwrap();
+
+        assert_eq!(value["mcp"]["lific"]["url"], "https://host/\u{202e}forged");
+        assert!(snippet.contains('\u{202e}'));
     }
 
     #[test]

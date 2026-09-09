@@ -108,10 +108,12 @@ pub(crate) fn is_terminal_control(ch: char) -> bool {
         || matches!(
             ch,
             '\u{00ad}'
+                | '\u{0600}'..='\u{0605}'
                 | '\u{061c}'
                 | '\u{06dd}'
                 | '\u{070f}'
                 | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
                 | '\u{180e}'
                 | '\u{200b}'..='\u{200f}'
                 | '\u{2028}'..='\u{202e}'
@@ -119,6 +121,13 @@ pub(crate) fn is_terminal_control(ch: char) -> bool {
                 | '\u{2066}'..='\u{206f}'
                 | '\u{feff}'
                 | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1343f}'
+                | '\u{1bca0}'..='\u{1bcaf}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
         )
 }
 
@@ -186,7 +195,13 @@ mod tests {
 
     #[test]
     fn default_ignorable_controls_are_neutralized() {
-        let controls = "\u{00ad}\u{061c}\u{06dd}\u{070f}\u{0890}\u{180e}\u{2061}\u{fff9}";
+        let controls = "\u{00ad}\u{061c}\u{06dd}\u{070f}\u{0890}\u{180e}\u{2061}\u{fff9}\u{e0061}";
+        assert_eq!(controls.terminal_line().to_string(), "         ");
+    }
+
+    #[test]
+    fn supplementary_unicode_format_controls_are_neutralized() {
+        let controls = "\u{0600}\u{08e2}\u{110bd}\u{13430}\u{1bca0}\u{1d173}\u{e0001}\u{e0061}";
         assert_eq!(controls.terminal_line().to_string(), "        ");
     }
 

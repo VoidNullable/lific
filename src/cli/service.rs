@@ -20,7 +20,7 @@
 //! Process-spawning lives in thin wrappers that the commands share.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The service name / launchd label. One service per user by design: Lific's
 /// target persona runs a single personal instance.
@@ -309,8 +309,10 @@ pub fn install(manager: Manager, plan: &ServicePlan) -> Result<InstallReport, St
             // refused; that's fine — report, don't fail.
             let linger = Command::new("loginctl")
                 .arg("enable-linger")
-                .output()
-                .is_ok_and(|output| output.status.success());
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
             Ok(InstallReport {
                 manager: manager.label().into(),
                 definition: path.display().to_string(),
@@ -378,8 +380,10 @@ pub fn status(manager: Manager) -> Result<StatusReport, String> {
     let active = match manager {
         Manager::SystemdUser => Command::new("systemctl")
             .args(["--user", "is-active", "--quiet", SYSTEMD_UNIT_NAME])
-            .output()
-            .is_ok_and(|output| output.status.success()),
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
         Manager::Launchd => Command::new("launchctl")
             .args(["print", &format!("{}/{LAUNCHD_LABEL}", launchd_domain()?)])
             .output()

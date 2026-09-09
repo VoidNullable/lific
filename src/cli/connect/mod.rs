@@ -977,7 +977,10 @@ fn print_human(result: &ConnectResult) {
             (None, Some(err)) => {
                 ui::warn(format!("{} — skipped: {err}", o.display));
                 if let Some(snippet) = &o.manual_snippet {
-                    ui::note(format!("{} — merge this in manually", o.display), snippet);
+                    ui::note(
+                        format!("{} — merge this in manually", o.display),
+                        terminal_manual_snippet(snippet),
+                    );
                 }
             }
             (None, None) => {}
@@ -1007,7 +1010,10 @@ fn print_human(result: &ConnectResult) {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
-            ui::note(path, contents.trim_end());
+            ui::note(
+                path,
+                writer::terminal_contents(&o.format, contents).trim_end(),
+            );
         }
     }
 
@@ -1037,6 +1043,13 @@ fn print_human(result: &ConnectResult) {
     }
 
     ui::outro("Restart your client(s) to pick up the new MCP server.");
+}
+
+fn terminal_manual_snippet(snippet: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(snippet)
+        .ok()
+        .and_then(|value| crate::cli::term::json_string(&value).ok())
+        .unwrap_or_else(|| crate::cli::ui::sanitize_terminal_block(snippet))
 }
 
 #[cfg(test)]
@@ -1108,6 +1121,25 @@ mod tests {
             "Which clients should connect to https://evil.test^[]8;;https://evil^[\\ ?"
         );
         assert!(!prompt.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn terminal_manual_json_snippet_preserves_escaped_data() {
+        let snippet = r#"{
+  "mcp": {
+    "lific": {
+      "url": "https://host/\u202eforged"
+    }
+  }
+}"#;
+        let rendered = terminal_manual_snippet(snippet);
+
+        assert!(!rendered.contains('\u{202e}'));
+        let value: serde_json::Value = serde_json::from_str(snippet).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap(),
+            value
+        );
     }
 
     fn base(dir: &std::path::Path) -> PathBase {

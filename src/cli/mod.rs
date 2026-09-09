@@ -121,7 +121,7 @@ pub struct Cli {
     pub backend: BackendKind,
 
     /// Base URL for the HTTP backend (also read from LIFIC_URL).
-    #[arg(long, global = true, env = "LIFIC_URL")]
+    #[arg(long, global = true, env = "LIFIC_URL", hide_env_values = true)]
     pub url: Option<String>,
 
     /// API key for the HTTP backend (also read from LIFIC_API_KEY; login

@@ -31,18 +31,35 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SanitizedStderr {
         SanitizedWriter {
             inner: io::stderr(),
             pending: Vec::new(),
+            truncated: false,
         }
     }
 }
 
+const MAX_PENDING_BYTES: usize = 64 * 1024;
+const TRUNCATION_MARKER: &[u8] = b" ... [truncated]\n";
+
 pub(crate) struct SanitizedWriter<W: Write> {
     inner: W,
     pending: Vec<u8>,
+    truncated: bool,
 }
 
 impl<W: Write> Write for SanitizedWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.pending.extend_from_slice(bytes);
+        if self.truncated {
+            return Ok(bytes.len());
+        }
+
+        let remaining = MAX_PENDING_BYTES.saturating_sub(self.pending.len());
+        let take = bytes.len().min(remaining);
+        self.pending.extend_from_slice(&bytes[..take]);
+        if take < bytes.len() {
+            self.pending
+                .truncate(MAX_PENDING_BYTES.saturating_sub(TRUNCATION_MARKER.len()));
+            self.pending.extend_from_slice(TRUNCATION_MARKER);
+            self.truncated = true;
+        }
         Ok(bytes.len())
     }
 
@@ -102,15 +119,21 @@ pub fn json_string<T: serde::Serialize>(value: &T) -> Result<String, serde_json:
                 output.push(ch);
                 in_string = false;
             }
-            ch if json_terminal_control(ch) => {
-                use std::fmt::Write;
-                write!(output, "\\u{:04x}", ch as u32).expect("String write cannot fail");
-            }
+            ch if json_terminal_control(ch) => escape_json_char(&mut output, ch),
             _ => output.push(ch),
         }
     }
 
     Ok(output)
+}
+
+fn escape_json_char(output: &mut String, ch: char) {
+    use std::fmt::Write;
+
+    let mut units = [0; 2];
+    for unit in ch.encode_utf16(&mut units) {
+        write!(output, "\\u{unit:04x}").expect("String write cannot fail");
+    }
 }
 
 fn json_terminal_control(ch: char) -> bool {
@@ -190,12 +213,14 @@ pub fn confirm_inner<R: std::io::BufRead, W: std::io::Write>(
 /// pass to supply the value without a prompt. Returns the trimmed input; errors
 /// on empty input or no-TTY.
 pub fn prompt_text(prompt: &str, bypass_flag: &str) -> Result<String, String> {
+    // Prompts are diagnostics/input guidance, never command data. Keep them
+    // off stdout so redirected or explicit JSON output remains parseable.
     prompt_text_inner(
         prompt,
         bypass_flag,
         stdin_is_tty(),
         &mut std::io::stdin().lock(),
-        &mut std::io::stdout(),
+        &mut std::io::stderr(),
     )
 }
 
@@ -251,6 +276,7 @@ mod tests {
                 let mut writer = SanitizedWriter {
                     inner: &mut output,
                     pending: Vec::new(),
+                    truncated: false,
                 };
                 for chunk in event.as_bytes().chunks(chunk_size) {
                     writer.write_all(chunk).unwrap();
@@ -274,9 +300,30 @@ mod tests {
         let mut writer = SanitizedWriter {
             inner: &mut [][..],
             pending: Vec::new(),
+            truncated: false,
         };
         writer.write_all(b"event").unwrap();
         assert_eq!(writer.flush().unwrap_err().kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[test]
+    fn tracing_writer_bounds_large_events() {
+        let mut output = Vec::new();
+        let mut writer = SanitizedWriter {
+            inner: &mut output,
+            pending: Vec::new(),
+            truncated: false,
+        };
+
+        writer
+            .write_all(&vec![b'x'; MAX_PENDING_BYTES * 2])
+            .unwrap();
+        assert_eq!(writer.pending.len(), MAX_PENDING_BYTES);
+        assert!(writer.truncated);
+        writer.flush().unwrap();
+
+        drop(writer);
+        assert!(output.ends_with(TRUNCATION_MARKER));
     }
 
     fn assert_json_strings_contain_no_terminal_controls(encoded: &str) {
@@ -420,6 +467,7 @@ mod tests {
             .with_writer(move || SanitizedWriter {
                 inner: capture.try_clone().unwrap(),
                 pending: Vec::new(),
+                truncated: false,
             })
             .finish();
 
@@ -444,6 +492,7 @@ mod tests {
         let mut writer = SanitizedWriter {
             inner: Vec::new(),
             pending: Vec::new(),
+            truncated: false,
         };
         writer
             .write_all("path: evil\nforged\x1b]8;;https://evil\x1b\\\u{009b}2J\n".as_bytes())
@@ -472,7 +521,6 @@ mod tests {
             "src/cli/doctor.rs",
             "src/cli/login.rs",
             "src/cli/connect/mod.rs",
-            "src/cli/connect/writer.rs",
             "src/cli/bind.rs",
             "src/cli/git_hook.rs",
             "src/cli/service.rs",
