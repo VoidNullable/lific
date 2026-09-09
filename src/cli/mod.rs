@@ -650,7 +650,7 @@ pub enum ImportAction {
 
         /// GitHub token (falls back to GITHUB_TOKEN). Optional for public
         /// repos, but strongly recommended to avoid the 60 req/hr anon limit.
-        #[arg(long, env = "GITHUB_TOKEN")]
+        #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
         token: Option<String>,
 
         /// Lific status for open issues.
@@ -682,7 +682,7 @@ pub enum ImportAction {
         project: String,
 
         /// Linear personal API key (falls back to LINEAR_API_KEY).
-        #[arg(long, env = "LINEAR_API_KEY")]
+        #[arg(long, env = "LINEAR_API_KEY", hide_env_values = true)]
         token: Option<String>,
 
         /// Username who should own the import bot.
@@ -709,11 +709,11 @@ pub enum ImportAction {
         project: String,
 
         /// Jira account email (falls back to JIRA_EMAIL).
-        #[arg(long, env = "JIRA_EMAIL")]
+        #[arg(long, env = "JIRA_EMAIL", hide_env_values = true)]
         email: Option<String>,
 
         /// Jira API token (falls back to JIRA_API_TOKEN).
-        #[arg(long, env = "JIRA_API_TOKEN")]
+        #[arg(long, env = "JIRA_API_TOKEN", hide_env_values = true)]
         token: Option<String>,
 
         /// Username who should own the import bot.
@@ -1485,6 +1485,59 @@ mod tests {
         assert_eq!(cli.backend, BackendKind::Http);
         assert_eq!(cli.url.as_deref(), Some("https://tracker.example.test"));
         assert_eq!(cli.api_key.as_deref(), Some("key-123"));
+    }
+
+    #[test]
+    fn import_credentials_use_environment_fallback_and_explicit_precedence() {
+        let _env = test_env::EnvGuard::set(&[
+            ("GITHUB_TOKEN", Some("github-from-env")),
+            ("LINEAR_API_KEY", Some("linear-from-env")),
+            ("JIRA_EMAIL", Some("jira@example.test")),
+            ("JIRA_API_TOKEN", Some("jira-from-env")),
+        ]);
+
+        let github = Cli::try_parse_from([
+            "lific",
+            "import",
+            "github",
+            "--repo",
+            "owner/repo",
+            "--project",
+            "LIF",
+        ])
+        .unwrap();
+        let Command::Import {
+            action: ImportAction::Github { token, .. },
+        } = github.command
+        else {
+            panic!("expected GitHub import");
+        };
+        assert_eq!(token.as_deref(), Some("github-from-env"));
+
+        let jira = Cli::try_parse_from([
+            "lific",
+            "import",
+            "jira",
+            "--site",
+            "example",
+            "--jira-project",
+            "PROJ",
+            "--project",
+            "LIF",
+            "--email",
+            "explicit@example.test",
+            "--token",
+            "explicit-token",
+        ])
+        .unwrap();
+        let Command::Import {
+            action: ImportAction::Jira { email, token, .. },
+        } = jira.command
+        else {
+            panic!("expected Jira import");
+        };
+        assert_eq!(email.as_deref(), Some("explicit@example.test"));
+        assert_eq!(token.as_deref(), Some("explicit-token"));
     }
 
     /// Value clap's `env` fallback will supply for `var` when the matching
