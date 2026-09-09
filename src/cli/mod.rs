@@ -1401,7 +1401,7 @@ pub enum UserAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use proptest::prelude::*;
 
     #[test]
@@ -1538,6 +1538,26 @@ mod tests {
         };
         assert_eq!(email.as_deref(), Some("explicit@example.test"));
         assert_eq!(token.as_deref(), Some("explicit-token"));
+    }
+
+    #[test]
+    fn every_environment_backed_argument_hides_its_value() {
+        fn assert_hidden(command: &clap::Command) {
+            for argument in command.get_arguments() {
+                if argument.get_env().is_some() {
+                    assert!(
+                        argument.is_hide_env_values_set(),
+                        "environment-backed argument {:?} exposes its value",
+                        argument.get_id()
+                    );
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                assert_hidden(subcommand);
+            }
+        }
+
+        assert_hidden(&Cli::command());
     }
 
     /// Value clap's `env` fallback will supply for `var` when the matching

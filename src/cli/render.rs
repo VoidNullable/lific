@@ -122,6 +122,19 @@ fn first_line_suffix(text: &str) -> String {
     }
 }
 
+fn truncate_with_ellipsis(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let end = text
+        .char_indices()
+        .take_while(|(index, _)| *index <= limit)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
+    format!("{}...", &text[..end])
+}
+
 // ── Issue ────────────────────────────────────────────────────
 
 pub fn issue_list(issues: &[Issue], module_name: ModuleName<'_>) -> String {
@@ -271,11 +284,7 @@ pub fn page_list(pages: &[Page]) -> String {
             "(empty)".to_string()
         } else {
             let first_line = page.content.lines().next().unwrap_or("");
-            if first_line.len() > 60 {
-                format!("{}...", &first_line[..60])
-            } else {
-                first_line.to_string()
-            }
+            truncate_with_ellipsis(first_line, 60)
         };
         out.line(format_args!(
             "  {:<12} {} - {}{}",
@@ -338,11 +347,7 @@ pub fn search_results(results: &[SearchResult]) -> String {
         if !result.snippet.is_empty() {
             // Clean up snippet for terminal display
             let snippet = result.snippet.replace("**", "").replace('\n', " ");
-            let snippet = if snippet.len() > 80 {
-                format!("{}...", &snippet[..80])
-            } else {
-                snippet
-            };
+            let snippet = truncate_with_ellipsis(&snippet, 80);
             out.line(format_args!("              {snippet}"));
         }
     }
@@ -567,6 +572,7 @@ pub fn export_written(written: &[PathBuf], output: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn issue(identifier: &str, status: Status, priority: Priority) -> Issue {
         Issue {
@@ -607,6 +613,95 @@ mod tests {
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
             seq: 1,
+        }
+    }
+
+    #[test]
+    fn truncates_previews_at_utf8_boundaries() {
+        assert_eq!(truncate_with_ellipsis("", 60), "");
+        assert_eq!(truncate_with_ellipsis(&"a".repeat(60), 60), "a".repeat(60));
+        assert_eq!(
+            truncate_with_ellipsis(&format!("{}é", "a".repeat(59)), 60),
+            format!("{}...", "a".repeat(59))
+        );
+        assert_eq!(
+            truncate_with_ellipsis(&format!("{}€", "a".repeat(58)), 60),
+            format!("{}...", "a".repeat(58))
+        );
+        assert_eq!(
+            truncate_with_ellipsis(&format!("{}🦀", "a".repeat(56)), 60),
+            format!("{}🦀", "a".repeat(56))
+        );
+
+        let page = Page {
+            id: 1,
+            project_id: None,
+            sequence: Some(1),
+            identifier: "TST-DOC-1".into(),
+            folder_id: None,
+            title: "title".into(),
+            content: format!("{}é", "a".repeat(59)),
+            sort_order: 0.0,
+            status: "active".into(),
+            pinned: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            seq: 1,
+            labels: Vec::new(),
+        };
+        assert!(page_list(&[page]).contains(&format!("{}...", "a".repeat(59))));
+
+        let result = SearchResult {
+            result_type: "issue".into(),
+            id: 1,
+            identifier: Some("TST-1".into()),
+            title: "title".into(),
+            snippet: format!("{}é", "a".repeat(79)),
+            project_id: None,
+            parent_page_id: None,
+        };
+        assert!(search_results(&[result]).contains(&format!("{}...", "a".repeat(79))));
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_unicode_page_and_search_previews_never_panic(
+            text in proptest::collection::vec(any::<char>(), 0..256)
+                .prop_map(String::from_iter)
+        ) {
+            let page = Page {
+                id: 1,
+                project_id: None,
+                sequence: Some(1),
+                identifier: "TST-DOC-1".into(),
+                folder_id: None,
+                title: "title".into(),
+                content: text.clone(),
+                sort_order: 0.0,
+                status: "active".into(),
+                pinned: false,
+                created_at: String::new(),
+                updated_at: String::new(),
+                seq: 1,
+                labels: Vec::new(),
+            };
+            let result = SearchResult {
+                result_type: "issue".into(),
+                id: 1,
+                identifier: Some("TST-1".into()),
+                title: "title".into(),
+                snippet: text,
+                project_id: None,
+                parent_page_id: None,
+            };
+
+            for rendered in [page_list(&[page]), search_results(&[result])] {
+                prop_assert!(rendered.is_char_boundary(rendered.len()));
+                let safe = rendered.chars().all(|ch| {
+                    !crate::cli::ui::is_terminal_control(ch) || ch == '\n' || ch == '\t'
+                });
+                prop_assert!(safe);
+            }
         }
     }
 

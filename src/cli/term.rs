@@ -16,6 +16,25 @@ use std::io::{self, IsTerminal, Write};
 
 use crate::cli::ui::TerminalDisplay;
 
+/// Build the filter without allowing a parse failure to print the configured
+/// directive before the sanitized tracing writer is installed.
+pub(crate) fn logging_filter(
+    configured_level: &str,
+) -> Result<tracing_subscriber::EnvFilter, Box<dyn std::error::Error>> {
+    if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
+        return Ok(filter);
+    }
+
+    if !matches!(
+        configured_level,
+        "trace" | "debug" | "info" | "warn" | "error"
+    ) {
+        return Err(format!("invalid configured log level: {configured_level}").into());
+    }
+
+    tracing_subscriber::EnvFilter::try_new(format!("lific={configured_level}")).map_err(Into::into)
+}
+
 /// A tracing writer that makes every formatted event safe for a terminal.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SanitizedStderr;

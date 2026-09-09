@@ -474,10 +474,7 @@ pub(crate) fn build_app_with_store(
 /// shutdown signal arrives.
 pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-        )
+        .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
         .with_ansi(false)
         .with_writer(crate::cli::term::sanitized_stderr())
         .init();

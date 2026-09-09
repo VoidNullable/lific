@@ -332,15 +332,30 @@ use tracing::info;
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("{}", error.to_string().terminal_line());
+        let _ = std::io::stderr().write_all(error_report(error.as_ref()).as_bytes());
         std::process::exit(1);
     }
+}
+
+fn error_report(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut report = String::new();
+    let mut current = Some(error);
+    for index in 0..8 {
+        let Some(error) = current else { break };
+        if index != 0 {
+            report.push_str("\ncaused by: ");
+        }
+        report.push_str(&error.to_string().terminal_line().to_string());
+        current = error.source();
+    }
+    report.push('\n');
+    report
 }
 
 fn cli_error_message(error: &clap::Error) -> String {
     match error.kind() {
         clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
-            error.to_string().terminal_block().to_string()
+            safe_clap_help(error)
         }
         _ => format!(
             "{}\n{}\n",
@@ -348,6 +363,19 @@ fn cli_error_message(error: &clap::Error) -> String {
             Cli::command().render_usage().terminal_block()
         ),
     }
+}
+
+/// Keep Clap's intentional help layout while removing controls from the
+/// process-derived program name. Clap renders that name directly into help,
+/// including for successful `--help`/`--version` requests.
+fn safe_clap_help(error: &clap::Error) -> String {
+    let mut rendered = error.to_string();
+    if let Some(program) = std::env::args_os().next() {
+        let program = program.to_string_lossy().into_owned();
+        let safe_program = program.clone().terminal_line().to_string();
+        rendered = rendered.replace(&program, &safe_program);
+    }
+    rendered.terminal_block().to_string()
 }
 
 fn exit_cli_error(error: clap::Error) -> ! {
@@ -820,10 +848,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // Logs on stderr only: a stray stdout line corrupts the session.
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-                )
+                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
                 .with_ansi(false)
                 .with_writer(crate::cli::term::sanitized_stderr())
                 .init();
@@ -842,10 +867,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Logs must stay on stderr: a stray stdout line corrupts the
             // stdio session.
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-                )
+                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
                 .with_ansi(false)
                 .with_writer(crate::cli::term::sanitized_stderr())
                 .init();
@@ -871,10 +893,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             instances: None,
         } => {
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| format!("lific={}", cfg.log.level).into()),
-                )
+                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
                 .with_ansi(false)
                 .with_writer(crate::cli::term::sanitized_stderr())
                 .init();
@@ -2330,6 +2349,42 @@ mod write_private_config_tests {
 mod cli_error_tests {
     use super::{Cli, cli_error_message};
     use clap::Parser;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct InnerError;
+
+    impl fmt::Display for InnerError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "root cause\nFORGED\x1b[2J\u{202e}")
+        }
+    }
+
+    impl std::error::Error for InnerError {}
+
+    #[derive(Debug)]
+    struct OuterError(InnerError);
+
+    impl fmt::Display for OuterError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("outer context")
+        }
+    }
+
+    impl std::error::Error for OuterError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn error_report_preserves_safe_context_and_root_cause() {
+        let rendered = super::error_report(&OuterError(InnerError));
+        assert!(rendered.contains("outer context"));
+        assert!(rendered.contains("caused by: root cause FORGED^[[2J"));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(rendered.chars().all(|ch| !ch.is_control() || ch == '\n'));
+    }
 
     #[test]
     fn parse_errors_sanitize_untrusted_argument_text() {
