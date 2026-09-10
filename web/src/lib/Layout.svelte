@@ -48,13 +48,13 @@
   import { startAutoRefresh } from "./autoRefresh.svelte";
   import {
     clampSidebarWidth,
-    loadSidebarWidth,
+    loadSidebarWidthPreference,
+    sidebarSizing,
+    observeSidebarFontSize,
     saveSidebarWidth,
     loadSidebarCollapsed,
     saveSidebarCollapsed,
     SIDEBAR_DEFAULT_WIDTH,
-    SIDEBAR_MAX_WIDTH,
-    SIDEBAR_MIN_WIDTH,
   } from "./sidebarWidth";
 
   // Ref to the command palette so the sidebar's "Jump to…" affordance can
@@ -69,13 +69,17 @@
   let navOpen = $state(false);
   let mobileNav = $state<{ openAt: (p: Project | null) => void; navigateTo: (path: string) => void } | null>(null);
 
-  // LIF-309: only the md+ docked sidebar is resizable; the mobile drawer
-  // always remains 230px. Width changes stay in memory until a drag ends.
-  let sidebarWidth = $state(loadSidebarWidth());
+  // Saved widths remain physical CSS pixels. Only the default and minimum
+  // follow text size, and a temporary clamp never overwrites the preference.
+  let preferredSidebarWidth = $state(loadSidebarWidthPreference());
+  let sidebarFontSize = $state(16);
+  let sidebarMetrics = $derived(sidebarSizing(preferredSidebarWidth, sidebarFontSize));
+  let sidebarWidth = $derived(sidebarMetrics.width);
   let sidebarResizing = $state(false);
   let sidebarPointerId: number | null = null;
   let sidebarDragStartX = 0;
   let sidebarDragStartWidth = SIDEBAR_DEFAULT_WIDTH;
+  let sidebarDragChanged = false;
   let previousBodyCursor = "";
   let previousBodyUserSelect = "";
   let sidebarBodyStylesApplied = false;
@@ -94,6 +98,7 @@
     sidebarPointerId = event.pointerId;
     sidebarDragStartX = event.clientX;
     sidebarDragStartWidth = sidebarWidth;
+    sidebarDragChanged = false;
     previousBodyCursor = document.body.style.cursor;
     previousBodyUserSelect = document.body.style.userSelect;
     document.body.style.cursor = "col-resize";
@@ -105,9 +110,14 @@
 
   function handleSidebarPointerMove(event: PointerEvent) {
     if (!sidebarResizing || event.pointerId !== sidebarPointerId) return;
-    sidebarWidth = clampSidebarWidth(
+    const next = clampSidebarWidth(
       sidebarDragStartWidth + event.clientX - sidebarDragStartX,
+      sidebarMetrics.min, sidebarMetrics.max,
     );
+    if (next !== sidebarWidth) {
+      preferredSidebarWidth = next;
+      sidebarDragChanged = true;
+    }
   }
 
   function finishSidebarResize(event: PointerEvent) {
@@ -120,12 +130,12 @@
     sidebarResizing = false;
     sidebarPointerId = null;
     restoreSidebarResizeStyles();
-    saveSidebarWidth(sidebarWidth);
+    if (sidebarDragChanged) saveSidebarWidth(preferredSidebarWidth);
   }
 
   function resetSidebarWidth() {
-    sidebarWidth = SIDEBAR_DEFAULT_WIDTH;
-    saveSidebarWidth(sidebarWidth);
+    preferredSidebarWidth = null;
+    saveSidebarWidth(null);
   }
 
   function handleSidebarResizeKeydown(event: KeyboardEvent) {
@@ -133,8 +143,8 @@
     if (delta === 0) return;
 
     event.preventDefault();
-    sidebarWidth = clampSidebarWidth(sidebarWidth + delta);
-    saveSidebarWidth(sidebarWidth);
+    preferredSidebarWidth = clampSidebarWidth(sidebarWidth + delta, sidebarMetrics.min, sidebarMetrics.max);
+    saveSidebarWidth(preferredSidebarWidth);
   }
 
   function sidebarResizeHandle(node: HTMLElement) {
@@ -842,6 +852,8 @@
              shrink-0 relative flex-col bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
+      <span aria-hidden="true" class="absolute invisible h-0 pointer-events-none" style="width: 1rem"
+        use:observeSidebarFontSize={(size) => sidebarFontSize = size}></span>
       <!-- Brand header -->
       <div class="px-3 pt-3 pb-2 flex items-center gap-1.5">
         <a
@@ -1211,8 +1223,8 @@
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize sidebar"
-        aria-valuemin={SIDEBAR_MIN_WIDTH}
-        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuemin={sidebarMetrics.min}
+        aria-valuemax={sidebarMetrics.max}
         aria-valuenow={sidebarWidth}
         tabindex="0"
         use:sidebarResizeHandle

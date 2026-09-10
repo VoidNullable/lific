@@ -548,6 +548,61 @@ try {
     await page.waitForURL("**/#/LONG/overview");
   });
 
+  await test("text-scaled default preserves pixel preference and resize semantics", async () => {
+    const { page, aside } = await session({ route: "/settings" });
+    const handle = aside.getByRole("separator", { name: "Resize sidebar" });
+    const stored = () => page.evaluate(() => localStorage.getItem("lific:sidebar:width"));
+    const width = async (expected: number) => {
+      await attr(handle, "aria-valuenow", String(expected));
+      assert.ok(Math.abs((await aside.boundingBox())!.width - expected) < 0.02, "ARIA reports the rendered CSS-pixel width");
+    };
+    const scale = async (name: string) => { await page.getByRole("button", { name, exact: true }).click(); };
+    await width(230);
+    await scale("L"); await width(258.75);
+    await attr(handle, "aria-valuemin", "202.5");
+    await scale("S"); await width(215.625);
+    await scale("M"); await width(230);
+    assert.equal(await stored(), null, "Text changes do not create a manual preference");
+    await handle.click();
+    assert.equal(await stored(), null, "Clicking the resize handle is not a resize");
+
+    // Simulate a pre-upgrade preference, including a load already using Large.
+    await scale("L");
+    await page.evaluate(() => localStorage.setItem("lific:sidebar:width", "300"));
+    await page.reload(); await width(300);
+    await scale("S"); await width(300);
+    await scale("M"); await width(300);
+    assert.equal(await stored(), "300");
+
+    await page.evaluate(() => localStorage.setItem("lific:sidebar:width", "190"));
+    await page.reload(); await width(190);
+    await scale("L"); await width(202.5);
+    assert.equal(await stored(), "190", "Temporary minimum does not overwrite the saved width");
+    await page.reload(); await width(202.5);
+    await scale("M"); await width(190);
+    await scale("L"); await width(202.5);
+    await handle.focus(); await page.keyboard.press("ArrowRight"); await width(212.5);
+    assert.equal(await stored(), "212.5", "Keyboard resize is still ten physical pixels");
+
+    const box = (await handle.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + 100);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 37, box.y + 100);
+    await width(249.5);
+    assert.equal(await stored(), "212.5", "Dragging does not persist until release");
+    await page.mouse.up();
+    assert.equal(await stored(), "249.5");
+    await page.reload(); await width(249.5);
+    await handle.dblclick(); await width(258.75);
+    assert.equal(await stored(), null, "Reset resumes the proportional default");
+
+    await aside.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    await scale("M");
+    await page.getByRole("button", { name: "Expand sidebar", exact: true }).click();
+    await width(230);
+    assert.equal(await stored(), null);
+  });
+
   await test("native modified sidebar links", async () => {
     const s = await session({ route: "/ONE/issues" }); const { page, aside, context } = s;
     await aside.getByRole("button", { name: "Recent issues", exact: true }).click();
