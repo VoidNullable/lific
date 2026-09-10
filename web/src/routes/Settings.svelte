@@ -12,7 +12,6 @@
     clearSession,
     getInstance,
     TOOL_TEMPLATES,
-    type AuthUser,
     type Bot,
     type ToolTemplate,
   } from "../lib/api";
@@ -27,7 +26,7 @@
   import SettingsTabs from "../lib/SettingsTabs.svelte";
   import Skeleton from "../lib/Skeleton.svelte";
   import {
-    getPreference, setPreference, type ThemePreference,
+    themePreference, setPreference, type ThemePreference,
     getAccent, setAccent, type AccentPreset,
     getDensity, setDensity, type Density,
     getFontScale, setFontScale, type FontScale,
@@ -41,6 +40,7 @@
   } from "lucide-svelte";
   import { getContext } from "svelte";
   import { copyToClipboard } from "../lib/clipboard";
+  import { currentUser, getUserRevision, publishUser } from "../lib/userState";
 
   let { navigate }: { navigate: (path: string) => void } = $props();
 
@@ -52,7 +52,7 @@
     return () => topbarCtx?.set(undefined);
   });
 
-  let user = $state<AuthUser | null>(null);
+  let user = $derived($currentUser);
   let bots = $state<Bot[]>([]);
   let loading = $state(true);
   let customOpen = $state(false);
@@ -200,7 +200,6 @@
   let profileSavedAt = $state(0);
 
   // Appearance
-  let themePref = $state<ThemePreference>("system");
   let accentPref = $state<AccentPreset>("indigo");
   let densityPref = $state<Density>("comfortable");
   let fontScalePref = $state<FontScale>("md");
@@ -220,7 +219,6 @@
   let signOutAllError = $state("");
 
   $effect(() => {
-    themePref = getPreference();
     accentPref = getAccent();
     densityPref = getDensity();
     fontScalePref = getFontScale();
@@ -237,6 +235,8 @@
 
   async function saveProfile() {
     if (!user || !hasProfileChanges || profileSaving) return;
+    const revision = getUserRevision();
+    const session = localStorage.getItem("lific_token");
     profileSaving = true;
     profileError = "";
     const input: { display_name?: string; email?: string } = {};
@@ -244,8 +244,9 @@
     if (profileEmail.trim().toLowerCase() !== user.email) input.email = profileEmail.trim();
     const res = await updateProfile(input);
     profileSaving = false;
+    if (session !== localStorage.getItem("lific_token")) return;
     if (res.ok) {
-      user = res.data;
+      if (!publishUser(res.data, revision)) return;
       profileName = res.data.display_name;
       profileEmail = res.data.email;
       profileSavedAt = Date.now();
@@ -256,7 +257,6 @@
   }
 
   function pickTheme(p: ThemePreference) {
-    themePref = p;
     setPreference(p);
   }
 
@@ -310,6 +310,7 @@
     signingOut = false;
     if (res.ok) {
       confirmingSignOutAll = false;
+      currentUser.set(null);
       navigate("/login");
       return;
     }
@@ -321,19 +322,23 @@
   async function logoutNow() {
     await logout();
     clearSession();
+    currentUser.set(null);
     navigate("/login");
   }
 
   async function loadUser() {
+    const revision = getUserRevision();
+    const session = localStorage.getItem("lific_token");
     // Whether this instance signs in without a password decides how a stale
     // session is recovered below, so it is read once with the profile.
     const instance = await getInstance();
     if (instance.ok) webAutoLogin = instance.data.web_auto_login;
     const result = await me();
+    if (session !== localStorage.getItem("lific_token")) return;
     if (result.ok) {
-      user = result.data;
-      profileName = result.data.display_name;
-      profileEmail = result.data.email;
+      publishUser(result.data, revision);
+      profileName = user?.display_name ?? "";
+      profileEmail = user?.email ?? "";
       await loadBots();
     }
     loading = false;
@@ -615,7 +620,7 @@
             {@const IconComp = Icon as typeof Sun}
             <button
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-body-sm font-medium transition-all
-                     {themePref === val
+                     {$themePreference === val
                 ? 'bg-[var(--surface)] text-[var(--text)] shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
                 : 'text-[var(--text-muted)] hover:text-[var(--text)]'}"
               onclick={() => pickTheme(val as ThemePreference)}

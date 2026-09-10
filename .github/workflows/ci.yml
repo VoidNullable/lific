@@ -78,6 +78,9 @@ jobs:
       - name: Typecheck (svelte-check + tsc)
         run: bun run check
         working-directory: web
+      - name: Frontend unit tests
+        run: bun test
+        working-directory: web
       - name: Build
         run: bun run build
         working-directory: web

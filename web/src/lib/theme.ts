@@ -1,3 +1,5 @@
+import { get, writable } from "svelte/store";
+
 export type ThemePreference = "light" | "dark" | "system";
 export type AccentPreset = "indigo" | "teal" | "rose" | "amber" | "green" | "violet";
 export type Density = "comfortable" | "compact";
@@ -12,11 +14,28 @@ const MOTION_KEY = "lific_motion";
 
 const ACCENTS: readonly AccentPreset[] = ["indigo", "teal", "rose", "amber", "green", "violet"];
 
-/** Read stored preference, default to system. */
-export function getPreference(): ThemePreference {
-  const stored = localStorage.getItem(STORAGE_KEY);
+function readPreference(): ThemePreference {
+  const stored = typeof localStorage === "undefined" ? null : localStorage.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
   return "system";
+}
+
+const preference = writable<ThemePreference>(readPreference());
+const effectiveTheme = writable<"light" | "dark">(
+  typeof window === "undefined" ? "light" : resolveTheme(get(preference)),
+);
+
+/** Shared writable preference. Direct store writes also persist and apply. */
+export const themePreference = {
+  subscribe: preference.subscribe,
+  set: setPreference,
+  update: (updater: (value: ThemePreference) => ThemePreference) => setPreference(updater(get(preference))),
+};
+/** Effective color scheme, including live OS changes while using system. */
+export const resolvedTheme = { subscribe: effectiveTheme.subscribe };
+
+export function getPreference(): ThemePreference {
+  return get(preference);
 }
 
 /** Persist a preference. */
@@ -26,6 +45,7 @@ export function setPreference(pref: ThemePreference) {
   } else {
     localStorage.setItem(STORAGE_KEY, pref);
   }
+  preference.set(pref);
   apply(pref);
 }
 
@@ -43,6 +63,7 @@ export function resolveTheme(pref: ThemePreference): "light" | "dark" {
 export function apply(pref: ThemePreference) {
   const resolved = resolveTheme(pref);
   document.documentElement.classList.toggle("dark", resolved === "dark");
+  effectiveTheme.set(resolved);
 }
 
 /** Read stored accent preset, default to indigo. */
@@ -145,13 +166,27 @@ export function motionReduced(): boolean {
   return resolveMotion(getMotionPreference());
 }
 
-/** Initialize on load + listen for system changes. */
+let initialized = false;
+
+/** Initialize on load + listen for system and other-tab changes. Idempotent. */
 export function init() {
+  preference.set(readPreference());
   apply(getPreference());
   applyAccent(getAccent());
   applyDensity(getDensity());
   applyFontScale(getFontScale());
   applyMotion(getMotionPreference());
+
+  if (initialized) return;
+  initialized = true;
+  window.addEventListener("storage", (event) => {
+    if (event.storageArea && event.storageArea !== localStorage) return;
+    if (event.key === STORAGE_KEY || event.key === null) {
+      const next = readPreference();
+      preference.set(next);
+      apply(next);
+    }
+  });
 
   window
     .matchMedia("(prefers-color-scheme: dark)")
