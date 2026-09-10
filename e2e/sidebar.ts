@@ -7,7 +7,7 @@ import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
-import { checkSidebarContrast, desktopScreenshots } from "./sidebar-visual";
+import { checkSidebarContrast, desktopScreenshots, mobileVisualChecks } from "./sidebar-visual";
 
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/SidebarFixture.svelte";
@@ -299,6 +299,14 @@ try {
     api.projects[1].emoji = "lucide:Terminal";
     const s = await session({ api, route: "/ONE/issues" });
     await desktopScreenshots(s.page, shotDir);
+  });
+
+  await test("mobile visual grammar contrast and touch targets", async () => {
+    const api = new API();
+    api.projects[0].emoji = "🦎";
+    api.projects[1].emoji = "lucide:Terminal";
+    const s = await session({ api, mobile: true, route: "/ONE/issues" });
+    await mobileVisualChecks(s.page, shotDir, process.env.E2E_VISUAL === "1");
   });
 
   await test("direct link reveal and deliberate collapse survives revalidation", async () => {

@@ -444,6 +444,17 @@ html[data-motion="reduced"] *::after {
   background: var(--sidebar-accent);
 }
 .desktop-sidebar .sidebar-recents-heading { margin-top: var(--sidebar-section-gap); }
+.mobile-sidebar :is(button, a) { min-height: 44px; }
+.mobile-sidebar button { min-width: 44px; }
+.mobile-sidebar .mobile-main-row { min-height: max(48px, 3rem); }
+.mobile-sidebar .mobile-project-row,
+.mobile-sidebar .mobile-destinations .sidebar-destination { min-height: 52px; }
+.mobile-sidebar .mobile-project-icon { width: 1.375rem; height: 1.375rem; }
+.mobile-sidebar .mobile-project-row:is(:hover, :active) { background: var(--sidebar-hover); }
+.mobile-sidebar [data-current-project] .mobile-project-chevron { color: var(--sidebar-accent); }
+.mobile-sidebar .mobile-group-heading { margin-top: var(--sidebar-section-gap); }
+.mobile-sidebar .mobile-ungrouped { margin-top: 0.75rem; }
+.mobile-sidebar .mobile-destinations .sidebar-destination + .sidebar-destination { margin-top: 0.125rem; }
 
 /* ── Mobile nav swipe surface (LIF-349) ────────────────
  * The nav's back/dismiss swipe needs the horizontal component of a touch

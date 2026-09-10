@@ -1247,7 +1247,7 @@
            moving between a project's sections is one tap plus one, not a
            trip back through the root (LIF-349). -->
       <header
-        class="md:hidden shrink-0 flex items-center gap-1 h-12 px-1
+        class="sidebar-theme md:hidden shrink-0 flex items-center gap-1 h-12 px-1
                pt-[env(safe-area-inset-top)] box-content bg-[var(--chrome)]"
       >
         <button
@@ -1271,9 +1271,8 @@
               </span>
             {:else}
               <span
-                class="size-6 rounded-md border border-[var(--border)] bg-[var(--bg-subtle)]
-                       grid place-items-center text-micro font-semibold tracking-tight
-                       shrink-0 text-[var(--text-muted)]"
+                class="sidebar-initials size-6 rounded
+                       grid place-items-center text-micro font-medium tracking-tight shrink-0"
               >
                 {activeProjectRecord.identifier.slice(0, 2)}
               </span>

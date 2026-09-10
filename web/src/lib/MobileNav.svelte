@@ -37,7 +37,6 @@
     ChevronLeft,
     X,
     Plus,
-    Folder,
     Settings,
     Sun,
     Moon,
@@ -580,7 +579,7 @@
     bind:this={panelEl}
     bind:clientWidth={panelWidth}
     data-mobile-nav
-    class="md:hidden fixed inset-0 z-[60] flex flex-col overflow-hidden bg-[var(--chrome)]
+    class="sidebar-theme mobile-sidebar md:hidden fixed inset-0 z-[60] flex flex-col overflow-hidden bg-[var(--chrome)]
            ease-[var(--ease-out-expo)] focus:outline-none
            {dragging ? 'transition-none' : 'transition-transform duration-300'}
            {open ? '' : 'pointer-events-none'}"
@@ -616,8 +615,7 @@
           Lific
         </span>
         <span
-          class="font-mono text-micro tracking-tight text-[var(--text-faint)]
-                 px-1.5 py-0.5 rounded-md bg-[var(--bg-subtle)]"
+          class="text-micro text-[var(--text-faint)] shrink-0"
         >
           v{__APP_VERSION__}
         </span>
@@ -631,37 +629,31 @@
         </button>
       </div>
 
-      <div class="shrink-0 px-3 pb-2">
+      <div class="shrink-0 px-3 pb-3">
         <button
-          class="w-full h-11 flex items-center gap-2.5 px-3 rounded-xl
-                 bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]
-                 text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
+          class="sidebar-launcher w-full h-11 flex items-center gap-2.5 px-3 rounded-lg transition-colors"
           onclick={() => {
             controller?.close(onOpenPalette);
           }}
         >
           <Search size={16} class="shrink-0" />
-          <span class="flex-1 text-left text-body">Search issues, pages, projects…</span>
+          <span class="flex-1 text-left text-body-lg">Search issues, pages, projects…</span>
         </button>
       </div>
 
       <nav class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-2 pb-3">
         <a
-          class="w-full min-h-12 flex items-center gap-3 px-3 rounded-xl text-left text-body
-                 transition-colors
-                 {isActive('/')
-            ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-            : 'text-[var(--text-muted)] active:bg-[var(--bg-subtle)]'}"
+          class="sidebar-destination mobile-main-row w-full min-h-12 flex items-center gap-3 px-3 rounded-lg text-left text-body-lg transition-colors"
           href="#/"
           aria-current={route === "/" ? "page" : undefined}
           onclick={(e) => go(e, "/")}
         >
-          <Home size={18} class="shrink-0 {isActive('/') ? 'text-[var(--accent)]' : ''}" />
+          <Home size={18} class="shrink-0" />
           Home
         </a>
 
-        <div class="flex items-center justify-between pl-3 pr-1 pt-4 pb-1">
-          <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
+        <div class="flex items-center justify-between pl-3 pr-1 pt-2 pb-1">
+          <span class="sidebar-section-label text-micro font-semibold uppercase text-[var(--text-faint)]">
             Projects
           </span>
           <button
@@ -684,36 +676,32 @@
         {#snippet projectRow(project: Project)}
           <div class="flex items-center">
           <button
-            class="flex-1 min-w-0 min-h-[52px] flex items-center gap-3 px-3 rounded-xl text-left
-                   transition-colors
-                   {project.identifier.toLowerCase() === activeIdentifier
-              ? 'bg-[var(--bg-subtle)]'
-              : 'active:bg-[var(--bg-subtle)]'}"
+            class="mobile-project-row flex-1 min-w-0 min-h-[52px] flex items-center gap-3 px-3 rounded-lg text-left transition-colors"
+            data-current-project={project.identifier.toLowerCase() === activeIdentifier || undefined}
             onclick={() => push(project)}
             data-mobile-project-trigger={project.identifier}
             aria-label="Open {project.name} navigation"
             oncontextmenu={(e) => projectMenu(e, project)}
           >
             {#if project.emoji}
-              <span class="size-8 rounded-lg bg-[var(--bg-subtle)] grid place-items-center shrink-0">
-                <ProjectIcon value={project.emoji} size={18} />
+              <span class="mobile-project-icon grid place-items-center shrink-0">
+                <ProjectIcon value={project.emoji} size={20} />
               </span>
             {:else}
               <span
-                class="size-8 rounded-lg border border-[var(--border)] bg-[var(--bg-subtle)]
-                       grid place-items-center text-caption font-semibold tracking-tight
-                       shrink-0 text-[var(--text-muted)]"
+                class="mobile-project-icon sidebar-initials rounded
+                       grid place-items-center text-micro font-medium tracking-tight shrink-0"
               >
                 {project.identifier.slice(0, 2)}
               </span>
             {/if}
             <span class="flex-1 min-w-0">
-              <span class="block truncate text-body text-[var(--text)]">{project.name}</span>
+              <span class="block truncate text-body-lg text-[var(--text)] font-medium">{project.name}</span>
               <span class="block font-mono text-micro text-[var(--text-faint)]">
                 {project.identifier}
               </span>
             </span>
-            <ChevronRight size={17} class="shrink-0 text-[var(--text-faint)]" />
+            <ChevronRight size={17} class="mobile-project-chevron shrink-0 text-[var(--text-faint)]" />
           </button>
           <button class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {project.name}" aria-haspopup="menu" onclick={(e) => projectMenu(e, project)}><Ellipsis size={18} /></button>
           </div>
@@ -724,7 +712,7 @@
                viewport on focus (LIF-271). -->
           <input
             bind:this={editInput}
-            class="w-full h-11 px-3 my-1 rounded-xl text-[16px] bg-[var(--bg)]
+            class="w-full h-11 px-3 my-1 rounded-lg text-[16px] bg-[var(--bg)]
                    border border-[var(--border)] text-[var(--text)]"
             placeholder="Group name"
             aria-label="Group name"
@@ -756,10 +744,10 @@
           {#if editingGroupId === group.id}
             {@render groupNameInput()}
           {:else}
-            <div class="flex items-center">
+            <div class="mobile-group-heading flex items-center">
             <button
-              class="flex-1 min-w-0 min-h-11 flex items-center gap-2 px-3 rounded-xl text-left
-                     text-body-sm font-medium uppercase tracking-wide
+              class="flex-1 min-w-0 min-h-11 flex items-center gap-2 px-3 rounded-lg text-left
+                     text-caption font-semibold
                      text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
               aria-expanded={!collapsed}
               onclick={() => onToggleGroup(group.id)}
@@ -770,14 +758,13 @@
                 class="shrink-0 transition-transform text-[var(--text-faint)]
                        {collapsed ? '' : 'rotate-90'}"
               />
-              <Folder size={15} class="shrink-0 text-[var(--text-faint)]" />
-              <span class="truncate flex-1 normal-case tracking-normal">{group.name}</span>
+              <span class="truncate flex-1">{group.name}</span>
             </button>
             <button data-mobile-group-actions={group.id} class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {group.name}" aria-haspopup="menu" onclick={(e) => groupMenu(e, group)}><Ellipsis size={18} /></button>
             </div>
           {/if}
           {#if !collapsed}
-            <div class="ml-4 pl-1 border-l border-[var(--border)]">
+            <div class="mobile-group-projects">
               {#each projectsIn(group) as project (project.id)}
                 {@render projectRow(project)}
               {/each}
@@ -785,15 +772,17 @@
           {/if}
         {/each}
 
-        {#each ungrouped as project (project.id)}
-          {@render projectRow(project)}
-        {/each}
+        <div class:mobile-ungrouped={groups.length > 0}>
+          {#each ungrouped as project (project.id)}
+            {@render projectRow(project)}
+          {/each}
+        </div>
 
         {#if projects.length === 0 && groups.length === 0 && editingGroupId !== NEW_GROUP}
           <div class="px-3 py-8">
             <p class="text-body text-[var(--text-faint)] mb-3">No projects yet.</p>
             <a
-              class="min-h-11 px-4 rounded-xl bg-[var(--accent)] text-[var(--accent-text)] text-body font-medium"
+              class="inline-flex items-center min-h-11 px-4 rounded-lg bg-[var(--accent)] text-[var(--accent-text)] text-body-lg font-medium"
               href="#/projects/new"
               onclick={(e) => go(e, "/projects/new")}
             >
@@ -804,26 +793,23 @@
       </nav>
 
       <div
-        class="shrink-0 flex items-center gap-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]
-               border-t border-[var(--border)]"
+        class="sidebar-footer shrink-0 flex items-center gap-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
       >
         <a
-          class="flex-1 min-w-0 min-h-12 flex items-center gap-3 px-2 rounded-xl text-left
-                 transition-colors
-                 {isActive('/settings') ? 'bg-[var(--bg-subtle)]' : 'active:bg-[var(--bg-subtle)]'}"
+          class="sidebar-destination mobile-main-row flex-1 min-w-0 min-h-12 flex items-center gap-3 px-2 rounded-lg text-left transition-colors"
           href="#/settings"
           aria-current={isActive("/settings") ? "page" : undefined}
           onclick={(e) => go(e, "/settings")}
         >
           <div
-            class="size-9 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+            class="sidebar-avatar size-9 rounded-full
                    grid place-items-center text-caption font-semibold tracking-wide
                    select-none shrink-0"
           >
             {initials(user.display_name || user.username)}
           </div>
           <div class="flex-1 min-w-0">
-            <div class="text-body text-[var(--text)] truncate leading-tight">
+            <div class="text-body-lg text-[var(--text)] truncate leading-tight">
               {user.display_name || user.username}
             </div>
             <div class="text-micro text-[var(--text-faint)] flex items-center gap-1 leading-tight mt-0.5">
@@ -832,7 +818,7 @@
           </div>
         </a>
         <button
-          class="size-11 shrink-0 grid place-items-center rounded-xl
+          class="size-11 shrink-0 grid place-items-center rounded-lg
                  text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
           onclick={onCycleTheme}
           aria-label="Choose theme, current: {themePref}"
@@ -855,7 +841,6 @@
       bind:this={projectEl}
       data-mobile-project
       class="absolute inset-0 flex flex-col bg-[var(--chrome)]
-             shadow-[-10px_0_28px_rgba(0,0,0,0.12)]
              {dragging || paneSnap ? 'transition-none' : 'transition-transform duration-300'}
              ease-[var(--ease-out-expo)]
              {level === 0 && !dragging ? 'pointer-events-none' : ''}"
@@ -889,14 +874,13 @@
           </div>
           <div class="flex items-center gap-3 px-4 pt-1 pb-4">
             {#if project.emoji}
-              <span class="size-11 rounded-xl bg-[var(--bg-subtle)] grid place-items-center shrink-0">
-                <ProjectIcon value={project.emoji} size={24} />
+              <span class="size-11 grid place-items-center shrink-0">
+                <ProjectIcon value={project.emoji} size={32} />
               </span>
             {:else}
               <span
-                class="size-11 rounded-xl border border-[var(--border)] bg-[var(--bg-subtle)]
-                       grid place-items-center text-body font-semibold tracking-tight
-                       shrink-0 text-[var(--text-muted)]"
+                class="sidebar-initials size-11 rounded-lg
+                       grid place-items-center text-body-lg font-medium tracking-tight shrink-0"
               >
                 {project.identifier.slice(0, 2)}
               </span>
@@ -913,27 +897,20 @@
         </div>
 
         <nav
-          class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-2
+          class="mobile-destinations flex-1 min-h-0 overflow-y-auto overscroll-contain px-2 pt-2
                  pb-[max(0.75rem,env(safe-area-inset-bottom))]"
         >
           {#each destinations as dest (dest.slug)}
             {@const href = `/${project.identifier}/${dest.slug}`}
             {@const active = isActive(href)}
             <a
-              class="w-full min-h-[52px] flex items-center gap-3 px-3 rounded-xl text-left text-body
-                     transition-colors
-                     {active
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] active:bg-[var(--bg-subtle)]'}"
+              class="sidebar-destination w-full min-h-[52px] flex items-center gap-3 px-3 rounded-lg text-left text-body-lg transition-colors"
               href={"#" + href}
               aria-current={active ? "page" : undefined}
               onclick={(e) => go(e, href)}
             >
-              <dest.icon size={18} class="shrink-0 {active ? 'text-[var(--accent)]' : ''}" />
+              <dest.icon size={18} class="shrink-0" />
               <span class="flex-1">{dest.label}</span>
-              {#if active}
-                <span class="size-1.5 rounded-full bg-[var(--accent)] shrink-0"></span>
-              {/if}
             </a>
           {/each}
         </nav>
