@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 // Real Layout, Settings, palette and MobileNav. Only HTTP is mocked; no copied
 // sidebar state or handlers. Vite and Chromium are owned by this finite process.
-// Run: bun run sidebar (in e2e). Screenshots: $E2E_SCREENSHOT_DIR or /tmp/opencode.
+// Run: bun run sidebar (in e2e). Screenshots: $E2E_SCREENSHOT_DIR or the OS temp directory.
 // This checks the client's per-session ordering contract, not server isolation.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
 import { accents, appearance, sidebarContrast, checkSidebarContrast, desktopScreenshots, mobileVisualChecks } from "./sidebar-visual";
@@ -156,7 +157,7 @@ const failures: string[] = [];
 let browser: Awaited<ReturnType<typeof chromium.launch>>;
 let base: string;
 let passed = 0;
-const shotDir = process.env.E2E_SCREENSHOT_DIR ?? "/tmp/opencode";
+const shotDir = process.env.E2E_SCREENSHOT_DIR ?? tmpdir();
 const allGates: Gate[] = [];
 type Session = { page: Page; api: API; aside: Locator; context: BrowserContext };
 
