@@ -6,7 +6,9 @@
     "smoke": "bun smoke.ts",
     "public": "bun public-projects.ts",
     "archives": "bun project-archives.ts",
-    "context-menu": "bun context-menu.ts"
+    "mobile-nav": "bun mobile-nav.ts",
+    "context-menu": "bun context-menu.ts",
+    "sidebar": "bun sidebar.ts"
   },
   "devDependencies": {
     "playwright": "^1.58.0"

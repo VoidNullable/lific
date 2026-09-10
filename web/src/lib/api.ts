@@ -762,6 +762,13 @@ export async function listProjectGroups() {
   return request<ProjectGroup[]>("/project-groups");
 }
 
+export async function reorderProjectGroups(ids: number[]) {
+  return request<ProjectGroup[]>("/project-groups/reorder", {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export async function createProjectGroup(name: string) {
   return request<ProjectGroup>("/project-groups", {
     method: "POST",
@@ -2417,4 +2424,3 @@ export async function getProjectChanges(
   if (limit !== undefined) params.set("limit", String(limit));
   return request<ChangesPage>(`/projects/${projectId}/changes?${params}`);
 }
-

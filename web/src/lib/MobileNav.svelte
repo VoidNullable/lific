@@ -26,6 +26,10 @@
    * had nowhere to put a second level.
    */
   import ProjectIcon from "./ProjectIcon.svelte";
+  import { onMount, tick, untrack } from "svelte";
+  import { mobileNavState } from "./mobileNavState.svelte";
+  import { createMobileNavHistory, type MobileNavEntry } from "./mobileNavHistory";
+  import { contextMenuState, closeContextMenu } from "./contextMenuState.svelte";
   import {
     Search,
     Home,
@@ -48,6 +52,9 @@
     TrendingUp,
     Waypoints,
     Paperclip,
+    Ellipsis,
+    ArrowUp,
+    ArrowDown,
   } from "lucide-svelte";
   import type { AuthUser, Project, ProjectGroup } from "./api";
   import { NEW_GROUP } from "./projectGroups";
@@ -72,6 +79,10 @@
     draftGroupName = $bindable(),
     onCommitGroupName,
     onCancelGroupEdit,
+    groupEditError = "",
+    orderError = "",
+    onMoveProject,
+    onMoveGroup,
     themePref,
     themeResolved,
     onCycleTheme,
@@ -92,11 +103,15 @@
     onGroupMenu: (e: MouseEvent, group: ProjectGroup) => void;
     editingGroupId?: number | null;
     draftGroupName?: string;
-    onCommitGroupName: () => void;
+    onCommitGroupName: () => void | boolean | Promise<void | boolean>;
     onCancelGroupEdit: () => void;
+    groupEditError?: string;
+    orderError?: string;
+    onMoveProject?: (project: Project, direction: "up" | "down") => void | Promise<void>;
+    onMoveGroup?: (group: ProjectGroup, direction: "up" | "down") => void | Promise<void>;
     themePref: ThemePreference;
     themeResolved: "light" | "dark";
-    onCycleTheme: () => void;
+    onCycleTheme: (event: MouseEvent) => void;
   } = $props();
 
   // ── Mount / visibility ──────────────────────────────────────
@@ -110,6 +125,14 @@
   let panelEl = $state<HTMLElement | null>(null);
   let panelWidth = $state(0);
   let restoreFocusTo: HTMLElement | null = null;
+  let projectTrigger: HTMLElement | null = null;
+  let rootEl = $state<HTMLDivElement>(null!);
+  let projectEl = $state<HTMLDivElement>(null!);
+  let controller: ReturnType<typeof createMobileNavHistory> | undefined;
+  let desktop: MediaQueryList;
+  let historyOpen = false;
+  let lastRoute: string;
+  let presentation = 0;
 
   // Opening at a level other than the one we closed at has to LAND there,
   // not animate there: otherwise the outgoing pane visibly slides away while
@@ -140,18 +163,106 @@
     };
   });
 
-  // Move focus into the panel on open and hand it back to whatever summoned
-  // it on close, so the hamburger doesn't lose the keyboard's place.
-  $effect(() => {
-    if (open) {
-      restoreFocusTo = document.activeElement as HTMLElement | null;
-      queueMicrotask(() => panelEl?.focus());
-    } else if (restoreFocusTo) {
-      const target = restoreFocusTo;
-      restoreFocusTo = null;
-      // Only restore if the trigger is still on the page.
-      if (target.isConnected) target.focus();
+  function focusPane() {
+    const pane = level === 1 ? projectEl : rootEl;
+    pane?.querySelector<HTMLElement>("button, a[href]")?.focus();
+  }
+
+  function present(entry: MobileNavEntry | null) {
+    const revision = ++presentation;
+    const wasOpen = historyOpen;
+    const oldLevel = level;
+    if (entry && desktop?.matches) { controller?.close(); return; }
+    if (entry && !wasOpen) {
+      const active = document.activeElement;
+      // A restored drawer has no click trigger. Return to the existing
+      // mobile header control rather than attempting to focus <body>.
+      restoreFocusTo = active instanceof HTMLElement && active !== document.body && active !== document.documentElement
+        ? active : document.querySelector<HTMLElement>('button[aria-label="Open navigation"]');
+      paneSnap = true;
     }
+    if (entry?.project) {
+      viewIdentifier = entry.project;
+    }
+    level = entry?.depth === 2 ? 1 : 0;
+    historyOpen = !!entry;
+    open = !!entry;
+    mobileNavState.open = open;
+    if (!open) closeContextMenu();
+    void tick().then(() => {
+      if (revision !== presentation) return;
+      if (open) {
+        if (contextMenuState.open) return;
+        const row = projectTrigger?.isConnected ? projectTrigger :
+          [...(rootEl?.querySelectorAll<HTMLElement>("[data-mobile-project-trigger]") ?? [])]
+            .find((element) => element.dataset.mobileProjectTrigger === viewProject?.identifier);
+        if (wasOpen && oldLevel === 1 && level === 0 && row && !row.closest("[inert]")) {
+          row.focus();
+        } else focusPane();
+      } else if (restoreFocusTo) {
+        const target = restoreFocusTo;
+        restoreFocusTo = null;
+        if (target.isConnected && !target.closest("[inert]") && target.getClientRects().length) target.focus();
+      }
+    });
+  }
+
+  onMount(() => {
+    desktop = matchMedia("(min-width: 768px)");
+    controller = createMobileNavHistory(present);
+    if (!controller.restore() && open) controller.open(null);
+    const resize = () => { if (desktop.matches) close(); };
+    desktop.addEventListener("change", resize);
+    return () => {
+      controller?.destroy();
+      mobileNavState.open = false;
+      desktop.removeEventListener("change", resize);
+    };
+  });
+
+  // Keep bind:open compatible, but all closures still unwind owned entries.
+  $effect(() => {
+    const requested = open;
+    untrack(() => {
+      if (requested !== historyOpen) {
+        if (requested) controller?.open(null);
+        else controller?.close();
+      }
+    });
+  });
+  $effect(() => {
+    const next = route;
+    untrack(() => {
+      if (lastRoute !== undefined && lastRoute !== next) controller?.routeChanged();
+      lastRoute = next;
+    });
+  });
+
+  // Inert the background, not the context menu mounted beside this dialog.
+  // Observe sibling insertion too, since the menu mounts lazily.
+  $effect(() => {
+    if (!open || !panelEl) return;
+    const saved = new Map<HTMLElement, boolean>();
+    const modal = panelEl;
+    function isolate() {
+      let child: HTMLElement = modal;
+      while (child.parentElement) {
+        for (const sibling of child.parentElement.children) {
+          if (!(sibling instanceof HTMLElement) || sibling === child || sibling.matches('[role="menu"], script, style')) continue;
+          if (!saved.has(sibling)) saved.set(sibling, sibling.inert);
+          sibling.inert = true;
+        }
+        child = child.parentElement;
+        if (child === document.body) break;
+      }
+    }
+    isolate();
+    const observer = new MutationObserver(isolate);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      for (const [element, inert] of saved) element.inert = inert;
+    };
   });
 
   // ── Levels ──────────────────────────────────────────────────
@@ -159,36 +270,37 @@
   // populated after popping back so the outgoing pane still has content to
   // animate with; at level 0 it is inert and unreachable.
   let level = $state(0);
-  let viewProject = $state<Project | null>(null);
+  let viewIdentifier = $state<string | null>(null);
+  let viewProject = $derived(projects.find((p) => p.identifier === viewIdentifier) ?? null);
 
   /** Open the nav, optionally landing straight on a project's pane. */
   export function openAt(project: Project | null) {
-    if (!open) paneSnap = true;
-    if (project) {
-      viewProject = project;
-      level = 1;
-    } else {
-      level = 0;
-    }
-    open = true;
+    projectTrigger = null;
+    controller?.open(project?.identifier ?? null);
   }
 
-  function close() {
-    open = false;
+  export function close() {
+    controller?.close();
+  }
+
+  /** Use for destinations supplied by parent-owned menus as well. */
+  export function navigateTo(path: string) {
+    controller?.close(() => { if (route !== path) navigate(path); });
   }
 
   function push(project: Project) {
-    viewProject = project;
-    level = 1;
+    projectTrigger = document.activeElement as HTMLElement | null;
+    controller?.open(project.identifier);
   }
 
   function pop() {
-    level = 0;
+    controller?.back();
   }
 
-  function go(path: string) {
-    navigate(path);
-    close();
+  function go(event: MouseEvent, path: string) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigateTo(path);
   }
 
   // ── Swipe ───────────────────────────────────────────────────
@@ -318,10 +430,122 @@
   // Escape steps back one level before it dismisses, so a mis-tapped project
   // costs one key rather than the whole navigation.
   function onKeydown(e: KeyboardEvent) {
-    if (!open || e.key !== "Escape") return;
-    e.stopPropagation();
-    if (level === 1) pop();
-    else close();
+    if (!open || contextMenuState.open || e.defaultPrevented) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (editingGroupId != null) cancelEdit();
+      else if (level === 1) pop();
+      else close();
+    } else if (e.key === "Tab") {
+      const pane = level === 1 ? projectEl : rootEl;
+      const items = [...pane.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')]
+        .filter((el) => !el.closest("[inert]") && el.getClientRects().length);
+      const first = items[0], last = items.at(-1);
+      if (!first) { e.preventDefault(); panelEl?.focus(); return; }
+      if (e.shiftKey ? document.activeElement === first || !pane.contains(document.activeElement) : document.activeElement === last || !pane.contains(document.activeElement)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first)?.focus();
+      }
+    }
+  }
+
+  function onFocusin(e: FocusEvent) {
+    if (!open || contextMenuState.open) return;
+    const pane = level === 1 ? projectEl : rootEl;
+    if (e.target instanceof Node && !pane?.contains(e.target)) focusPane();
+  }
+
+  let editInput = $state<HTMLInputElement>(null!);
+  let editReturn: HTMLElement | null = null;
+  let editReturnLabel: string | null = null;
+  let editReturnGroup: number | null = null;
+  let editBusy = $state(false);
+  let editError = $state("");
+  $effect(() => {
+    if (!open || editingGroupId == null) return;
+    untrack(() => {
+      editError = "";
+      editReturn = document.activeElement instanceof HTMLElement && document.activeElement.closest("[data-mobile-nav]")
+        ? document.activeElement : editReturn;
+      void tick().then(() => { editInput?.focus(); editInput?.select(); });
+    });
+  });
+  function restoreEditFocus() {
+    void tick().then(() => {
+      if (editReturn?.isConnected && !editReturn.closest("[inert]")) editReturn.focus();
+      else {
+        const replacement = (editReturnGroup != null ? rootEl?.querySelector<HTMLElement>(`[data-mobile-group-actions="${editReturnGroup}"]`) : null) ?? [...(rootEl?.querySelectorAll<HTMLElement>("button[aria-label]") ?? [])]
+          .find((button) => button.getAttribute("aria-label") === editReturnLabel);
+        if (replacement) replacement.focus();
+        else focusPane();
+      }
+    });
+  }
+  function cancelEdit() {
+    if (editBusy) return;
+    onCancelGroupEdit();
+    editError = "";
+    restoreEditFocus();
+  }
+  async function saveEdit() {
+    if (editBusy) return;
+    if (!draftGroupName?.trim()) { editError = "Enter a group name."; editInput?.focus(); return; }
+    editBusy = true;
+    editError = "";
+    try {
+      const result = await onCommitGroupName();
+      if (result === false || editingGroupId != null) {
+        editError = groupEditError || "Couldn't save the group. Try again.";
+        void tick().then(() => editInput?.focus());
+      } else restoreEditFocus();
+    } catch (error) {
+      editError = error instanceof Error ? error.message : "Couldn't save the group. Try again.";
+      void tick().then(() => editInput?.focus());
+    } finally { editBusy = false; }
+  }
+
+  function projectMenu(e: MouseEvent, project: Project) {
+    editReturn = e.currentTarget as HTMLElement;
+    editReturnLabel = editReturn.getAttribute("aria-label");
+    editReturnGroup = null;
+    onProjectMenu(e, project);
+    anchorMenu(e);
+    if (onMoveProject) {
+      const group = groups.find((g) => g.project_ids.includes(project.id));
+      const ordered = group ? projectsIn(group) : ungrouped;
+      contextMenuState.items = [...contextMenuState.items.filter((item) => item.label !== "Move up" && item.label !== "Move down"),
+        { label: "Move up", icon: ArrowUp, disabled: ordered[0]?.id === project.id, action: () => void onMoveProject?.(project, "up") },
+        { label: "Move down", icon: ArrowDown, disabled: ordered.at(-1)?.id === project.id, action: () => void onMoveProject?.(project, "down") },
+      ];
+    }
+  }
+  function groupMenu(e: MouseEvent, group: ProjectGroup) {
+    editReturn = e.currentTarget as HTMLElement;
+    editReturnLabel = editReturn.getAttribute("aria-label");
+    editReturnGroup = group.id;
+    onGroupMenu(e, group);
+    anchorMenu(e);
+    if (onMoveGroup) {
+      contextMenuState.items = [...contextMenuState.items.filter((item) => item.label !== "Move up" && item.label !== "Move down"),
+        { label: "Move up", icon: ArrowUp, disabled: groups[0]?.id === group.id, action: () => void onMoveGroup?.(group, "up") },
+        { label: "Move down", icon: ArrowDown, disabled: groups.at(-1)?.id === group.id, action: () => void onMoveGroup?.(group, "down") },
+      ];
+    }
+  }
+
+  function anchorMenu(e: MouseEvent) {
+    if (e.type !== "click") return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    contextMenuState.x = rect.left;
+    contextMenuState.y = rect.bottom;
+  }
+
+  function createMenu(e: MouseEvent) {
+    editReturn = e.currentTarget as HTMLElement;
+    editReturnLabel = editReturn.getAttribute("aria-label");
+    editReturnGroup = null;
+    onOpenCreateMenu(e);
   }
 
   function initials(name: string): string {
@@ -348,7 +572,7 @@
   ];
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onfocusin={onFocusin} />
 
 {#if mounted}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -362,9 +586,10 @@
            {open ? '' : 'pointer-events-none'}"
     style={panelStyle}
     role="dialog"
-    aria-modal="true"
+    aria-modal={!contextMenuState.open}
     aria-label="Navigation"
     aria-hidden={!open}
+    inert={!open}
     tabindex="-1"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -373,12 +598,15 @@
   >
     <!-- ── Level 0: everything you can navigate to ───────────── -->
     <div
+      bind:this={rootEl}
+      data-mobile-root
       class="absolute inset-0 flex flex-col
              {dragging || paneSnap ? 'transition-none' : 'transition-[transform,opacity] duration-300'}
              ease-[var(--ease-out-expo)]
              {level === 1 && !dragging ? 'pointer-events-none' : ''}"
       style={rootStyle}
-      aria-hidden={level === 1}
+      aria-hidden={!open || level === 1}
+      inert={!open || level === 1}
     >
       <div
         class="shrink-0 flex items-center gap-2 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2"
@@ -409,8 +637,7 @@
                  bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]
                  text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
           onclick={() => {
-            close();
-            onOpenPalette();
+            controller?.close(onOpenPalette);
           }}
         >
           <Search size={16} class="shrink-0" />
@@ -419,17 +646,19 @@
       </div>
 
       <nav class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-2 pb-3">
-        <button
+        <a
           class="w-full min-h-12 flex items-center gap-3 px-3 rounded-xl text-left text-body
                  transition-colors
                  {isActive('/')
             ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
             : 'text-[var(--text-muted)] active:bg-[var(--bg-subtle)]'}"
-          onclick={() => go("/")}
+          href="#/"
+          aria-current={route === "/" ? "page" : undefined}
+          onclick={(e) => go(e, "/")}
         >
           <Home size={18} class="shrink-0 {isActive('/') ? 'text-[var(--accent)]' : ''}" />
           Home
-        </button>
+        </a>
 
         <div class="flex items-center justify-between pl-3 pr-1 pt-4 pb-1">
           <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
@@ -439,24 +668,31 @@
             class="size-11 -mr-1 grid place-items-center rounded-lg
                    text-[var(--text-faint)] active:bg-[var(--bg-subtle)] transition-colors"
             aria-label="New project or group"
-            onclick={onOpenCreateMenu}
+            onclick={createMenu}
           >
             <Plus size={18} />
           </button>
         </div>
 
+        {#if orderError}
+          <p role="alert" class="px-3 py-2 text-body-sm text-[var(--error)] break-words">{orderError}</p>
+        {/if}
+
         <!-- One project row. Chevron means "this pushes", matching the
              pane it opens. Long-press still raises the group context menu,
              same as right-click on the desktop sidebar. -->
         {#snippet projectRow(project: Project)}
+          <div class="flex items-center">
           <button
-            class="w-full min-h-[52px] flex items-center gap-3 px-3 rounded-xl text-left
+            class="flex-1 min-w-0 min-h-[52px] flex items-center gap-3 px-3 rounded-xl text-left
                    transition-colors
                    {project.identifier.toLowerCase() === activeIdentifier
               ? 'bg-[var(--bg-subtle)]'
               : 'active:bg-[var(--bg-subtle)]'}"
             onclick={() => push(project)}
-            oncontextmenu={(e) => onProjectMenu(e, project)}
+            data-mobile-project-trigger={project.identifier}
+            aria-label="Open {project.name} navigation"
+            oncontextmenu={(e) => projectMenu(e, project)}
           >
             {#if project.emoji}
               <span class="size-8 rounded-lg bg-[var(--bg-subtle)] grid place-items-center shrink-0">
@@ -479,22 +715,36 @@
             </span>
             <ChevronRight size={17} class="shrink-0 text-[var(--text-faint)]" />
           </button>
+          <button class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {project.name}" aria-haspopup="menu" onclick={(e) => projectMenu(e, project)}><Ellipsis size={18} /></button>
+          </div>
         {/snippet}
 
         {#snippet groupNameInput()}
           <!-- 16px on purpose: anything smaller and iOS Safari zooms the
                viewport on focus (LIF-271). -->
           <input
+            bind:this={editInput}
             class="w-full h-11 px-3 my-1 rounded-xl text-[16px] bg-[var(--bg)]
                    border border-[var(--border)] text-[var(--text)]"
             placeholder="Group name"
+            aria-label="Group name"
+            aria-invalid={!!(editError || groupEditError)}
+            aria-describedby={editError || groupEditError ? "mobile-group-error" : undefined}
+            disabled={editBusy}
             bind:value={draftGroupName}
-            onblur={onCommitGroupName}
             onkeydown={(e) => {
-              if (e.key === "Enter") onCommitGroupName();
-              if (e.key === "Escape") onCancelGroupEdit();
+              if (e.key !== "Enter" && e.key !== "Escape") return;
+              e.preventDefault();
+              e.stopPropagation();
+              if (e.key === "Enter") void saveEdit();
+              else cancelEdit();
             }}
           />
+          {#if editError || groupEditError}<p id="mobile-group-error" role="alert" class="px-3 text-body-sm text-[var(--error)]">{editError || groupEditError}</p>{/if}
+          <div class="flex gap-2 px-3 pb-2">
+            <button class="min-h-11 px-3 rounded-lg bg-[var(--accent)] text-[var(--accent-text)]" disabled={editBusy} onclick={saveEdit}>{editBusy ? "Saving…" : "Save"}</button>
+            <button class="min-h-11 px-3 rounded-lg active:bg-[var(--bg-subtle)]" disabled={editBusy} onclick={cancelEdit}>Cancel</button>
+          </div>
         {/snippet}
 
         {#if editingGroupId === NEW_GROUP}
@@ -506,13 +756,14 @@
           {#if editingGroupId === group.id}
             {@render groupNameInput()}
           {:else}
+            <div class="flex items-center">
             <button
-              class="w-full min-h-11 flex items-center gap-2 px-3 rounded-xl text-left
+              class="flex-1 min-w-0 min-h-11 flex items-center gap-2 px-3 rounded-xl text-left
                      text-body-sm font-medium uppercase tracking-wide
                      text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
               aria-expanded={!collapsed}
               onclick={() => onToggleGroup(group.id)}
-              oncontextmenu={(e) => onGroupMenu(e, group)}
+              oncontextmenu={(e) => groupMenu(e, group)}
             >
               <ChevronRight
                 size={15}
@@ -522,6 +773,8 @@
               <Folder size={15} class="shrink-0 text-[var(--text-faint)]" />
               <span class="truncate flex-1 normal-case tracking-normal">{group.name}</span>
             </button>
+            <button data-mobile-group-actions={group.id} class="size-11 shrink-0 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Actions for {group.name}" aria-haspopup="menu" onclick={(e) => groupMenu(e, group)}><Ellipsis size={18} /></button>
+            </div>
           {/if}
           {#if !collapsed}
             <div class="ml-4 pl-1 border-l border-[var(--border)]">
@@ -539,12 +792,13 @@
         {#if projects.length === 0 && groups.length === 0 && editingGroupId !== NEW_GROUP}
           <div class="px-3 py-8">
             <p class="text-body text-[var(--text-faint)] mb-3">No projects yet.</p>
-            <button
+            <a
               class="min-h-11 px-4 rounded-xl bg-[var(--accent)] text-[var(--accent-text)] text-body font-medium"
-              onclick={() => go("/projects/new")}
+              href="#/projects/new"
+              onclick={(e) => go(e, "/projects/new")}
             >
               Create a project
-            </button>
+            </a>
           </div>
         {/if}
       </nav>
@@ -553,11 +807,13 @@
         class="shrink-0 flex items-center gap-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]
                border-t border-[var(--border)]"
       >
-        <button
+        <a
           class="flex-1 min-w-0 min-h-12 flex items-center gap-3 px-2 rounded-xl text-left
                  transition-colors
                  {isActive('/settings') ? 'bg-[var(--bg-subtle)]' : 'active:bg-[var(--bg-subtle)]'}"
-          onclick={() => go("/settings")}
+          href="#/settings"
+          aria-current={isActive("/settings") ? "page" : undefined}
+          onclick={(e) => go(e, "/settings")}
         >
           <div
             class="size-9 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
@@ -574,12 +830,14 @@
               <Settings size={10} /> Settings
             </div>
           </div>
-        </button>
+        </a>
         <button
           class="size-11 shrink-0 grid place-items-center rounded-xl
                  text-[var(--text-muted)] active:bg-[var(--bg-subtle)] transition-colors"
           onclick={onCycleTheme}
-          aria-label="Cycle theme, current: {themePref}"
+          aria-label="Choose theme, current: {themePref}"
+          title="Choose theme, current: {themePref}"
+          aria-haspopup="menu"
         >
           {#if themePref === "system"}
             <Monitor size={18} />
@@ -594,13 +852,16 @@
 
     <!-- ── Level 1: one project's destinations ───────────────── -->
     <div
+      bind:this={projectEl}
+      data-mobile-project
       class="absolute inset-0 flex flex-col bg-[var(--chrome)]
              shadow-[-10px_0_28px_rgba(0,0,0,0.12)]
              {dragging || paneSnap ? 'transition-none' : 'transition-transform duration-300'}
              ease-[var(--ease-out-expo)]
              {level === 0 && !dragging ? 'pointer-events-none' : ''}"
       style={projectStyle}
-      aria-hidden={level === 0}
+      aria-hidden={!open || level === 0}
+      inert={!open || level === 0}
     >
       {#if viewProject}
         {@const project = viewProject}
@@ -658,22 +919,35 @@
           {#each destinations as dest (dest.slug)}
             {@const href = `/${project.identifier}/${dest.slug}`}
             {@const active = isActive(href)}
-            <button
+            <a
               class="w-full min-h-[52px] flex items-center gap-3 px-3 rounded-xl text-left text-body
                      transition-colors
                      {active
                 ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                 : 'text-[var(--text-muted)] active:bg-[var(--bg-subtle)]'}"
-              onclick={() => go(href)}
+              href={"#" + href}
+              aria-current={active ? "page" : undefined}
+              onclick={(e) => go(e, href)}
             >
               <dest.icon size={18} class="shrink-0 {active ? 'text-[var(--accent)]' : ''}" />
               <span class="flex-1">{dest.label}</span>
               {#if active}
                 <span class="size-1.5 rounded-full bg-[var(--accent)] shrink-0"></span>
               {/if}
-            </button>
+            </a>
           {/each}
         </nav>
+      {:else if level === 1}
+        <div class="shrink-0 flex items-center justify-between px-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-[var(--border)]">
+          <button class="min-h-11 flex items-center gap-0.5 px-2 rounded-lg text-body text-[var(--accent)] active:bg-[var(--bg-subtle)]" onclick={pop}>
+            <ChevronLeft size={20} /> Projects
+          </button>
+          <button class="size-11 grid place-items-center rounded-lg text-[var(--text-muted)] active:bg-[var(--bg-subtle)]" aria-label="Close navigation" onclick={close}><X size={20} /></button>
+        </div>
+        <div class="p-4">
+          <h2 class="font-display text-title text-[var(--text)]">Project unavailable</h2>
+          <p class="mt-2 text-body text-[var(--text-muted)]">This project is no longer in your project list.</p>
+        </div>
       {/if}
     </div>
   </div>

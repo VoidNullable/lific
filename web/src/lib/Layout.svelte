@@ -4,6 +4,7 @@
     clearSession,
     listProjects,
     reorderProjects,
+    reorderProjectGroups,
     listIssues,
     listModules,
     listPages,
@@ -13,7 +14,6 @@
     renameProjectGroup,
     deleteProjectGroup,
     assignProjectGroup,
-    type AuthUser,
     type Project,
     type ProjectGroup,
     type Issue,
@@ -28,9 +28,13 @@
   import ShortcutHelp from "./ShortcutHelp.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import { flip } from "svelte/animate";
-  import { getPreference, setPreference, resolveTheme, motionReduced, type ThemePreference } from "./theme";
+  import { themePreference, resolvedTheme, setPreference, motionReduced } from "./theme";
+  import { currentUser, getUserRevision, publishUser } from "./userState";
+  import { mobileNavState } from "./mobileNavState.svelte";
+  import { navLink } from "./navLink";
   import { Settings, List, LayoutGrid, FileText, Plus, Layers, History, ListChecks, LayoutDashboard, Search, ChevronRight, Sun, Moon, Monitor, Menu, Home, TrendingUp, HelpCircle, Folder, FolderPlus, FolderMinus, Pencil, Trash2, PanelLeftClose, PanelLeftOpen, Waypoints, Paperclip } from "lucide-svelte";
-  import { onDestroy, setContext } from "svelte";
+  import { onDestroy, setContext, untrack, tick } from "svelte";
+  import { Ellipsis, ArrowUp, ArrowDown } from "lucide-svelte";
   import { peekState } from "./issues/peek.svelte";
   import PeekPanel from "./issues/PeekPanel.svelte"; // LIF-248: hoisted here so it's available on every route
   import PagePeekPanel from "./pages/PagePeekPanel.svelte"; // pages sibling of PeekPanel, same reasoning
@@ -63,7 +67,7 @@
   // holds the instance so the header can open it already drilled into the
   // current project.
   let navOpen = $state(false);
-  let mobileNav = $state<{ openAt: (p: Project | null) => void } | null>(null);
+  let mobileNav = $state<{ openAt: (p: Project | null) => void; navigateTo: (path: string) => void } | null>(null);
 
   // LIF-309: only the md+ docked sidebar is resizable; the mobile drawer
   // always remains 230px. Width changes stay in memory until a drag ends.
@@ -179,6 +183,7 @@
   // that), and this toggle works both ways.
   $effect(() => {
     function onKey(e: KeyboardEvent) {
+      if (mobileNavState.open || e.defaultPrevented) return;
       if (
         e.key === "?" &&
         !isTypingContext() &&
@@ -203,14 +208,17 @@
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // Compact icon-only theme cycle for the footer (full Light/Dark/System
-  // control lives in Settings → Appearance).
-  let themePref = $state<ThemePreference>(getPreference());
-  let themeResolved = $derived(resolveTheme(themePref));
-  function cycleTheme() {
-    const order: ThemePreference[] = ["light", "dark", "system"];
-    themePref = order[(order.indexOf(themePref) + 1) % order.length];
-    setPreference(themePref);
+  let themePref = $derived($themePreference);
+  let themeResolved = $derived($resolvedTheme);
+  function themeMenu(e?: MouseEvent) {
+    e?.stopPropagation();
+    const trigger = (e?.currentTarget ?? document.activeElement) as HTMLElement;
+    const rect = trigger.getBoundingClientRect();
+    openContextMenu(rect.left, rect.top, [
+      { label: "Light", icon: Sun, action: () => setPreference("light") },
+      { label: "Dark", icon: Moon, action: () => setPreference("dark") },
+      { label: "System", icon: Monitor, action: () => setPreference("system") },
+    ], trigger);
   }
 
   let {
@@ -250,12 +258,13 @@
     onProjectChange = refreshProjects;
   });
 
-  let user = $state<AuthUser | null>(null);
+  let user = $derived($currentUser);
   let projects = $state<Project[]>([]);
   let loading = $state(true);
 
   // ── Per-user sidebar project groups ────────────────────────
   let groups = $state<ProjectGroup[]>([]);
+  let groupsLoaded = $state(false);
   let collapsedGroups = $state<Set<number>>(loadCollapsedGroups());
 
   // Membership is the server's answer, so a project missing from every group
@@ -285,6 +294,62 @@
   // The id being renamed, or NEW_GROUP while creating one.
   let editingGroupId = $state<number | null>(null);
   let draftGroupName = $state("");
+  let groupEditError = $state("");
+  let groupSaving = $state(false);
+  let orderError = $state("");
+  let orderSaving = $state(false);
+  let refreshRequest = 0;
+  let groupInput = $state<HTMLInputElement | null>(null);
+  let groupEditTrigger: HTMLElement | null = null;
+
+  function menuNavigate(path: string) {
+    if (navOpen) mobileNav?.navigateTo(path);
+    else navigate(path);
+  }
+
+  async function moveProject(project: Project, direction: "up" | "down") {
+    if (orderSaving) return;
+    const group = groups.find((g) => g.project_ids.includes(project.id));
+    const siblings = group ? projectsIn(group) : ungrouped;
+    const index = siblings.findIndex((p) => p.id === project.id);
+    const neighbor = siblings[index + (direction === "up" ? -1 : 1)];
+    if (!neighbor) return;
+    const next = [...projects];
+    const a = next.findIndex((p) => p.id === project.id);
+    const b = next.findIndex((p) => p.id === neighbor.id);
+    [next[a], next[b]] = [next[b], next[a]];
+    await persistProjectOrder(next);
+  }
+
+  async function persistProjectOrder(next: Project[]) {
+    refreshRequest++;
+    const previous = projects;
+    orderSaving = true;
+    orderError = "";
+    projects = next;
+    const res = await reorderProjects(next.map((p) => p.id));
+    projects = res.ok ? res.data : previous;
+    if (!res.ok) orderError = `Project order wasn't saved: ${res.error}`;
+    orderSaving = false;
+  }
+
+  async function moveGroup(group: ProjectGroup, direction: "up" | "down") {
+    if (orderSaving) return;
+    const index = groups.findIndex((g) => g.id === group.id);
+    const to = index + (direction === "up" ? -1 : 1);
+    if (to < 0 || to >= groups.length) return;
+    refreshRequest++;
+    const previous = groups;
+    const next = [...groups];
+    [next[index], next[to]] = [next[to], next[index]];
+    groups = next;
+    orderSaving = true;
+    orderError = "";
+    const res = await reorderProjectGroups(next.map((g) => g.id));
+    groups = res.ok ? res.data : previous;
+    if (!res.ok) orderError = `Group order wasn't saved: ${res.error}`;
+    orderSaving = false;
+  }
   // Set when "New group…" came from a project's menu: the project to file
   // into the group as soon as it exists.
   let pendingGroupProjectId = $state<number | null>(null);
@@ -293,7 +358,12 @@
     e.preventDefault();
     e.stopPropagation();
     const current = groups.find((g) => g.project_ids.includes(project.id));
-    openContextMenu(e.clientX, e.clientY, [
+    const siblings = current ? projectsIn(current) : ungrouped;
+    const index = siblings.findIndex((p) => p.id === project.id);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    openContextMenu(e.type === "contextmenu" ? e.clientX : rect.right, e.type === "contextmenu" ? e.clientY : rect.bottom, [
+      { label: "Move up", icon: ArrowUp, disabled: orderSaving || index === 0, action: () => void moveProject(project, "up") },
+      { label: "Move down", icon: ArrowDown, disabled: orderSaving || index === siblings.length - 1, action: () => void moveProject(project, "down") },
       ...groups
         .filter((g) => g.id !== current?.id)
         .map((g) => ({
@@ -315,16 +385,20 @@
         icon: FolderPlus,
         action: () => startCreatingGroup(project.id),
       },
-    ]);
+    ], e.currentTarget as HTMLElement);
   }
 
   function openGroupMenu(e: MouseEvent, group: ProjectGroup) {
     e.preventDefault();
     e.stopPropagation();
-    openContextMenu(e.clientX, e.clientY, [
+    const index = groups.findIndex((g) => g.id === group.id);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    openContextMenu(e.type === "contextmenu" ? e.clientX : rect.right, e.type === "contextmenu" ? e.clientY : rect.bottom, [
+      { label: "Move up", icon: ArrowUp, disabled: orderSaving || index === 0, action: () => void moveGroup(group, "up") },
+      { label: "Move down", icon: ArrowDown, disabled: orderSaving || index === groups.length - 1, action: () => void moveGroup(group, "down") },
       { label: "Rename", icon: Pencil, action: () => startRenamingGroup(group) },
       { label: "Delete group", icon: Trash2, action: () => void removeGroup(group) },
-    ]);
+    ], e.currentTarget as HTMLElement);
   }
 
   function openCreateMenu(e: MouseEvent) {
@@ -335,25 +409,37 @@
     // under the + rather than wherever the pointer happened to be.
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     openContextMenu(rect.left, rect.bottom, [
-      { label: "New project", icon: Plus, action: () => navigate("/projects/new") },
+      { label: "New project", icon: Plus, href: "#/projects/new", action: () => menuNavigate("/projects/new") },
       { label: "New group", icon: FolderPlus, action: () => startCreatingGroup() },
-    ]);
+    ], e.currentTarget as HTMLElement);
   }
 
   function startRenamingGroup(group: ProjectGroup) {
+    groupEditTrigger = document.activeElement as HTMLElement | null;
+    groupEditError = "";
     editingGroupId = group.id;
     draftGroupName = group.name;
   }
 
   function startCreatingGroup(projectId: number | null = null) {
+    groupEditTrigger = document.activeElement as HTMLElement | null;
+    groupEditError = "";
     editingGroupId = NEW_GROUP;
     draftGroupName = "";
     pendingGroupProjectId = projectId;
   }
 
   function cancelGroupEdit() {
+    if (groupSaving) return;
+    const id = editingGroupId;
+    groupEditError = "";
     editingGroupId = null;
     pendingGroupProjectId = null;
+    if (!navOpen) void tick().then(() => {
+      const target = groupEditTrigger?.isConnected ? groupEditTrigger
+        : document.querySelector<HTMLElement>(`[data-sidebar-group-actions="${id}"]`);
+      target?.focus({ preventScroll: true });
+    });
   }
 
   async function assignProject(projectId: number, groupId: number | null) {
@@ -366,20 +452,30 @@
   }
 
   async function commitGroupName() {
+    if (groupSaving) return false;
     const name = draftGroupName.trim();
     const editing = editingGroupId;
     const pending = pendingGroupProjectId;
-    cancelGroupEdit();
-    if (!name || editing === null) return;
+    if (!name || editing === null) {
+      groupEditError = "Enter a group name.";
+      return false;
+    }
+    groupSaving = true;
+    groupEditError = "";
 
     const res =
       editing === NEW_GROUP
         ? await createProjectGroup(name)
         : await renameProjectGroup(editing, name);
     if (!res.ok) {
-      toast(res.error, { kind: "error" });
-      return;
+      groupSaving = false;
+      groupEditError = res.error;
+      await tick();
+      groupInput?.focus();
+      return false;
     }
+    groupSaving = false;
+    cancelGroupEdit();
     // The group exists now even if the follow-up assignment fails, so report
     // that separately: the user's next move is to file the project by hand,
     // not to create the group again.
@@ -392,6 +488,7 @@
       }
     }
     await refreshProjects();
+    return true;
   }
 
   // Deleting a group never touches the projects inside it — they reappear in
@@ -416,13 +513,12 @@
   $effect(() => {
     route; // track route changes
     refreshProjects();
-    navOpen = false;
   });
 
   $effect(() =>
     startAutoRefresh({
       refresh: refreshProjects,
-      isBusy: () => dragActive,
+      isBusy: () => dragActive || orderSaving,
       // `project_groups.changed` uses an underscore, so the `project.` prefix
       // test below does not cover it — it needs its own clause.
       shouldRefresh: (event) =>
@@ -434,11 +530,15 @@
   );
 
   async function loadUser() {
+    const revision = getUserRevision();
+    const session = localStorage.getItem("lific_token");
     const res = await me();
+    if (session !== localStorage.getItem("lific_token")) return;
     if (res.ok) {
-      user = res.data;
+      publishUser(res.data, revision);
     } else {
       clearSession();
+      currentUser.set(null);
       navigate("/login");
       return;
     }
@@ -451,16 +551,20 @@
     // svelte-dnd-action owns it during the consider/finalize lifecycle, and a
     // route-change refresh landing mid-drag would corrupt the zone. The
     // finalize handler re-syncs from the server response once the drop settles.
-    if (dragActive) return;
+    if (dragActive || orderSaving) return;
+    const request = ++refreshRequest;
+    groupsLoaded = false;
     const [projectsRes, groupsRes] = await Promise.all([
       listProjects(),
       listProjectGroups(),
     ]);
+    if (request !== refreshRequest || dragActive || orderSaving) return;
     if (projectsRes.ok) {
       projects = projectsRes.data;
     }
     if (groupsRes.ok) {
       groups = groupsRes.data;
+      groupsLoaded = true;
     }
   }
 
@@ -483,27 +587,14 @@
 
   async function handleProjectFinalize(e: CustomEvent<DndEvent<Project>>) {
     ungroupedDuringDrag = e.detail.items;
-    const res = await reorderProjects(reorderPayload(e.detail));
-    if (res.ok) {
-      projects = res.data;
-    } else {
-      // Persist failed — re-sync from server to undo the optimistic order.
-      const fresh = await listProjects();
-      if (fresh.ok) projects = fresh.data;
-    }
+    const ids = reorderPayload(e.detail);
+    await persistProjectOrder(ids.map((id) => projects.find((p) => p.id === id)!));
     ungroupedDuringDrag = null;
     dragActive = false;
   }
 
-  // sort_order is a single global column, but groups are per-user. So the
-  // payload must never be derived from the sidebar's grouped layout: doing
-  // that would write this user's private grouping into an order every other
-  // user reads. Sending only the dragged zone's ids is no better — the server
-  // reindexes them to 0..N and collides with the ranks held by grouped
-  // projects. Instead, take the canonical order the server last returned and
-  // move exactly one project within it: the one that was dragged. The result
-  // is always a permutation of the canonical list with a single element
-  // relocated, which carries no grouping information at all.
+  // Relocate the dragged project against its siblings while preserving the
+  // personal order of projects outside this zone.
   function reorderPayload(detail: DndEvent<Project>): number[] {
     const movedId = Number(detail.info.id);
     const moved = projects.find((p) => p.id === movedId);
@@ -544,8 +635,8 @@
 
   function projectFromRoute(): string | null {
     // Routes like /LIF/issues or /LIF/board
-    const match = route.match(/^\/([A-Z][A-Z0-9_-]*)\//);
-    return match ? match[1] : null;
+    const match = route.match(/^\/([A-Z][A-Z0-9_-]*)\//i);
+    return match ? match[1].toUpperCase() : null;
   }
 
   let activeProject = $derived(projectFromRoute());
@@ -557,6 +648,8 @@
   let recentPlans = $state<Plan[]>([]);
   let recentLoading = $state<RecentSection | null>(null);
   let recentRequest = 0;
+  let recentProjectId: number | null = null;
+  let recentOpen = $state(false);
 
   let activeRecentProjectId = $derived(
     projects.find((project) => project.identifier === activeProject)?.id ?? null,
@@ -585,17 +678,18 @@
     void loadRecents(projectId, section);
   });
 
-  function clearRecents(section: RecentSection) {
-    if (section === "issues") recentIssues = [];
-    else if (section === "modules") recentModules = [];
-    else if (section === "pages") recentPages = [];
-    else recentPlans = [];
-  }
-
   async function loadRecents(projectId: number, section: RecentSection) {
     const requestId = ++recentRequest;
     recentLoading = section;
-    clearRecents(section);
+    // Preserve the last successful rows on refresh, but never display another
+    // project's cached data while the new project is loading.
+    if (recentProjectId !== projectId) {
+      recentProjectId = projectId;
+      recentIssues = [];
+      recentModules = [];
+      recentPages = [];
+      recentPlans = [];
+    }
 
     if (section === "issues") {
       const res = await listIssues({
@@ -605,13 +699,13 @@
         limit: 5,
       });
       if (requestId !== recentRequest) return;
-      recentIssues = res.ok ? res.data : [];
+      if (res.ok) recentIssues = res.data;
     } else if (section === "modules") {
       const res = await listModules(projectId);
       if (requestId !== recentRequest) return;
       recentModules = res.ok
         ? res.data.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 5)
-        : [];
+        : recentModules;
     } else if (section === "pages") {
       // Page statuses cannot be negated server-side, so fetch a bounded recent
       // slice for each visible lifecycle state, then combine the candidates.
@@ -632,14 +726,14 @@
             .flatMap((res) => (res.ok ? res.data : []))
             .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id)
             .slice(0, 5)
-        : [];
+        : recentPages;
     } else {
       // Over-fetch so filtering archived plans out can still yield 5 rows.
       const res = await listPlans(projectId, undefined, 10);
       if (requestId !== recentRequest) return;
       recentPlans = res.ok
         ? res.data.filter((p) => p.status !== "archived").slice(0, 5)
-        : [];
+        : recentPlans;
     }
 
     if (requestId === recentRequest) recentLoading = null;
@@ -661,42 +755,35 @@
     if (proj) loadProjectRole(proj.id);
   });
 
-  // ── Project sub-nav expand/collapse ─────────────────────────
-  // The active project's sub-nav is shown by default. `manuallyCollapsed`
-  // lets the user fold it away by clicking the already-active project (the
-  // chevron now behaves like a real disclosure toggle, not a one-way latch).
-  // It's reset whenever you navigate to a *different* project so that project
-  // opens expanded.
-  let manuallyCollapsed = $state(false);
-  let prevActiveProject: string | null = null;
+  // Expansion is independent of navigation. Reveal only on project entry,
+  // never on refresh or a route change within the same project.
+  let expandedProjects = $state(new Set<number>());
+  let revealedProjectId: number | null = null;
   $effect(() => {
-    if (activeProject !== prevActiveProject) {
-      prevActiveProject = activeProject;
-      manuallyCollapsed = false;
-    }
+    const project = projects.find((p) => p.identifier === activeProject);
+    if (!project) { revealedProjectId = null; return; }
+    if (!groupsLoaded) return;
+    // Track asynchronous group arrival so a direct link is revealed once
+    // both lists have loaded, but do not track deliberate disclosure edits.
+    const containing = groups.find((g) => g.project_ids.includes(project.id));
+    if (revealedProjectId === project.id) return;
+    revealedProjectId = project.id;
+    untrack(() => {
+      expandedProjects = new Set([...expandedProjects, project.id]);
+      if (containing && collapsedGroups.has(containing.id)) toggleGroup(containing.id);
+    });
+    void tick().then(() => {
+      if (revealedProjectId !== project.id || !matchMedia("(min-width: 768px)").matches) return;
+      document.querySelector<HTMLElement>(`[data-sidebar-project="${project.id}"]`)?.scrollIntoView({ block: "nearest" });
+    });
   });
-
-  // Whether the active project's sub-nav is currently visible. Hidden while a
-  // drag is in flight (collapsing every tree keeps the reorder list compact and
-  // unambiguous) and while the user has manually folded it.
-  //
-  // LIF-349: this is now purely the docked sidebar's concern. The mobile
-  // surface pushes to a dedicated pane per project, so LIF-272's
-  // drawer-expansion branch is gone from here.
   function subnavOpen(project: Project): boolean {
-    if (dragActive) return false;
-    return activeProject === project.identifier && !manuallyCollapsed;
+    return !dragActive && expandedProjects.has(project.id);
   }
-
-  // Clicking a project: if it's already the active one, toggle its sub-nav
-  // (collapse/expand) in place rather than re-navigating. Otherwise navigate
-  // into it, which makes it active and — via the reset effect — expands it.
-  function onProjectClick(project: Project) {
-    if (activeProject === project.identifier) {
-      manuallyCollapsed = !manuallyCollapsed;
-    } else {
-      navigate(`/${project.identifier}/overview`);
-    }
+  function toggleProject(project: Project) {
+    const next = new Set(expandedProjects);
+    if (!next.delete(project.id)) next.add(project.id);
+    expandedProjects = next;
   }
 
   // ── Mobile header context (LIF-349) ─────────────────────────
@@ -812,17 +899,16 @@
              project list as its own top-level entry, mirroring the sub-nav
              pill's shape (icon + label) but unindented and un-chevroned
              since it isn't a disclosure. -->
-        <button
+        <a href="#/" use:navLink={navigate} aria-current={route === "/" ? "page" : undefined}
           class="w-full flex items-center gap-2 px-2.5 py-1.5 mb-1 rounded-md
                  text-left text-body-sm transition-colors
                  {isActive('/')
             ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
             : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-          onclick={() => navigate("/")}
         >
           <Home size={14} class="shrink-0 {isActive('/') ? 'text-[var(--accent)]' : ''}" />
           Home
-        </button>
+        </a>
 
         <!-- One project entry: the pill plus its sub-nav. Shared verbatim by
              the grouped lists and the ungrouped drag zone below, so a project
@@ -830,27 +916,29 @@
         {#snippet projectEntry(project: Project)}
             {@const isProjectActive = activeProject === project.identifier}
             {@const open = subnavOpen(project)}
-            <!-- Project pill. Clicking the active project toggles its sub-nav
-                 (the chevron is a real disclosure control); clicking any other
-                 project navigates in and opens it. The chevron rotates with the
-                 open state, not mere activeness, so a manually-collapsed active
-                 project reads as closed. -->
-            <button
-              class="group w-full flex items-center gap-1.5 pl-1.5 pr-2 py-1.5 rounded-md
+            <div
+              class="sidebar-row group w-full flex items-center rounded-md
                      text-left text-body-sm transition
                      {isProjectActive
                 ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                 : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-              aria-expanded={isProjectActive ? open : undefined}
-              onclick={() => onProjectClick(project)}
-              oncontextmenu={(e) => openProjectMenu(e, project)}
             >
+              <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+                aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
+                aria-expanded={open} aria-controls={`project-nav-${project.id}`}
+                onclick={() => toggleProject(project)}>
               <ChevronRight
                 size={13}
                 class="shrink-0 transition-transform
                        {open ? 'rotate-90' : ''}
                        {isProjectActive ? 'text-[var(--text-muted)]' : 'text-[var(--text-faint)] group-hover:text-[var(--text-muted)]'}"
               />
+              </button>
+              <a href={`#/${project.identifier}/overview`} use:navLink={navigate}
+                data-sidebar-project={project.id}
+                aria-current={route === `/${project.identifier}/overview` ? "page" : undefined}
+                title={project.name} class="min-w-0 flex-1 flex items-center gap-1.5 py-1.5"
+                oncontextmenu={(e) => openProjectMenu(e, project)}>
               {#if project.emoji}
                 <span class="size-5 flex items-center justify-center shrink-0">
                   <ProjectIcon value={project.emoji} size={16} />
@@ -866,43 +954,45 @@
                 </span>
               {/if}
               <span class="truncate flex-1">{project.name}</span>
-            </button>
+              </a>
+              <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+                aria-label={`Actions for ${project.name}`} aria-haspopup="menu"
+                onclick={(e) => openProjectMenu(e, project)}><Ellipsis size={15} /></button>
+            </div>
 
-            {#if open}
               <!-- Sub-nav: indented under the project with a vertical guide
                    line, matching the tree language used in Pages. -->
-              <div class="ml-[1.125rem] pl-2.5 mt-0.5 mb-1.5 border-l border-[var(--border)] flex flex-col gap-px">
+              <div id={`project-nav-${project.id}`} hidden={!open} class="project-subnav ml-3 pl-1 mt-0.5 mb-1.5 border-l border-[var(--border)] flex flex-col gap-px">
                 {#snippet subItem(href: string, label: string, Icon: typeof List)}
                   {@const active = isActive(href)}
-                  <button
+                  <a href={`#${href}`} use:navLink={navigate} aria-current={active ? "page" : undefined}
                     class="w-full flex items-center gap-2 px-2 py-1 rounded-md
                            text-left text-body-sm transition-colors
                            {active
                       ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                       : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                    onclick={() => navigate(href)}
                   >
                     <Icon size={14} class="shrink-0 {active ? 'text-[var(--accent)]' : ''}" />
                     {label}
-                  </button>
+                  </a>
                 {/snippet}
                 {#snippet recentItem(href: string, label: string, identifier: string | null)}
-                  <button
-                    class="w-full flex items-center gap-1 px-2 py-1 pl-8 rounded-md
+                  <a href={`#${href}`} use:navLink={navigate} aria-current={isActive(href) ? "page" : undefined}
+                    title={identifier ? `${identifier}: ${label}` : label}
+                    class="recent-link relative w-full flex items-center gap-1 px-2 py-1 rounded-md
                            text-left text-caption transition-colors
                            {isActive(href)
                       ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
                       : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
-                    onclick={() => navigate(href)}
                   >
                     {#if identifier}
-                      <span class="font-mono text-[var(--text-faint)] shrink-0">{identifier}</span>
+                      <span class="font-mono text-[var(--text-faint)] shrink-0">#{identifier.split('-').at(-1)}</span>
                     {/if}
                     <span class="flex-1 min-w-0 truncate">{label}</span>
-                  </button>
+                    <span class="focus-title">{label}</span>
+                  </a>
                 {/snippet}
                 {#snippet recentItems(section: RecentSection, project: Project)}
-                  {#if recentLoading !== section}
                     {#if section === "issues"}
                       {#each recentIssues as issue (issue.id)}
                         {@render recentItem(`/${project.identifier}/issues/${issue.identifier}`, issue.title, issue.identifier)}
@@ -920,33 +1010,27 @@
                         {@render recentItem(`/${project.identifier}/plans/${plan.id}`, plan.title, null)}
                       {/each}
                     {/if}
-                  {/if}
                 {/snippet}
                 {@render subItem(`/${project.identifier}/overview`, "Overview", LayoutDashboard)}
                 {@render subItem(`/${project.identifier}/issues`, "Issues", List)}
-                <!-- LIF-307: only the current route's resource section shows recents. -->
-                {#if isProjectActive && activeRecentSection === "issues"}
-                  {@render recentItems("issues", project)}
-                {/if}
                 {@render subItem(`/${project.identifier}/board`, "Board", LayoutGrid)}
                 {@render subItem(`/${project.identifier}/graph`, "Graph", Waypoints)}
                 {@render subItem(`/${project.identifier}/modules`, "Modules", Layers)}
-                {#if isProjectActive && activeRecentSection === "modules"}
-                  {@render recentItems("modules", project)}
-                {/if}
                 {@render subItem(`/${project.identifier}/pages`, "Pages", FileText)}
-                {#if isProjectActive && activeRecentSection === "pages"}
-                  {@render recentItems("pages", project)}
-                {/if}
                 {@render subItem(`/${project.identifier}/files`, "Files", Paperclip)}
                 {@render subItem(`/${project.identifier}/plans`, "Plans", ListChecks)}
-                {#if isProjectActive && activeRecentSection === "plans"}
-                  {@render recentItems("plans", project)}
-                {/if}
                 {@render subItem(`/${project.identifier}/activity`, "Activity", History)}
                 {@render subItem(`/${project.identifier}/insights`, "Insights", TrendingUp)}
+                {#if isProjectActive && activeRecentSection}
+                  <button class="flex items-center gap-1 px-2 py-1 text-caption text-[var(--text-faint)] rounded-md hover:bg-[var(--bg-subtle)]"
+                    aria-expanded={recentOpen} aria-controls={`recent-${project.id}`} onclick={() => recentOpen = !recentOpen}>
+                    <ChevronRight size={12} class={recentOpen ? "rotate-90" : ""} /> Recent {activeRecentSection}
+                  </button>
+                  <div id={`recent-${project.id}`} hidden={!recentOpen} aria-busy={recentLoading !== null}>
+                    {@render recentItems(activeRecentSection, project)}
+                  </div>
+                {/if}
               </div>
-            {/if}
         {/snippet}
 
         <!-- The header renders unconditionally: it carries the only affordance
@@ -957,10 +1041,11 @@
             Projects
           </span>
           <button
-            class="size-5 flex items-center justify-center rounded
+            class="size-8 flex items-center justify-center rounded
                    text-[var(--text-faint)] hover:text-[var(--accent)]
                    hover:bg-[var(--bg-subtle)] transition-colors"
             title="New project or group"
+            aria-label="New project or group" aria-haspopup="menu"
             onclick={openCreateMenu}
           >
             <Plus size={13} />
@@ -970,23 +1055,32 @@
         <!-- Outside the guard below for the same reason as the header: on an
              empty instance this input is the whole first-group flow. -->
         {#snippet groupNameInput()}
+          <!-- Escape cancels from the input or either form button. -->
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+          <form class="px-1 py-1" onsubmit={(e) => { e.preventDefault(); void commitGroupName(); }}
+            onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); cancelGroupEdit(); } }}>
           <input
             class="w-full h-7 px-2 mb-0.5 rounded-md text-body-sm bg-[var(--bg)]
                    border border-[var(--border)] text-[var(--text)]"
             placeholder="Group name"
+            aria-label="Group name" aria-invalid={!!groupEditError} aria-describedby={groupEditError ? "group-edit-error" : undefined}
+            bind:this={groupInput}
             bind:value={draftGroupName}
-            onblur={commitGroupName}
-            onkeydown={(e) => {
-              if (e.key === "Enter") commitGroupName();
-              if (e.key === "Escape") cancelGroupEdit();
-            }}
+            disabled={groupSaving}
             autofocus
           />
+          {#if groupEditError}<p id="group-edit-error" role="alert" class="text-caption text-[var(--error)] break-words">{groupEditError}</p>{/if}
+          <div class="flex gap-2 text-caption">
+            <button type="submit" disabled={groupSaving} class="px-2 py-1 rounded hover:bg-[var(--bg-subtle)]">{groupSaving ? "Saving…" : "Save"}</button>
+            <button type="button" disabled={groupSaving} class="px-2 py-1 rounded hover:bg-[var(--bg-subtle)]" onclick={cancelGroupEdit}>Cancel</button>
+          </div>
+          </form>
         {/snippet}
 
         {#if editingGroupId === NEW_GROUP}
           {@render groupNameInput()}
         {/if}
+        {#if orderError}<p role="alert" class="px-2 py-1 text-caption text-[var(--error)] break-words">{orderError}</p>{/if}
 
         <!-- Groups render above the ungrouped list. The guard covers groups as
              well as projects so a group whose last project left stays around
@@ -997,11 +1091,13 @@
             {#if editingGroupId === group.id}
               {@render groupNameInput()}
             {:else}
+            <div class="sidebar-row group flex items-center">
             <button
-              class="group w-full flex items-center gap-1.5 pl-1.5 pr-2 py-1.5 rounded-md
+              class="min-w-0 flex-1 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-md
                      text-left text-body-sm transition text-[var(--text-muted)]
                      hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
               aria-expanded={!collapsed}
+              aria-controls={`group-${group.id}`} title={group.name}
               onclick={() => toggleGroup(group.id)}
               oncontextmenu={(e) => openGroupMenu(e, group)}
             >
@@ -1013,16 +1109,22 @@
               <Folder size={14} class="shrink-0 text-[var(--text-faint)]" />
               <span class="truncate flex-1">{group.name}</span>
             </button>
+            <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+              data-sidebar-group-actions={group.id}
+              aria-label={`Actions for group ${group.name}`} aria-haspopup="menu" onclick={(e) => openGroupMenu(e, group)}><Ellipsis size={15} /></button>
+            </div>
             {/if}
-            {#if !collapsed}
+            {#if collapsed && projectsIn(group).some((p) => p.identifier === activeProject)}
+              <button class="ml-3 max-w-[calc(100%-0.75rem)] truncate text-caption text-[var(--accent)] px-2 py-1"
+                title={`Show ${activeProjectRecord?.name}`} onclick={() => toggleGroup(group.id)}>Current: {activeProjectRecord?.name}</button>
+            {/if}
               <!-- Same indent and guide line as a project's sub-nav, so the
                    sidebar reads as one tree rather than two conventions. -->
-              <div class="ml-[1.125rem] pl-2.5 border-l border-[var(--border)]">
+              <div id={`group-${group.id}`} hidden={collapsed} class="ml-2 pl-1 border-l border-[var(--border)]">
                 {#each projectsIn(group) as project (project.id)}
                   {@render projectEntry(project)}
                 {/each}
               </div>
-            {/if}
           {/each}
 
           <!-- LIF-233: drag-to-reorder zone, now holding only the ungrouped
@@ -1037,7 +1139,7 @@
               flipDurationMs: flipMs(),
               type: "lific-projects",
               dropTargetStyle: {},
-              dragDisabled: ungroupedItems.length < 2,
+              dragDisabled: orderSaving || ungroupedItems.length < 2,
             }}
             onconsider={handleProjectConsider}
             onfinalize={handleProjectFinalize}
@@ -1055,12 +1157,11 @@
           <div class="px-3 py-6">
             <p class="text-body-sm text-[var(--text-faint)] mb-2">No projects yet.</p>
             <div class="flex flex-col items-start gap-1">
-              <button
+              <a href="#/projects/new" use:navLink={navigate}
                 class="text-body-sm text-[var(--accent)] hover:underline"
-                onclick={() => navigate("/projects/new")}
               >
                 Create a project
-              </button>
+              </a>
               <button
                 class="text-body-sm text-[var(--accent)] hover:underline"
                 onclick={() => startCreatingGroup()}
@@ -1075,12 +1176,11 @@
       <!-- Footer: the user identity IS the Settings entry (logout now lives
            inside Settings → Security). A compact theme toggle sits beside it. -->
       <div class="p-2 flex items-center gap-1">
-        <button
+        <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
           class="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left transition-colors
                  {isActive('/settings')
             ? 'bg-[var(--bg-subtle)]'
             : 'hover:bg-[var(--bg-subtle)]'}"
-          onclick={() => navigate("/settings")}
           title="Account settings"
         >
           <div
@@ -1098,13 +1198,13 @@
               <Settings size={9} /> Settings
             </div>
           </div>
-        </button>
+        </a>
         <button
           class="size-8 shrink-0 grid place-items-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
-          onclick={cycleTheme}
+          onclick={themeMenu}
           title="Theme: {themePref}"
-          aria-label="Cycle theme, current: {themePref}"
+          aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
         >
           {#if themePref === "system"}
             <Monitor size={15} />
@@ -1314,9 +1414,11 @@
     onGroupMenu={openGroupMenu}
     onCommitGroupName={commitGroupName}
     onCancelGroupEdit={cancelGroupEdit}
+    {groupEditError}
+    {orderError}
     {themePref}
     {themeResolved}
-    onCycleTheme={cycleTheme}
+    onCycleTheme={themeMenu}
   />
 
   <!-- LIF-159: cmd+k / ctrl+p jump-anywhere. Mounted here (once, above
@@ -1340,3 +1442,32 @@
   <PagePeekPanel {navigate} />
   <ContextMenu />
 {/if}
+
+<style>
+  aside a:hover { text-decoration: none; }
+  [data-sidebar-project] { color: inherit; }
+  .project-subnav[hidden] { display: none; }
+  .focus-title { display: none; }
+  .recent-link:focus-visible .focus-title {
+    display: block;
+    pointer-events: none;
+    position: absolute;
+    inset-inline: 0;
+    top: 100%;
+    z-index: 30;
+    padding: 0.4rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .sidebar-overflow { opacity: 0; }
+    .sidebar-row:hover .sidebar-overflow,
+    .sidebar-row:focus-within .sidebar-overflow { opacity: 1; }
+  }
+  @media (pointer: coarse) {
+    .sidebar-overflow { min-width: 44px; min-height: 44px; }
+  }
+</style>
