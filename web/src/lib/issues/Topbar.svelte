@@ -14,6 +14,7 @@
     List as ListIcon, LayoutGrid, SlidersHorizontal, HelpCircle,
     ArrowDown, ArrowUp, Hash, Clock, History, Check, Zap, PenLine,
     SlidersVertical, Rows3, Layers, MoreHorizontal,
+    Square, SquareMinus, SquareCheck,
   } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
   import SubTabs, { type SubTab } from "../SubTabs.svelte";
@@ -45,6 +46,11 @@
     onMaybeCollapseSearch,
     onQuickCreate,
     canEdit = true,
+    selectableCount = 0,
+    selectedCount = 0,
+    selectionBusy = false,
+    onSelectAll = () => {},
+    onClearSelection = () => {},
   }: {
     view: IssueListState;
     projectIdentifier: string;
@@ -74,7 +80,24 @@
     /** LIF-234: when false (a viewer on this project, enforcement on), the
      *  "New issue" primary action is hidden — creation is maintainer-gated. */
     canEdit?: boolean;
+    /** LIF-149 select-all, relocated into the sub-tab strip. How many rows
+     *  the list currently shows (what "Select all" would select), how many
+     *  of them are selected, and whether a bulk action is in flight. */
+    selectableCount?: number;
+    selectedCount?: number;
+    selectionBusy?: boolean;
+    onSelectAll?: () => void;
+    onClearSelection?: () => void;
   } = $props();
+
+  // Tri-state for the select-all toggle. "all" flips to clear on click;
+  // "none" and "some" both select everything visible, matching the
+  // indeterminate-checkbox convention it replaces.
+  let selectionState = $derived<"none" | "some" | "all">(
+    selectedCount === 0 ? "none"
+      : selectedCount >= selectableCount ? "all"
+      : "some",
+  );
 
   // Count of active filters — drives the badge on the Filter button. Derived
   // so the topbar re-renders when filters change without manual subscription.
@@ -882,7 +905,50 @@
         tabs={issueSubTabs}
         active={view.issueSubTab}
         onselect={(id) => view.selectIssueSubTab(id)}
-      />
+      >
+        {#snippet trailing()}
+          {#if canEdit && selectableCount > 0}
+            <!-- Select-all lives at the right end of the tab strip rather
+                 than on its own full-width row. Desktop only (`hidden
+                 sm:flex`): below sm the rows are tapped one at a time and
+                 the bulk bar handles the rest. Styled as a sibling of the
+                 Display / Filter buttons above, with a lucide tri-state
+                 glyph instead of a native checkbox. -->
+            <Tooltip
+              content={selectionState === "all"
+                ? "Clear selection  ·  Esc"
+                : "Select all visible issues  ·  Ctrl+A"}
+              placement="bottom"
+            >
+              <button
+                type="button"
+                aria-pressed={selectionState === "all"}
+                class="hidden sm:flex h-7 items-center gap-1.5 px-2 rounded-md
+                       text-caption font-medium transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       {selectionState === 'none'
+                  ? 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'
+                  : 'text-[var(--text)] bg-[var(--bg-subtle)]'}"
+                disabled={selectionBusy}
+                onclick={() => selectionState === "all" ? onClearSelection() : onSelectAll()}
+              >
+                {#if selectionState === "all"}
+                  <SquareCheck size={14} class="shrink-0 text-[var(--accent)]" />
+                {:else if selectionState === "some"}
+                  <SquareMinus size={14} class="shrink-0 text-[var(--accent)]" />
+                {:else}
+                  <Square size={14} class="shrink-0" />
+                {/if}
+                <span>{selectionState === "all" ? "All selected" : "Select all"}</span>
+                <span class="text-micro tabular-nums font-normal
+                             {selectionState === 'none' ? 'text-[var(--text-faint)]' : 'text-[var(--text-muted)]'}">
+                  {selectionState === "some" ? `${selectedCount}/${selectableCount}` : selectableCount}
+                </span>
+              </button>
+            </Tooltip>
+          {/if}
+        {/snippet}
+      </SubTabs>
     </div>
   {/if}
 </div>

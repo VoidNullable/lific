@@ -18,17 +18,27 @@
     tabs,
     active,
     onselect,
+    trailing,
   }: {
     tabs: SubTab[];
     active: string;
     onselect: (id: string) => void;
+    /** Optional control pinned to the strip's right edge (e.g. the issue
+     *  list's select-all toggle). Rendered outside the tablist semantics so
+     *  it is not announced as a tab. */
+    trailing?: import("svelte").Snippet;
   } = $props();
 </script>
 
+<!-- The tabs' `-mb-px` overlap makes this scroll container overflow by 1px
+     vertically, which would otherwise reserve a 10px scrollbar gutter along
+     the right edge (and misalign anything pinned there). Hide the strip's
+     scrollbars; it still pans horizontally by touch/wheel. -->
 <div
-  class="flex items-center gap-5 border-b border-[var(--border)] overflow-x-auto"
-  role="tablist"
+  class="flex items-center gap-5 border-b border-[var(--border)] overflow-x-auto
+         [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 >
+  <div class="flex items-center gap-5 shrink-0" role="tablist">
   {#each tabs as tab (tab.id)}
     <button
       role="tab"
@@ -53,4 +63,13 @@
       {/if}
     </button>
   {/each}
+  </div>
+  {#if trailing}
+    <!-- Tabs sit on pt-1/pb-2 above a 2px underline, so their text centre
+         is ~2px above the row's centre. mb-1 nudges the trailing control up
+         to meet it instead of hanging visibly low. -->
+    <div class="ml-auto shrink-0 mb-1 pl-3">
+      {@render trailing()}
+    </div>
+  {/if}
 </div>

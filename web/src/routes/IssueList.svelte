@@ -766,8 +766,6 @@
   let bulkBusy = $state(false);
   let bulkError = $state("");
 
-  let allSelected = $derived.by(() => flatIssues.length > 0 && flatIssues.every((i) => view.selectedIds.has(i.id)));
-
   function selectAll() {
     if (!canEdit || bulkBusy) return;
     view.selectedIds = new Set(flatIssues.map((i) => i.id));
@@ -1636,6 +1634,11 @@
     onOpenSearch={openSearch}
     onMaybeCollapseSearch={maybeCollapseSearch}
     onQuickCreate={startInlineCreateFromEmpty}
+    selectableCount={loading || error ? 0 : flatIssues.length}
+    selectedCount={view.selectedIds.size}
+    selectionBusy={bulkBusy}
+    onSelectAll={selectAll}
+    onClearSelection={clearSelection}
   />
 {/snippet}
 
@@ -2087,21 +2090,8 @@
       </div>
   {/if}
 
-  <!-- Issue list -->
-  {#if canEdit && !loading && !error && subTabIssues.length > 0}
-    <label class="flex shrink-0 items-center gap-2 px-3 sm:px-6 py-2 border-b border-[var(--border)] text-caption text-[var(--text-muted)]">
-      <input
-        type="checkbox"
-        class="size-4 accent-[var(--accent)]"
-        checked={allSelected}
-        indeterminate={view.selectedIds.size > 0 && !allSelected}
-        disabled={bulkBusy || flatIssues.length === 0}
-        onchange={() => allSelected ? clearSelection() : selectAll()}
-      />
-      Select all visible issues
-      <span class="tabular-nums">({flatIssues.length})</span>
-    </label>
-  {/if}
+  <!-- Issue list. The select-all toggle lives in the Topbar's sub-tab
+       strip (right edge) rather than on its own row here. -->
   <div class="flex-1 overflow-y-auto" bind:this={listEl}>
     {#if loading}
       <!-- LIF-281: grouped-list skeleton with shape+position parity to the
