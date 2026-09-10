@@ -7,7 +7,7 @@ import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
-import { checkSidebarContrast, desktopScreenshots, mobileVisualChecks } from "./sidebar-visual";
+import { accents, appearance, sidebarContrast, checkSidebarContrast, desktopScreenshots, mobileVisualChecks } from "./sidebar-visual";
 
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/SidebarFixture.svelte";
@@ -289,8 +289,21 @@ try {
   });
 
   await test("sidebar selection and readable accents in both themes", async () => {
-    const s = await session({ route: "/ONE/issues" });
+    const s = await session({ route: "/ONE/issues/ONE-1" });
+    await s.aside.getByRole("button", { name: "Recent issues", exact: true }).click();
     await checkSidebarContrast(s.page, shotDir);
+  });
+
+  await test("selected account metadata remains readable across accents", async () => {
+    const s = await session({ route: "/settings" });
+    const measurements = [];
+    for (const theme of ["light", "dark"]) for (const accent of accents) {
+      await appearance(s.page, theme, accent);
+      const result = { theme, accent, ...await sidebarContrast(s.page) };
+      measurements.push(result);
+      assert.ok(result.minimumText >= 4.5, JSON.stringify(result));
+    }
+    await Bun.write(resolve(shotDir, "sidebar-account-contrast.json"), JSON.stringify(measurements, null, 2));
   });
 
   if (process.env.E2E_VISUAL === "1") await test("desktop visual matrix", async () => {

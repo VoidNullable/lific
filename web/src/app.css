@@ -373,6 +373,10 @@ html[data-motion="reduced"] *::after {
   background: var(--sidebar-hover);
 }
 .sidebar-theme .sidebar-destination[aria-current="page"] {
+  /* The accent-tinted fill sits slightly nearer the accent than -chrome does,
+     so faint metadata (identifiers, caption lines) falls below AA on it.
+     Bump their ink within the selected row only; hierarchy is preserved. */
+  --text-faint: var(--text-muted);
   color: var(--text);
   background: var(--sidebar-selected);
   font-weight: 500;
