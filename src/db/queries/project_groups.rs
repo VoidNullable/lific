@@ -62,7 +62,7 @@ pub fn list_groups(conn: &Connection, user_id: i64) -> Result<Vec<ProjectGroup>,
     let mut stmt = conn.prepare_cached(
         "SELECT id, user_id, name, sort_order, created_at, updated_at
          FROM project_groups WHERE user_id = ?1
-         ORDER BY sort_order, name COLLATE NOCASE",
+         ORDER BY sort_order, name COLLATE NOCASE, id",
     )?;
     let mut groups: Vec<ProjectGroup> = stmt
         .query_map(params![user_id], row_to_group)?
@@ -86,6 +86,42 @@ pub fn list_groups(conn: &Connection, user_id: i64) -> Result<Vec<ProjectGroup>,
         group.project_ids = by_group.remove(&group.id).unwrap_or_default();
     }
     Ok(groups)
+}
+
+/// Reindex owned groups, preserving the current order of omitted groups.
+pub fn reorder_groups(
+    conn: &Connection,
+    user_id: i64,
+    ids: &[i64],
+) -> Result<Vec<ProjectGroup>, LificError> {
+    super::savepoint(conn, "reorder_project_groups", || {
+        let current = list_groups(conn, user_id)?;
+        let owned: std::collections::HashSet<i64> = current.iter().map(|g| g.id).collect();
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            if !seen.insert(*id) {
+                return Err(LificError::BadRequest(
+                    "duplicate group id in reorder list".into(),
+                ));
+            }
+            if !owned.contains(id) {
+                return Err(LificError::BadRequest(
+                    "invalid group id in reorder list".into(),
+                ));
+            }
+        }
+        let order = ids
+            .iter()
+            .copied()
+            .chain(current.iter().map(|g| g.id).filter(|id| !seen.contains(id)));
+        for (rank, id) in order.enumerate() {
+            conn.execute(
+                "UPDATE project_groups SET sort_order = ?1 WHERE id = ?2 AND user_id = ?3",
+                params![rank as i64, id, user_id],
+            )?;
+        }
+        list_groups(conn, user_id)
+    })
 }
 
 /// Create a group, appended after the caller's existing ones.
@@ -206,6 +242,33 @@ mod tests {
         )
         .unwrap()
         .id
+    }
+
+    #[test]
+    fn group_reorder_rolls_back_when_a_later_rank_update_fails() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "alice");
+        let a = create_group(&conn, user, &CreateProjectGroup { name: "A".into() })
+            .unwrap()
+            .id;
+        let b = create_group(&conn, user, &CreateProjectGroup { name: "B".into() })
+            .unwrap()
+            .id;
+        conn.execute_batch(
+            "CREATE TRIGGER reject_group_rank BEFORE UPDATE OF sort_order ON project_groups
+            WHEN NEW.sort_order = 1 BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+        )
+        .unwrap();
+        assert!(reorder_groups(&conn, user, &[b, a]).is_err());
+        let groups = list_groups(&conn, user).unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| (g.id, g.sort_order))
+                .collect::<Vec<_>>(),
+            [(a, 0), (b, 1)]
+        );
     }
 
     #[test]

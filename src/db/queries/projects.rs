@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, params};
 
@@ -21,7 +21,7 @@ pub struct ProjectAgentStats {
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, name, identifier, description, emoji, lead_user_id, sort_order, created_at, updated_at, is_public
-         FROM projects ORDER BY sort_order, name",
+         FROM projects ORDER BY sort_order, name, id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Project {
@@ -38,6 +38,30 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, LificError> {
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Stored personal ranks precede projects the user has not ordered yet.
+/// This is unfiltered, like `list_projects`; callers must apply visibility.
+pub fn list_projects_for_user(conn: &Connection, user_id: i64) -> Result<Vec<Project>, LificError> {
+    let mut projects = list_projects(conn)?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT project_id, sort_order FROM user_project_order WHERE user_id = ?1",
+    )?;
+    let ranks: HashMap<i64, i64> = stmt
+        .query_map([user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    // Stable sorting keeps the legacy (rank, name, id) order within ties and
+    // among newly visible projects. Expose the personal rank in REST results.
+    projects.sort_by_key(|p| match ranks.get(&p.id) {
+        Some(rank) => (false, *rank),
+        None => (true, 0),
+    });
+    for project in &mut projects {
+        if let Some(rank) = ranks.get(&project.id) {
+            project.sort_order = *rank;
+        }
+    }
+    Ok(projects)
 }
 
 /// Fetch workload signals for every project in one SQL statement.
@@ -216,38 +240,54 @@ pub fn create_project(conn: &Connection, input: &CreateProject) -> Result<Projec
     })
 }
 
-/// LIF-233: reindex project `sort_order` to match the supplied id order
-/// (position 0 = top of the sidebar). Full reindex on every call keeps ranks
-/// dense and deterministic, avoiding the float-midpoint exhaustion and
-/// all-equal-rank collisions a per-item PATCH scheme would hit.
-///
-/// Rejects duplicate ids and any id that doesn't exist (BadRequest). Projects
-/// not present in `ids` keep their current rank — callers should send the full
-/// list to guarantee a total order.
-pub fn reorder_projects(conn: &Connection, ids: &[i64]) -> Result<Vec<Project>, LificError> {
-    // Reject duplicates: an id appearing twice would silently clobber its own
-    // rank and signals a malformed client request.
-    let mut seen = std::collections::HashSet::new();
-    for id in ids {
-        if !seen.insert(*id) {
-            return Err(LificError::BadRequest(format!(
-                "duplicate project id {id} in reorder list"
-            )));
-        }
-    }
+/// Snapshot the complete visible order, with submitted IDs ahead of omitted
+/// projects in their current order. The caller must resolve `visible` inside
+/// the same transaction as this operation. No legacy project ranks change.
+/// A snapshot drops hidden ranks; access regained after that appends the project.
+pub fn reorder_projects(
+    conn: &Connection,
+    user_id: i64,
+    ids: &[i64],
+    visible: &Option<HashSet<i64>>,
+) -> Result<Vec<Project>, LificError> {
     super::savepoint(conn, "reorder_projects", || {
-        for (position, id) in ids.iter().enumerate() {
-            let changed = conn.execute(
-                "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
-                params![position as i64, id],
-            )?;
-            if changed == 0 {
-                return Err(LificError::BadRequest(format!("project {id} not found")));
+        let current: Vec<Project> = list_projects_for_user(conn, user_id)?
+            .into_iter()
+            .filter(|p| visible.as_ref().is_none_or(|v| v.contains(&p.id)))
+            .collect();
+        let allowed: HashSet<i64> = current.iter().map(|p| p.id).collect();
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(*id) {
+                return Err(LificError::BadRequest(
+                    "duplicate project id in reorder list".into(),
+                ));
+            }
+            if !allowed.contains(id) {
+                return Err(LificError::BadRequest(
+                    "invalid project id in reorder list".into(),
+                ));
             }
         }
-        Ok(())
-    })?;
-    list_projects(conn)
+        let order = ids
+            .iter()
+            .copied()
+            .chain(current.iter().map(|p| p.id).filter(|id| !seen.contains(id)));
+        conn.execute(
+            "DELETE FROM user_project_order WHERE user_id = ?1",
+            [user_id],
+        )?;
+        for (rank, id) in order.enumerate() {
+            conn.execute(
+                "INSERT INTO user_project_order (user_id, project_id, sort_order) VALUES (?1, ?2, ?3)",
+                params![user_id, id, rank as i64],
+            )?;
+        }
+        Ok(list_projects_for_user(conn, user_id)?
+            .into_iter()
+            .filter(|p| visible.as_ref().is_none_or(|v| v.contains(&p.id)))
+            .collect())
+    })
 }
 
 pub fn update_project(
@@ -750,17 +790,17 @@ mod tests {
     fn reorder_projects_sets_explicit_order() {
         let pool = test_db();
         let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "ordering");
         let a = seed_named(&conn, "Alpha", "A");
         let b = seed_named(&conn, "Beta", "B");
         let g = seed_named(&conn, "Gamma", "G");
 
-        // Put Gamma first, then Alpha, then Beta — the opposite of alphabetical.
-        let reordered = reorder_projects(&conn, &[g, a, b]).unwrap();
+        let reordered = reorder_projects(&conn, user, &[g, a, b], &None).unwrap();
         let names: Vec<String> = reordered.into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Gamma", "Alpha", "Beta"]);
 
         // Order persists across a fresh list (sort_order, not query happenstance).
-        let names: Vec<String> = list_projects(&conn)
+        let names: Vec<String> = list_projects_for_user(&conn, user)
             .unwrap()
             .into_iter()
             .map(|p| p.name)
@@ -772,8 +812,9 @@ mod tests {
     fn reorder_rejects_unknown_id() {
         let pool = test_db();
         let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "ordering");
         let a = seed_named(&conn, "Alpha", "A");
-        let err = reorder_projects(&conn, &[a, 99999]).unwrap_err();
+        let err = reorder_projects(&conn, user, &[a, 99999], &None).unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
         // The failed reorder is rolled back: Alpha keeps its original rank.
         assert_eq!(list_projects(&conn).unwrap()[0].name, "Alpha");
@@ -783,9 +824,10 @@ mod tests {
     fn reorder_rejects_duplicate_id() {
         let pool = test_db();
         let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "ordering");
         let a = seed_named(&conn, "Alpha", "A");
         let b = seed_named(&conn, "Beta", "B");
-        let err = reorder_projects(&conn, &[a, b, a]).unwrap_err();
+        let err = reorder_projects(&conn, user, &[a, b, a], &None).unwrap_err();
         assert!(matches!(err, LificError::BadRequest(_)), "got {err:?}");
     }
 
@@ -793,18 +835,115 @@ mod tests {
     fn new_project_appends_after_reorder() {
         let pool = test_db();
         let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "ordering");
         let a = seed_named(&conn, "Alpha", "A");
         let b = seed_named(&conn, "Beta", "B");
         // Reorder so Beta(rank 0) precedes Alpha(rank 1).
-        reorder_projects(&conn, &[b, a]).unwrap();
+        reorder_projects(&conn, user, &[b, a], &None).unwrap();
         // A brand-new project should land at the bottom, not jump to rank 0.
         seed_named(&conn, "Zeta", "Z");
-        let names: Vec<String> = list_projects(&conn)
+        let names: Vec<String> = list_projects_for_user(&conn, user)
             .unwrap()
             .into_iter()
             .map(|p| p.name)
             .collect();
         assert_eq!(names, ["Beta", "Alpha", "Zeta"]);
+    }
+
+    #[test]
+    fn personal_order_snapshots_visible_projects_and_preserves_other_users_and_legacy_ranks() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let alice = seed_user(&conn, "alice");
+        let bob = seed_user(&conn, "bob");
+        let a = seed_named(&conn, "Alpha", "A");
+        let b = seed_named(&conn, "Beta", "B");
+        let c = seed_named(&conn, "Charlie", "C");
+        let hidden = seed_named(&conn, "Hidden", "H");
+        let visible = Some(HashSet::from([a, b, c]));
+        let ids = |projects: Vec<Project>| projects.into_iter().map(|p| p.id).collect::<Vec<_>>();
+        let legacy = list_projects(&conn).unwrap();
+        assert_eq!(
+            ids(reorder_projects(&conn, alice, &[c], &visible).unwrap()),
+            [c, a, b]
+        );
+        assert_eq!(
+            ids(reorder_projects(&conn, alice, &[b], &visible).unwrap()),
+            [b, c, a]
+        );
+        assert_eq!(
+            ids(reorder_projects(&conn, alice, &[], &visible).unwrap()),
+            [b, c, a]
+        );
+        assert_eq!(
+            ids(list_projects_for_user(&conn, bob).unwrap()),
+            [a, b, c, hidden]
+        );
+        assert_eq!(
+            list_projects(&conn)
+                .unwrap()
+                .iter()
+                .map(|p| p.sort_order)
+                .collect::<Vec<_>>(),
+            legacy.iter().map(|p| p.sort_order).collect::<Vec<_>>()
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_project_order WHERE user_id = ?1",
+                [alice],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+        // Newly granted access appends even when the legacy rank would put it first.
+        conn.execute(
+            "UPDATE projects SET sort_order = -1 WHERE id = ?1",
+            [hidden],
+        )
+        .unwrap();
+        assert_eq!(
+            ids(list_projects_for_user(&conn, alice).unwrap()),
+            [b, c, a, hidden]
+        );
+        let invalid = reorder_projects(&conn, alice, &[a, hidden], &visible).unwrap_err();
+        let unknown = reorder_projects(&conn, alice, &[a, 99999], &visible).unwrap_err();
+        assert_eq!(invalid.to_string(), unknown.to_string());
+        assert_eq!(
+            ids(list_projects_for_user(&conn, alice).unwrap()),
+            [b, c, a, hidden]
+        );
+        reorder_projects(&conn, bob, &[hidden], &None).unwrap();
+        reorder_projects(&conn, alice, &[a], &visible).unwrap();
+        assert_eq!(
+            ids(list_projects_for_user(&conn, bob).unwrap()),
+            [hidden, a, b, c]
+        );
+        assert_eq!(
+            ids(list_projects_for_user(&conn, alice).unwrap()),
+            [a, b, c, hidden]
+        );
+    }
+
+    #[test]
+    fn personal_order_rolls_back_a_database_failure_after_snapshot_deletion() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let user = seed_user(&conn, "ordering");
+        let a = seed_named(&conn, "Alpha", "A");
+        let b = seed_named(&conn, "Beta", "B");
+        reorder_projects(&conn, user, &[b, a], &None).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_order_insert BEFORE INSERT ON user_project_order
+            WHEN NEW.sort_order = 1 BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+        )
+        .unwrap();
+        assert!(reorder_projects(&conn, user, &[a, b], &None).is_err());
+        let ids: Vec<_> = list_projects_for_user(&conn, user)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, [b, a]);
     }
 
     #[test]

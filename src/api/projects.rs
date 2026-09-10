@@ -2,7 +2,7 @@ use axum::{
     Extension,
     extract::{Json, Path, Query, State},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -13,17 +13,61 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::{
     filter_visible, require_project_delete, require_project_lead, require_user, with_read,
-    with_write,
 };
+
+/// Connection-scoped counterpart of authz::visible_project_ids for sidebar
+/// snapshots. The credential user owns preferences, as with project groups;
+/// the freshly resolved effective user governs project visibility.
+pub(super) fn sidebar_visibility(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+) -> Result<Option<HashSet<i64>>, LificError> {
+    let fresh = crate::auth::fresh_caller(conn, user_id)?;
+    let effective = authz::effective_user(conn, &Some(crate::auth::fresh_auth_user(&fresh)));
+    if matches!(&effective, Some(user) if user.is_admin) || !authz::authz_enforced_conn(conn)? {
+        return Ok(None);
+    }
+    let Some(user) = effective else {
+        return Ok(Some(HashSet::new()));
+    };
+    Ok(Some(
+        crate::db::queries::members::list_project_ids_for_user(conn, user.id)?
+            .into_iter()
+            .collect(),
+    ))
+}
+
+/// REST ranks describe positions in the visible response, not storage ranks.
+/// Filtering may remove stored positions and newly visible rows use legacy
+/// ranks internally, so normalize only after the final ordering and filtering.
+fn normalize_sidebar_ranks(mut projects: Vec<Project>) -> Vec<Project> {
+    for (position, project) in projects.iter_mut().enumerate() {
+        project.sort_order = position as i64;
+    }
+    projects
+}
 
 pub(super) async fn list_projects(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    // Cross-project list (LIF-197 scope item 2): filter, don't deny.
-    let visible = authz::visible_project_ids(&db, &identity)?;
-    let projects = with_read(&db, crate::db::queries::list_projects)?;
-    Ok(Json(filter_visible(projects, &visible, |p| Some(p.id))))
+    // A valid unbound key can precede the first user. There is no preference
+    // owner in that case; preserve the existing visibility-filtered listing.
+    if identity.is_none() {
+        let visible = authz::visible_project_ids(&db, &identity)?;
+        let projects = with_read(&db, crate::db::queries::list_projects)?;
+        return Ok(Json(filter_visible(projects, &visible, |p| Some(p.id))));
+    }
+    let user = require_user(&identity)?;
+    let projects = with_read(&db, |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let visible = sidebar_visibility(&tx, user.id)?;
+        let projects = crate::db::queries::list_projects_for_user(&tx, user.id)?;
+        let projects = normalize_sidebar_ranks(filter_visible(projects, &visible, |p| Some(p.id)));
+        tx.commit()?;
+        Ok(projects)
+    })?;
+    Ok(Json(projects))
 }
 
 pub(super) async fn get_project(
@@ -163,23 +207,21 @@ pub(super) async fn update_project(
     Ok(Json(project))
 }
 
-/// PUT /api/projects/reorder — persist the sidebar order (LIF-233). Takes the
-/// full id list top-to-bottom; the server reindexes `sort_order`. Gated only on
-/// being authenticated (order is instance-wide, not a privileged project edit),
-/// so any logged-in user can rearrange — unlike `update_project`, which is
-/// lead/admin-only.
+/// PUT /api/projects/reorder persists only the caller's sidebar preferences.
+/// Submitted projects precede omitted visible projects in their current order.
 pub(super) async fn reorder_projects(
     State(db): State<DbPool>,
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<ReorderProjects>,
 ) -> Result<Json<Vec<Project>>, LificError> {
-    require_user(&identity)?;
-    let projects = with_write(&db, |conn| {
-        crate::db::queries::reorder_projects(conn, &input.ids)
+    let user = require_user(&identity)?;
+    let projects = db.transaction(|tx| {
+        let visible = sidebar_visibility(tx, user.id)?;
+        crate::db::queries::reorder_projects(tx, user.id, &input.ids, &visible)
     })?;
-    realtime.send(RealtimeEvent::ProjectsReordered);
-    Ok(Json(projects))
+    realtime.send_to_users(RealtimeEvent::ProjectsReordered, vec![user.id]);
+    Ok(Json(normalize_sidebar_ranks(projects)))
 }
 
 pub(super) async fn delete_project_handler(
@@ -1208,7 +1250,7 @@ mod tests {
     #[tokio::test]
     async fn reorder_allowed_for_non_lead_user() {
         // Unlike update_project (lead/admin-only), reordering is open to any
-        // authenticated user since sidebar order is instance-wide chrome.
+        // authenticated user with visibility since sidebar order is personal.
         let (db, _, _, regular, _) = setup_lead_test();
         let app = app_as_user(db, &regular);
 
@@ -1245,6 +1287,313 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn project_order_is_private_partial_and_appends_newly_visible_projects() {
+        use crate::db::models::{CreateProject, Role};
+        use crate::db::queries::{create_project, members::upsert_member};
+        let (db, admin, lead, _, viewer, outsider, a) = setup_membership_test();
+        let (b, c, hidden) = {
+            let conn = db.write().unwrap();
+            let mut ids = Vec::new();
+            for identifier in ["BBB", "CCC", "HIDE"] {
+                let project = create_project(
+                    &conn,
+                    &CreateProject {
+                        name: identifier.into(),
+                        identifier: identifier.into(),
+                        lead_user_id: Some(lead.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                if identifier != "HIDE" {
+                    upsert_member(&conn, project.id, viewer.id, Role::Viewer).unwrap();
+                }
+                ids.push(project.id);
+            }
+            (ids[0], ids[1], ids[2])
+        };
+        let app = app_as_user(db.clone(), &viewer);
+        let ids = |value: serde_json::Value| {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        for (submitted, expected) in [
+            (vec![c], vec![c, a, b]),
+            (vec![b], vec![b, c, a]),
+            (vec![], vec![b, c, a]),
+        ] {
+            let response = json_put(
+                &app,
+                "/api/projects/reorder",
+                serde_json::json!({"ids": submitted}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(ids(parse_json(response).await), expected);
+        }
+        assert_eq!(
+            ids(parse_json(json_get(&app, "/api/projects").await).await),
+            [b, c, a]
+        );
+        let lead_app = app_as_user(db.clone(), &lead);
+        assert_eq!(
+            ids(parse_json(json_get(&lead_app, "/api/projects").await).await),
+            [a, b, c, hidden]
+        );
+        let outsider_app = app_as_user(db.clone(), &outsider);
+        let empty = json_put(
+            &outsider_app,
+            "/api/projects/reorder",
+            serde_json::json!({"ids": []}),
+        )
+        .await;
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert_eq!(parse_json(empty).await, serde_json::json!([]));
+        let before = parse_json(json_get(&app, "/api/projects").await).await;
+        let mut invalid_bodies = Vec::new();
+        for bad in [hidden, 99999] {
+            let response = json_put(
+                &app,
+                "/api/projects/reorder",
+                serde_json::json!({"ids": [a, bad]}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            invalid_bodies.push(parse_json(response).await);
+        }
+        assert_eq!(invalid_bodies[0], invalid_bodies[1]);
+        let duplicate = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({"ids": [a, b, a]}),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            before
+        );
+        {
+            let conn = db.write().unwrap();
+            upsert_member(&conn, hidden, viewer.id, Role::Viewer).unwrap();
+        }
+        assert_eq!(
+            ids(parse_json(json_get(&app, "/api/projects").await).await),
+            [b, c, a, hidden]
+        );
+        let new = seed_named_project(&app_as_user(db.clone(), &admin), "New", "NEW").await;
+        {
+            let conn = db.write().unwrap();
+            upsert_member(&conn, new, viewer.id, Role::Viewer).unwrap();
+        }
+        assert_eq!(
+            ids(parse_json(json_get(&app, "/api/projects").await).await),
+            [b, c, a, hidden, new]
+        );
+        let conn = db.read().unwrap();
+        let stored: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_project_order WHERE user_id = ?1",
+                [viewer.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 3, "reads must not materialize new projects");
+        let legacy: Vec<_> = crate::db::queries::list_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(legacy, [a, b, c, hidden, new]);
+    }
+
+    #[tokio::test]
+    async fn sidebar_response_ranks_are_dense_after_new_and_hidden_projects() {
+        use crate::db::models::{CreateProject, Role};
+        use crate::db::queries::{create_project, members::upsert_member};
+
+        let (db, admin, lead, _, viewer, _, a) = setup_membership_test();
+        let (b, c) = {
+            let conn = db.write().unwrap();
+            let create = |identifier: &str| {
+                create_project(
+                    &conn,
+                    &CreateProject {
+                        name: identifier.into(),
+                        identifier: identifier.into(),
+                        lead_user_id: Some(lead.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id
+            };
+            let b = create("BBB");
+            let c = create("CCC");
+            upsert_member(&conn, c, viewer.id, Role::Viewer).unwrap();
+            (b, c)
+        };
+        let app = app_as_user(db.clone(), &viewer);
+        let assert_positions = |value: serde_json::Value, expected: &[i64]| {
+            let actual: Vec<_> = value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p["id"].as_i64().unwrap(), p["sort_order"].as_i64().unwrap()))
+                .collect();
+            let expected: Vec<_> = expected
+                .iter()
+                .enumerate()
+                .map(|(rank, id)| (*id, rank as i64))
+                .collect();
+            assert_eq!(actual, expected);
+        };
+        // Even before materialization, a hidden legacy rank must leave no hole.
+        assert_positions(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            &[a, c],
+        );
+        let response = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({"ids": [c, a]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_positions(parse_json(response).await, &[c, a]);
+
+        let d = seed_named_project(&app_as_user(db.clone(), &admin), "New", "DDD").await;
+        {
+            let conn = db.write().unwrap();
+            upsert_member(&conn, d, viewer.id, Role::Viewer).unwrap();
+        }
+        // D's legacy rank is 3, but its position in this response is 2.
+        assert_positions(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            &[c, a, d],
+        );
+        {
+            let conn = db.write().unwrap();
+            upsert_member(&conn, b, viewer.id, Role::Viewer).unwrap();
+        }
+        // B's legacy rank duplicates A's personal rank. REST must not expose it.
+        assert_positions(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            &[c, a, b, d],
+        );
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "DELETE FROM project_members WHERE project_id = ?1 AND user_id = ?2",
+                rusqlite::params![a, viewer.id],
+            )
+            .unwrap();
+        }
+        assert_positions(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            &[c, b, d],
+        );
+        {
+            let conn = db.read().unwrap();
+            let raw: Vec<_> = crate::db::queries::list_projects_for_user(&conn, viewer.id)
+                .unwrap()
+                .into_iter()
+                .map(|p| (p.id, p.sort_order))
+                .collect();
+            assert_eq!(
+                raw,
+                [(c, 0), (a, 1), (b, 1), (d, 3)],
+                "GET normalization must not change internal ranks"
+            );
+        }
+        let response = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({"ids": [d]}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_positions(parse_json(response).await, &[d, c, b]);
+        let response = json_put(
+            &app,
+            "/api/projects/reorder",
+            serde_json::json!({"ids": []}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_positions(parse_json(response).await, &[d, c, b]);
+        assert_positions(
+            parse_json(json_get(&app, "/api/projects").await).await,
+            &[d, c, b],
+        );
+        let conn = db.read().unwrap();
+        let legacy: Vec<_> = crate::db::queries::list_projects(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.id, p.sort_order))
+            .collect();
+        assert_eq!(legacy, [(a, 0), (b, 1), (c, 2), (d, 3)]);
+    }
+
+    #[tokio::test]
+    async fn project_order_rechecks_demoted_revoked_and_disabled_callers() {
+        let (db, admin, _, _, viewer, _, project) = setup_membership_test();
+        let admin_app = app_as_user(db.clone(), &admin);
+        let viewer_app = app_as_user(db.clone(), &viewer);
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE users SET is_admin = 0 WHERE id = ?1", [admin.id])
+                .unwrap();
+            conn.execute(
+                "DELETE FROM project_members WHERE project_id = ?1 AND user_id = ?2",
+                rusqlite::params![project, viewer.id],
+            )
+            .unwrap();
+        }
+        for app in [&admin_app, &viewer_app] {
+            assert_eq!(
+                parse_json(json_get(app, "/api/projects").await).await,
+                serde_json::json!([])
+            );
+            let response = json_put(
+                app,
+                "/api/projects/reorder",
+                serde_json::json!({"ids": [project]}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE users SET is_active = 0 WHERE id = ?1", [viewer.id])
+                .unwrap();
+        }
+        assert_eq!(
+            json_get(&viewer_app, "/api/projects").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            json_put(
+                &viewer_app,
+                "/api/projects/reorder",
+                serde_json::json!({"ids": []})
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let conn = db.read().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_project_order", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

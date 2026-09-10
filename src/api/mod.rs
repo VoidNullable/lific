@@ -136,6 +136,10 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             put(project_groups::assign_project),
         )
         .route(
+            "/api/project-groups/reorder",
+            put(project_groups::reorder_groups),
+        )
+        .route(
             "/api/project-groups/{id}",
             patch(project_groups::update_group).delete(project_groups::delete_group),
         )

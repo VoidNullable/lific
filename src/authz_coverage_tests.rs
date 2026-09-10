@@ -298,7 +298,9 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         ),
         (
             ("PUT", "/api/projects/reorder"),
-            Exempt("require_user only; instance-wide sidebar chrome, not a project edit — LIF-233"),
+            Exempt(
+                "per-user ordering; fresh caller and project visibility checked in one transaction",
+            ),
         ),
         (("GET", "/api/projects/{id}"), Gated(Viewer)),
         (("PUT", "/api/projects/{id}"), Gated(Lead)),
@@ -325,6 +327,12 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
             Exempt("per-user groups; another user's id is NotFound, never Forbidden"),
         ),
         (("PUT", "/api/project-groups/assign"), Gated(Viewer)),
+        (
+            ("PUT", "/api/project-groups/reorder"),
+            Exempt(
+                "per-user ordering; fresh caller and group ownership checked in one transaction",
+            ),
+        ),
         (("GET", "/api/projects/{id}/board"), Gated(Viewer)),
         (("GET", "/api/projects/{id}/issue-counts"), Gated(Viewer)),
         // Dependency graph edges (LIF-363).

@@ -28,17 +28,42 @@ pub(super) async fn list_groups(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<Vec<ProjectGroup>>, LificError> {
-    let visible = authz::visible_project_ids(&db, &identity)?;
     let user = require_user(&identity)?;
-    let mut groups = with_read(&db, |conn| project_groups::list_groups(conn, user.id))?;
-    // A membership outlives the caller's access to that project when a
-    // project_members row is revoked. Drop those ids rather than render a
-    // sidebar entry that 403s the moment it's clicked.
-    if let Some(ids) = &visible {
-        for group in &mut groups {
-            group.project_ids.retain(|id| ids.contains(id));
+    let groups = with_read(&db, |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let visible = super::projects::sidebar_visibility(&tx, user.id)?;
+        let mut groups = project_groups::list_groups(&tx, user.id)?;
+        // Group membership can outlive project access. Resolve both from the
+        // same snapshot so stale middleware roles cannot reveal hidden IDs.
+        if let Some(ids) = &visible {
+            for group in &mut groups {
+                group.project_ids.retain(|id| ids.contains(id));
+            }
         }
-    }
+        tx.commit()?;
+        Ok(groups)
+    })?;
+    Ok(Json(groups))
+}
+
+pub(super) async fn reorder_groups(
+    State(db): State<DbPool>,
+    Extension(realtime): Extension<RealtimeHub>,
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+    Json(input): Json<ReorderProjectGroups>,
+) -> Result<Json<Vec<ProjectGroup>>, LificError> {
+    let user = require_user(&identity)?;
+    let groups = db.transaction(|tx| {
+        let visible = super::projects::sidebar_visibility(tx, user.id)?;
+        let mut groups = project_groups::reorder_groups(tx, user.id, &input.ids)?;
+        if let Some(ids) = &visible {
+            for group in &mut groups {
+                group.project_ids.retain(|id| ids.contains(id));
+            }
+        }
+        Ok(groups)
+    })?;
+    realtime.send_to_users(RealtimeEvent::ProjectGroupsChanged, vec![user.id]);
     Ok(Json(groups))
 }
 
@@ -137,6 +162,174 @@ mod tests {
         let resp = json_delete(&app, &format!("/api/project-groups/{group_id}")).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(parse_json(resp).await["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn group_listing_rechecks_a_demoted_and_disabled_caller() {
+        let (db, admin, _, _, _, _, project) = setup_membership_test();
+        let group_id = {
+            let conn = db.write().unwrap();
+            let group = crate::db::queries::project_groups::create_group(
+                &conn,
+                admin.id,
+                &crate::db::models::CreateProjectGroup {
+                    name: "Private".into(),
+                },
+            )
+            .unwrap();
+            crate::db::queries::project_groups::assign_project(
+                &conn,
+                admin.id,
+                project,
+                Some(group.id),
+            )
+            .unwrap();
+            group.id
+        };
+        // The router retains the original middleware identity across requests.
+        let app = app_as_user(db.clone(), &admin);
+        let before = json_get(&app, "/api/project-groups").await;
+        assert_eq!(before.status(), StatusCode::OK);
+        assert_eq!(
+            parse_json(before).await[0]["project_ids"],
+            serde_json::json!([project])
+        );
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE users SET is_admin = 0 WHERE id = ?1", [admin.id])
+                .unwrap();
+        }
+        let demoted = json_get(&app, "/api/project-groups").await;
+        assert_eq!(demoted.status(), StatusCode::OK);
+        let groups = parse_json(demoted).await;
+        assert_eq!(groups.as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["id"], group_id);
+        assert_eq!(groups[0]["project_ids"], serde_json::json!([]));
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE users SET is_active = 0 WHERE id = ?1", [admin.id])
+                .unwrap();
+        }
+        assert_eq!(
+            json_get(&app, "/api/project-groups").await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn group_reorder_is_owned_atomic_and_keeps_omitted_groups_stable() {
+        let (db, _, lead, _, viewer, _, project) = setup_membership_test();
+        let (a, b, c, other) = {
+            let conn = db.write().unwrap();
+            let group = |user_id, name: &str| {
+                crate::db::queries::project_groups::create_group(
+                    &conn,
+                    user_id,
+                    &crate::db::models::CreateProjectGroup { name: name.into() },
+                )
+                .unwrap()
+                .id
+            };
+            let a = group(viewer.id, "A");
+            let b = group(viewer.id, "B");
+            let c = group(viewer.id, "C");
+            let other = group(lead.id, "Private");
+            crate::db::queries::project_groups::assign_project(&conn, viewer.id, project, Some(a))
+                .unwrap();
+            (a, b, c, other)
+        };
+        let hub = crate::realtime::RealtimeHub::new();
+        let mut events = hub.subscribe();
+        let app = app_as_user_with_realtime(db.clone(), &viewer, hub);
+        let ids = |value: serde_json::Value| {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        for (submitted, expected) in [
+            (vec![c], vec![c, a, b]),
+            (vec![b], vec![b, c, a]),
+            (vec![], vec![b, c, a]),
+        ] {
+            let response = json_put(
+                &app,
+                "/api/project-groups/reorder",
+                serde_json::json!({"ids": submitted}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(ids(parse_json(response).await), expected);
+            assert_eq!(
+                events.try_recv().unwrap().event,
+                crate::realtime::RealtimeEvent::ProjectGroupsChanged
+            );
+        }
+        let before = parse_json(json_get(&app, "/api/project-groups").await).await;
+        let mut errors = Vec::new();
+        for bad in [other, 99999] {
+            let response = json_put(
+                &app,
+                "/api/project-groups/reorder",
+                serde_json::json!({"ids": [a, bad]}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            errors.push(parse_json(response).await);
+        }
+        assert_eq!(errors[0], errors[1]);
+        let duplicate = json_put(
+            &app,
+            "/api/project-groups/reorder",
+            serde_json::json!({"ids": [a, b, a]}),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parse_json(json_get(&app, "/api/project-groups").await).await,
+            before
+        );
+        assert!(events.try_recv().is_err());
+        let other_app = app_as_user(db.clone(), &lead);
+        let others = parse_json(json_get(&other_app, "/api/project-groups").await).await;
+        assert_eq!(ids(others.clone()), [other]);
+        assert_eq!(others[0]["sort_order"], 0);
+        // Group membership may outlive access. Reorder must not leak those IDs.
+        {
+            let conn = db.write().unwrap();
+            conn.execute(
+                "DELETE FROM project_members WHERE project_id = ?1 AND user_id = ?2",
+                rusqlite::params![project, viewer.id],
+            )
+            .unwrap();
+        }
+        let response = json_put(
+            &app,
+            "/api/project-groups/reorder",
+            serde_json::json!({"ids": []}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for group in parse_json(response).await.as_array().unwrap() {
+            assert_eq!(group["project_ids"], serde_json::json!([]));
+        }
+        {
+            let conn = db.write().unwrap();
+            conn.execute("UPDATE users SET is_active = 0 WHERE id = ?1", [viewer.id])
+                .unwrap();
+        }
+        assert_eq!(
+            json_put(
+                &app,
+                "/api/project-groups/reorder",
+                serde_json::json!({"ids": []})
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

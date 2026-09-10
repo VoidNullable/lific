@@ -251,6 +251,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "public projects",
         include_str!("../../migrations/051_public_projects.sql"),
     ),
+    (
+        52,
+        "user project order",
+        include_str!("../../migrations/052_user_project_order.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -633,6 +638,54 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run(&conn).expect("initial migration");
         conn
+    }
+
+    #[test]
+    fn user_project_order_upgrade_keeps_legacy_fallback_and_lazily_backfills_on_reorder() {
+        let conn = migrated_up_to(52);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES
+                (1,'alice','alice@test','hash'), (2,'bob','bob@test','hash');
+             INSERT INTO projects(id,name,identifier,sort_order) VALUES
+                (1,'Same','ONE',5), (2,'Same','TWO',5), (3,'First','THREE',0);",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        use crate::db::queries::{list_projects_for_user, reorder_projects};
+        let ids = |projects: Vec<crate::db::models::Project>| {
+            projects.into_iter().map(|p| p.id).collect::<Vec<_>>()
+        };
+        assert_eq!(count(&conn, "SELECT count(*) FROM user_project_order"), 0);
+        assert_eq!(ids(list_projects_for_user(&conn, 1).unwrap()), [3, 1, 2]);
+        assert_eq!(ids(list_projects_for_user(&conn, 2).unwrap()), [3, 1, 2]);
+        reorder_projects(&conn, 1, &[2], &None).unwrap();
+        assert_eq!(ids(list_projects_for_user(&conn, 1).unwrap()), [2, 3, 1]);
+        assert_eq!(ids(list_projects_for_user(&conn, 2).unwrap()), [3, 1, 2]);
+        assert_eq!(count(&conn, "SELECT count(*) FROM user_project_order"), 3);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM projects WHERE sort_order = 5"),
+            2
+        );
+        assert!(
+            conn.execute("INSERT INTO user_project_order VALUES (1, 2, 10)", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("INSERT INTO user_project_order VALUES (999, 2, 10)", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("INSERT INTO user_project_order VALUES (1, 999, 10)", [])
+                .is_err()
+        );
+        run(&conn).unwrap();
+        assert_eq!(ids(list_projects_for_user(&conn, 1).unwrap()), [2, 3, 1]);
+        conn.execute("DELETE FROM projects WHERE id = 2", [])
+            .unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM user_project_order"), 2);
+        conn.execute("DELETE FROM users WHERE id = 1", []).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM user_project_order"), 0);
+        assert!(!has_fk_violations(&conn).unwrap());
     }
 
     #[test]
