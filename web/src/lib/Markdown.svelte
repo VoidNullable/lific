@@ -22,7 +22,23 @@
   import { openContextMenu } from "./contextMenuState.svelte"; // LIF-248
   import { PanelRight, ExternalLink } from "lucide-svelte";
   import { linkMentionsInText, type MentionUser } from "./mentions"; // LIF-263
-  import { attachmentThumbnailUrl } from "./api"; // LIF-418
+  import { attachmentThumbnailUrl, attachmentUrl } from "./api"; // LIF-418
+  import { inPublicScope } from "./publicScope"; // LIF-471
+
+  // LIF-471: in public scope an <img> may only point at this instance's own
+  // attachments. Registered once (hooks are global to DOMPurify) and inert
+  // outside public scope. An image with no `src` renders as its alt text.
+  const PUBLIC_IMG_SRC_RE = /^\/api\/attachments\/\d+\/?$/;
+  DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+    if (!inPublicScope()) return;
+    if (data.attrName !== "src") return;
+    // `<input type="image" src>` fetches too; task-list checkboxes need the
+    // element, so only the attribute goes.
+    if (node.nodeName === "INPUT") data.keepAttr = false;
+    if (node.nodeName === "IMG" && !PUBLIC_IMG_SRC_RE.test(data.attrValue)) {
+      data.keepAttr = false;
+    }
+  });
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
 
   let {
@@ -223,6 +239,20 @@
   // generate (identifier <a href="#/...">, the mermaid/code wrapper <div>s with
   // their class + data-* attributes, GFM tables, task-list checkboxes, and the
   // LIF-262 attachment img/chip markup).
+  //
+  // LIF-471: on a public page the reader has no relationship with whoever
+  // wrote the body, so a body must not be able to make their browser fetch
+  // from a host the author chose (a tracking pixel: IP, user agent, reading
+  // time). Everything that can fetch on its own is dropped in public scope:
+  // media elements, embeds, stylesheets, inline styles, `srcset`/`poster`,
+  // and any `<img>` whose source is not one of this instance's attachments.
+  // Links the reader chooses to click survive. The signed-in renderer keeps
+  // its permissive config: there the author is a colleague or their agent.
+  const PUBLIC_FORBID_TAGS = [
+    "video", "audio", "source", "track", "picture", "iframe", "object",
+    "embed", "style", "link", "form", "svg", "image", "use", "math",
+  ];
+  const PUBLIC_FORBID_ATTR = ["style", "srcset", "poster", "background", "ping"];
   let html = $derived(
     DOMPurify.sanitize(
       decorateAttachmentLinks(
@@ -241,6 +271,9 @@
         "data-attachment",
         "download",
       ],
+      ...(inPublicScope()
+        ? { FORBID_TAGS: PUBLIC_FORBID_TAGS, FORBID_ATTR: PUBLIC_FORBID_ATTR }
+        : {}),
     })
   );
 
@@ -463,7 +496,21 @@
         if (cancelled) return;
         await renderMermaidBlock(
           block,
-          (id, source) => mermaid.render(id, source),
+          async (id, source) => {
+            const out = await mermaid.render(id, source);
+            // LIF-471: a diagram can carry `<image href>` nodes, which are
+            // a fetch the author chose. The body sanitizer never sees this
+            // SVG (it is produced after sanitization), so it gets the same
+            // public-scope rule here: no external fetches from a body.
+            if (!inPublicScope()) return out;
+            return {
+              svg: DOMPurify.sanitize(out.svg, {
+                USE_PROFILES: { svg: true, svgFilters: true },
+                FORBID_TAGS: ["image", "foreignObject", "use", "script", "a"],
+                FORBID_ATTR: ["href", "xlink:href", "style"],
+              }),
+            };
+          },
           budget,
           () => cancelled,
         );
@@ -535,9 +582,17 @@
       "img:not([data-attachment-decorated])",
     );
     for (const img of Array.from(imgs)) {
-      const src = img.getAttribute("src") ?? "";
-      const match = src.match(ATTACHMENT_SRC_RE);
-      if (!match) continue;
+      const authored = img.getAttribute("src") ?? "";
+      const match = authored.match(ATTACHMENT_SRC_RE);
+      if (!match) {
+        // LIF-471: an image hosted elsewhere loads for a public reader too,
+        // but must not tell its host which page they came from.
+        if (inPublicScope()) img.referrerPolicy = "no-referrer";
+        continue;
+      }
+      // The body says `/api/attachments/N`; the URL that actually loads it
+      // depends on which surface this page is reading from (LIF-471).
+      const src = attachmentUrl(Number(match[1]));
       img.dataset.attachmentDecorated = "true";
       img.classList.add("attachment-image");
       img.loading = "lazy";

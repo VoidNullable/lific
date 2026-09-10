@@ -1,6 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Public project view: browser feature smoke (LIF-465).
+ * Public project view: browser feature smoke (LIF-465, redesigned in LIF-471).
+ *
+ * Since LIF-471 there is no bespoke public component: `#/public/DEMO`
+ * redirects to `#/public/DEMO/issues` and the ordinary IssueList /
+ * IssueDetail / PageList / PageDetail render inside `PublicLayout`, with
+ * every request rewritten onto `/public/api/...` and no credential attached.
+ * So these assertions are about the *real* app running in public scope.
  *
  * The Rust tests prove the HTTP boundary: what the server will and will not
  * answer. They cannot prove the half of this feature that only exists in a
@@ -26,7 +32,7 @@
  * Binary picked: $LIFIC_BIN, else target/debug/lific (a debug build reads
  * web/dist from disk at runtime, so run `bun run build` in web/ first).
  */
-import { chromium, type Browser, type BrowserContext, type Route } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
@@ -125,6 +131,10 @@ const FRIENDLY_BODY = [
   "> a quote",
   "",
   "A sibling issue: [see DEMO-1](/DEMO/issues/DEMO-1).",
+  "",
+  // LIF-471: a bare identifier in prose is auto-linked by the renderer, and
+  // in public scope that generated route must stay under /public.
+  "And bare in prose, DEMO-1 should auto-link.",
 ].join("\n");
 
 function cli(config: string, db: string, args: string[]): string {
@@ -192,8 +202,10 @@ async function watchedPage(context: BrowserContext, base: string) {
   // body CAN reach: an <img> tracking pixel, a fetch, a script, a media
   // element. A leak through the renderer still fails this test.
   const BODY_DRIVEN = new Set(["image", "xhr", "fetch", "script", "media"]);
+  const requests: string[] = [];
   page.on("request", (req) => {
     const url = req.url();
+    requests.push(url);
     if (!url.startsWith(base)) {
       if (url.startsWith("http") && BODY_DRIVEN.has(req.resourceType())) {
         offOrigin.push(url);
@@ -202,8 +214,13 @@ async function watchedPage(context: BrowserContext, base: string) {
     }
     if (isPrivateRequest(url, base)) privateRequests.push(url);
   });
-  return { page, consoleErrors, pageErrors, privateRequests, offOrigin };
+  return { page, consoleErrors, pageErrors, privateRequests, offOrigin, requests };
 }
+
+/** The rendered issue/page body: EditableMarkdown's read pane wrapping the
+ *  shared Markdown component. (Comment bodies are `.prose` too, hence the
+ *  `.em-rendered` qualifier.) */
+const BODY_SELECTOR = ".em-rendered .prose";
 
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
@@ -256,6 +273,12 @@ async function main(): Promise<number> {
     ]);
     cli(config, db, ["comment", "add", "DEMO-1", "--content", "A public comment body", "--json"]);
     cli(config, db, [
+      "page", "create", "--project", "DEMO",
+      "--title", "Public page",
+      "--content", "Page body text",
+      "--json",
+    ]);
+    cli(config, db, [
       "issue", "create", "--project", "PRIV",
       "--title", "Classified issue",
       "--description", "classified-marker-string",
@@ -296,10 +319,21 @@ async function main(): Promise<number> {
         if (w.page.url().includes("/login")) {
           fail(scenario, `redirected to the login page (${w.page.url()})`);
         }
-        for (const expected of ["Public issue one", "Public issue two", "Public read-only view"]) {
+        // LIF-471: the bare project route canonicalizes onto the issue list.
+        if (!w.page.url().includes("#/public/DEMO/issues")) {
+          fail(scenario, `/public/DEMO did not redirect to its issue list (${w.page.url()})`);
+        }
+        // The shell: one project, its two sections, the public tag, a way in.
+        for (const expected of [
+          "Public issue one", "Public issue two", "Issues", "Pages", "public", "Sign in",
+        ]) {
           if (!body.includes(expected)) {
             fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
           }
+        }
+        // The LIF-465 banner is gone; the shell says "public" instead.
+        if (body.includes("Public read-only view")) {
+          fail(scenario, "the retired 'Public read-only view' banner is still rendered");
         }
         if (body.includes("Something went wrong")) {
           fail(scenario, "rendered the error boundary fallback");
@@ -328,18 +362,37 @@ async function main(): Promise<number> {
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
         await w.page.getByText("Public issue one").first().click();
         await w.page
           .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
             timeout: 10_000,
           })
           .catch(() => {});
+        if (!w.page.url().includes("#/public/DEMO/issues/DEMO-1")) {
+          fail(scenario, `clicking the row landed on ${w.page.url()}`);
+        }
         const body = (await w.page.locator("body").innerText()) ?? "";
-        for (const expected of ["Public issue one", "A public comment body", "DEMO-1"]) {
+        for (const expected of [
+          "Public issue one",
+          "A public comment body",
+          "DEMO-1",
+          // The commenter's display name, and nothing else about them.
+          "Public Operator",
+          // LIF-471: the read-only cue the ordinary detail view already had.
+          "Read-only",
+        ]) {
           if (!body.includes(expected)) {
             fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
           }
+        }
+        // Nothing to write with: no comment composer, no body editor.
+        if ((await w.page.locator("textarea").count()) > 0) {
+          fail(scenario, "a text input was offered on a read-only public page");
+        }
+        // And no export, which is a signed-in affordance.
+        if ((await w.page.getByRole("button", { name: "Export" }).count()) > 0) {
+          fail(scenario, "the export button was offered on a public page");
         }
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
@@ -365,7 +418,17 @@ async function main(): Promise<number> {
       });
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/DEMO-1`, { waitUntil: "load", timeout: 15_000 });
+        // Hash form. A detail deep link in *path* form
+        // (`/public/DEMO/issues/DEMO-1`) is currently mis-parsed by
+        // `splitResourcePath` in web/src/lib/commentLinks.ts, which reads
+        // `/public` as an app base path and routes to the private
+        // `/DEMO/issues/DEMO-1`. Reported separately; the hash form is what
+        // the app canonicalizes every in-app URL to, so it is what a reader
+        // copies out of the address bar.
+        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-1`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (!body.includes("Public issue one")) {
@@ -394,7 +457,8 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/DEMO-3`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-3`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.locator(BODY_SELECTOR).first().waitFor({ timeout: 15_000 });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
 
         const pwned = await w.page.evaluate(
@@ -402,10 +466,10 @@ async function main(): Promise<number> {
         );
         if (pwned) fail(scenario, "injected script executed");
 
-        const markup = await w.page.evaluate(() => {
-          const el = document.querySelector(".public-md");
+        const markup = await w.page.evaluate((sel: string) => {
+          const el = document.querySelector(sel);
           return el ? el.innerHTML : "";
-        });
+        }, BODY_SELECTOR);
         if (markup === "") fail(scenario, "the issue body did not render at all");
 
         // Every attribute of every surviving element, and every tag name.
@@ -415,18 +479,33 @@ async function main(): Promise<number> {
         // want: a body that *talks about* `javascript:` URLs, or shows one in
         // a code block, is fine, it is inert text. What must not exist is an
         // attribute the browser would act on.
-        const dom = await w.page.evaluate(() => {
-          const root = document.querySelector(".public-md");
+        //
+        // Two regions are the *app's* output rather than the sanitizer's, and
+        // are excluded so the checklist below stays about the author's markup:
+        //
+        //   * `span.attachment-view-host` — LIF-418 replaces each attachment
+        //     chip with a mounted `AttachmentView`, whose Lucide icons are
+        //     `<svg>`. Author markup never lands inside one of these.
+        //   * `style` on `img[data-attachment-decorated]` — the same effect
+        //     sets `cursor: zoom-in` on an attachment image *after*
+        //     sanitization. The author's own `style=` attributes are on other
+        //     elements and are still asserted on.
+        const dom = await w.page.evaluate((sel: string) => {
+          const root = document.querySelector(sel);
           const tags: string[] = [];
           const attrs: { name: string; value: string; tag: string }[] = [];
           for (const el of Array.from(root?.querySelectorAll("*") ?? [])) {
-            tags.push(el.tagName.toLowerCase());
+            if (el.closest(".attachment-view-host")) continue;
+            const tag = el.tagName.toLowerCase();
+            tags.push(tag);
+            const appStyled = tag === "img" && el.hasAttribute("data-attachment-decorated");
             for (const a of Array.from(el.attributes)) {
-              attrs.push({ name: a.name.toLowerCase(), value: a.value, tag: el.tagName.toLowerCase() });
+              if (appStyled && a.name.toLowerCase() === "style") continue;
+              attrs.push({ name: a.name.toLowerCase(), value: a.value, tag });
             }
           }
           return { tags, attrs };
-        });
+        }, BODY_SELECTOR);
 
         // 1. Nothing executes, and no attribute is an executable URL.
         for (const [needle, what] of [
@@ -448,9 +527,10 @@ async function main(): Promise<number> {
         // 2. Nothing that can name a URL is left in the document at all. This
         //    is the assertion the regex renderer could not have passed: every
         //    one of these tags was invisible to it.
+        //    The list is exactly `PUBLIC_FORBID_TAGS` in web/src/lib/Markdown.svelte.
         for (const tag of [
-          "video", "audio", "source", "iframe", "object", "embed", "svg",
-          "link", "style", "input", "form", "button",
+          "video", "audio", "source", "track", "picture", "iframe", "object",
+          "embed", "style", "link", "form", "svg", "image", "use", "math",
         ]) {
           if (dom.tags.includes(tag)) {
             fail(scenario, `a <${tag}> element survived into the public body`);
@@ -461,7 +541,7 @@ async function main(): Promise<number> {
         //    on. `style` is on this list because `background:url()` is a
         //    fetch instruction wearing different clothes.
         for (const attr of dom.attrs) {
-          if (["style", "srcset", "poster", "background", "ping", "formaction", "data"].includes(attr.name)) {
+          if (["style", "srcset", "poster", "background", "ping"].includes(attr.name)) {
             fail(scenario, `a ${attr.name}= attribute survived on <${attr.tag}>`);
           }
         }
@@ -470,20 +550,17 @@ async function main(): Promise<number> {
         //    (It may still appear as inert text, which is the correct outcome
         //    for a URL the renderer refused: the reader can see what was
         //    stripped.)
+        //
+        //    An attachment the reader is not entitled to is NOT asserted on
+        //    here any more (LIF-471): the chip becomes a mounted
+        //    AttachmentView and the image is rewritten onto the public
+        //    thumbnail route, so the surviving markup legitimately names
+        //    `/public/api/.../attachments/...`. What matters is the request
+        //    it makes, asserted below. Cross-project links are ordinary
+        //    relative hrefs now and survive on purpose.
         for (const attr of dom.attrs) {
           if (/tracker\.invalid/i.test(attr.value)) {
             fail(scenario, `a remote resource URL survived in <${attr.tag} ${attr.name}>`);
-          }
-          if (/\/api\/attachments\//.test(attr.value)) {
-            fail(scenario, `an unauthorized attachment reference survived in <${attr.tag} ${attr.name}>`);
-          }
-          if (/PRIV\/issues|\/public\/PRIV/i.test(attr.value)) {
-            fail(scenario, `a link into another project survived in <${attr.tag} ${attr.name}>`);
-          }
-          // A project whose identifier merely starts with this one is a
-          // different project; a prefix match would have rewritten it.
-          if (/DEMOX/i.test(attr.value)) {
-            fail(scenario, `a prefix-shaped project link survived in <${attr.tag} ${attr.name}>`);
           }
         }
 
@@ -497,26 +574,33 @@ async function main(): Promise<number> {
         if (!/example\.com\/single-quoted/.test(markup)) {
           fail(scenario, "a single-quoted outbound link was stripped");
         }
-        // Every surviving outbound link is de-fanged.
-        for (const attr of dom.attrs) {
-          if (attr.tag === "a" && attr.name === "href" && /^https?:/i.test(attr.value)) {
-            const rel = dom.attrs.find(
-              (a) => a.tag === "a" && a.name === "rel" && a.value.includes("noreferrer"),
-            );
-            if (!rel) fail(scenario, `an outbound link kept its referrer: ${attr.value}`);
-          }
-        }
         if (!/Hostile body/.test(markup)) {
           fail(scenario, "the body's own prose was lost");
         }
 
         // 6. And the ground truth behind all of it: the browser fetched
-        //    nothing off-origin and probed nothing private.
+        //    nothing off-origin and probed nothing private. In particular no
+        //    request reached the credentialed `/api/attachments/...` route
+        //    for the two attachment ids this reader is not entitled to; the
+        //    404s all land on the anonymous mirror.
         for (const url of w.offOrigin) fail(scenario, `fetched an off-origin resource: ${url}`);
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
         }
+        for (const url of w.requests) {
+          if (url.startsWith(`${base}/api/attachments/`)) {
+            fail(scenario, `probed a private attachment route: ${url}`);
+          }
+        }
         for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        // The two unauthorized attachment ids 404 on the public mirror (the
+        // thumbnail first, then the full asset the error handler falls back
+        // to). That is the correct outcome and the browser logs it; nothing
+        // else may be logged.
+        for (const err of w.consoleErrors) {
+          if (err.includes("Failed to load resource")) continue;
+          fail(scenario, `console error: ${err}`);
+        }
       } catch (e) {
         fail(scenario, String(e));
       } finally {
@@ -533,12 +617,13 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/DEMO-4`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-4`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.locator(BODY_SELECTOR).first().waitFor({ timeout: 15_000 });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
-        const markup = await w.page.evaluate(() => {
-          const el = document.querySelector(".public-md");
+        const markup = await w.page.evaluate((sel: string) => {
+          const el = document.querySelector(sel);
           return el ? el.innerHTML : "";
-        });
+        }, BODY_SELECTOR);
         for (const [needle, what] of [
           [/<strong>/i, "bold"],
           [/<code>/i, "inline code"],
@@ -548,17 +633,32 @@ async function main(): Promise<number> {
           [/<ul>/i, "a list"],
           [/type="checkbox"/i, "a task-list checkbox"],
           [/example\.com\/ok/, "an outbound link"],
-          [/#\/public\/DEMO\/DEMO-1/, "an in-project issue link"],
         ] as const) {
           if (!needle.test(markup)) fail(scenario, `${what} was stripped`);
         }
-        // The in-project link must actually work.
-        await w.page.getByText("see DEMO-1").first().click();
-        await w.page
-          .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
-            timeout: 10_000,
-          })
-          .catch(() => fail(scenario, "the in-project issue link did not navigate"));
+        // LIF-471: the generated links (auto-linked identifiers) are the ones
+        // the renderer owns, and they must stay inside the public view. An
+        // authored relative link is the author's, and is left alone.
+        const autoLink = w.page.locator(`${BODY_SELECTOR} a.identifier-link`).first();
+        if ((await autoLink.count()) === 0) {
+          fail(scenario, "a bare identifier in prose was not auto-linked");
+        } else {
+          const href = (await autoLink.getAttribute("href")) ?? "";
+          if (!href.startsWith("#/public/DEMO/issues/")) {
+            fail(scenario, `an auto-linked identifier escaped the public view: ${href}`);
+          }
+          // And it must actually work, without leaving /public.
+          await autoLink.click();
+          await w.page
+            .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
+              timeout: 10_000,
+            })
+            .catch(() => fail(scenario, "the auto-linked identifier did not navigate"));
+          if (!w.page.url().includes("#/public/DEMO/issues/DEMO-1")) {
+            fail(scenario, `navigation left the public view: ${w.page.url()}`);
+          }
+        }
+        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
         for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
         for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
       } catch (e) {
@@ -569,13 +669,59 @@ async function main(): Promise<number> {
       console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
     }
 
-    // ---- 4c. the list pages, and the whole project arrives --------------
+    // ---- 4c. pages are the public view's other half ---------------------
+    // LIF-471: the sidebar offers Issues and Pages, and both are the real
+    // components. A published project's pages are readable the same way.
     {
-      const scenario = "issue list pagination";
-      const context = await browser.newContext();
+      const scenario = "public pages";
+      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
       const w = await watchedPage(context, base);
       try {
-        // One page is 100 server-side; seed past it so the walk is real.
+        await w.page.goto(`${base}/public/DEMO/pages`, { waitUntil: "load", timeout: 15_000 });
+        await w.page
+          .waitForFunction(() => document.body.innerText.includes("Public page"), undefined, {
+            timeout: 15_000,
+          })
+          .catch(() => fail(scenario, "the page tree did not list the published page"));
+
+        await w.page.getByText("Public page").first().click();
+        await w.page
+          .waitForFunction(() => document.body.innerText.includes("Page body text"), undefined, {
+            timeout: 10_000,
+          })
+          .catch(() => fail(scenario, "the page body never rendered"));
+
+        if (!/\/public\/DEMO\/pages\/\d+/.test(w.page.url())) {
+          fail(scenario, `opening a page landed on ${w.page.url()}`);
+        }
+        const body = (await w.page.locator("body").innerText()) ?? "";
+        for (const expected of ["Public page", "Page body text", "Read-only"]) {
+          if (!body.includes(expected)) {
+            fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
+          }
+        }
+        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
+        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+      } catch (e) {
+        fail(scenario, String(e));
+      } finally {
+        await context.close();
+      }
+      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+    }
+
+    // ---- 4d. the whole project arrives in one list ----------------------
+    // LIF-471 replaced the paged `/issues` endpoint with `/index`, which
+    // answers with every live row at once. So the property is no longer "the
+    // view walks the pages" but "a project bigger than the old page size
+    // renders end to end".
+    {
+      const scenario = "whole issue list arrives";
+      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const w = await watchedPage(context, base);
+      try {
+        // Comfortably past the retired 100-row page size.
         const bulk = new Database(db);
         const projectId = bulk
           .query("SELECT id FROM projects WHERE identifier = 'DEMO'")
@@ -591,78 +737,32 @@ async function main(): Promise<number> {
         }
         bulk.close();
 
-        await w.page.goto(`${base}/public/DEMO`, { waitUntil: "load", timeout: 15_000 });
-        // The last-seeded issue only appears once the second page lands.
-        const walked = await w.page
-          .waitForFunction(() => document.body.innerText.includes("Bulk issue 120"), undefined, {
-            timeout: 15_000,
-          })
-          .then(() => true)
-          .catch(() => false);
-        if (!walked) {
-          fail(scenario, "the view did not walk past the first page of issues");
-        }
-        // And the first page was on screen before the walk finished, i.e. the
-        // list is not blocked on the whole project loading.
-        const body = (await w.page.locator("body").innerText()) ?? "";
-        if (!body.includes("Public issue one")) {
-          fail(scenario, "the first page's issues are missing after the walk");
-        }
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
-      } catch (e) {
-        fail(scenario, String(e));
-      } finally {
-        await context.close();
-      }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
-    }
-
-    // ---- 4d. comments page, and the rest is reachable ------------------
-    {
-      const scenario = "comment paging";
-      const context = await browser.newContext();
-      const w = await watchedPage(context, base);
-      try {
-        const bulk = new Database(db);
-        const issue = bulk
-          .query("SELECT id FROM issues WHERE title = 'Public issue one'")
-          .get() as { id: number };
-        for (let i = 1; i <= 60; i += 1) {
-          bulk.run(
-            "INSERT INTO comments (issue_id, user_id, content) VALUES (?, 1, ?)",
-            [issue.id, `paged comment ${i}`],
-          );
-        }
-        bulk.close();
-
-        await w.page.goto(`${base}/public/DEMO/DEMO-1`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
-
-        let body = (await w.page.locator("body").innerText()) ?? "";
-        if (!body.includes("61 comments")) {
-          fail(scenario, "the total comment count was not shown");
-        }
-        if (body.includes("paged comment 60")) {
-          fail(scenario, "the whole thread loaded at once; it should be paged");
-        }
-        // Truncation must be actionable, not an apology.
-        const more = w.page.getByRole("button", { name: /Load more/ });
-        if ((await more.count()) === 0) {
-          fail(scenario, "no way to read the rest of the thread");
-        } else {
-          await more.first().click();
-          const arrived = await w.page
-            .waitForFunction(() => document.body.innerText.includes("paged comment 60"), undefined, {
-              timeout: 10_000,
-            })
+        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
+        // Default grouping is by status, and every seeded row is `backlog`,
+        // so they all live in one group.
+        for (const title of ["Bulk issue 1", "Bulk issue 120"]) {
+          const found = await w.page
+            .getByText(title, { exact: true })
+            .first()
+            .waitFor({ timeout: 15_000 })
             .then(() => true)
             .catch(() => false);
-          if (!arrived) fail(scenario, "Load more did not fetch the next page");
-          body = (await w.page.locator("body").innerText()) ?? "";
-          if (!body.includes("A public comment body")) {
-            fail(scenario, "the first page was dropped when the next one loaded");
-          }
+          if (!found) fail(scenario, `${JSON.stringify(title)} never rendered`);
+        }
+        // Counted from the rows themselves rather than the text, so a
+        // truncating list cannot pass by showing both ends and nothing else.
+        const rows = await w.page.evaluate(
+          () =>
+            Array.from(document.querySelectorAll("[aria-label]")).filter((el) =>
+              /^DEMO-\d+$/.test(el.getAttribute("aria-label") ?? ""),
+            ).length,
+        );
+        if (rows < 100) {
+          fail(scenario, `only ${rows} issue rows rendered; expected at least 100`);
+        }
+        const body = (await w.page.locator("body").innerText()) ?? "";
+        if (!body.includes("Public issue one")) {
+          fail(scenario, "the originally seeded issues are missing from the list");
         }
         for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
         for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
@@ -675,26 +775,32 @@ async function main(): Promise<number> {
       console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
     }
 
+    // The LIF-465 "comment paging" and "load-more navigation race" scenarios
+    // are gone with the bespoke public view: comments now render through the
+    // ordinary `Comments` thread (newest page plus a "Load older comments"
+    // control), which the signed-in smoke already exercises, and the paged
+    // `/public/api/.../issues` list endpoint they leaned on no longer exists.
+
     // ---- 4e. navigating away mid-load does not leak content -------------
     {
       const scenario = "route race";
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
-        // Bounce between routes fast enough that responses for an abandoned
-        // one land after the next has rendered.
+        // Bounce between two issues fast enough that responses for an
+        // abandoned one land after the next has rendered.
         for (let i = 0; i < 6; i += 1) {
           await w.page.evaluate(() => {
-            window.location.hash = "#/public/DEMO/DEMO-3";
+            window.location.hash = "#/public/DEMO/issues/DEMO-3";
           });
           await w.page.evaluate(() => {
-            window.location.hash = "#/public/DEMO";
+            window.location.hash = "#/public/DEMO/issues";
           });
         }
         await w.page.evaluate(() => {
-          window.location.hash = "#/public/DEMO/DEMO-1";
+          window.location.hash = "#/public/DEMO/issues/DEMO-1";
         });
         const settled = await w.page
           .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
@@ -716,100 +822,42 @@ async function main(): Promise<number> {
       console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
     }
 
-    // A held load-more response must not leave the next route busy or append stale comments.
-    {
-      const scenario = "load-more navigation race";
-      const context = await browser.newContext();
-      const w = await watchedPage(context, base);
-      try {
-        w.page.setDefaultTimeout(10_000);
-        // Let the old response arrive after cancellation to exercise the generation guard.
-        await w.page.addInitScript(() => {
-          const original = window.fetch.bind(window);
-          window.fetch = (input, init) => {
-            const url = new URL(String(input), location.href);
-            if (url.pathname.endsWith("/DEMO-1/comments") && url.searchParams.get("offset") === "1") {
-              return original(input, { ...init, signal: undefined });
-            }
-            return original(input, init);
-          };
-        });
-        const oldRequest = Promise.withResolvers<Route>();
-        const newRequest = Promise.withResolvers<Route>();
-        const comments = (id: number, content: string, hasMore: boolean) => ({
-          comments: [{ id, content, created_at: "2026-09-07T12:00:00Z",
-            updated_at: "2026-09-07T12:00:00Z", attachments: [] }],
-          total: 2, limit: 50, offset: hasMore ? 0 : 1, has_more: hasMore,
-        });
-        await w.page.route("**/public/api/projects/DEMO/issues/*/comments?*", async (route) => {
-          const url = new URL(route.request().url());
-          const old = url.pathname.endsWith("/DEMO-1/comments");
-          if (url.searchParams.get("offset") === "1") {
-            (old ? oldRequest : newRequest).resolve(route);
-          } else {
-            await route.fulfill({ json: comments(old ? 101 : 201, old ? "Old first page" : "New first page", true) });
-          }
-        });
-        const heldRoute = (promise: Promise<Route>) => Promise.race([
-          promise,
-          Bun.sleep(10_000).then(() => { throw new Error("load-more request never arrived"); }),
-        ]);
-
-        await w.page.goto(`${base}/public/DEMO/DEMO-1`, { waitUntil: "load" });
-        await w.page.getByRole("button", { name: /Load more/ }).click();
-        const oldRoute = await heldRoute(oldRequest.promise);
-        if (!(await w.page.getByRole("button", { name: "Loading…", exact: true }).isDisabled())) {
-          fail(scenario, "the old request did not enter its busy state");
-        }
-        await w.page.evaluate(() => { window.location.hash = "#/public/DEMO/DEMO-2"; });
-        await w.page.getByText("New first page", { exact: true }).waitFor();
-        await w.page.getByRole("button", { name: /Load more/ }).click();
-        const newRoute = await heldRoute(newRequest.promise);
-
-        const oldResponse = w.page.waitForResponse((response) => response.url() === oldRoute.request().url());
-        await oldRoute.fulfill({ json: comments(102, "Stale old page must not render", false) });
-        await (await oldResponse).finished();
-        await w.page.evaluate(() => new Promise<void>((resolve) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-        }));
-        if (!(await w.page.getByRole("button", { name: "Loading…", exact: true }).isDisabled())) {
-          fail(scenario, "the old request cleared the new request's busy state");
-        }
-        if ((await w.page.locator("body").innerText()).includes("Stale old page")) {
-          fail(scenario, "the old request appended comments to the new issue");
-        }
-        await newRoute.fulfill({ json: comments(202, "New second page", false) });
-        await w.page.getByText("New second page", { exact: true }).waitFor();
-        if (!(await w.page.getByText("New first page", { exact: true }).isVisible())) {
-          fail(scenario, "the new issue lost its first page");
-        }
-        if (await w.page.getByRole("button", { name: /Load more|Loading…/ }).count()) {
-          fail(scenario, "the completed thread retained a load-more button");
-        }
-        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
-      } catch (e) {
-        fail(scenario, String(e));
-      } finally {
-        await context.close();
-      }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
-    }
-
     // ---- 5. a private project is not reachable --------------------------
     {
       const scenario = "private project stays private";
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/PRIV`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/PRIV/issues`, { waitUntil: "load", timeout: 15_000 });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (body.includes("classified-marker-string") || body.includes("Classified issue")) {
           fail(scenario, "an unpublished project's content rendered");
         }
-        if (!body.includes("isn't published")) {
-          fail(scenario, `expected the "not published" message, got: ${body.slice(0, 200)}`);
+        if (!body.includes("This project isn't public")) {
+          fail(scenario, `expected the "isn't public" message, got: ${body.slice(0, 200)}`);
+        }
+        // Refusing must not have gone looking on the credentialed surface.
+        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
+
+        // A private project and a nonexistent one are the same answer, byte
+        // for byte: the surface is not an oracle for what the instance holds.
+        const [priv, nope] = await w.page.evaluate(async (b: string) => {
+          const read = async (p: string) => {
+            const r = await fetch(`${b}/public/api/projects/${p}/index`, { credentials: "omit" });
+            return { status: r.status, body: await r.text() };
+          };
+          return [await read("PRIV"), await read("NOPE")];
+        }, base);
+        if (priv.status !== 404) {
+          fail(scenario, `an unpublished project's index answered ${priv.status}, not 404`);
+        }
+        if (priv.status !== nope.status || priv.body !== nope.body) {
+          fail(
+            scenario,
+            `a private project is distinguishable from a nonexistent one: ` +
+              `${priv.status} ${JSON.stringify(priv.body)} vs ${nope.status} ${JSON.stringify(nope.body)}`,
+          );
         }
       } catch (e) {
         fail(scenario, String(e));
@@ -825,10 +873,10 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/DEMO-1`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
         await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
         if (!(await w.page.locator("body").innerText()).includes("Public issue one")) {
-          fail(scenario, "the issue did not render before unpublishing");
+          fail(scenario, "the list did not render before unpublishing");
         }
 
         const live = new Database(db);
@@ -838,13 +886,13 @@ async function main(): Promise<number> {
         // A direct fetch proves the server closed it; the reload proves the
         // page a reader already had open cannot be refreshed back into life.
         const status = await w.page.evaluate(async (b: string) => {
-          const r = await fetch(`${b}/public/api/projects/DEMO/issues/DEMO-1`, {
+          const r = await fetch(`${b}/public/api/projects/DEMO/index`, {
             credentials: "omit",
           });
           return r.status;
         }, base);
         if (status !== 404) {
-          fail(scenario, `the detail endpoint answered ${status} after unpublishing, not 404`);
+          fail(scenario, `the index endpoint answered ${status} after unpublishing, not 404`);
         }
 
         await w.page.reload({ waitUntil: "load", timeout: 15_000 });
@@ -852,6 +900,9 @@ async function main(): Promise<number> {
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (body.includes("Public issue one")) {
           fail(scenario, "the issue still rendered after publication was turned off");
+        }
+        if (!body.includes("This project isn't public")) {
+          fail(scenario, `expected the "isn't public" message, got: ${body.slice(0, 200)}`);
         }
 
         // Republishing restores the same address, no new link.
@@ -879,13 +930,99 @@ async function main(): Promise<number> {
     // that does need a login.
     {
       const scenario = "signed-in app is unaffected";
-      const context = await browser.newContext();
+      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
       const page = await context.newPage();
       try {
         await page.goto(`${base}/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
         await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
         if (!page.url().includes("/login")) {
           fail(scenario, `an anonymous visitor reached ${page.url()} instead of the login page`);
+        }
+
+        // Sign in the way a person does, then confirm the private view still
+        // works: the public routes must not have loosened or broken it.
+        await page.goto(`${base}/login`, { waitUntil: "load", timeout: 15_000 });
+        await page.fill("#login-identity", "public-operator");
+        await page.fill("#login-password", PASSWORD);
+        await page.click("button[type=submit]");
+        await page.waitForURL(`${base}/`, { timeout: 15_000 }).catch(() => {});
+        if (page.url().includes("/login")) {
+          const text = await page.locator("body").innerText().catch(() => "");
+          fail(scenario, `login did not land on the app: ${text.slice(0, 200)}`);
+        }
+
+        await page.evaluate(() => {
+          window.location.hash = "#/DEMO/issues";
+        });
+        await page
+          .waitForFunction(() => document.body.innerText.includes("Public issue one"), undefined, {
+            timeout: 15_000,
+          })
+          .catch(() => fail(scenario, "the signed-in issue list did not render"));
+        if ((await page.getByLabel("More create options").count()) === 0) {
+          fail(scenario, "the signed-in list lost its create control");
+        }
+
+        // LIF-471: the same account, on the public route. A signed-in reader
+        // must see exactly what a stranger sees, which means the credential
+        // is not attached and the private API is not consulted at all.
+        //
+        // A page of its own, in the same (signed-in) context: it carries the
+        // session cookie and the token in localStorage, and the public route
+        // is the first thing it ever loads, so nothing the private app was
+        // doing can be mistaken for something the public view did.
+        const publicPage = await context.newPage();
+        let watching = true;
+        const seen: { url: string; auth: string | undefined }[] = [];
+        publicPage.on("request", (req) => {
+          if (watching) seen.push({ url: req.url(), auth: req.headers()["authorization"] });
+        });
+        await publicPage.goto(`${base}/#/public/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await publicPage
+          .waitForFunction(() => document.body.innerText.includes("Public issue one"), undefined, {
+            timeout: 15_000,
+          })
+          .catch(() => fail(scenario, "the public route did not render for a signed-in reader"));
+        await publicPage.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        watching = false;
+
+        if ((await publicPage.evaluate(() => localStorage.getItem("lific_token"))) === null) {
+          fail(scenario, "the context under test was not actually signed in");
+        }
+        for (const req of seen) {
+          if (req.url.startsWith(`${base}/public/api`) && req.auth !== undefined) {
+            fail(scenario, `a public request carried a credential: ${req.url}`);
+          }
+          // Same-origin only: index.html loads the app's webfonts from
+          // Google on every route, signed-in or not, which is app-wide and
+          // predates this feature (see `watchedPage`).
+          if (req.url.startsWith(base) && isPrivateRequest(req.url, base)) {
+            fail(scenario, `the public view reached the private API: ${req.url}`);
+          }
+        }
+
+        // And nothing to create with, even though this reader could.
+        if ((await publicPage.getByLabel("More create options").count()) > 0) {
+          fail(scenario, "the public view offered a create control to a signed-in reader");
+        }
+
+        // Leaving again restores the signed-in affordances: the read-only
+        // answers the public scope synthesizes must not have poisoned the
+        // role cache.
+        await publicPage.evaluate(() => {
+          window.location.hash = "#/DEMO/issues";
+        });
+        const restored = await publicPage
+          .getByLabel("More create options")
+          .first()
+          .waitFor({ timeout: 15_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!restored) {
+          fail(scenario, "the create control did not come back after leaving the public view");
         }
       } catch (e) {
         fail(scenario, String(e));

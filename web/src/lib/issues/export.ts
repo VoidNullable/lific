@@ -1,5 +1,10 @@
+import { inPublicScope } from "../publicScope";
+
 /** Use canonical server exports so comments and metadata match single-issue export. */
 export async function selectedIssueExport(identifiers: string[]): Promise<Blob> {
+  // LIF-471: there is no public export route, and a signed-in reader's token
+  // must not leave the public view through this side door either.
+  if (inPublicScope()) throw new Error("Export isn't available in the public view.");
   const token = localStorage.getItem("lific_token");
   const parts: BlobPart[] = [];
   const separator = new TextEncoder().encode("\n\n---\n\n");

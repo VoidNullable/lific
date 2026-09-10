@@ -49,12 +49,12 @@
     <Globe size={15} class="mt-0.5 shrink-0 text-[var(--text-muted)]" />
     <div class="flex-1 min-w-0">
       <h2 class="text-body-sm font-semibold text-[var(--text)]">
-        Public issue view
+        Public view
       </h2>
       <p class="text-caption text-[var(--text-muted)] mt-0.5">
         {project.is_public
-          ? "This project's current issues are readable by anyone, with no account."
-          : "Off. Only people with access to this project can see its issues."}
+          ? "This project's current issues and pages are readable by anyone, with no account."
+          : "Off. Only people with access to this project can see its issues and pages."}
       </p>
     </div>
     <span
@@ -134,17 +134,20 @@
           </p>
           <ul class="list-disc pl-4 flex flex-col gap-1 text-[var(--text-muted)]">
             <li>
-              Every current issue in this project, including its full
-              description.
+              Every current issue and page in this project, including full
+              descriptions, labels, modules and folders.
             </li>
-            <li>Every comment on those issues.</li>
             <li>
-              Every file attached to those issues and comments, downloadable by
-              anyone.
+              Every comment on those issues and pages, shown with the
+              commenter's display name.
+            </li>
+            <li>
+              Every file attached to those issues, pages and comments,
+              downloadable by anyone.
             </li>
           </ul>
           <p class="text-[var(--text-muted)]">
-            Pages, plans, history, deleted items and your member list stay
+            Plans, history, deleted items, usernames and your member list stay
             private. Nobody needs an account or a password, and there is no
             secret in the link, so search engines can find it. Turning this
             back off closes the link but cannot recall anything already
@@ -160,8 +163,8 @@
           class="mt-0.5 accent-[var(--accent)]"
         />
         <span class="text-[var(--text-muted)]">
-          I've reviewed this project's issues, comments and attachments, and
-          they can be public.
+          I've reviewed this project's issues, pages, comments and
+          attachments, and they can be public.
         </span>
       </label>
 

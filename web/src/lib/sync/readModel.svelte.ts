@@ -23,6 +23,7 @@
 // gaps are impossible because the cursor only ever moves by applying rows.
 
 import { getProjectChanges, getProjectIndex, type Project } from "../api";
+import { getPublicProject } from "../publicScope";
 import type { ChangesPage, IssueRow, PageRow, SyncEvent } from "./types";
 
 /** Coalescing window for pulls. Long enough that a burst of websocket events
@@ -34,6 +35,11 @@ export type ReadModelStatus = "cold" | "loading" | "ready";
 
 export class ProjectReadModel {
   readonly projectId: number;
+  /** LIF-471: the registry key this model was created under. A pull only
+   *  runs while the client is still in that audience, so a public replica
+   *  is never filled from the authenticated API after a scope change (or the
+   *  reverse), however late the pull was scheduled. */
+  readonly key: string;
 
   /** Live issues by id. Reassigned (never mutated in place) on every apply
    *  so `$state` sees the change — a plain Map is not deeply reactive. */
@@ -68,14 +74,22 @@ export class ProjectReadModel {
    *  write; pull once the bootstrap settles rather than dropping it. */
   private pullAfterBootstrap = false;
 
-  constructor(projectId: number) {
+  constructor(projectId: number, key: string = `private:${projectId}`) {
     this.projectId = projectId;
+    this.key = key;
+  }
+
+  /** False once the client has crossed the public/private boundary since
+   *  this model was created; see `key`. */
+  private inScope(): boolean {
+    return modelKey(this.projectId) === this.key;
   }
 
   /** Cold start. Idempotent: concurrent callers share one request, and a
    *  model that is already `ready` just catches up instead. */
   bootstrap(): Promise<void> {
     if (this.bootstrapping) return this.bootstrapping;
+    if (!this.inScope()) return Promise.resolve();
     if (this.status === "ready") {
       this.schedulePull();
       return Promise.resolve();
@@ -147,11 +161,13 @@ export class ProjectReadModel {
       this.pullQueued = true;
       return;
     }
+    if (!this.inScope()) return;
     this.pulling = true;
     try {
       // Loop while the server says there is more above our (just advanced)
       // cursor, so one call drains a large backlog.
       for (;;) {
+        if (!this.inScope()) break;
         const res = await getProjectChanges(this.projectId, this.cursor);
         if (!res.ok) break;
         this.applyChanges(res.data);
@@ -233,17 +249,27 @@ export class ProjectReadModel {
 // single most common navigation in the app, so there is no eviction policy:
 // the whole point is that the second visit costs nothing.
 
-const models = new Map<number, ProjectReadModel>();
+// LIF-471: keyed by audience as well as project. The public view of a
+// project is fed by the anonymous surface and the private view by the
+// authenticated one; the rows happen to match today, but a replica must
+// never be filled from one and served through the other.
+const models = new Map<string, ProjectReadModel>();
+
+function modelKey(projectId: number): string {
+  const audience = getPublicProject();
+  return audience === null ? `private:${projectId}` : `public:${audience}:${projectId}`;
+}
 
 /** The project whose websocket resume frame we send on reconnect. Set by
  *  whichever list route resolved its project most recently. */
 let activeProjectId: number | null = null;
 
 export function getProjectModel(projectId: number): ProjectReadModel {
-  let model = models.get(projectId);
+  const key = modelKey(projectId);
+  let model = models.get(key);
   if (!model) {
-    model = new ProjectReadModel(projectId);
-    models.set(projectId, model);
+    model = new ProjectReadModel(projectId, key);
+    models.set(key, model);
   }
   return model;
 }
@@ -267,7 +293,7 @@ export function setActiveProject(projectId: number | null): void {
  *  after a local mutation that they could not apply optimistically. */
 export function refreshProjectModel(projectId: number | null | undefined): void {
   if (projectId == null) return;
-  const model = models.get(projectId);
+  const model = models.get(modelKey(projectId));
   if (model) void model.pull();
 }
 
@@ -284,7 +310,7 @@ let sendFrame: FrameSender | null = null;
 export function realtimeOpened(send: FrameSender): void {
   sendFrame = send;
   if (activeProjectId == null) return;
-  const model = models.get(activeProjectId);
+  const model = models.get(modelKey(activeProjectId));
   if (!model) return;
   if (model.status === "ready") {
     send({ type: "resume", project_id: model.projectId, cursor: model.cursor });
@@ -307,13 +333,16 @@ export function handleRealtimeEvent(event: SyncEvent): void {
   // A dropped-and-restored connection invalidates every replica's
   // assumption that it saw the intervening events.
   if (event.type === "resync.required") {
-    for (const model of models.values()) model.schedulePull();
+    for (const model of models.values()) {
+      if (model.key.startsWith("private:")) model.schedulePull();
+    }
     return;
   }
 
   const projectId = typeof event.project_id === "number" ? event.project_id : null;
   if (projectId == null) return;
-  const model = models.get(projectId);
+  // Realtime is a private channel; it only ever feeds private replicas.
+  const model = models.get(`private:${projectId}`);
   if (!model) return;
 
   // `sync_required` is the server saying "my replay ring no longer covers
@@ -338,7 +367,7 @@ let listenersInstalled = false;
 function pullActiveOnFocus(): void {
   if (typeof document !== "undefined" && document.hidden) return;
   if (activeProjectId == null) return;
-  models.get(activeProjectId)?.schedulePull();
+  models.get(modelKey(activeProjectId))?.schedulePull();
 }
 
 function installGlobalListeners(): void {
@@ -361,12 +390,17 @@ function installGlobalListeners(): void {
 
 const projectsByIdentifier = new Map<string, Project>();
 
+function projectKey(identifier: string): string {
+  const audience = getPublicProject() === null ? "private" : "public";
+  return `${audience}:${identifier.toLowerCase()}`;
+}
+
 export function cacheProjects(projects: Project[]): void {
   for (const project of projects) {
-    projectsByIdentifier.set(project.identifier.toLowerCase(), project);
+    projectsByIdentifier.set(projectKey(project.identifier), project);
   }
 }
 
 export function cachedProject(identifier: string): Project | null {
-  return projectsByIdentifier.get(identifier.toLowerCase()) ?? null;
+  return projectsByIdentifier.get(projectKey(identifier)) ?? null;
 }

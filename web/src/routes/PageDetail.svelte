@@ -27,6 +27,7 @@
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
   import { projectRole, loadProjectRole, ensureMeAdmin } from "../lib/projectRole.svelte"; // LIF-234
   import { toast } from "../lib/toast/toast.svelte"; // LIF-284
+  import { inPublicScope } from "../lib/publicScope"; // LIF-471
   import {
     COMMENT_WINDOW_RETRY_LIMIT,
     commentOpIsCurrent,
@@ -616,7 +617,7 @@
   onSaveBody={saveBody}
   {saving}
   {lastSaved}
-  onExport={exportMarkdown}
+  onExport={inPublicScope() ? undefined : exportMarkdown}
   {exporting}
   {exportError}
   deleteNoun="page"
@@ -642,9 +643,11 @@
       <!-- LIF-234: read-only cue for a viewer (project page) or non-admin
            (workspace page). Commenting stays available on project pages. -->
       <span class="text-micro font-medium px-1.5 py-0.5 rounded-full text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-            title={isWorkspacePage
-              ? "Read-only — workspace pages can only be edited by an admin."
-              : "Read-only — you're a viewer on this project. You can still comment."}>
+            title={inPublicScope()
+              ? "Read-only. This is the public view of the project; sign in to edit or comment."
+              : isWorkspacePage
+                ? "Read-only — workspace pages can only be edited by an admin."
+                : "Read-only — you're a viewer on this project. You can still comment."}>
         Read-only
       </span>
     {/if}

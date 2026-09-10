@@ -1,4 +1,4 @@
-//! LIF-465: the anonymous read surface for a published project.
+//! LIF-465 / LIF-471: the anonymous read surface for a published project.
 //!
 //! A router of its own rather than routes added to [`super::router`], because
 //! the separation is the boundary:
@@ -10,11 +10,37 @@
 //!   `authz.rs` even by accident. That rules out the two shortcuts the
 //!   contract forbids: turning auth off, and impersonating a Viewer;
 //! * it registers only `get`, so every other method is a 405 from axum's own
-//!   method router rather than from five handlers remembering to check.
+//!   method router rather than from a dozen handlers remembering to check.
 //!
-//! Authorization is the `is_public = 1` predicate inside every statement in
-//! [`crate::db::queries::public`]. Each read re-evaluates it, so unpublishing
-//! closes all of them on the next request.
+//! ## The mirror rule (LIF-471)
+//!
+//! Every route here is a private route with `/api` replaced by
+//! `/public/api/projects/{project}`, answering with the same JSON shape and
+//! the same paging headers, minus what [`crate::db::queries::public`] scrubs.
+//! That is what lets the web client run its ordinary components against this
+//! surface with one path rewrite and no bearer token:
+//!
+//! | private                          | public                                                  |
+//! |----------------------------------|---------------------------------------------------------|
+//! | `GET /api/projects/{id}`         | `GET /public/api/projects/{project}`                    |
+//! | `GET /api/projects/{id}/index`   | `GET /public/api/projects/{project}/index`              |
+//! | `GET /api/projects/{id}/changes` | `GET /public/api/projects/{project}/changes`            |
+//! | `GET /api/modules?project_id=`   | `GET /public/api/projects/{project}/modules`            |
+//! | `GET /api/labels?project_id=`    | `GET /public/api/projects/{project}/labels`             |
+//! | `GET /api/folders?project_id=`   | `GET /public/api/projects/{project}/folders`            |
+//! | `GET /api/issues/resolve/{ident}`| `GET /public/api/projects/{project}/issues/resolve/{ident}` |
+//! | `GET /api/issues/{id}`           | `GET /public/api/projects/{project}/issues/{id}`        |
+//! | `GET /api/issues/{id}/comments`  | `GET /public/api/projects/{project}/issues/{id}/comments` |
+//! | `GET /api/pages/{id}`            | `GET /public/api/projects/{project}/pages/{id}`         |
+//! | `GET /api/pages/{id}/comments`   | `GET /public/api/projects/{project}/pages/{id}/comments` |
+//! | `GET /api/attachments?...`       | `GET /public/api/projects/{project}/attachments?...`    |
+//! | `GET /api/attachments/{id}`      | `GET /public/api/projects/{project}/attachments/{id}`   |
+//! | `.../{id}/thumbnail`, `/preview` | same, under the project                                  |
+//!
+//! Authorization is the `is_public = 1` predicate plus project ownership
+//! inside every query in [`crate::db::queries::public`], evaluated in one read
+//! snapshot per request. Each read re-evaluates it, so unpublishing closes all
+//! of them on the next request.
 //!
 //! Caching is off everywhere: a published project can be unpublished, and a
 //! cached response would outlive that decision.
@@ -31,15 +57,21 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::db::{DbPool, queries::public as q};
+use crate::db::models::{
+    Attachment, AttachmentEntity, ChangesPage, Comment, Folder, IndexSnapshot, Issue, Label,
+    Module, Page, Project,
+};
+use crate::db::queries::comments::CommentParent;
+use crate::db::{DbPool, queries, queries::public as q};
 use crate::error::LificError;
 use crate::ratelimit::{self, IpNetwork, RateLimiter};
 use crate::storage::{self, AttachmentStore};
 
+use super::comments::{ListCommentsQuery, paging_headers};
 use super::with_read;
 
 /// The single answer for "no such published thing here".
@@ -51,52 +83,6 @@ const NOT_FOUND: &str = "not found";
 
 fn not_found() -> LificError {
     LificError::NotFound(NOT_FOUND.into())
-}
-
-// ── Response envelopes ───────────────────────────────────────
-//
-// The payload types are the allowlists in `db::queries::public`; these only
-// name the shape of each response.
-
-#[derive(Debug, Serialize)]
-struct ProjectResponse {
-    project: q::PublicProject,
-}
-
-#[derive(Debug, Serialize)]
-struct IssueListResponse {
-    project: q::PublicProject,
-    issues: Vec<q::PublicIssue>,
-    /// Echoed so a paging client can see that its `limit` was clamped.
-    limit: i64,
-    offset: i64,
-    has_more: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct CommentListResponse {
-    comments: Vec<q::PublicComment>,
-    /// Live comments on the issue, so a client knows what paging will reach.
-    total: i64,
-    limit: i64,
-    offset: i64,
-    has_more: bool,
-}
-
-/// `?limit=&offset=`. Both optional, both clamped rather than rejected: a 400
-/// on a hand-typed `?limit=99999` would teach a stranger where the ceiling is
-/// and gain nothing.
-#[derive(Debug, Default, Deserialize)]
-struct PageQuery {
-    limit: Option<i64>,
-    offset: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-struct IssueDetailResponse {
-    project: q::PublicProject,
-    #[serde(flatten)]
-    issue: q::PublicIssueDetail,
 }
 
 // ── Anonymous load bounds ────────────────────────────────────
@@ -116,6 +102,13 @@ const PUBLIC_READS_PER_MINUTE: usize = 240;
 /// authenticated instance out of the database. Exceeding it is a fast 503 with
 /// a `Retry-After`, not a queue.
 const PUBLIC_CONCURRENCY: usize = 4;
+
+/// Largest attachment a public thumbnail or preview will be *derived* from.
+/// The download streams, but a thumbnail decodes the whole image and a
+/// preview parses the whole archive in memory; four anonymous requests for a
+/// 500 MB import must not be able to do that at once. A thumbnail already on
+/// disk is served whatever the original's size.
+const PUBLIC_DERIVE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 
 /// Bytes read from disk per chunk when streaming an attachment. The download
 /// is streamed rather than buffered because an imported attachment can be
@@ -159,21 +152,42 @@ fn router_with_bounds(
     limiter: Arc<PublicReadLimiter>,
     concurrency: Arc<PublicConcurrency>,
 ) -> Router {
+    const P: &str = "/public/api/projects/{project}";
     Router::new()
-        .route("/public/api/projects/{project}", get(get_project))
-        .route("/public/api/projects/{project}/issues", get(list_issues))
+        .route(P, get(get_project))
+        .route(&format!("{P}/index"), get(get_index))
+        .route(&format!("{P}/changes"), get(get_changes))
+        .route(&format!("{P}/modules"), get(list_modules))
+        .route(&format!("{P}/labels"), get(list_labels))
+        .route(&format!("{P}/folders"), get(list_folders))
         .route(
-            "/public/api/projects/{project}/issues/{issue}",
-            get(get_issue),
+            &format!("{P}/issues/resolve/{{identifier}}"),
+            get(resolve_issue),
+        )
+        .route(&format!("{P}/issues/{{id}}"), get(get_issue))
+        .route(
+            &format!("{P}/issues/{{id}}/comments"),
+            get(list_issue_comments),
+        )
+        .route(&format!("{P}/pages/{{id}}"), get(get_page))
+        .route(
+            &format!("{P}/pages/{{id}}/comments"),
+            get(list_page_comments),
+        )
+        .route(&format!("{P}/attachments"), get(list_entity_attachments))
+        .route(&format!("{P}/attachments/{{id}}"), get(download_attachment))
+        .route(
+            &format!("{P}/attachments/{{id}}/thumbnail"),
+            get(attachment_thumbnail),
         )
         .route(
-            "/public/api/projects/{project}/issues/{issue}/comments",
-            get(list_comments),
+            &format!("{P}/attachments/{{id}}/preview"),
+            get(attachment_preview),
         )
-        .route(
-            "/public/api/projects/{project}/attachments/{id}",
-            get(download_attachment),
-        )
+        // Anything else under the prefix is the same JSON 404 as a private
+        // project, with the same headers. Without this the SPA fallback would
+        // answer an unknown public API path with 200 and a page of HTML.
+        .route("/public/api/{*rest}", axum::routing::any(unknown))
         // axum's layer order is the reverse of reading order: the last layer
         // added is outermost. Bounds are added first so they sit inside the
         // headers layer, and a 429 or 503 they short-circuit with still leaves
@@ -186,7 +200,6 @@ fn router_with_bounds(
         .layer(Extension(store))
         .with_state(db)
 }
-
 /// Stamp every public response, including 404s, 405s and errors, with the
 /// caching and browser-hardening headers.
 ///
@@ -312,119 +325,236 @@ fn public_client_ip(peer: Option<SocketAddr>, request: &Request<Body>) -> String
     ratelimit::client_ip(peer.ip(), headers, &trusted)
 }
 
-// ── Identifier handling ──────────────────────────────────────
+// ── Handlers ─────────────────────────────────────────────────
 
-/// Split `LIF-42` into its sequence, but only if it names `project`.
-///
-/// This is what makes a guessed cross-project identifier inert: the path
-/// already says which project is being read, so an identifier naming a
-/// different one is rejected here rather than resolved and then filtered.
-/// Page identifiers (`DEMO-DOC-3`) fail as a side effect, since the prefix
-/// works out to `DEMO-DOC`.
-fn split_issue_identifier(project: &str, identifier: &str) -> Option<i64> {
-    let (prefix, sequence) = identifier.rsplit_once('-')?;
-    if !prefix.eq_ignore_ascii_case(project) {
-        return None;
-    }
-    // `i64::from_str` alone accepts a leading sign, which is not an identifier.
-    if sequence.is_empty() || !sequence.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    sequence.parse::<i64>().ok()
+/// The catch-all for the prefix. A path that names no route here is a 404,
+/// never a 405 and never the SPA's `index.html`.
+async fn unknown() -> LificError {
+    not_found()
+}
+//
+// Every handler resolves the published project first, inside one read
+// snapshot, and does everything else against that `Project` in the same
+// snapshot. A private or missing project is `not_found()` before any other
+// table is touched.
+
+/// Run `f` against the published project named in the path, in one snapshot.
+fn with_public<T>(
+    db: &DbPool,
+    identifier: &str,
+    f: impl FnOnce(&rusqlite::Connection, &Project) -> Result<T, LificError>,
+) -> Result<T, LificError> {
+    with_read(db, |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let project = q::public_project(&tx, identifier)?.ok_or_else(not_found)?;
+        f(&tx, &project)
+    })
 }
 
-// ── Handlers ─────────────────────────────────────────────────
+type PathProject = Path<String>;
+
+/// A numeric row id from the path. Anything else is a 404 rather than axum's
+/// 400: the answer to "is there anything public at this address" is no.
+fn row_id(raw: &str) -> Result<i64, LificError> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_found());
+    }
+    raw.parse().map_err(|_| not_found())
+}
 
 /// `GET /public/api/projects/{project}`
 async fn get_project(
     State(db): State<DbPool>,
-    Path(project): Path<String>,
-) -> Result<axum::Json<ProjectResponse>, LificError> {
-    let project =
-        with_read(&db, |conn| q::get_public_project(conn, &project))?.ok_or_else(not_found)?;
-    Ok(axum::Json(ProjectResponse { project }))
+    Path(project): PathProject,
+) -> Result<axum::Json<Project>, LificError> {
+    let project = with_public(&db, &project, |_, project| Ok(project.clone()))?;
+    Ok(axum::Json(project))
 }
 
-/// `GET /public/api/projects/{project}/issues`
-async fn list_issues(
+/// `GET /public/api/projects/{project}/index`
+async fn get_index(
     State(db): State<DbPool>,
-    Path(project): Path<String>,
-    Query(page): Query<PageQuery>,
-) -> Result<axum::Json<IssueListResponse>, LificError> {
-    let limit = page
-        .limit
-        .unwrap_or(q::PUBLIC_ISSUE_PAGE)
-        .clamp(1, q::PUBLIC_ISSUE_PAGE);
-    let offset = page.offset.unwrap_or(0).max(0);
-    let (project, issues, has_more) = with_read(&db, |conn| {
-        let tx = conn.unchecked_transaction()?;
-        let Some(project) = q::get_public_project(&tx, &project)? else {
-            return Err(not_found());
-        };
-        let (issues, has_more) = q::list_public_issues(&tx, &project.identifier, limit, offset)?;
-        Ok((project, issues, has_more))
+    Path(project): PathProject,
+) -> Result<axum::Json<IndexSnapshot>, LificError> {
+    let snapshot = with_public(&db, &project, |conn, project| {
+        q::public_index(conn, project)
     })?;
-    Ok(axum::Json(IssueListResponse {
-        project,
-        issues,
-        limit,
-        offset,
-        has_more,
-    }))
+    Ok(axum::Json(snapshot))
 }
 
-/// `GET /public/api/projects/{project}/issues/{issue}`
+/// `?since=&limit=`, mirroring `api::sync::ChangesQuery`.
+#[derive(Debug, Default, Deserialize)]
+struct ChangesQuery {
+    since: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /public/api/projects/{project}/changes`
+async fn get_changes(
+    State(db): State<DbPool>,
+    Path(project): PathProject,
+    Query(query): Query<ChangesQuery>,
+) -> Result<axum::Json<ChangesPage>, LificError> {
+    let since = query.since.unwrap_or(0).max(0);
+    let limit = queries::changes::clamp_changes_limit(query.limit);
+    let page = with_public(&db, &project, |conn, project| {
+        q::public_changes(conn, project, since, limit)
+    })?;
+    Ok(axum::Json(page))
+}
+
+/// `GET /public/api/projects/{project}/modules`
+async fn list_modules(
+    State(db): State<DbPool>,
+    Path(project): PathProject,
+) -> Result<axum::Json<Vec<Module>>, LificError> {
+    Ok(axum::Json(with_public(&db, &project, |conn, project| {
+        q::public_modules(conn, project)
+    })?))
+}
+
+/// `GET /public/api/projects/{project}/labels`
+async fn list_labels(
+    State(db): State<DbPool>,
+    Path(project): PathProject,
+) -> Result<axum::Json<Vec<Label>>, LificError> {
+    Ok(axum::Json(with_public(&db, &project, |conn, project| {
+        q::public_labels(conn, project)
+    })?))
+}
+
+/// `GET /public/api/projects/{project}/folders`
+async fn list_folders(
+    State(db): State<DbPool>,
+    Path(project): PathProject,
+) -> Result<axum::Json<Vec<Folder>>, LificError> {
+    Ok(axum::Json(with_public(&db, &project, |conn, project| {
+        q::public_folders(conn, project)
+    })?))
+}
+
+/// `GET /public/api/projects/{project}/issues/resolve/{identifier}`
+async fn resolve_issue(
+    State(db): State<DbPool>,
+    Path((project, identifier)): Path<(String, String)>,
+) -> Result<axum::Json<Issue>, LificError> {
+    let issue = with_public(&db, &project, |conn, project| {
+        q::public_issue_by_identifier(conn, project, &identifier)?.ok_or_else(not_found)
+    })?;
+    Ok(axum::Json(issue))
+}
+
+/// `GET /public/api/projects/{project}/issues/{id}`
 async fn get_issue(
     State(db): State<DbPool>,
-    Path((project, issue)): Path<(String, String)>,
-) -> Result<axum::Json<IssueDetailResponse>, LificError> {
-    let sequence = split_issue_identifier(&project, &issue).ok_or_else(not_found)?;
-    let (project, issue) = with_read(&db, |conn| {
-        let tx = conn.unchecked_transaction()?;
-        let Some(project) = q::get_public_project(&tx, &project)? else {
-            return Err(not_found());
-        };
-        let Some(issue) = q::get_public_issue(&tx, &project.identifier, sequence)? else {
-            return Err(not_found());
-        };
-        Ok((project, issue))
+    Path((project, id)): Path<(String, String)>,
+) -> Result<axum::Json<Issue>, LificError> {
+    let id = row_id(&id)?;
+    let issue = with_public(&db, &project, |conn, project| {
+        q::public_issue(conn, project, id)?.ok_or_else(not_found)
     })?;
-    Ok(axum::Json(IssueDetailResponse { project, issue }))
+    Ok(axum::Json(issue))
 }
 
-/// `GET /public/api/projects/{project}/issues/{issue}/comments`
-async fn list_comments(
+/// `GET /public/api/projects/{project}/pages/{id}`
+async fn get_page(
     State(db): State<DbPool>,
-    Path((project, issue)): Path<(String, String)>,
-    Query(page): Query<PageQuery>,
-) -> Result<axum::Json<CommentListResponse>, LificError> {
-    let sequence = split_issue_identifier(&project, &issue).ok_or_else(not_found)?;
-    let limit = page
-        .limit
-        .unwrap_or(q::PUBLIC_COMMENT_PAGE)
-        .clamp(1, q::PUBLIC_COMMENT_PAGE);
-    let offset = page.offset.unwrap_or(0).max(0);
-    let page = with_read(&db, |conn| {
-        let tx = conn.unchecked_transaction()?;
-        if !q::public_issue_exists(&tx, &project, sequence)? {
+    Path((project, id)): Path<(String, String)>,
+) -> Result<axum::Json<Page>, LificError> {
+    let id = row_id(&id)?;
+    let page = with_public(&db, &project, |conn, project| {
+        q::public_page(conn, project, id)?.ok_or_else(not_found)
+    })?;
+    Ok(axum::Json(page))
+}
+
+/// Shared by the issue and page comment routes. Same query contract and the
+/// same paging headers as the private route, so the client's comment thread
+/// does not need to know which surface it is reading from.
+fn list_comments_for(
+    db: &DbPool,
+    project: &str,
+    parent: CommentParent,
+    query: &ListCommentsQuery,
+) -> Result<(HeaderMap, axum::Json<Vec<Comment>>), LificError> {
+    let cursor = query.cursor()?;
+    let (limit, offset) = queries::page(query.limit, query.offset);
+    let page = with_public(db, project, |conn, project| {
+        if !q::public_parent_exists(conn, project, parent)? {
             return Err(not_found());
         }
-        q::list_public_comments(&tx, &project, sequence, limit, offset)
+        // `author` is accepted and ignored: filtering by username would
+        // confirm which usernames exist.
+        q::public_comments(
+            conn,
+            parent,
+            query.order.as_deref(),
+            Some(limit),
+            Some(offset),
+            cursor.as_ref(),
+        )
     })?;
-    Ok(axum::Json(CommentListResponse {
-        comments: page.comments,
-        total: page.total,
-        limit,
-        offset,
-        has_more: page.has_more,
-    }))
+    let headers = paging_headers(
+        &page,
+        cursor.is_some(),
+        query.order.as_deref() == Some("desc"),
+    );
+    Ok((headers, axum::Json(page.items)))
+}
+
+/// `GET /public/api/projects/{project}/issues/{id}/comments`
+async fn list_issue_comments(
+    State(db): State<DbPool>,
+    Path((project, id)): Path<(String, String)>,
+    Query(query): Query<ListCommentsQuery>,
+) -> Result<(HeaderMap, axum::Json<Vec<Comment>>), LificError> {
+    list_comments_for(&db, &project, CommentParent::Issue(row_id(&id)?), &query)
+}
+
+/// `GET /public/api/projects/{project}/pages/{id}/comments`
+async fn list_page_comments(
+    State(db): State<DbPool>,
+    Path((project, id)): Path<(String, String)>,
+    Query(query): Query<ListCommentsQuery>,
+) -> Result<(HeaderMap, axum::Json<Vec<Comment>>), LificError> {
+    list_comments_for(&db, &project, CommentParent::Page(row_id(&id)?), &query)
+}
+
+/// `?entity_type=issue&entity_id=42`, mirroring the private route.
+#[derive(Debug, Deserialize)]
+struct ListForEntityQuery {
+    entity_type: String,
+    entity_id: i64,
+}
+
+/// `GET /public/api/projects/{project}/attachments`
+async fn list_entity_attachments(
+    State(db): State<DbPool>,
+    Path(project): PathProject,
+    Query(query): Query<ListForEntityQuery>,
+) -> Result<axum::Json<Vec<Attachment>>, LificError> {
+    // An unknown entity type is a 404 here, not a 400: the answer to "is there
+    // anything public at this address" is no, and nothing more.
+    let entity: AttachmentEntity = query.entity_type.parse().map_err(|_| not_found())?;
+    let items = with_public(&db, &project, |conn, project| {
+        q::public_entity_attachments(conn, project, entity, query.entity_id)?.ok_or_else(not_found)
+    })?;
+    Ok(axum::Json(items))
+}
+
+/// The attachment named in the path, if the project in the path publishes it.
+fn public_blob(db: &DbPool, project: &str, id: &str) -> Result<Attachment, LificError> {
+    let id = row_id(id)?;
+    with_public(db, project, |conn, project| {
+        q::public_attachment(conn, project, id)?.ok_or_else(not_found)
+    })
 }
 
 /// `GET /public/api/projects/{project}/attachments/{id}`
 ///
 /// Re-authorized from scratch against the project in the path: an id lifted
-/// from a private project, belonging to a page, orphaned, or whose issue was
-/// deleted a moment ago all answer with the same 404 as one that never existed.
+/// from a private project, orphaned, or whose parent was deleted a moment ago
+/// all answer with the same 404 as one that never existed.
 ///
 /// Headers follow the authenticated download's rules, which matter more here:
 /// `nosniff` so a browser cannot re-guess a hostile file into something
@@ -439,10 +569,9 @@ async fn download_attachment(
     State(db): State<DbPool>,
     Extension(store): Extension<AttachmentStore>,
     permit: Option<Extension<HeldPermit>>,
-    Path((project, id)): Path<(String, i64)>,
+    Path((project, id)): Path<(String, String)>,
 ) -> Result<Response<Body>, LificError> {
-    let blob = with_read(&db, |conn| q::get_public_attachment(conn, &project, id))?
-        .ok_or_else(not_found)?;
+    let blob = public_blob(&db, &project, &id)?;
 
     // The store lock is held only to open the handle. Streaming under it would
     // block a dump or restore for as long as a reader takes; the fd stays
@@ -485,6 +614,68 @@ async fn download_attachment(
         .body(body)
         .map_err(|e| LificError::Internal(format!("build response: {e}")))
         .map(IntoResponse::into_response)
+}
+
+/// `GET /public/api/projects/{project}/attachments/{id}/thumbnail`
+///
+/// Same lazy generation as the private route; same 404 for "not a raster" as
+/// for "not public", so the response never says which.
+async fn attachment_thumbnail(
+    State(db): State<DbPool>,
+    Extension(store): Extension<AttachmentStore>,
+    Path((project, id)): Path<(String, String)>,
+) -> Result<Response<Body>, LificError> {
+    let blob = public_blob(&db, &project, &id)?;
+    if !storage::is_raster_mime(&blob.mime) {
+        return Err(not_found());
+    }
+    let thumb = match store.read_thumb(&blob.sha256)? {
+        Some(bytes) => bytes,
+        None => {
+            if blob.size_bytes > PUBLIC_DERIVE_MAX_BYTES {
+                return Err(not_found());
+            }
+            let source = store.read(&blob.sha256)?;
+            match storage::generate_thumbnail(&source) {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = store.write_thumb(&blob.sha256, &bytes) {
+                        tracing::warn!(error = %e, "failed to cache public attachment thumbnail");
+                    }
+                    bytes
+                }
+                Ok(None) | Err(_) => return Err(not_found()),
+            }
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/webp")
+        .header(header::CONTENT_LENGTH, thumb.len())
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        )
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}.webp\"", header_safe(&blob.filename)),
+        )
+        .body(Body::from(thumb))
+        .map_err(|e| LificError::Internal(format!("build response: {e}")))
+}
+
+/// `GET /public/api/projects/{project}/attachments/{id}/preview`
+async fn attachment_preview(
+    State(db): State<DbPool>,
+    Extension(store): Extension<AttachmentStore>,
+    Path((project, id)): Path<(String, String)>,
+) -> Result<axum::Json<crate::preview::Preview>, LificError> {
+    let blob = public_blob(&db, &project, &id)?;
+    if blob.size_bytes > PUBLIC_DERIVE_MAX_BYTES {
+        return Err(not_found());
+    }
+    let bytes = store.read(&blob.sha256)?;
+    Ok(axum::Json(crate::preview::preview_bytes(&bytes)?))
 }
 
 fn download_body(
@@ -575,10 +766,6 @@ mod tests {
         )
     }
 
-    /// A published `PUB` project and a private `PRIV` project, each with one
-    /// live issue, one live comment, and one deleted issue carrying its own
-    /// comment. Attachments are added per test so each one names the linkage
-    /// it is actually about.
     fn fixture() -> Fixture {
         let db = crate::db::open_memory().expect("test db");
         let tmp = tempfile::tempdir().expect("attachment tempdir");
@@ -626,6 +813,7 @@ mod tests {
                 &CreateProject {
                     name: format!("{identifier} project"),
                     identifier: identifier.into(),
+                    lead_user_id: Some(1),
                     ..Default::default()
                 },
             )
@@ -648,6 +836,7 @@ mod tests {
                     project_id,
                     title: title.into(),
                     description: description.into(),
+                    source: Some(format!("github:acme/secret#{title}")),
                     ..Default::default()
                 },
             )
@@ -655,11 +844,11 @@ mod tests {
             .id
         }
 
-        fn seed_comment(&self, issue_id: i64, content: &str) -> i64 {
+        fn seed_comment(&self, parent: CommentParent, content: &str) -> i64 {
             let conn = self.db.write().unwrap();
             crate::db::queries::comments::create_comment_with_mentions(
                 &conn,
-                crate::db::queries::comments::CommentParent::Issue(issue_id),
+                parent,
                 None,
                 CommentActor {
                     user_id: 1,
@@ -678,14 +867,19 @@ mod tests {
             crate::db::queries::delete_issue(&conn, issue_id).unwrap();
         }
 
-        fn seed_page(&self, project_id: i64) -> i64 {
+        fn delete_page(&self, page_id: i64) {
+            let conn = self.db.write().unwrap();
+            crate::db::queries::delete_page(&conn, page_id).unwrap();
+        }
+
+        fn seed_page(&self, project_id: Option<i64>, title: &str, content: &str) -> i64 {
             let conn = self.db.write().unwrap();
             crate::db::queries::create_page(
                 &conn,
                 &CreatePage {
-                    project_id: Some(project_id),
-                    title: "Private page".into(),
-                    content: "secret".into(),
+                    project_id,
+                    title: title.into(),
+                    content: content.into(),
                     ..Default::default()
                 },
             )
@@ -704,7 +898,7 @@ mod tests {
                 name,
                 "application/pdf",
                 bytes.len() as i64,
-                None,
+                Some(1),
             )
             .unwrap();
             crate::db::queries::attachments::link_attachment(
@@ -741,55 +935,6 @@ mod tests {
                 [identifier],
             )
             .unwrap();
-        }
-
-        /// A comment written straight to the table, bypassing the authenticated
-        /// size validation, to stand in for legacy or imported data.
-        fn seed_oversized_comment(&self, issue_id: i64, bytes: usize) -> i64 {
-            let conn = self.db.write().unwrap();
-            conn.execute(
-                "INSERT INTO comments (issue_id, user_id, content) VALUES (?1, 1, ?2)",
-                params![issue_id, "z".repeat(bytes)],
-            )
-            .unwrap();
-            conn.last_insert_rowid()
-        }
-
-        fn set_description(&self, issue_id: i64, description: &str) {
-            let conn = self.db.write().unwrap();
-            conn.execute(
-                "UPDATE issues SET description = ?1 WHERE id = ?2",
-                params![description, issue_id],
-            )
-            .unwrap();
-        }
-
-        fn add_label(&self, project_id: i64, issue_id: i64, name: &str) {
-            let conn = self.db.write().unwrap();
-            conn.execute(
-                "INSERT OR IGNORE INTO labels (project_id, name) VALUES (?1, ?2)",
-                params![project_id, name],
-            )
-            .unwrap();
-            let label_id: i64 = conn
-                .query_row(
-                    "SELECT id FROM labels WHERE project_id = ?1 AND name = ?2",
-                    params![project_id, name],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            conn.execute(
-                "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
-                params![issue_id, label_id],
-            )
-            .unwrap();
-        }
-
-        /// SQL statements the public query module has issued on this thread.
-        /// See `db::queries::public::probe` for why the tally exists and why
-        /// it is thread-local.
-        fn statements_run(&self) -> usize {
-            crate::db::queries::public::probe::count()
         }
 
         async fn get(&self, uri: &str) -> axum::response::Response {
@@ -837,54 +982,24 @@ mod tests {
         serde_json::from_str(&body_string(response).await).unwrap()
     }
 
-    #[tokio::test]
-    async fn public_comments_remain_readable_when_parent_text_exceeds_its_budget() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Issue", "Body");
-        f.seed_comment(issue, "Readable comment");
-        let huge = "x".repeat(q::PUBLIC_PAGE_BYTES);
-        f.set_description(issue, &huge);
-        f.db.write()
-            .unwrap()
-            .execute(
-                "UPDATE projects SET description=?1 WHERE id=?2",
-                params![huge, project],
-            )
-            .unwrap();
-        let response = f
-            .get("/public/api/projects/PUB/issues/PUB-1/comments")
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            body_json(response).await["comments"][0]["content"],
-            "Readable comment"
-        );
-    }
-
-    #[tokio::test]
-    async fn public_download_headers_bound_and_sanitize_legacy_filenames() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Issue", "Body");
-        let id = f.seed_attachment(AttachmentEntity::Issue, issue, "file.txt");
-        f.db.write()
-            .unwrap()
-            .execute(
-                "UPDATE attachments SET filename=?1 WHERE id=?2",
-                params![format!("name\0{}\r\n", "z".repeat(200_000)), id],
-            )
-            .unwrap();
-        let response = f
-            .get(&format!("/public/api/projects/PUB/attachments/{id}"))
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let value = response.headers()[header::CONTENT_DISPOSITION]
-            .to_str()
-            .unwrap();
-        assert!(value.len() < 1024);
-        assert!(!value.chars().any(char::is_control));
-        assert!(!body_string(response).await.is_empty());
+    /// Every public route, for the tests that walk the whole surface.
+    fn all_routes(issue_id: i64, page_id: i64, attachment_id: i64) -> Vec<String> {
+        vec![
+            "/public/api/projects/PUB".into(),
+            "/public/api/projects/PUB/index".into(),
+            "/public/api/projects/PUB/changes".into(),
+            "/public/api/projects/PUB/modules".into(),
+            "/public/api/projects/PUB/labels".into(),
+            "/public/api/projects/PUB/folders".into(),
+            "/public/api/projects/PUB/issues/resolve/PUB-1".into(),
+            format!("/public/api/projects/PUB/issues/{issue_id}"),
+            format!("/public/api/projects/PUB/issues/{issue_id}/comments"),
+            format!("/public/api/projects/PUB/pages/{page_id}"),
+            format!("/public/api/projects/PUB/pages/{page_id}/comments"),
+            format!("/public/api/projects/PUB/attachments?entity_type=issue&entity_id={issue_id}"),
+            format!("/public/api/projects/PUB/attachments/{attachment_id}"),
+            format!("/public/api/projects/PUB/attachments/{attachment_id}/preview"),
+        ]
     }
 
     // ── The happy path ───────────────────────────────────────
@@ -894,32 +1009,54 @@ mod tests {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Public issue", "The body");
-        f.seed_comment(issue, "A public comment");
+        f.seed_comment(CommentParent::Issue(issue), "A public comment");
+        let page = f.seed_page(Some(project), "Public page", "Page body");
+        f.seed_comment(CommentParent::Page(page), "A page comment");
 
-        let response = f.get("/public/api/projects/PUB").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = body_json(response).await;
-        assert_eq!(json["project"]["identifier"], "PUB");
+        let json = body_json(f.get("/public/api/projects/PUB").await).await;
+        assert_eq!(json["identifier"], "PUB");
+        assert_eq!(json["id"], project);
+        assert_eq!(json["is_public"], true);
 
-        let response = f.get("/public/api/projects/PUB/issues").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = body_json(response).await;
+        let json = body_json(f.get("/public/api/projects/PUB/index").await).await;
         assert_eq!(json["issues"][0]["identifier"], "PUB-1");
-        assert_eq!(json["issues"][0]["title"], "Public issue");
-        assert_eq!(json["has_more"], false);
+        assert_eq!(json["pages"][0]["title"], "Public page");
 
-        let response = f.get("/public/api/projects/PUB/issues/PUB-1").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = body_json(response).await;
+        let json = body_json(f.get("/public/api/projects/PUB/issues/resolve/PUB-1").await).await;
         assert_eq!(json["description"], "The body");
+        assert_eq!(json["id"], issue);
+
+        let json = body_json(
+            f.get(&format!("/public/api/projects/PUB/issues/{issue}"))
+                .await,
+        )
+        .await;
+        assert_eq!(json["title"], "Public issue");
 
         let response = f
-            .get("/public/api/projects/PUB/issues/PUB-1/comments")
+            .get(&format!("/public/api/projects/PUB/issues/{issue}/comments"))
             .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[super::super::comments::HAS_MORE_HEADER],
+            "false"
+        );
         let json = body_json(response).await;
-        assert_eq!(json["comments"][0]["content"], "A public comment");
-        assert_eq!(json["has_more"], false);
+        assert_eq!(json[0]["content"], "A public comment");
+        assert_eq!(json[0]["author_display_name"], "Owner");
+
+        let json = body_json(
+            f.get(&format!("/public/api/projects/PUB/pages/{page}"))
+                .await,
+        )
+        .await;
+        assert_eq!(json["content"], "Page body");
+        let json = body_json(
+            f.get(&format!("/public/api/projects/PUB/pages/{page}/comments"))
+                .await,
+        )
+        .await;
+        assert_eq!(json[0]["content"], "A page comment");
     }
 
     /// The identifier column is NOCASE everywhere else in Lific; a shared
@@ -930,7 +1067,7 @@ mod tests {
         let project = f.seed_project("PUB", true);
         f.seed_issue(project, "Public issue", "");
         assert_eq!(
-            f.get("/public/api/projects/pub/issues/pub-1")
+            f.get("/public/api/projects/pub/issues/resolve/pub-1")
                 .await
                 .status(),
             StatusCode::OK
@@ -946,184 +1083,179 @@ mod tests {
     async fn a_private_project_is_indistinguishable_from_a_missing_one() {
         let f = fixture();
         let project = f.seed_project("PRIV", false);
-        f.seed_issue(project, "Private issue", "secret body");
+        let issue = f.seed_issue(project, "Private issue", "secret body");
+        let page = f.seed_page(Some(project), "Private page", "secret");
+        let attachment = f.seed_attachment(AttachmentEntity::Issue, issue, "secret.pdf");
 
-        for (hidden, missing) in [
-            ("/public/api/projects/PRIV", "/public/api/projects/NOPE"),
-            (
-                "/public/api/projects/PRIV/issues",
-                "/public/api/projects/NOPE/issues",
-            ),
-            (
-                "/public/api/projects/PRIV/issues/PRIV-1",
-                "/public/api/projects/NOPE/issues/NOPE-1",
-            ),
-            (
-                "/public/api/projects/PRIV/issues/PRIV-1/comments",
-                "/public/api/projects/NOPE/issues/NOPE-1/comments",
-            ),
-        ] {
-            let hidden_response = f.get(hidden).await;
-            let missing_response = f.get(missing).await;
-            assert_eq!(hidden_response.status(), StatusCode::NOT_FOUND, "{hidden}");
+        for hidden in all_routes(issue, page, attachment) {
+            let hidden = hidden.replace("/PUB", "/PRIV");
+            let missing = hidden.replace("/PRIV", "/NOPE");
+            let a = f.get(&hidden).await;
+            let b = f.get(&missing).await;
+            assert_eq!(a.status(), StatusCode::NOT_FOUND, "{hidden}");
+            assert_eq!(b.status(), StatusCode::NOT_FOUND, "{missing}");
             assert_eq!(
-                missing_response.status(),
-                StatusCode::NOT_FOUND,
-                "{missing}"
-            );
-            assert_eq!(
-                body_string(hidden_response).await,
-                body_string(missing_response).await,
-                "{hidden} must answer identically to {missing}"
+                body_string(a).await,
+                body_string(b).await,
+                "{hidden} must not read differently from {missing}"
             );
         }
     }
 
-    /// A published project must not become a lens onto its neighbours. The
-    /// identifier in the path is matched against the identifier in the issue
-    /// reference before any row is read.
+    /// Only the project in the path publishes anything. An id or identifier
+    /// from another project, even a public one, is inert through this path.
     #[tokio::test]
-    async fn a_cross_project_issue_identifier_resolves_to_nothing() {
+    async fn another_projects_content_is_unreachable_through_this_path() {
         let f = fixture();
         let public = f.seed_project("PUB", true);
-        let private = f.seed_project("PRIV", false);
-        f.seed_issue(public, "Public issue", "");
-        let secret = f.seed_issue(private, "Private issue", "secret body");
-        f.seed_comment(secret, "secret comment");
+        let other = f.seed_project("OTHER", true);
+        f.seed_issue(public, "Mine", "");
+        let theirs = f.seed_issue(other, "Theirs", "");
+        let their_page = f.seed_page(Some(other), "Their page", "");
+        let their_comment = f.seed_comment(CommentParent::Issue(theirs), "theirs");
+        let their_file = f.seed_attachment(AttachmentEntity::Issue, theirs, "theirs.pdf");
+        let their_comment_file =
+            f.seed_attachment(AttachmentEntity::Comment, their_comment, "theirsc.pdf");
 
-        for uri in [
-            "/public/api/projects/PUB/issues/PRIV-1",
-            "/public/api/projects/PUB/issues/PRIV-1/comments",
-            // A page identifier, which splits to the prefix `PUB-DOC`.
-            "/public/api/projects/PUB/issues/PUB-DOC-1",
-            // Nonsense that must not reach SQLite as a sequence.
-            "/public/api/projects/PUB/issues/PUB-+1",
-            "/public/api/projects/PUB/issues/PUB-1x",
-            "/public/api/projects/PUB/issues/PUB-",
-            "/public/api/projects/PUB/issues/1",
+        for path in [
+            "/public/api/projects/PUB/issues/resolve/OTHER-1".to_string(),
+            format!("/public/api/projects/PUB/issues/{theirs}"),
+            format!("/public/api/projects/PUB/issues/{theirs}/comments"),
+            format!("/public/api/projects/PUB/pages/{their_page}"),
+            format!("/public/api/projects/PUB/pages/{their_page}/comments"),
+            format!("/public/api/projects/PUB/attachments?entity_type=issue&entity_id={theirs}"),
+            format!(
+                "/public/api/projects/PUB/attachments?entity_type=comment&entity_id={their_comment}"
+            ),
+            format!("/public/api/projects/PUB/attachments/{their_file}"),
+            format!("/public/api/projects/PUB/attachments/{their_comment_file}"),
         ] {
-            let response = f.get(uri).await;
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
-            assert!(
-                !body_string(response).await.contains("secret"),
-                "{uri} leaked private content"
-            );
+            assert_eq!(f.get(&path).await.status(), StatusCode::NOT_FOUND, "{path}");
         }
-
-        // And the second published project cannot be reached through the
-        // first even when both are public: the sequence is scoped by the
-        // identifier bound in the same statement.
-        let other = f.seed_project("PUB2", true);
-        f.seed_issue(other, "Other public issue", "");
-        let json = body_json(f.get("/public/api/projects/PUB/issues/PUB-1").await).await;
-        assert_eq!(json["title"], "Public issue");
+        // And the same rows are fine through their own project.
+        assert_eq!(
+            f.get(&format!("/public/api/projects/OTHER/issues/{theirs}"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
-    /// A tombstoned issue is gone from the public view immediately, and so is
-    /// its comment thread. The trash is not a public archive.
     #[tokio::test]
-    async fn deleted_issues_and_comments_are_not_public() {
+    async fn deleted_content_is_not_public() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
-        let live = f.seed_issue(project, "Live issue", "");
-        f.seed_comment(live, "live comment");
-        let doomed = f.seed_issue(project, "Doomed issue", "about to go");
-        f.seed_comment(doomed, "doomed comment");
-        f.delete_issue(doomed);
-
-        let json = body_json(f.get("/public/api/projects/PUB/issues").await).await;
-        let titles: Vec<&str> = json["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["title"].as_str().unwrap())
-            .collect();
-        assert_eq!(titles, vec!["Live issue"]);
-
-        assert_eq!(
-            f.get("/public/api/projects/PUB/issues/PUB-2")
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            f.get("/public/api/projects/PUB/issues/PUB-2/comments")
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-
-        // A comment deleted on its own drops out while its issue stays.
-        let stray = f.seed_comment(live, "retracted");
+        let live = f.seed_issue(project, "Live", "");
+        let doomed = f.seed_issue(project, "Doomed", "");
+        let doomed_comment = f.seed_comment(CommentParent::Issue(doomed), "going away");
+        let doomed_file = f.seed_attachment(AttachmentEntity::Issue, doomed, "doomed.pdf");
+        let doomed_comment_file =
+            f.seed_attachment(AttachmentEntity::Comment, doomed_comment, "doomedc.pdf");
+        let doomed_page = f.seed_page(Some(project), "Doomed page", "");
+        let doomed_page_file = f.seed_attachment(AttachmentEntity::Page, doomed_page, "dp.pdf");
+        // A deleted comment on a live issue.
+        let gone_comment = f.seed_comment(CommentParent::Issue(live), "deleted");
+        let gone_comment_file =
+            f.seed_attachment(AttachmentEntity::Comment, gone_comment, "gone.pdf");
         {
             let conn = f.db.write().unwrap();
-            crate::db::queries::comments::delete_comment(&conn, stray).unwrap();
+            crate::db::queries::comments::delete_comment(&conn, gone_comment).unwrap();
+        }
+        f.delete_issue(doomed);
+        f.delete_page(doomed_page);
+
+        let json = body_json(f.get("/public/api/projects/PUB/index").await).await;
+        assert_eq!(json["issues"].as_array().unwrap().len(), 1);
+        assert_eq!(json["pages"].as_array().unwrap().len(), 0);
+
+        for path in [
+            "/public/api/projects/PUB/issues/resolve/PUB-2".to_string(),
+            format!("/public/api/projects/PUB/issues/{doomed}"),
+            format!("/public/api/projects/PUB/issues/{doomed}/comments"),
+            format!("/public/api/projects/PUB/pages/{doomed_page}"),
+            format!("/public/api/projects/PUB/attachments/{doomed_file}"),
+            format!("/public/api/projects/PUB/attachments/{doomed_comment_file}"),
+            format!("/public/api/projects/PUB/attachments/{doomed_page_file}"),
+            format!("/public/api/projects/PUB/attachments/{gone_comment_file}"),
+            format!(
+                "/public/api/projects/PUB/attachments?entity_type=comment&entity_id={gone_comment}"
+            ),
+        ] {
+            assert_eq!(f.get(&path).await.status(), StatusCode::NOT_FOUND, "{path}");
         }
         let json = body_json(
-            f.get("/public/api/projects/PUB/issues/PUB-1/comments")
+            f.get(&format!("/public/api/projects/PUB/issues/{live}/comments"))
                 .await,
         )
         .await;
-        assert_eq!(json["comments"].as_array().unwrap().len(), 1);
-        assert_eq!(json["comments"][0]["content"], "live comment");
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            0,
+            "the deleted comment is gone"
+        );
     }
 
-    /// Unpublishing closes the detail and download paths that were open a
-    /// moment ago. The address itself survives, so republishing resumes it.
+    /// Publication is re-read on every request, including for URLs already in
+    /// somebody's hands.
     #[tokio::test]
     async fn unpublishing_closes_every_open_path() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Public issue", "");
-        f.seed_comment(issue, "hello");
+        f.seed_comment(CommentParent::Issue(issue), "hello");
+        let page = f.seed_page(Some(project), "Page", "");
         let attachment = f.seed_attachment(AttachmentEntity::Issue, issue, "spec.pdf");
-
-        let paths = [
-            "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/issues".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1/comments".to_string(),
-            format!("/public/api/projects/PUB/attachments/{attachment}"),
-        ];
-        for path in &paths {
+        let routes = all_routes(issue, page, attachment);
+        for path in &routes {
             assert_eq!(f.get(path).await.status(), StatusCode::OK, "{path}");
         }
-
         f.unpublish("PUB");
-        for path in &paths {
-            assert_eq!(
-                f.get(path).await.status(),
-                StatusCode::NOT_FOUND,
-                "{path} stayed open after unpublish"
-            );
+        for path in &routes {
+            assert_eq!(f.get(path).await.status(), StatusCode::NOT_FOUND, "{path}");
         }
+    }
 
-        // Republishing resumes the same stable address; no new URL is minted.
-        {
-            let conn = f.db.write().unwrap();
-            conn.execute(
-                "UPDATE projects SET is_public = 1 WHERE identifier = 'PUB'",
-                [],
-            )
-            .unwrap();
-        }
-        for path in &paths {
-            assert_eq!(f.get(path).await.status(), StatusCode::OK, "{path}");
+    #[tokio::test]
+    async fn workspace_pages_plans_and_history_are_not_on_this_surface() {
+        let f = fixture();
+        let project = f.seed_project("PUB", true);
+        let issue = f.seed_issue(project, "Public issue", "");
+        let workspace_page = f.seed_page(None, "Workspace page", "not project content");
+        for path in [
+            format!("/public/api/projects/PUB/pages/{workspace_page}"),
+            "/public/api/projects/PUB/plans".into(),
+            "/public/api/projects/PUB/activity".into(),
+            "/public/api/projects/PUB/members".into(),
+            "/public/api/projects/PUB/my-role".into(),
+            "/public/api/projects/PUB/views".into(),
+            "/public/api/projects/PUB/mention-candidates".into(),
+            format!("/public/api/projects/PUB/issues/{issue}/activity"),
+            "/public/api/projects/PUB/attachments/orphans".into(),
+            "/public/api/projects/PUB/issues/-1".into(),
+            "/public/api/search?query=x".into(),
+            "/public/api/projects".into(),
+        ] {
+            assert_eq!(f.get(&path).await.status(), StatusCode::NOT_FOUND, "{path}");
         }
     }
 
     // ── Attachments ──────────────────────────────────────────
 
     #[tokio::test]
-    async fn attachments_linked_to_public_issues_and_comments_download() {
+    async fn attachments_linked_to_public_issues_comments_and_pages_download() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Public issue", "");
-        let comment = f.seed_comment(issue, "see attached");
+        let comment = f.seed_comment(CommentParent::Issue(issue), "see attached");
+        let page = f.seed_page(Some(project), "Page", "");
+        let page_comment = f.seed_comment(CommentParent::Page(page), "see attached");
         let on_issue = f.seed_attachment(AttachmentEntity::Issue, issue, "issue.pdf");
         let on_comment = f.seed_attachment(AttachmentEntity::Comment, comment, "comment.pdf");
+        let on_page = f.seed_attachment(AttachmentEntity::Page, page, "page.pdf");
+        let on_page_comment =
+            f.seed_attachment(AttachmentEntity::Comment, page_comment, "pagecomment.pdf");
 
-        for id in [on_issue, on_comment] {
+        for id in [on_issue, on_comment, on_page, on_page_comment] {
             let response = f
                 .get(&format!("/public/api/projects/PUB/attachments/{id}"))
                 .await;
@@ -1149,35 +1281,74 @@ mod tests {
             assert!(body_string(response).await.starts_with("bytes for"));
         }
 
-        // The metadata rides along with the entities that carry them.
-        let json = body_json(f.get("/public/api/projects/PUB/issues/PUB-1").await).await;
-        assert_eq!(json["attachments"][0]["id"], on_issue);
-        assert!(
-            json["attachments"][0].get("sha256").is_none(),
-            "the content address is not public metadata"
-        );
+        // The listing route is scrubbed and re-checks the entity.
         let json = body_json(
-            f.get("/public/api/projects/PUB/issues/PUB-1/comments")
-                .await,
+            f.get(&format!(
+                "/public/api/projects/PUB/attachments?entity_type=page&entity_id={page}"
+            ))
+            .await,
         )
         .await;
-        assert_eq!(json["comments"][0]["attachments"][0]["id"], on_comment);
+        assert_eq!(json[0]["id"], on_page);
+        assert!(
+            json[0]["uploader_id"].is_null(),
+            "uploader is account metadata"
+        );
+        assert!(json[0].get("sha256").is_none());
+        assert_eq!(
+            f.get("/public/api/projects/PUB/attachments?entity_type=bogus&entity_id=1")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Deriving a thumbnail or a preview reads the whole file into memory,
+    /// which an anonymous caller must not be able to ask for at any size.
+    #[tokio::test]
+    async fn derived_views_are_refused_for_oversized_attachments() {
+        let f = fixture();
+        let project = f.seed_project("PUB", true);
+        let issue = f.seed_issue(project, "Public issue", "");
+        let id = f.seed_attachment(AttachmentEntity::Issue, issue, "huge.png");
+        f.db.write()
+            .unwrap()
+            .execute(
+                "UPDATE attachments SET mime = 'image/png', size_bytes = ?1 WHERE id = ?2",
+                params![PUBLIC_DERIVE_MAX_BYTES + 1, id],
+            )
+            .unwrap();
+        for suffix in ["/thumbnail", "/preview"] {
+            assert_eq!(
+                f.get(&format!(
+                    "/public/api/projects/PUB/attachments/{id}{suffix}"
+                ))
+                .await
+                .status(),
+                StatusCode::NOT_FOUND,
+                "{suffix}"
+            );
+        }
+        // The bytes themselves still stream.
+        assert_eq!(
+            f.get(&format!("/public/api/projects/PUB/attachments/{id}"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     /// The attachment id space is global and countable, so the download has
-    /// to re-derive publication from the link graph on every request. Each
-    /// case here is an id an anonymous visitor could reach by typing.
+    /// to re-derive publication from the link graph on every request.
     #[tokio::test]
-    async fn attachments_outside_the_published_issue_graph_are_refused() {
+    async fn attachments_outside_the_published_graph_are_refused() {
         let f = fixture();
-        let public = f.seed_project("PUB", true);
+        f.seed_project("PUB", true);
         let private = f.seed_project("PRIV", false);
-        let public_issue = f.seed_issue(public, "Public issue", "");
         let private_issue = f.seed_issue(private, "Private issue", "");
-        let private_comment = f.seed_comment(private_issue, "private");
-        let page = f.seed_page(public);
-        let doomed = f.seed_issue(public, "Doomed", "");
-        let doomed_comment = f.seed_comment(doomed, "going away");
+        let private_comment = f.seed_comment(CommentParent::Issue(private_issue), "private");
+        let private_page = f.seed_page(Some(private), "Private page", "");
+        let workspace_page = f.seed_page(None, "Workspace page", "");
 
         let cases = [
             (
@@ -1189,42 +1360,26 @@ mod tests {
                 f.seed_attachment(AttachmentEntity::Comment, private_comment, "privc.pdf"),
             ),
             (
-                "a page in the published project",
-                f.seed_attachment(AttachmentEntity::Page, page, "page.pdf"),
+                "another project's page",
+                f.seed_attachment(AttachmentEntity::Page, private_page, "privp.pdf"),
+            ),
+            (
+                "a workspace page",
+                f.seed_attachment(AttachmentEntity::Page, workspace_page, "ws.pdf"),
             ),
             ("an orphan with no links", f.seed_orphan_attachment()),
+            ("an id that does not exist", 99_999),
         ];
-
-        // Tombstoning the parent must close the download without anything
-        // unlinking the attachment first.
-        let on_doomed = f.seed_attachment(AttachmentEntity::Issue, doomed, "doomed.pdf");
-        let on_doomed_comment =
-            f.seed_attachment(AttachmentEntity::Comment, doomed_comment, "doomedc.pdf");
-        f.delete_issue(doomed);
-
-        for (what, id) in cases
-            .into_iter()
-            .chain([
-                ("a deleted parent issue", on_doomed),
-                ("a comment on a deleted issue", on_doomed_comment),
-            ])
-            .chain([("an id that does not exist", 99_999)])
-        {
-            let response = f
-                .get(&format!("/public/api/projects/PUB/attachments/{id}"))
-                .await;
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{what}");
+        for (what, id) in cases {
+            for suffix in ["", "/thumbnail", "/preview"] {
+                let response = f
+                    .get(&format!(
+                        "/public/api/projects/PUB/attachments/{id}{suffix}"
+                    ))
+                    .await;
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{what}{suffix}");
+            }
         }
-
-        // The one that must still work, so the test above is not passing by
-        // refusing everything.
-        let allowed = f.seed_attachment(AttachmentEntity::Issue, public_issue, "ok.pdf");
-        assert_eq!(
-            f.get(&format!("/public/api/projects/PUB/attachments/{allowed}"))
-                .await
-                .status(),
-            StatusCode::OK
-        );
     }
 
     /// One attachment, two links: the shared blob is reachable through the
@@ -1319,6 +1474,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn public_download_headers_bound_and_sanitize_legacy_filenames() {
+        let f = fixture();
+        let project = f.seed_project("PUB", true);
+        let issue = f.seed_issue(project, "Issue", "Body");
+        let id = f.seed_attachment(AttachmentEntity::Issue, issue, "file.txt");
+        f.db.write()
+            .unwrap()
+            .execute(
+                "UPDATE attachments SET filename=?1 WHERE id=?2",
+                params![format!("name\0{}\r\n", "z".repeat(200_000)), id],
+            )
+            .unwrap();
+        let response = f
+            .get(&format!("/public/api/projects/PUB/attachments/{id}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap();
+        assert!(value.len() < 1024);
+        assert!(!value.chars().any(char::is_control));
+        assert!(!body_string(response).await.is_empty());
+    }
+
     // ── Methods and headers ──────────────────────────────────
 
     /// Nothing on this surface writes. The routing table only knows `get`,
@@ -1328,19 +1508,13 @@ mod tests {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Public issue", "");
-        f.seed_comment(issue, "hello");
+        f.seed_comment(CommentParent::Issue(issue), "hello");
+        let page = f.seed_page(Some(project), "Page", "");
         let attachment = f.seed_attachment(AttachmentEntity::Issue, issue, "spec.pdf");
 
-        let paths = [
-            "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/issues".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1/comments".to_string(),
-            format!("/public/api/projects/PUB/attachments/{attachment}"),
-        ];
-        for path in &paths {
+        for path in all_routes(issue, page, attachment) {
             for method in ["POST", "PUT", "PATCH", "DELETE"] {
-                let response = f.request(method, path).await;
+                let response = f.request(method, &path).await;
                 assert_eq!(
                     response.status(),
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -1362,12 +1536,12 @@ mod tests {
 
         for (path, method) in [
             ("/public/api/projects/PUB", "GET"),
-            ("/public/api/projects/PUB/issues", "GET"),
-            ("/public/api/projects/PUB/issues/PUB-1", "GET"),
+            ("/public/api/projects/PUB/index", "GET"),
+            ("/public/api/projects/PUB/issues/resolve/PUB-1", "GET"),
             // a 404
             ("/public/api/projects/NOPE", "GET"),
             // a 405
-            ("/public/api/projects/PUB/issues", "POST"),
+            ("/public/api/projects/PUB/index", "POST"),
         ] {
             let response = f.request(method, path).await;
             let headers = response.headers();
@@ -1404,38 +1578,41 @@ mod tests {
 
     // ── What must never appear in a public body ──────────────
 
-    /// The contract excludes account metadata, rosters and history. This
-    /// walks every public response and fails on any of their field names or
-    /// values, which is cheaper to keep honest than a per-DTO review.
+    /// The shapes are the private ones, so the scrub is what stands between a
+    /// reader and the account data those shapes normally carry. This walks
+    /// every route and checks the values, not the field names.
     #[tokio::test]
-    async fn public_json_carries_no_identity_or_history() {
+    async fn public_json_carries_no_account_data_provenance_or_private_relations() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
+        let private = f.seed_project("PRIV", false);
         let issue = f.seed_issue(project, "Public issue", "body");
-        f.seed_comment(issue, "a comment");
-        f.seed_attachment(AttachmentEntity::Issue, issue, "spec.pdf");
+        let theirs = f.seed_issue(private, "Their issue", "");
+        {
+            let conn = f.db.write().unwrap();
+            crate::db::queries::link_issues(&conn, issue, theirs, "blocks").unwrap();
+        }
+        let comment = f.seed_comment(CommentParent::Issue(issue), "a comment");
+        let page = f.seed_page(Some(project), "Page", "");
+        let attachment = f.seed_attachment(AttachmentEntity::Issue, issue, "spec.pdf");
+        f.seed_attachment(AttachmentEntity::Comment, comment, "c.pdf");
 
         let forbidden = [
             "owner@test.local",
             "password_hash",
-            "user_id",
-            "uploader_id",
-            "author",
-            "username",
+            "\"owner\"",
+            "acme/secret",
+            "PRIV-1",
             "is_admin",
-            "email",
+            "\"user_id\":1",
+            "\"uploader_id\":1",
+            "\"lead_user_id\":1",
             "sha256",
-            "audit",
-            "lead_user_id",
-            "seq",
         ];
-        for path in [
-            "/public/api/projects/PUB",
-            "/public/api/projects/PUB/issues",
-            "/public/api/projects/PUB/issues/PUB-1",
-            "/public/api/projects/PUB/issues/PUB-1/comments",
-        ] {
-            let body = body_string(f.get(path).await).await;
+        for path in all_routes(issue, page, attachment) {
+            let response = f.get(&path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = body_string(response).await;
             for needle in forbidden {
                 assert!(
                     !body.contains(needle),
@@ -1443,316 +1620,131 @@ mod tests {
                 );
             }
         }
+
+        let json = body_json(f.get("/public/api/projects/PUB").await).await;
+        assert!(json["lead_user_id"].is_null());
+        let json = body_json(f.get("/public/api/projects/PUB/issues/resolve/PUB-1").await).await;
+        assert!(json.get("source").is_none());
+        assert!(
+            json.get("blocks").is_none(),
+            "the only relation was private"
+        );
+        let json = body_json(
+            f.get(&format!("/public/api/projects/PUB/issues/{issue}/comments"))
+                .await,
+        )
+        .await;
+        assert_eq!(json[0]["user_id"], 0);
+        assert_eq!(json[0]["author"], "");
+        assert_eq!(json[0]["author_display_name"], "Owner");
+    }
+
+    // ── Sync stream ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_change_stream_omits_comments_but_still_advances_past_them() {
+        let f = fixture();
+        let project = f.seed_project("PUB", true);
+        let issue = f.seed_issue(project, "Public issue", "");
+        let json = body_json(f.get("/public/api/projects/PUB/index").await).await;
+        let cursor = json["cursor"].as_i64().unwrap();
+        assert_eq!(cursor, json["issues"][0]["seq"].as_i64().unwrap());
+
+        f.seed_comment(CommentParent::Issue(issue), "one");
+        f.seed_comment(CommentParent::Issue(issue), "two");
+        let json = body_json(
+            f.get(&format!(
+                "/public/api/projects/PUB/changes?since={cursor}&limit=1"
+            ))
+            .await,
+        )
+        .await;
+        assert_eq!(json["changes"].as_array().unwrap().len(), 0);
+        assert!(json["cursor"].as_i64().unwrap() > cursor, "must not stall");
+        assert_eq!(json["has_more"], true);
+
+        // Tombstones for issues do ride the stream; comment tombstones do not.
+        f.delete_issue(issue);
+        let json = body_json(
+            f.get(&format!("/public/api/projects/PUB/changes?since={cursor}"))
+                .await,
+        )
+        .await;
+        let kinds: Vec<&str> = json["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["issue"]);
+        assert_eq!(json["changes"][0]["deleted"], true);
     }
 
     // ── Comment paging ──────────────────────────────────────
 
-    /// A thread longer than one page is fully readable by paging, not
-    /// truncated with an apology. `total` is what lets a client say so.
+    /// A long thread pages exactly as it does on the private route, headers
+    /// included, so the shared comment component needs no special case.
     #[tokio::test]
-    async fn a_long_comment_thread_is_paged_not_truncated() {
+    async fn comment_paging_mirrors_the_private_contract() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Chatty", "");
-        for n in 0..(q::PUBLIC_COMMENT_PAGE + 7) {
-            f.seed_comment(issue, &format!("comment {n}"));
+        for n in 0..7 {
+            f.seed_comment(CommentParent::Issue(issue), &format!("comment {n}"));
         }
-
-        let mut seen: Vec<String> = Vec::new();
-        let mut offset = 0;
-        loop {
-            let json = body_json(
-                f.get(&format!(
-                    "/public/api/projects/PUB/issues/PUB-1/comments?offset={offset}"
-                ))
-                .await,
-            )
+        let response = f
+            .get(&format!(
+                "/public/api/projects/PUB/issues/{issue}/comments?limit=5"
+            ))
             .await;
-            assert_eq!(json["total"], q::PUBLIC_COMMENT_PAGE + 7);
-            let page = json["comments"].as_array().unwrap().clone();
-            for comment in &page {
-                seen.push(comment["content"].as_str().unwrap().to_string());
-            }
-            if !json["has_more"].as_bool().unwrap() {
-                break;
-            }
-            offset += page.len() as i64;
-            assert!(offset < 1000, "comment paging did not terminate");
-        }
-
-        let expected: Vec<String> = (0..(q::PUBLIC_COMMENT_PAGE + 7))
-            .map(|n| format!("comment {n}"))
-            .collect();
-        assert_eq!(seen, expected);
-    }
-
-    #[tokio::test]
-    async fn comment_page_size_is_clamped() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Chatty", "");
-        for n in 0..3 {
-            f.seed_comment(issue, &format!("comment {n}"));
-        }
-        for (query, limit) in [
-            ("?limit=99999", q::PUBLIC_COMMENT_PAGE),
-            ("?limit=0", 1),
-            ("?offset=-4", q::PUBLIC_COMMENT_PAGE),
-        ] {
-            let json = body_json(
-                f.get(&format!(
-                    "/public/api/projects/PUB/issues/PUB-1/comments{query}"
-                ))
-                .await,
-            )
-            .await;
-            assert_eq!(json["limit"], limit, "{query}");
-            assert!(json["offset"].as_i64().unwrap() >= 0, "{query}");
-        }
-    }
-
-    // ── Byte budgets ────────────────────────────────────────
-
-    /// A page is bounded in bytes as well as rows, and the bound is applied
-    /// from a conservative JSON preflight, so oversized text is never read.
-    #[tokio::test]
-    async fn a_page_stops_at_the_byte_budget_and_says_so() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Chatty", "");
-        // Two rows exceed the conservative six-bytes-per-input-byte budget.
-        let big = q::PUBLIC_PAGE_BYTES / 12 + 1024;
-        f.seed_oversized_comment(issue, big);
-        f.seed_oversized_comment(issue, big);
-        f.seed_comment(issue, "small");
-
-        let json = body_json(
-            f.get("/public/api/projects/PUB/issues/PUB-1/comments")
-                .await,
-        )
-        .await;
-        assert_eq!(
-            json["comments"].as_array().unwrap().len(),
-            1,
-            "the page stops before the byte budget is exceeded"
-        );
-        assert_eq!(json["has_more"], true, "the rest must remain reachable");
-        assert_eq!(json["total"], 3);
-
-        // And the rest is genuinely reachable from the reported offset.
-        let json = body_json(
-            f.get("/public/api/projects/PUB/issues/PUB-1/comments?offset=1")
-                .await,
-        )
-        .await;
-        assert_eq!(json["comments"].as_array().unwrap().len(), 2);
-        assert_eq!(json["has_more"], false);
-    }
-
-    /// A single row past the whole budget (legacy or imported data) is a
-    /// visible error, never a silently empty page a client would ask for
-    /// forever.
-    #[tokio::test]
-    async fn one_oversized_row_is_refused_with_a_visible_error() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Chatty", "");
-        f.seed_oversized_comment(issue, q::PUBLIC_PAGE_BYTES + 1024);
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers().clone();
+        assert_eq!(headers[super::super::comments::HAS_MORE_HEADER], "true");
+        assert_eq!(headers[super::super::comments::RETURNED_HEADER], "5");
+        assert_eq!(headers[super::super::comments::NEXT_OFFSET_HEADER], "5");
+        let json = body_json(response).await;
+        assert_eq!(json.as_array().unwrap().len(), 5);
 
         let response = f
-            .get("/public/api/projects/PUB/issues/PUB-1/comments")
+            .get(&format!(
+                "/public/api/projects/PUB/issues/{issue}/comments?limit=5&offset=5"
+            ))
             .await;
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = body_string(response).await;
-        assert!(body.contains("public response"), "{body}");
-    }
-
-    /// The same rule on an issue body, which has no page to stop short of.
-    #[tokio::test]
-    async fn an_oversized_issue_description_is_refused() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Huge", "");
-        f.set_description(issue, &"y".repeat(q::PUBLIC_PAGE_BYTES + 1024));
-
-        let response = f.get("/public/api/projects/PUB/issues/PUB-1").await;
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        // The list still works: one unreadable body does not close the project.
         assert_eq!(
-            f.get("/public/api/projects/PUB/issues").await.status(),
-            StatusCode::OK
+            response.headers()[super::super::comments::HAS_MORE_HEADER],
+            "false"
         );
-    }
+        assert_eq!(body_json(response).await.as_array().unwrap().len(), 2);
 
-    // ── Pagination (Sol, low) ────────────────────────────────
-
-    /// The bug this replaced: `has_more` was `count >= limit`, so a project
-    /// holding exactly one page of issues advertised a next page that was
-    /// empty. The flag is now derived from a row fetched past the end, so the
-    /// boundary case is the interesting one and it is checked exactly.
-    #[tokio::test]
-    async fn a_project_holding_exactly_one_page_does_not_claim_a_next_page() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        for n in 0..5 {
-            f.seed_issue(project, &format!("Issue {n}"), "");
-        }
-
-        let json = body_json(f.get("/public/api/projects/PUB/issues?limit=5").await).await;
-        assert_eq!(json["issues"].as_array().unwrap().len(), 5);
-        assert_eq!(json["has_more"], false, "exactly a full page is not 'more'");
-
-        let json = body_json(f.get("/public/api/projects/PUB/issues?limit=4").await).await;
-        assert_eq!(json["issues"].as_array().unwrap().len(), 4);
-        assert_eq!(json["has_more"], true);
-    }
-
-    /// Walking the pages returns every issue exactly once, in sequence order,
-    /// and stops on its own.
-    #[tokio::test]
-    async fn paging_walks_the_whole_project_without_gaps_or_repeats() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        for n in 0..23 {
-            f.seed_issue(project, &format!("Issue {n}"), "");
-        }
-
-        let mut seen: Vec<String> = Vec::new();
-        let mut offset = 0;
-        loop {
-            let json = body_json(
-                f.get(&format!(
-                    "/public/api/projects/PUB/issues?limit=10&offset={offset}"
-                ))
-                .await,
-            )
-            .await;
-            for issue in json["issues"].as_array().unwrap() {
-                seen.push(issue["identifier"].as_str().unwrap().to_string());
-            }
-            assert_eq!(json["offset"], offset);
-            assert_eq!(json["limit"], 10);
-            if !json["has_more"].as_bool().unwrap() {
-                break;
-            }
-            offset += 10;
-            assert!(offset < 1000, "paging did not terminate");
-        }
-
-        let expected: Vec<String> = (1..=23).map(|n| format!("PUB-{n}")).collect();
-        assert_eq!(seen, expected);
-    }
-
-    /// A hand-typed page size is clamped, never rejected: a `400` on a public
-    /// endpoint would tell a stranger where the ceiling is and gain nothing.
-    /// The echoed `limit` is how a client sees that it was clamped.
-    #[tokio::test]
-    async fn page_size_is_clamped_rather_than_rejected() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        for n in 0..3 {
-            f.seed_issue(project, &format!("Issue {n}"), "");
-        }
-
-        for (query, expected_limit, expected_offset) in [
-            ("?limit=99999", q::PUBLIC_ISSUE_PAGE, 0),
-            ("?limit=0", 1, 0),
-            ("?limit=-5", 1, 0),
-            ("?offset=-5", q::PUBLIC_ISSUE_PAGE, 0),
-            ("", q::PUBLIC_ISSUE_PAGE, 0),
-        ] {
-            let response = f
-                .get(&format!("/public/api/projects/PUB/issues{query}"))
-                .await;
-            assert_eq!(response.status(), StatusCode::OK, "{query}");
-            let json = body_json(response).await;
-            assert_eq!(json["limit"], expected_limit, "{query}");
-            assert_eq!(json["offset"], expected_offset, "{query}");
-        }
-
-        // Past the end is an empty page, not an error.
-        let json = body_json(f.get("/public/api/projects/PUB/issues?offset=500").await).await;
-        assert_eq!(json["issues"].as_array().unwrap().len(), 0);
-        assert_eq!(json["has_more"], false);
-    }
-
-    // ── Query count (Sol, medium) ────────────────────────────
-
-    /// The list used to issue one label query per issue, so a page cost 101
-    /// statements. This counts what SQLite actually prepared and asserts the
-    /// cost is flat in the page size: a real regression guard, not a comment
-    /// claiming the batching exists.
-    #[tokio::test]
-    async fn a_list_read_costs_a_fixed_number_of_statements() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        for n in 0..40 {
-            let issue = f.seed_issue(project, &format!("Issue {n}"), "");
-            f.add_label(project, issue, &format!("label-{}", n % 4));
-        }
-
-        let before = f.statements_run();
-        let json = body_json(f.get("/public/api/projects/PUB/issues?limit=40").await).await;
-        let cost_40 = f.statements_run() - before;
-
-        // Labels genuinely came back, so the cheap version is not cheap by
-        // being wrong.
-        assert_eq!(json["issues"][0]["labels"][0], "label-0");
-        assert_eq!(json["issues"][5]["labels"][0], "label-1");
-
-        // The same read over a page of 4.
-        let before = f.statements_run();
-        let _ = f.get("/public/api/projects/PUB/issues?limit=4").await;
-        let cost_4 = f.statements_run() - before;
-
-        assert_eq!(
-            cost_40, cost_4,
-            "a 40-issue page cost {cost_40} statements and a 4-issue page {cost_4}; \
-             the label lookup is per-issue again"
-        );
-        assert!(
-            cost_40 <= 7,
-            "a list read should be a handful of statements, took {cost_40}"
-        );
-    }
-
-    /// Same guarantee for a comment thread, whose attachments were also a
-    /// query per row.
-    #[tokio::test]
-    async fn a_comment_read_costs_a_fixed_number_of_statements() {
-        let f = fixture();
-        let project = f.seed_project("PUB", true);
-        let issue = f.seed_issue(project, "Chatty", "");
-        for n in 0..30 {
-            let comment = f.seed_comment(issue, &format!("comment {n}"));
-            f.seed_attachment(AttachmentEntity::Comment, comment, &format!("f{n}.pdf"));
-        }
-
-        let before = f.statements_run();
+        // The author filter is ignored rather than honoured: honouring it
+        // would answer "does this username exist" one guess at a time.
         let json = body_json(
-            f.get("/public/api/projects/PUB/issues/PUB-1/comments?limit=30")
-                .await,
+            f.get(&format!(
+                "/public/api/projects/PUB/issues/{issue}/comments?author=owner&limit=100"
+            ))
+            .await,
         )
         .await;
-        let cost_30 = f.statements_run() - before;
-        assert_eq!(json["comments"].as_array().unwrap().len(), 30);
-        assert!(
-            json["comments"][0]["attachments"][0]["id"].is_i64(),
-            "attachments must still be attached to the right comment"
-        );
+        assert_eq!(json.as_array().unwrap().len(), 7);
+        let json = body_json(
+            f.get(&format!(
+                "/public/api/projects/PUB/issues/{issue}/comments?author=nobody&limit=100"
+            ))
+            .await,
+        )
+        .await;
+        assert_eq!(json.as_array().unwrap().len(), 7);
 
-        let before = f.statements_run();
-        let _ = f
-            .get("/public/api/projects/PUB/issues/PUB-1/comments?limit=3")
-            .await;
-        let cost_3 = f.statements_run() - before;
+        // A half-supplied cursor is refused, exactly as it is privately.
         assert_eq!(
-            cost_30, cost_3,
-            "a 30-comment page cost {cost_30} statements and a 3-comment page {cost_3}; \
-             the attachment lookup is per-comment again"
+            f.get(&format!(
+                "/public/api/projects/PUB/issues/{issue}/comments?before_id=1"
+            ))
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
         );
     }
-
     // ── Anonymous load bounds (Sol, medium) ──────────────────
 
     /// One host cannot walk the public API in an unbounded loop. The limiter
@@ -2019,19 +2011,6 @@ mod tests {
         assert!(body.frame().await.unwrap().unwrap().is_data());
         drop(body);
         wait_for_download_release(&semaphore).await;
-    }
-
-    #[test]
-    fn issue_identifiers_are_only_accepted_for_their_own_project() {
-        assert_eq!(split_issue_identifier("PUB", "PUB-1"), Some(1));
-        assert_eq!(split_issue_identifier("PUB", "pub-42"), Some(42));
-        assert_eq!(split_issue_identifier("PUB", "OTHER-1"), None);
-        assert_eq!(split_issue_identifier("PUB", "PUB-DOC-1"), None);
-        assert_eq!(split_issue_identifier("PUB", "PUB-0x1"), None);
-        assert_eq!(split_issue_identifier("PUB", "PUB--1"), None);
-        assert_eq!(split_issue_identifier("PUB", "PUB-"), None);
-        assert_eq!(split_issue_identifier("PUB", "1"), None);
-        assert_eq!(split_issue_identifier("PUB", ""), None);
     }
 }
 

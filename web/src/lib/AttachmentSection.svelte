@@ -17,11 +17,13 @@
     deleteAttachment,
     getAttachmentLinks,
     attachmentThumbnailUrl,
+    attachmentUrl,
     formatBytes,
     me,
     type Attachment,
     type AttachmentEntity,
   } from "./api";
+  import { inPublicScope } from "./publicScope"; // LIF-471
   import { canDeleteAttachment, deleteConfirmMessage } from "./files/files";
   import { projectRole } from "./projectRole.svelte";
   import { toast } from "./toast/toast.svelte";
@@ -77,7 +79,7 @@
   });
 
   function urlFor(id: number): string {
-    return `/api/attachments/${id}`;
+    return attachmentUrl(id);
   }
 
   function isImage(a: Attachment): boolean {
@@ -85,6 +87,10 @@
   }
 
   function mayDelete(a: Attachment): boolean {
+    // LIF-471: `canDeleteAttachment` fails open while the viewer is unknown,
+    // which is right for a signed-in page still loading `me()` and wrong for
+    // a public page, where the viewer is unknown by design.
+    if (inPublicScope()) return false;
     return canDeleteAttachment({
       uploaderId: a.uploader_id,
       viewerId,

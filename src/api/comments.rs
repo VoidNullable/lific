@@ -27,14 +27,14 @@ fn require_comment_viewer(
 #[derive(Default, serde::Deserialize)]
 pub(super) struct ListCommentsQuery {
     /// Exact author username (case-insensitive).
-    author: Option<String>,
+    pub(super) author: Option<String>,
     /// Creation-time sort direction: asc (default) or desc.
-    order: Option<String>,
+    pub(super) order: Option<String>,
     /// Maximum comments to return. Absent means the shared default of 50;
     /// any value is clamped to `1..=500` by `queries::page`.
-    limit: Option<i64>,
+    pub(super) limit: Option<i64>,
     /// Number of matching comments to skip. Floored at 0.
-    offset: Option<i64>,
+    pub(super) offset: Option<i64>,
     /// Keyset cursor, first half: the `created_at` of the oldest comment the
     /// caller has already seen. Optional, and only meaningful paired with
     /// `before_id`.
@@ -52,7 +52,7 @@ impl ListCommentsQuery {
     /// `created_at` alone would silently include a comment sharing that
     /// second, which is the exact case the id half exists to settle. Answering
     /// it with a plausible-looking page would hide the mistake.
-    fn cursor(&self) -> Result<Option<comments::CommentCursor>, LificError> {
+    pub(super) fn cursor(&self) -> Result<Option<comments::CommentCursor>, LificError> {
         match (self.before_created_at.as_deref(), self.before_id) {
             (None, None) => Ok(None),
             (Some(_), None) | (None, Some(_)) => Err(LificError::BadRequest(
@@ -115,7 +115,7 @@ pub const NEXT_CURSOR_ID_HEADER: &str = "x-comment-next-id";
 /// place in the thread. Those reads get the cursor headers instead, naming the
 /// last row actually returned — the same pair the client would derive from the
 /// rows, sent by the only party that knows whether the budget cut them short.
-fn paging_headers(
+pub(super) fn paging_headers(
     page: &comments::CommentPage,
     cursor_paged: bool,
     order_desc: bool,

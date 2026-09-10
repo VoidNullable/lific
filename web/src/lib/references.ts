@@ -7,6 +7,7 @@
 // touching api.ts / routes / lib/issues in parallel, so nothing here
 // reaches into those).
 
+import { getPublicProject, scopedRoute } from "./publicScope";
 import {
   resolveIssue,
   getModule,
@@ -64,9 +65,14 @@ export function projectCodeOf(identifier: string): string {
  *  pipeline is synchronous, so those link to the project's list view
  *  instead (same tradeoff the pre-LIF-239 code already made for DOC-n). */
 export function routeFor(project: string, kind: RefKind, identifier: string): string {
-  if (kind === "page") return `#/${project}/pages`;
-  if (kind === "plan") return `#/${project}/plans`;
-  return `#/${project}/issues/${identifier}`;
+  // LIF-471: inside the public view every generated link stays inside it.
+  const route =
+    kind === "page"
+      ? `/${project}/pages`
+      : kind === "plan"
+        ? `/${project}/plans`
+        : `/${project}/issues/${identifier}`;
+  return `#${scopedRoute(route)}`;
 }
 
 // ── Issue + module cache (session-scoped, module scope) ───────
@@ -130,9 +136,13 @@ function refreshSubscribedIssueStatuses() {
 }
 
 function ensureCacheSession(): boolean {
-  const session = typeof localStorage === "undefined"
+  const token = typeof localStorage === "undefined"
     ? null
     : localStorage.getItem("lific_token");
+  // LIF-471: the public view is a different audience with a different data
+  // source, so a scope change invalidates exactly like a token change would.
+  const audience = getPublicProject();
+  const session = audience === null ? token : `public:${audience}`;
   if (cacheSession === session) return false;
   cacheSession = session;
   clearReferenceCaches(true);

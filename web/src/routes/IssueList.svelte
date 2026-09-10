@@ -1223,7 +1223,9 @@
         const prevDown = view.focusedIndex;
         view.focusedIndex = Math.min(view.focusedIndex + 1, flatIssues.length - 1);
         // Shift extends the selection across the rows the cursor sweeps.
-        if (e.shiftKey && view.focusedIndex >= 0) {
+        // Gated like the row checkboxes: selection exists for the bulk
+        // actions, and a reader who has none must not reach the bar.
+        if (e.shiftKey && canEdit && view.focusedIndex >= 0) {
           const next = new Set(view.selectedIds);
           if (prevDown >= 0 && flatIssues[prevDown]) next.add(flatIssues[prevDown].id);
           if (flatIssues[view.focusedIndex]) next.add(flatIssues[view.focusedIndex].id);
@@ -1242,7 +1244,7 @@
         scrollOnFocus = true;
         const prevUp = view.focusedIndex;
         view.focusedIndex = Math.max(view.focusedIndex - 1, 0);
-        if (e.shiftKey && view.focusedIndex >= 0) {
+        if (e.shiftKey && canEdit && view.focusedIndex >= 0) {
           const next = new Set(view.selectedIds);
           if (prevUp >= 0 && flatIssues[prevUp]) next.add(flatIssues[prevUp].id);
           if (flatIssues[view.focusedIndex]) next.add(flatIssues[view.focusedIndex].id);
@@ -2275,7 +2277,7 @@
   <!-- LIF-149: floating bulk-action bar (component in lib/issues). Appears
        while anything is selected. bulkMenu is bound so the parent's Escape
        handler and outside-click can close the open menu. -->
-  {#if view.selectedIds.size > 0}
+  {#if view.selectedIds.size > 0 && canEdit}
     <BulkActionBar
       selectedCount={view.selectedIds.size}
       {bulkBusy}

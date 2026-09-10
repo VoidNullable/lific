@@ -1,6 +1,48 @@
 import type { ChangesPage, IndexSnapshot } from "./sync/types";
+import { inPublicScope, publicMirror, publicSynthetic } from "./publicScope";
 
 const BASE = "/api";
+
+// ── LIF-471: the public-scope chokepoint ─────────────────────
+//
+// Every request in this file resolves its URL through `resolveRequest` (or
+// `resolveUrl` for the `src=`/`href=` builders). In public scope that means
+// one of three things: the path is answered synthetically (no account, no
+// role, no history), it is rewritten onto `/public/api/projects/{P}/...` and
+// sent with NO credential, or it is refused outright. A path with no public
+// mirror never reaches `/api` from a public page, so a component that grows
+// a new fetch fails visibly in the public view instead of quietly sending a
+// signed-in reader's token somewhere a stranger could not follow.
+
+type Resolved =
+  | { kind: "private"; url: string }
+  | { kind: "public"; url: string }
+  | { kind: "synthetic"; status: number; body: unknown }
+  | { kind: "refused" };
+
+function resolveRequest(path: string): Resolved {
+  if (!inPublicScope()) return { kind: "private", url: `${BASE}${path}` };
+  const synthetic = publicSynthetic(path);
+  if (synthetic) return { kind: "synthetic", ...synthetic };
+  const mirrored = publicMirror(path);
+  if (mirrored) return { kind: "public", url: mirrored };
+  return { kind: "refused" };
+}
+
+/** The URL a browser subresource (`<img src>`, `<a href>`) should load for a
+ *  private `/api` path. In public scope an unmirrored path resolves to a URL
+ *  that cannot succeed, rather than to the private one. */
+function resolveUrl(path: string): string {
+  const r = resolveRequest(path);
+  if (r.kind === "private" || r.kind === "public") return r.url;
+  return "/public/api/refused";
+}
+
+const REFUSED: { ok: false; error: string; status: number } = {
+  ok: false,
+  error: "This isn't available in the public view.",
+  status: 403,
+};
 
 export interface AuthUser {
   id: number;
@@ -34,19 +76,36 @@ async function requestWithHeaders<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<HeadedResult<T>> {
-  const token = localStorage.getItem("lific_token");
+  const resolved = resolveRequest(path);
+  if (resolved.kind === "refused") return REFUSED;
+  if (resolved.kind === "synthetic") {
+    if (resolved.status >= 400) {
+      const body = resolved.body as { error?: string };
+      return { ok: false, error: body?.error ?? `HTTP ${resolved.status}`, status: resolved.status };
+    }
+    return { ok: true, data: resolved.body as T, headers: new Headers() };
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
-
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  // The public surface never sees a credential: not the bearer token, and
+  // (via `credentials: "omit"`) not the session cookie either. A signed-in
+  // reader and a stranger must get byte-identical answers.
+  const credentials: RequestCredentials | undefined =
+    resolved.kind === "public" ? "omit" : undefined;
+  if (resolved.kind === "private") {
+    const token = localStorage.getItem("lific_token");
+    if (token) headers["Authorization"] = `Bearer ${token}`;
   }
 
   try {
-    const res = await fetch(`${BASE}${path}`, { ...options, headers });
-    const body = await res.json();
+    const res = await fetch(resolved.url, { ...options, headers, credentials });
+    let body = await res.json();
+    // `/projects` mirrors onto the one published project; the callers expect
+    // the list shape.
+    if (resolved.kind === "public" && path === "/projects" && res.ok) body = [body];
 
     if (!res.ok) {
       return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
@@ -71,11 +130,20 @@ async function request<T>(
 }
 
 export async function download(path: string, filename?: string) {
-  const token = localStorage.getItem("lific_token");
+  const resolved = resolveRequest(path);
+  if (resolved.kind !== "private" && resolved.kind !== "public") {
+    return { ok: false as const, error: REFUSED.error };
+  }
   const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (resolved.kind === "private") {
+    const token = localStorage.getItem("lific_token");
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  }
 
-  const res = await fetch(`${BASE}${path}`, { headers });
+  const res = await fetch(resolved.url, {
+    headers,
+    credentials: resolved.kind === "public" ? "omit" : undefined,
+  });
   if (!res.ok) {
     let error = `HTTP ${res.status}`;
     try {
@@ -1280,6 +1348,7 @@ export async function uploadAttachment(
   file: File,
   link?: { entity_type: AttachmentEntity; entity_id: number },
 ): Promise<{ ok: true; data: UploadResponse } | { ok: false; error: string }> {
+  if (inPublicScope()) return { ok: false, error: REFUSED.error };
   const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
@@ -1340,6 +1409,14 @@ export function uploadAttachmentWithProgress(
     onProgress?: (p: UploadProgress) => void;
   } = {},
 ): UploadHandle {
+  // A public page cannot upload: settle without opening a request, so not
+  // even the session cookie travels.
+  if (inPublicScope()) {
+    return {
+      result: Promise.resolve({ ok: false, error: REFUSED.error, status: 403, canceled: false }),
+      abort: () => {},
+    };
+  }
   const token = localStorage.getItem("lific_token");
   const form = new FormData();
   form.append("file", file, file.name);
@@ -1566,13 +1643,13 @@ export async function getAttachmentLinks(id: number) {
  *  how the browser authenticates subresource loads that cannot carry an
  *  Authorization header (see src/auth.rs, LIF-267). */
 export function attachmentUrl(id: number): string {
-  return `${BASE}/attachments/${id}`;
+  return resolveUrl(`/attachments/${id}`);
 }
 
 /** Server-generated webp preview. 404s when the attachment has none, so every
  *  consumer must have an onerror path back to the full asset. */
 export function attachmentThumbnailUrl(id: number): string {
-  return `${BASE}/attachments/${id}/thumbnail`;
+  return resolveUrl(`/attachments/${id}/thumbnail`);
 }
 
 export interface ZipPreviewEntry {
@@ -1611,11 +1688,20 @@ export async function getAttachmentPreview(id: number) {
 export async function fetchAttachmentText(
   id: number,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const token = localStorage.getItem("lific_token");
+  const resolved = resolveRequest(`/attachments/${id}`);
+  if (resolved.kind !== "private" && resolved.kind !== "public") {
+    return { ok: false, error: REFUSED.error };
+  }
   const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (resolved.kind === "private") {
+    const token = localStorage.getItem("lific_token");
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  }
   try {
-    const res = await fetch(`${BASE}/attachments/${id}`, { headers });
+    const res = await fetch(resolved.url, {
+      headers,
+      credentials: resolved.kind === "public" ? "omit" : undefined,
+    });
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, text: await res.text() };
   } catch {
@@ -2332,157 +2418,3 @@ export async function getProjectChanges(
   return request<ChangesPage>(`/projects/${projectId}/changes?${params}`);
 }
 
-// ── Public project view (LIF-465) ───────────────────────────
-//
-// A separate client for the anonymous surface. It does not go through
-// `request()` above, which attaches the stored bearer token: sending a private
-// credential to a route that never wants one would also make the public view
-// behave differently for a signed-in reader than for a stranger, which is the
-// difference that hides bugs in a boundary like this. Plain fetch, no
-// Authorization header, `credentials: "omit"` so the session cookie stays home.
-
-const PUBLIC_BASE = "/public/api";
-
-export interface PublicProject {
-  identifier: string;
-  name: string;
-  description: string;
-  emoji: string | null;
-}
-
-/** An attachment a public reader may fetch. The server re-derives that
- *  permission on every download; this list is what the view may link. */
-export interface PublicAttachment {
-  id: number;
-  filename: string;
-  mime: string;
-  size_bytes: number;
-  alt_text: string | null;
-  width: number | null;
-  height: number | null;
-}
-
-/** No author: the public view carries no account metadata. */
-export interface PublicComment {
-  id: number;
-  content: string;
-  created_at: string;
-  updated_at: string;
-  attachments: PublicAttachment[];
-}
-
-export interface PublicIssue {
-  identifier: string;
-  title: string;
-  status: string;
-  priority: string;
-  module: string | null;
-  labels: string[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PublicIssueList {
-  project: PublicProject;
-  issues: PublicIssue[];
-  /** Echoed back, so a caller can see that its `limit` was clamped. */
-  limit: number;
-  offset: number;
-  has_more: boolean;
-}
-
-export interface PublicIssueDetail extends PublicIssue {
-  project: PublicProject;
-  description: string;
-  attachments: PublicAttachment[];
-}
-
-export interface PublicComments {
-  comments: PublicComment[];
-  /** Live comments on the issue, so the view can show what paging will reach. */
-  total: number;
-  limit: number;
-  offset: number;
-  has_more: boolean;
-}
-
-async function publicRequest<T>(
-  path: string,
-  signal?: AbortSignal,
-): Promise<RequestResult<T>> {
-  try {
-    const res = await fetch(`${PUBLIC_BASE}${path}`, {
-      credentials: "omit",
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    const body = await res.json();
-    if (!res.ok) {
-      return {
-        ok: false,
-        error: body?.error || `HTTP ${res.status}`,
-        status: res.status,
-      };
-    }
-    return { ok: true, data: body as T };
-  } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") {
-      return { ok: false, error: "aborted", status: null };
-    }
-    return {
-      ok: false,
-      error: "Couldn't reach the server. Check your connection and try again.",
-      status: null,
-    };
-  }
-}
-
-/** One page of a published project's current issues. The server clamps
- *  `limit` rather than rejecting it. */
-export async function getPublicIssues(
-  project: string,
-  offset = 0,
-  signal?: AbortSignal,
-) {
-  const params = new URLSearchParams({ offset: String(offset) });
-  return publicRequest<PublicIssueList>(
-    `/projects/${encodeURIComponent(project)}/issues?${params}`,
-    signal,
-  );
-}
-
-export async function getPublicIssue(
-  project: string,
-  identifier: string,
-  signal?: AbortSignal,
-) {
-  return publicRequest<PublicIssueDetail>(
-    `/projects/${encodeURIComponent(project)}/issues/${encodeURIComponent(identifier)}`,
-    signal,
-  );
-}
-
-/** One page of an issue's current comments. */
-export async function getPublicComments(
-  project: string,
-  identifier: string,
-  offset = 0,
-  signal?: AbortSignal,
-) {
-  const params = new URLSearchParams({ offset: String(offset) });
-  return publicRequest<PublicComments>(
-    `/projects/${encodeURIComponent(project)}/issues/${encodeURIComponent(identifier)}/comments?${params}`,
-    signal,
-  );
-}
-
-/** The download URL for an attachment, scoped to the project it is public
- *  through. The server refuses an id that is not reachable from a live issue
- *  or comment in that project, so a URL built with the wrong project 404s. */
-export function publicAttachmentUrl(project: string, id: number): string {
-  return `${PUBLIC_BASE}/projects/${encodeURIComponent(project)}/attachments/${id}`;
-}
-
-/** Ceiling on pages the public list view will walk on its own, so a broken or
- *  hostile server cannot keep a tab fetching forever. */
-export const PUBLIC_MAX_PAGES = 50;

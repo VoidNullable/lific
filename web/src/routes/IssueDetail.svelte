@@ -46,6 +46,7 @@
   } from "../lib/commentState";
   import { ArrowUpRight, ChevronDown } from "lucide-svelte";
   import { untrack } from "svelte";
+  import { inPublicScope } from "../lib/publicScope"; // LIF-471
 
   let {
     navigate,
@@ -718,7 +719,7 @@
   autofocusWhenEmpty
   {saving}
   {lastSaved}
-  onExport={exportMarkdown}
+  onExport={inPublicScope() ? undefined : exportMarkdown}
   {exporting}
   {exportError}
   deleteNoun="issue"
@@ -786,7 +787,9 @@
       {#if !editable && projectRole.enforced}
         <!-- LIF-234: viewer read-only cue, in the topbar breadcrumb. -->
         <span class="text-micro font-medium px-1.5 py-0.5 rounded-full text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-              title="Read-only — you're a viewer on this project. You can still comment.">
+              title={inPublicScope()
+                ? "Read-only. This is the public view of the project; sign in to edit or comment."
+                : "Read-only — you're a viewer on this project. You can still comment."}>
           Read-only
         </span>
       {/if}

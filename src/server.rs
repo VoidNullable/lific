@@ -1235,9 +1235,8 @@ mod public_surface_tests {
         let d = deploy();
         for uri in [
             "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/issues".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1".to_string(),
-            "/public/api/projects/PUB/issues/PUB-1/comments".to_string(),
+            "/public/api/projects/PUB/index".to_string(),
+            "/public/api/projects/PUB/issues/resolve/PUB-1".to_string(),
             format!("/public/api/projects/PUB/attachments/{}", d.attachment_id),
         ] {
             let response = anonymous(&d.app, "GET", &uri).await;
@@ -1287,8 +1286,8 @@ mod public_surface_tests {
     #[tokio::test]
     async fn a_private_project_is_not_reachable_through_the_public_prefix() {
         let d = deploy();
-        let hidden = anonymous(&d.app, "GET", "/public/api/projects/PRIV/issues").await;
-        let missing = anonymous(&d.app, "GET", "/public/api/projects/NOPE/issues").await;
+        let hidden = anonymous(&d.app, "GET", "/public/api/projects/PRIV/index").await;
+        let missing = anonymous(&d.app, "GET", "/public/api/projects/NOPE/index").await;
         assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         let (hidden, missing) = (body_string(hidden).await, body_string(missing).await);
@@ -1302,7 +1301,7 @@ mod public_surface_tests {
     async fn the_public_prefix_refuses_every_write() {
         let d = deploy();
         for method in ["POST", "PUT", "PATCH", "DELETE"] {
-            let response = anonymous(&d.app, method, "/public/api/projects/PUB/issues").await;
+            let response = anonymous(&d.app, method, "/public/api/projects/PUB/index").await;
             assert_eq!(
                 response.status(),
                 StatusCode::METHOD_NOT_ALLOWED,

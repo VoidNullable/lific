@@ -1,7 +1,8 @@
 # Public projects
 
-A project can be published so that anyone can read its issues without an
-account. Publication is per project, off by default, and reversible.
+A project can be published so that anyone can read its issues and pages
+without an account. Publication is per project, off by default, and
+reversible.
 
 The published address is derived from the project identifier:
 
@@ -14,18 +15,28 @@ search engines, scrapers and anyone who is sent the URL reach it the same way.
 If you need "readable by a specific group", add those people as project
 members instead.
 
+The public page is the same issue list, board, issue view, page tree and page
+view a signed-in reader gets, in a shell that holds only that one project. The
+filters, grouping, search and sort all work. Nothing can be edited, created,
+commented on or deleted, and the controls for those are not offered.
+
 ## What becomes public
 
 Publishing `LIF` exposes, to everyone:
 
 - every **current issue** in the project: title, description, status,
-  priority, module, labels, and the created/updated timestamps;
-- every **current comment** on those issues;
-- every **attachment linked to** one of those issues or comments, downloadable
-  by anyone who can reach the instance.
+  priority, module, labels, dates, and its relations to other issues **in the
+  same project**;
+- every **current page** in the project: title, content, status, folder,
+  labels;
+- the project's **modules, labels and folders** (names and descriptions);
+- every **current comment** on those issues and pages, with the commenter's
+  **display name**;
+- every **attachment linked to** one of those issues, pages or comments,
+  downloadable by anyone who can reach the instance.
 
-"Current" means not in the trash. A deleted issue, a deleted comment and any
-attachment whose only link was to one of them drop out of the public view
+"Current" means not in the trash. A deleted issue, page or comment, and any
+attachment whose only link was to one of them, drop out of the public view
 immediately, without waiting for the retention sweep.
 
 ## What stays private
@@ -33,24 +44,22 @@ immediately, without waiting for the retention sweep.
 The public read path excludes the following. This does not secure other routes
 if instance authentication is disabled:
 
-- pages and page comments (including attachments linked only to a page);
 - plans and plan steps;
 - activity, audit history and status transitions;
 - the trash;
-- the member roster and every kind of account metadata, including **comment
-  authors**: a published comment shows its text and its timestamp, never who
-  wrote it;
+- the member roster, the project lead, and account metadata: comments carry
+  a display name and nothing else (no username, no user id, no email);
+  attachments carry no uploader;
+- an issue's import provenance (`source`), and any relation whose other end
+  is in a different project, published or not;
+- workspace pages (pages that belong to no project);
 - other projects, published or not;
-- global search, exports, delta sync, the REST API and MCP, all of which keep
-  the authentication they had.
-
-Issue relations are not published either. A public issue does not list what it
-blocks or duplicates, because the other end of a relation can live in a project
-that was never published.
+- global search, exports, the realtime socket, the REST API and MCP, all of
+  which keep the authentication they had.
 
 ## Publishing a project
 
-Project overview → **Public issue view**. You need to be the project **lead**
+Project overview → **Public view**. You need to be the project **lead**
 or an instance **admin**; the same gate that guards renaming a project and
 naming its lead. Unlike the rest of the project settings, the panel does not
 appear for everyone when `authz_enforced` is off: publication is the one
@@ -85,50 +94,52 @@ identifier rather than minted, so old links start working again.
 
 ## The public HTTP surface
 
-Five read-only endpoints, all under `/public/api`, all `GET`. Any other method
-is `405`. None of them accepts or reads a credential of any kind.
+Every route is under `/public/api/projects/{PROJ}` and is `GET`; any other
+method is `405`, any other path under `/public/api` is `404`. None of them
+accepts or reads a credential of any kind. Each one is a private route with
+`/api` replaced by that prefix, answering with the same JSON shape (minus the
+fields listed above) and, for comments, the same paging headers, which is what
+lets the web app run its ordinary components against it.
 
-| Endpoint | Answers |
-| --- | --- |
-| `GET /public/api/projects/{PROJ}` | the project's name, identifier, description, emoji |
-| `GET /public/api/projects/{PROJ}/issues` | one page of current issues (`?limit=` up to 100, `?offset=`, with `has_more`) |
-| `GET /public/api/projects/{PROJ}/issues/{PROJ-42}` | one issue with its body and attachment list |
-| `GET /public/api/projects/{PROJ}/issues/{PROJ-42}/comments` | one page of current comments (`?limit=` up to 50, `?offset=`, with `total` and `has_more`) |
-| `GET /public/api/projects/{PROJ}/attachments/{id}` | the file's bytes |
+| Public | Mirrors | Answers |
+| --- | --- | --- |
+| `/public/api/projects/{PROJ}` | `GET /api/projects/{id}` | the project (`lead_user_id` is `null`) |
+| `…/index` | `GET /api/projects/{id}/index` | every live issue and page, skinny rows, plus a resume cursor |
+| `…/changes?since=&limit=` | `GET /api/projects/{id}/changes` | rows above the cursor; comment rows are omitted |
+| `…/modules`, `…/labels`, `…/folders` | `GET /api/modules?project_id=` etc. | the project's structure |
+| `…/issues/resolve/{PROJ-42}` | `GET /api/issues/resolve/{ident}` | one issue with its body and in-project relations |
+| `…/issues/{id}` | `GET /api/issues/{id}` | the same, by row id |
+| `…/issues/{id}/comments` | `GET /api/issues/{id}/comments` | comments, with the `x-comment-*` paging headers |
+| `…/pages/{id}` | `GET /api/pages/{id}` | one page with its content |
+| `…/pages/{id}/comments` | `GET /api/pages/{id}/comments` | comments on it |
+| `…/attachments?entity_type=&entity_id=` | `GET /api/attachments?…` | attachment metadata for a live issue, page or comment |
+| `…/attachments/{id}` | `GET /api/attachments/{id}` | the file's bytes, streamed |
+| `…/attachments/{id}/thumbnail`, `…/preview` | the same routes under `/api` | a webp preview; a structured archive/database preview |
 
-Both lists are paginated the same way. `limit` defaults to its ceiling (100
-issues, 50 comments) and is **clamped**, not rejected, so `?limit=99999` returns
-a full page rather than an error. `limit` and `offset` are echoed back, and
-`has_more` is derived from a row fetched past the end of the page, so a project
-holding exactly one page reports `has_more: false`. Walk either list by adding
-the returned page length to `offset` until `has_more` is false; the comment
-response also carries `total`, so a client can show what paging will reach.
+The sync cursor in `/index` is the highest sequence number among the project's
+own rows, not the instance-wide counter the private route returns, so a
+stranger polling it learns when *this* project changed and nothing about the
+others. Row sequence numbers are the global ones; gaps between them are
+visible. `/changes` carries tombstones for deleted issues and pages of the
+project (a numeric id and a sequence number, never a title or body), because
+a replica needs them to drop rows; treat "issue #N once existed here" as
+public once the project is.
 
-Each JSON response has a **512 KiB limit**, including project metadata, labels,
-attachment metadata and the response envelope. Before loading text into Rust,
-SQLite checks a conservative bound: six times each field's UTF-8 byte length
-(`length(CAST(field AS BLOB))`), plus fixed allowances for JSON keys, punctuation,
-nulls and numbers. This counts embedded NULs and covers JSON escaping. It can
-reject content whose actual serialized size would fit; reported sizes are
-estimates, not exact JSON lengths. Preflight and reads share one snapshot.
-
-A list returns the longest consecutive prefix that fits this estimate. Add the
-number of returned issues or comments to `offset` to continue. If the first row
-cannot fit with its complete metadata and envelope, the response is `413`.
-Oversized project metadata or issue details also return `413`. Attachment lists
-are complete, never truncated: each attachment reserves at least 256 bytes of
-the budget, and each label reserves at least 32. File downloads are streamed
-separately and do not have the JSON size limit.
+Thumbnails and structured previews are only derived for attachments up to
+32 MiB; a larger file still downloads, but its `/thumbnail` and `/preview`
+answer `404` unless a thumbnail was already generated by a signed-in reader.
 
 Five properties worth knowing if you are building against these:
 
 - **A private or nonexistent project answers identically.** Both are a `404`
-  with the same body. You cannot use this surface to find out which projects
-  an instance holds.
+  with the same body. So does an issue, page, comment or attachment that
+  exists but belongs to another project, is in the trash, or is not linked
+  from anything live in this one. You cannot use this surface to find out
+  what an instance holds.
 - **The project is part of every path, including the attachment one.** An
-  issue identifier that names a different project (`/public/DEMO/issues/PRIV-1`)
+  issue identifier that names a different project (`/public/api/projects/DEMO/issues/resolve/PRIV-1`)
   is rejected before anything is read, and an attachment id that is not
-  reachable from a live issue or comment in *this* published project is a
+  reachable from a live issue, page or comment in *this* published project is a
   `404` even if the id exists.
 - **Responses carry `Cache-Control: no-store`**, plus `nosniff`,
   `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and
@@ -156,36 +167,35 @@ Five properties worth knowing if you are building against these:
   `server.trusted_proxies` address. Set that if you run behind a reverse
   proxy, or every visitor will share one bucket.
 
+`/index` is not size-bounded beyond the project itself, exactly like its
+private twin: a project with many thousands of issues serves them all in one
+response. The concurrency permit and the rate limit are what bound anonymous
+load.
+
 ## How the public page renders content
 
-The public view uses its own Markdown renderer, not the one the signed-in app
-uses. Three differences matter:
+The public page is the signed-in app in a *public scope*: every request the
+ordinary components make is rewritten onto the mirror above and sent with no
+credential (no bearer token, no cookie), so a signed-in maintainer who opens a
+public link sees exactly what a stranger sees. A request with no public mirror
+is refused in the browser rather than sent to `/api`. Identity, role, history
+and mention lookups are answered locally as "nobody, read-only, nothing".
 
-- **Issue identifiers are not auto-linked.** The signed-in app turns `LIF-42`
-  into a link and fetches that issue to decorate it with a live status. On a
-  public page that would be a request to a protected endpoint, so it does not
-  happen at all.
-- **Only published attachments are linked.** An `/api/attachments/{id}`
-  reference in an issue body is rewritten to the public download URL only when
-  that id is in the attachment list the server returned for that issue or
-  comment. Any other reference renders as plain text and produces no request.
-- **Bodies cannot trigger automatic third-party requests.** Authorized attachment
-  images still load from this instance. Markdown bodies may contain raw HTML,
-  so the public renderer parses the rendered HTML
-  into an inert document and rebuilds it against an allowlist. Tags that can
-  fetch or execute (`script`, `style`, `iframe`, `object`, `embed`, `video`,
-  `audio`, `source`, `svg`, `link`, forms) are dropped with their
-  contents, and **no attribute is ever copied from the input**: every surviving
-  element is created fresh and given only attributes the renderer writes. That
-  is what rules out `style="background:url(…)"`, `srcset`, `poster`,
-  `background` and the rest as a class, rather than one at a time.
+Markdown renders through the same renderer and sanitizer as the signed-in
+app (DOMPurify), with a stricter configuration in public scope. Issue
+identifiers auto-link and show their live status, resolved through the public
+mirror, and every generated link stays under `/public/…`. Attachment
+references in bodies load through the public download route, so one that is
+not published simply fails to load.
 
-The only URLs that survive are ones rebuilt from scratch: a published
-attachment, a link to another issue **in the same published project**, or an
-ordinary `http(s)`/`mailto:` link, which keeps working but carries
-`rel="noopener noreferrer nofollow"` and sends no referrer. A remote image is
-replaced by its alt text, so a public issue body cannot be used as a tracking
-pixel against its readers.
+**A public body cannot make a reader's browser fetch from a third party.**
+Elements that fetch on their own (`video`, `audio`, `source`, `picture`,
+`iframe`, `object`, `embed`, `style`, `link`, `svg`, forms) are dropped, as
+are `style`, `srcset`, `poster`, `background` and `ping` attributes, and an
+`<img>` keeps its `src` only when it points at one of this instance's
+attachments (`/api/attachments/{id}`); any other image renders as its alt
+text. Ordinary links survive: a destination the reader chooses to click is
+theirs to choose.
 
 ## Operational notes
 
