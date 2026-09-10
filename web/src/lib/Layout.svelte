@@ -838,7 +838,7 @@
          drilldown surface with its own structure, not this tree at a
          narrower width (LIF-349). -->
     <aside
-      class="{sidebarCollapsed ? 'hidden' : 'hidden md:flex'} w-[var(--sidebar-w)]
+      class="sidebar-theme desktop-sidebar {sidebarCollapsed ? 'hidden' : 'hidden md:flex'} w-[var(--sidebar-w)]
              shrink-0 relative flex-col bg-[var(--chrome)] select-none"
       style={`--sidebar-w: ${sidebarWidth}px`}
     >
@@ -849,16 +849,14 @@
           target="_blank"
           rel="noopener noreferrer"
           title="View Lific on GitHub"
-          class="group flex flex-1 min-w-0 items-center gap-2.5 px-1 py-1 rounded-lg hover:bg-[var(--bg-subtle)] transition-colors"
+          class="sidebar-brand flex flex-1 min-w-0 items-center gap-2.5 px-1 py-1 transition-colors"
         >
           <img src="/logo.webp" alt="" width="26" height="26" class="rounded-md shrink-0" />
           <span class="font-display text-heading tracking-tight text-[var(--text)] leading-none flex-1">
             Lific
           </span>
           <span
-            class="font-mono text-micro tracking-tight text-[var(--text-faint)]
-                   px-1.5 py-0.5 rounded-md bg-[var(--bg-subtle)]
-                   group-hover:bg-[var(--surface)] transition-colors"
+            class="sidebar-version text-micro text-[var(--text-faint)] shrink-0"
           >
             v{__APP_VERSION__}
           </span>
@@ -869,7 +867,7 @@
         <button
           class="size-7 shrink-0 grid place-items-center rounded-md
                  text-[var(--text-faint)] hover:text-[var(--text)]
-                 hover:bg-[var(--bg-subtle)] transition-colors"
+                 hover:bg-[var(--sidebar-hover)] transition-colors"
           onclick={toggleSidebar}
           title="Collapse sidebar  ·  ⌘\\"
           aria-label="Collapse sidebar"
@@ -879,17 +877,15 @@
       </div>
 
       <!-- Jump-to / command palette trigger -->
-      <div class="px-3 pb-2">
+      <div class="sidebar-launcher-wrap px-3">
         <button
-          class="w-full h-8 flex items-center gap-2 px-2.5 rounded-md
-                 bg-[var(--bg)] shadow-[inset_0_1px_2px_rgba(0,0,0,0.08)]
-                 text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+          class="sidebar-launcher w-full h-8 flex items-center gap-2 px-2.5 rounded-md transition-colors"
           onclick={() => palette?.openPalette()}
         >
           <Search size={14} class="shrink-0" />
           <span class="flex-1 text-left text-body-sm">Jump to…</span>
           <kbd class="font-mono text-micro leading-none text-[var(--text-faint)]
-                      border border-[var(--border)] rounded px-1 py-0.5">⌘K</kbd>
+                      bg-[var(--sidebar-hover)] rounded px-1 py-0.5">⌘K</kbd>
         </button>
       </div>
 
@@ -900,13 +896,10 @@
              pill's shape (icon + label) but unindented and un-chevroned
              since it isn't a disclosure. -->
         <a href="#/" use:navLink={navigate} aria-current={route === "/" ? "page" : undefined}
-          class="w-full flex items-center gap-2 px-2.5 py-1.5 mb-1 rounded-md
-                 text-left text-body-sm transition-colors
-                 {isActive('/')
-            ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-            : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+          class="sidebar-destination sidebar-home w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md
+                 text-left text-body-sm transition-colors"
         >
-          <Home size={14} class="shrink-0 {isActive('/') ? 'text-[var(--accent)]' : ''}" />
+          <Home size={14} class="shrink-0" />
           Home
         </a>
 
@@ -917,13 +910,10 @@
             {@const isProjectActive = activeProject === project.identifier}
             {@const open = subnavOpen(project)}
             <div
-              class="sidebar-row group w-full flex items-center rounded-md
-                     text-left text-body-sm transition
-                     {isProjectActive
-                ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+              class="sidebar-row sidebar-project group w-full flex items-center rounded-md
+                     text-left text-body-sm font-medium text-[var(--text)] transition-colors"
             >
-              <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+              <button class="size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--sidebar-hover)]"
                 aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
                 aria-expanded={open} aria-controls={`project-nav-${project.id}`}
                 onclick={() => toggleProject(project)}>
@@ -937,53 +927,44 @@
               <a href={`#/${project.identifier}/overview`} use:navLink={navigate}
                 data-sidebar-project={project.id}
                 aria-current={route === `/${project.identifier}/overview` ? "page" : undefined}
-                title={project.name} class="min-w-0 flex-1 flex items-center gap-1.5 py-1.5"
+                title={project.name} class="sidebar-project-link min-w-0 flex-1 flex items-center gap-1.5"
                 oncontextmenu={(e) => openProjectMenu(e, project)}>
               {#if project.emoji}
-                <span class="size-5 flex items-center justify-center shrink-0">
+                <span class="sidebar-project-icon">
                   <ProjectIcon value={project.emoji} size={16} />
                 </span>
               {:else}
                 <span
-                  class="size-5 rounded-md border border-[var(--border)] bg-[var(--bg-subtle)]
-                         flex items-center justify-center text-micro font-semibold
-                         tracking-tight shrink-0
-                         {isProjectActive ? 'text-[var(--text)]' : 'text-[var(--text-muted)]'}"
+                  class="sidebar-project-icon sidebar-initials rounded text-micro font-medium tracking-tight"
                 >
                   {project.identifier.slice(0, 2)}
                 </span>
               {/if}
               <span class="truncate flex-1">{project.name}</span>
               </a>
-              <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+              <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
                 aria-label={`Actions for ${project.name}`} aria-haspopup="menu"
                 onclick={(e) => openProjectMenu(e, project)}><Ellipsis size={15} /></button>
             </div>
 
               <!-- Sub-nav: indented under the project with a vertical guide
                    line, matching the tree language used in Pages. -->
-              <div id={`project-nav-${project.id}`} hidden={!open} class="project-subnav ml-3 pl-1 mt-0.5 mb-1.5 border-l border-[var(--border)] flex flex-col gap-px">
+              <div id={`project-nav-${project.id}`} hidden={!open} class="project-subnav flex flex-col">
                 {#snippet subItem(href: string, label: string, Icon: typeof List)}
                   {@const active = isActive(href)}
                   <a href={`#${href}`} use:navLink={navigate} aria-current={active ? "page" : undefined}
-                    class="w-full flex items-center gap-2 px-2 py-1 rounded-md
-                           text-left text-body-sm transition-colors
-                           {active
-                      ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                      : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                    class="sidebar-destination w-full flex items-center gap-2 px-2 py-1 rounded-md
+                           text-left text-body-sm transition-colors"
                   >
-                    <Icon size={14} class="shrink-0 {active ? 'text-[var(--accent)]' : ''}" />
+                    <Icon size={14} class="shrink-0" />
                     {label}
                   </a>
                 {/snippet}
                 {#snippet recentItem(href: string, label: string, identifier: string | null)}
                   <a href={`#${href}`} use:navLink={navigate} aria-current={isActive(href) ? "page" : undefined}
                     title={identifier ? `${identifier}: ${label}` : label}
-                    class="recent-link relative w-full flex items-center gap-1 px-2 py-1 rounded-md
-                           text-left text-caption transition-colors
-                           {isActive(href)
-                      ? 'text-[var(--text)] bg-[var(--bg-subtle)] font-medium'
-                      : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]'}"
+                    class="sidebar-destination recent-link relative w-full flex items-center gap-1 px-2 py-1 rounded-md
+                           text-left text-caption transition-colors"
                   >
                     {#if identifier}
                       <span class="font-mono text-[var(--text-faint)] shrink-0">#{identifier.split('-').at(-1)}</span>
@@ -1022,7 +1003,7 @@
                 {@render subItem(`/${project.identifier}/activity`, "Activity", History)}
                 {@render subItem(`/${project.identifier}/insights`, "Insights", TrendingUp)}
                 {#if isProjectActive && activeRecentSection}
-                  <button class="flex items-center gap-1 px-2 py-1 text-caption text-[var(--text-faint)] rounded-md hover:bg-[var(--bg-subtle)]"
+                  <button class="sidebar-recents-heading flex items-center gap-1 px-2 py-1 text-caption text-[var(--text-faint)] rounded-md hover:bg-[var(--sidebar-hover)]"
                     aria-expanded={recentOpen} aria-controls={`recent-${project.id}`} onclick={() => recentOpen = !recentOpen}>
                     <ChevronRight size={12} class={recentOpen ? "rotate-90" : ""} /> Recent {activeRecentSection}
                   </button>
@@ -1036,14 +1017,14 @@
         <!-- The header renders unconditionally: it carries the only affordance
              for creating a group, so gating it on having projects would make
              the first group unreachable on a brand-new instance. -->
-        <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
-          <span class="text-micro font-semibold uppercase tracking-widest text-[var(--text-faint)]">
+        <div class="sidebar-projects-heading flex items-center justify-between px-2 pb-1">
+          <span class="sidebar-section-label text-micro font-semibold uppercase text-[var(--text-faint)]">
             Projects
           </span>
           <button
             class="size-8 flex items-center justify-center rounded
                    text-[var(--text-faint)] hover:text-[var(--accent)]
-                   hover:bg-[var(--bg-subtle)] transition-colors"
+                   hover:bg-[var(--sidebar-hover)] transition-colors"
             title="New project or group"
             aria-label="New project or group" aria-haspopup="menu"
             onclick={openCreateMenu}
@@ -1091,11 +1072,11 @@
             {#if editingGroupId === group.id}
               {@render groupNameInput()}
             {:else}
-            <div class="sidebar-row group flex items-center">
+            <div class="sidebar-row sidebar-group-heading group flex items-center">
             <button
               class="min-w-0 flex-1 flex items-center gap-1.5 pl-1.5 pr-1 py-1.5 rounded-md
-                     text-left text-body-sm transition text-[var(--text-muted)]
-                     hover:text-[var(--text)] hover:bg-[var(--bg-subtle)]"
+                     text-left text-caption font-semibold transition-colors text-[var(--text-muted)]
+                     hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)]"
               aria-expanded={!collapsed}
               aria-controls={`group-${group.id}`} title={group.name}
               onclick={() => toggleGroup(group.id)}
@@ -1106,10 +1087,9 @@
                 class="shrink-0 transition-transform {collapsed ? '' : 'rotate-90'}
                        text-[var(--text-faint)] group-hover:text-[var(--text-muted)]"
               />
-              <Folder size={14} class="shrink-0 text-[var(--text-faint)]" />
               <span class="truncate flex-1">{group.name}</span>
             </button>
-            <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md hover:bg-[var(--bg-subtle)]"
+            <button class="sidebar-overflow size-7 shrink-0 grid place-items-center rounded-md text-[var(--text-faint)] hover:bg-[var(--sidebar-hover)]"
               data-sidebar-group-actions={group.id}
               aria-label={`Actions for group ${group.name}`} aria-haspopup="menu" onclick={(e) => openGroupMenu(e, group)}><Ellipsis size={15} /></button>
             </div>
@@ -1118,9 +1098,8 @@
               <button class="ml-3 max-w-[calc(100%-0.75rem)] truncate text-caption text-[var(--accent)] px-2 py-1"
                 title={`Show ${activeProjectRecord?.name}`} onclick={() => toggleGroup(group.id)}>Current: {activeProjectRecord?.name}</button>
             {/if}
-              <!-- Same indent and guide line as a project's sub-nav, so the
-                   sidebar reads as one tree rather than two conventions. -->
-              <div id={`group-${group.id}`} hidden={collapsed} class="ml-2 pl-1 border-l border-[var(--border)]">
+              <!-- Groups use spacing; only project destinations have a spine. -->
+              <div id={`group-${group.id}`} hidden={collapsed} class="sidebar-group-projects">
                 {#each projectsIn(group) as project (project.id)}
                   {@render projectEntry(project)}
                 {/each}
@@ -1133,7 +1112,7 @@
                one-item-per-child model stays 1:1 — the active project's
                expanded sub-nav must NOT become its own draggable item. The
                header/+button and the groups above sit OUTSIDE the zone. -->
-          <div
+          <div class:sidebar-ungrouped={groups.length > 0}
             use:dndzone={{
               items: ungroupedItems,
               flipDurationMs: flipMs(),
@@ -1175,16 +1154,13 @@
 
       <!-- Footer: the user identity IS the Settings entry (logout now lives
            inside Settings → Security). A compact theme toggle sits beside it. -->
-      <div class="p-2 flex items-center gap-1">
+      <div class="sidebar-footer p-2 flex items-center gap-1">
         <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
-          class="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-md text-left transition-colors
-                 {isActive('/settings')
-            ? 'bg-[var(--bg-subtle)]'
-            : 'hover:bg-[var(--bg-subtle)]'}"
+          class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors"
           title="Account settings"
         >
           <div
-            class="size-7 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
+            class="sidebar-avatar size-7 rounded-full
                    flex items-center justify-center text-micro font-semibold
                    tracking-wide select-none shrink-0"
           >
@@ -1200,8 +1176,8 @@
           </div>
         </a>
         <button
-          class="size-8 shrink-0 grid place-items-center rounded-md
-                 text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+          class="size-7 shrink-0 grid place-items-center rounded-md
+                 text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
           onclick={themeMenu}
           title="Theme: {themePref}"
           aria-label="Choose theme, current: {themePref}" aria-haspopup="menu"
@@ -1219,8 +1195,8 @@
              the same thing from anywhere; this is for anyone who doesn't
              know the key exists yet. -->
         <button
-          class="size-8 shrink-0 grid place-items-center rounded-md
-                 text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-subtle)] transition-colors"
+          class="size-7 shrink-0 grid place-items-center rounded-md
+                 text-[var(--text-faint)] hover:text-[var(--text)] hover:bg-[var(--sidebar-hover)] transition-colors"
           onclick={() => toggleShortcutHelp()}
           title="Keyboard shortcuts  ·  ?"
           aria-label="Keyboard shortcuts"

@@ -7,6 +7,7 @@ import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
+import { checkSidebarContrast, desktopScreenshots } from "./sidebar-visual";
 
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/SidebarFixture.svelte";
@@ -285,6 +286,19 @@ try {
     assert.equal(new URL(page.url()).hash, "#/ONE/overview");
     await attr(aside.locator("#project-nav-1"), "hidden", "");
     await attr(aside.locator("#project-nav-2"), "hidden", null);
+  });
+
+  await test("sidebar selection and readable accents in both themes", async () => {
+    const s = await session({ route: "/ONE/issues" });
+    await checkSidebarContrast(s.page, shotDir);
+  });
+
+  if (process.env.E2E_VISUAL === "1") await test("desktop visual matrix", async () => {
+    const api = new API();
+    api.projects[0].emoji = "🦎";
+    api.projects[1].emoji = "lucide:Terminal";
+    const s = await session({ api, route: "/ONE/issues" });
+    await desktopScreenshots(s.page, shotDir);
   });
 
   await test("direct link reveal and deliberate collapse survives revalidation", async () => {

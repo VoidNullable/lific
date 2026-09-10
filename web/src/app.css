@@ -344,6 +344,98 @@ html[data-motion="reduced"] *::after {
   scroll-behavior: auto !important;
 }
 
+/* Sidebar surfaces share a palette without changing in-content hover/selection.
+   Accent foreground has extra text contrast on the lightly tinted fill. */
+.sidebar-theme {
+  --sidebar-selected: color-mix(in oklab, var(--accent) 11%, var(--chrome));
+  --sidebar-hover: color-mix(in oklab, var(--text) 4%, var(--chrome));
+  --sidebar-accent: color-mix(in oklab, var(--accent) 85%, var(--text));
+  --sidebar-command: color-mix(in oklab, var(--bg) 55%, var(--chrome));
+  --sidebar-guide: color-mix(in oklab, var(--border) 65%, var(--chrome));
+  --sidebar-section-gap: 0.5rem;
+  --sidebar-project-gap: 0.125rem;
+  --sidebar-project-pad: 0.3125rem;
+}
+.density-compact .desktop-sidebar {
+  --sidebar-section-gap: 0.375rem;
+  --sidebar-project-pad: 0.25rem;
+}
+.sidebar-theme :is(a, button, input, [role="separator"]):focus-visible {
+  outline: 2px solid var(--sidebar-accent);
+  outline-offset: -2px;
+}
+.sidebar-theme a:hover { text-decoration: none; }
+.sidebar-theme .sidebar-destination {
+  color: var(--text-muted);
+}
+.sidebar-theme .sidebar-destination:hover {
+  color: var(--text);
+  background: var(--sidebar-hover);
+}
+.sidebar-theme .sidebar-destination[aria-current="page"] {
+  color: var(--text);
+  background: var(--sidebar-selected);
+  font-weight: 500;
+}
+.sidebar-theme .sidebar-destination[aria-current="page"] > svg {
+  color: var(--sidebar-accent);
+}
+.sidebar-section-label { letter-spacing: 0.08em; }
+.sidebar-launcher {
+  border: 1px solid var(--border);
+  background: var(--sidebar-command);
+  color: var(--text-muted);
+}
+.sidebar-launcher:is(:hover, :focus-visible) {
+  border-color: var(--sidebar-accent);
+  color: var(--text);
+}
+.sidebar-launcher:is(:hover, :focus-visible) > svg { color: var(--sidebar-accent); }
+.sidebar-avatar {
+  background: var(--sidebar-selected);
+  color: var(--sidebar-accent);
+}
+.sidebar-initials {
+  background: var(--sidebar-hover);
+  color: var(--text-muted);
+}
+.sidebar-footer { border-top: 1px solid var(--sidebar-guide); }
+.desktop-sidebar .sidebar-brand:hover > .font-display { color: var(--sidebar-accent); }
+.desktop-sidebar .sidebar-launcher-wrap { padding-bottom: 0.75rem; }
+.desktop-sidebar .sidebar-home { margin-bottom: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-projects-heading { padding-top: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-group-heading,
+.desktop-sidebar .sidebar-ungrouped { margin-top: var(--sidebar-section-gap); }
+.desktop-sidebar .sidebar-group-projects { padding-left: 0.25rem; }
+.desktop-sidebar .sidebar-project { margin-top: var(--sidebar-project-gap); }
+.desktop-sidebar .sidebar-project:hover { background: var(--sidebar-hover); }
+.desktop-sidebar .sidebar-project-link { padding-block: var(--sidebar-project-pad); }
+.desktop-sidebar .sidebar-project-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.desktop-sidebar .project-subnav {
+  margin: 0.125rem 0 0.375rem 0.875rem;
+  padding-left: 0.375rem;
+  border-left: 1px solid var(--sidebar-guide);
+  gap: 0;
+}
+.desktop-sidebar .project-subnav > .sidebar-destination { position: relative; }
+.desktop-sidebar .project-subnav > .sidebar-destination[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: calc(-0.375rem - 2px);
+  top: 0.375rem;
+  bottom: 0.375rem;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--sidebar-accent);
+}
+.desktop-sidebar .sidebar-recents-heading { margin-top: var(--sidebar-section-gap); }
+
 /* ── Mobile nav swipe surface (LIF-349) ────────────────
  * The nav's back/dismiss swipe needs the horizontal component of a touch
  * to reach the page. `touch-action` is not inherited, and the browser
