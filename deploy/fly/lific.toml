@@ -5,8 +5,12 @@
 [server]
 host = "0.0.0.0"
 port = 3456
-public_url = "https://lific-community.fly.dev"
-cors_origins = ["https://lific-community.fly.dev"]
+# Browsers reach this instance through the community.lific.dev Cloudflare
+# Worker, which proxies to the .fly.dev origin. The public URL is the address
+# people see, so OAuth metadata, MCP links and cookies name it. Both origins
+# are allowed because the .fly.dev address still answers directly.
+public_url = "https://community.lific.dev"
+cors_origins = ["https://community.lific.dev", "https://lific-community.fly.dev"]
 # Fly Proxy is the only thing that can reach this port: it connects from the
 # private 6PN / 172.16 networks and appends the app's own anycast address to
 # X-Forwarded-For. Every hop has to be listed or all visitors share one

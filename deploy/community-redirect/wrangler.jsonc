@@ -1,5 +1,5 @@
 {
-  // community.lific.dev redirects to the public LIF project on Fly.
+  // community.lific.dev proxies the community Lific instance on Fly.
   // Deploy with: bunx wrangler deploy (from this directory).
   "$schema": "../../site/node_modules/wrangler/config-schema.json",
   "name": "lific-community-redirect",
