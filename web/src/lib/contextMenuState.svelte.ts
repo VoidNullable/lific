@@ -18,7 +18,9 @@ export interface ContextMenuItem {
    *  named icon (PanelRight, ExternalLink, ...) assigns cleanly; lucide-svelte
    *  v1 icons are legacy class components, not Svelte 5 `Component` functions. */
   icon?: typeof Icon;
-  action: () => void;
+  action?: () => void;
+  /** Render navigation as a real link. Modified clicks retain browser behavior. */
+  href?: string;
   disabled?: boolean;
 }
 
@@ -27,9 +29,26 @@ class ContextMenuState {
   x = $state(0);
   y = $state(0);
   items = $state<ContextMenuItem[]>([]);
+  generation = $state(0);
 }
 
 export const contextMenuState = new ContextMenuState();
+let returnTarget: HTMLElement | null = null;
+let fallbackTarget: HTMLElement | null = null;
+
+function restoreFocus(target: HTMLElement | null): boolean {
+  if (!target?.isConnected || target.closest('[inert]')) return false;
+  const temporaryTabindex = !target.hasAttribute('tabindex') && target.tabIndex < 0;
+  if (temporaryTabindex) target.setAttribute('tabindex', '-1');
+  target.focus({ preventScroll: true });
+  const focused = document.activeElement === target;
+  if (temporaryTabindex) {
+    // Removing tabindex while a generic row is focused blurs it in Chromium.
+    if (focused) target.addEventListener('blur', () => target.removeAttribute('tabindex'), { once: true });
+    else target.removeAttribute('tabindex');
+  }
+  return focused;
+}
 
 /** Open the menu at viewport coordinates `x, y` (typically `e.clientX` /
  *  `e.clientY` from the triggering `contextmenu` event) with `items`.
@@ -38,13 +57,23 @@ export const contextMenuState = new ContextMenuState();
  *  outside-right-click-closes listener, which lives on `window`, doesn't
  *  immediately close the menu this call just opened — see that
  *  component's contextmenu listener for the full reasoning). */
-export function openContextMenu(x: number, y: number, items: ContextMenuItem[]): void {
+export function openContextMenu(x: number, y: number, items: ContextMenuItem[], trigger?: HTMLElement | null): void {
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  // Reopening from within the menu must not save an item that is about to disappear.
+  if (!active?.closest('[data-context-menu]')) fallbackTarget = active;
+  returnTarget = trigger ?? fallbackTarget;
   contextMenuState.x = x;
   contextMenuState.y = y;
   contextMenuState.items = items;
   contextMenuState.open = true;
+  contextMenuState.generation += 1;
 }
 
-export function closeContextMenu(): void {
+export function closeContextMenu(restore = true): void {
+  if (!contextMenuState.open) return;
   contextMenuState.open = false;
+  // Synchronous by design: an action may now focus a dialog or rename field.
+  if (restore && !restoreFocus(returnTarget)) restoreFocus(fallbackTarget);
+  returnTarget = null;
+  fallbackTarget = null;
 }

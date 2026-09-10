@@ -5,7 +5,8 @@
   "scripts": {
     "smoke": "bun smoke.ts",
     "public": "bun public-projects.ts",
-    "archives": "bun project-archives.ts"
+    "archives": "bun project-archives.ts",
+    "context-menu": "bun context-menu.ts"
   },
   "devDependencies": {
     "playwright": "^1.58.0"

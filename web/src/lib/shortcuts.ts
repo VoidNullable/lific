@@ -19,6 +19,7 @@ import { peekState } from "./issues/peek.svelte";
 import { commandPaletteState } from "./commandPaletteState.svelte";
 import { shortcutHelpState } from "./shortcutHelpState.svelte";
 import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
+import { mobileNavState } from "./mobileNavState.svelte";
 
 export type ShortcutScope = "global" | "list" | "board" | "peek" | "palette" | "editor";
 
@@ -120,6 +121,7 @@ export function shortcutsSuppressed(): boolean {
     peekState.open ||
     commandPaletteState.open ||
     shortcutHelpState.open ||
-    contextMenuState.open
+    contextMenuState.open ||
+    mobileNavState.open
   );
 }

@@ -32,6 +32,7 @@
     type Folder,
   } from "./api";
   import { fuzzyMatch } from "./fuzzy";
+  import { mobileNavState } from "./mobileNavState.svelte";
   import {
     LOCAL_HIT_SERVER_THRESHOLD,
     dedupeByIdentifier,
@@ -162,7 +163,7 @@
     // summon it on top of the shortcut help overlay — that one owns Esc
     // via its own listener and the two stacking would just be confusing.
     if ((e.metaKey || e.ctrlKey) && ["k", "p"].includes(e.key.toLowerCase())) {
-      if (shortcutHelpState.open) return;
+      if (shortcutHelpState.open || mobileNavState.open) return;
       e.preventDefault();
       if (open) hide();
       else void show();

@@ -118,6 +118,9 @@ jobs:
       - name: Project archive browser round-trip
         run: bun run archives
         working-directory: e2e
+      - name: Context menu interaction contracts
+        run: bun run context-menu
+        working-directory: e2e
 
   docs:
     runs-on: ubuntu-latest
