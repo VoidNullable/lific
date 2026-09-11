@@ -528,7 +528,15 @@ impl Display for PlanView<'_> {
                 full_descriptions: self.full_descriptions,
             },
             formatter,
-        )
+        )?;
+        if let Some(step) = plan.steps.first() {
+            writeln!(
+                formatter,
+                "Step IDs are database IDs, not positions. For #{0}, pass integer step_id: {0} (no # or quotes) to update_plan_step or edit_plan_step.",
+                step.id
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -11001,6 +11009,145 @@ mod tests {
         );
         assert!(got.contains("0/4 done"), "header should count steps: {got}");
         assert_eq!(crate::mcp::issue_link_context_reads(), 1);
+    }
+
+    #[test]
+    fn rendered_plan_step_ids_round_trip_across_plans_and_gaps() {
+        let (m, _guard) = mcp();
+        seed_project(&m, "Plans", "PLN");
+        let rendered_id = |output: &str, title: &str| -> i64 {
+            output
+                .lines()
+                .find(|line| line.starts_with("- [ ] #") && line.ends_with(title))
+                .expect("step line in plan output")
+                .split_whitespace()
+                .nth(3)
+                .unwrap()
+                .trim_start_matches('#')
+                .parse()
+                .unwrap()
+        };
+        let foreign = m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PLN".into()),
+            title: "Other plan".into(),
+            steps: Some(vec![PlanStepInput {
+                title: "Foreign step".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }));
+        let foreign_id = rendered_id(&foreign, "Foreign step");
+        let created = m.create_plan(Parameters(CreatePlanInput {
+            project: Some("PLN".into()),
+            title: "Target plan".into(),
+            steps: Some(
+                ["Keep", "Remove", "Target"]
+                    .into_iter()
+                    .map(|title| PlanStepInput {
+                        title: title.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }));
+        let removed_id = rendered_id(&created, "Remove");
+        let deleted = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PLN-PLAN-2".into(),
+            step_id: Some(removed_id),
+            delete: Some(true),
+            ..Default::default()
+        }));
+        assert!(deleted.contains("Deleted step"), "{deleted}");
+
+        let get = |plan: &str| m.get_plan(Parameters(GetPlanInput { plan: plan.into() }));
+        let before = get("PLN-PLAN-2");
+        let foreign_before = get("PLN-PLAN-1");
+        let keep_id = rendered_id(&before, "Keep");
+        let target_id = rendered_id(&before, "Target");
+        assert!(keep_id > 1);
+        assert!(target_id > keep_id + 1, "deleted step leaves an ID gap");
+        assert!(!before.contains("Remove"));
+        for output in [&created, &before] {
+            assert!(output.contains("database IDs, not positions"), "{output}");
+            assert!(
+                output.contains(&format!(
+                    "For #{keep_id}, pass integer step_id: {keep_id} (no # or quotes)"
+                )),
+                "{output}"
+            );
+            assert!(output.contains("update_plan_step or edit_plan_step"));
+        }
+
+        let updated = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PLN-PLAN-2".into(),
+            step_id: Some(target_id),
+            done: Some(true),
+            ..Default::default()
+        }));
+        assert!(
+            updated.contains(&format!("Step #{target_id} marked done")),
+            "{updated}"
+        );
+        let edited = m.edit_plan_step(Parameters(EditPlanStepInput {
+            plan: "PLN-PLAN-2".into(),
+            step_id: target_id,
+            field: Some("title".into()),
+            old_string: "Target".into(),
+            new_string: "Finished".into(),
+            ..Default::default()
+        }));
+        assert!(edited.contains("Edited step"), "{edited}");
+        let after = get("PLN-PLAN-2");
+        assert!(
+            after.contains(&format!("- [ ] #{keep_id} Keep\n")),
+            "{after}"
+        );
+        assert!(
+            after.contains(&format!("- [x] #{target_id} Finished\n")),
+            "{after}"
+        );
+        assert!(after.contains("1/2 done"), "{after}");
+
+        let wrong_update = m.update_plan_step(Parameters(UpdatePlanStepInput {
+            plan: "PLN-PLAN-2".into(),
+            step_id: Some(foreign_id),
+            done: Some(true),
+            ..Default::default()
+        }));
+        let wrong_edit = m.edit_plan_step(Parameters(EditPlanStepInput {
+            plan: "PLN-PLAN-2".into(),
+            step_id: foreign_id,
+            field: Some("title".into()),
+            old_string: "Foreign step".into(),
+            new_string: "Wrong plan".into(),
+            ..Default::default()
+        }));
+        for output in [wrong_update, wrong_edit] {
+            assert!(output.contains("does not belong to this plan"), "{output}");
+        }
+        assert_eq!(get("PLN-PLAN-1"), foreign_before);
+        assert_eq!(get("PLN-PLAN-2"), after);
+    }
+
+    #[test]
+    fn plan_step_schemas_explain_numeric_ids_instead_of_positions() {
+        let (m, _guard) = mcp();
+        let schemas = m.list_tool_schemas();
+        for name in ["update_plan_step", "edit_plan_step"] {
+            let (_, schema) = schemas.iter().find(|(tool, _)| tool == name).unwrap();
+            let description = schema["properties"]["step_id"]["description"]
+                .as_str()
+                .unwrap();
+            assert!(
+                description.contains("not its position"),
+                "{name}: {description}"
+            );
+            assert!(
+                description.contains("For #18, pass integer step_id: 18 (no # or quotes)"),
+                "{name}: {description}"
+            );
+        }
     }
 
     // Reported on Discord (dr.leech, 2026-08-19): get_plan truncated step

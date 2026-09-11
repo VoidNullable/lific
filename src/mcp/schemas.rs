@@ -436,7 +436,9 @@ pub struct GetPlanInput {
 pub struct EditPlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
-    #[schemars(description = "Numeric step id (the #N shown by get_plan)")]
+    #[schemars(
+        description = "Database step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes)."
+    )]
     pub step_id: i64,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
     pub old_string: String,
@@ -453,7 +455,7 @@ pub struct UpdatePlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
     #[schemars(
-        description = "Step ID to operate on (#N from get_plan). OMIT operates on the plan itself."
+        description = "Database step ID from get_plan, not its position. For #18, pass integer step_id: 18 (no # or quotes). OMIT operates on the plan itself."
     )]
     pub step_id: Option<i64>,
     #[schemars(description = "New title for the target")]
