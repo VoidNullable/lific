@@ -14,6 +14,7 @@ pub mod mcp_instances;
 pub mod mcp_proxy;
 pub mod member;
 pub mod render;
+pub(crate) mod runtime;
 pub mod service;
 pub mod term;
 #[cfg(test)]

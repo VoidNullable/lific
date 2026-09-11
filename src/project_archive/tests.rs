@@ -440,8 +440,9 @@ fn project_archive_cli_uses_local_operator_dispatch_and_requires_an_existing_dat
         ],
     ] {
         let parsed = Cli::try_parse_from(args).unwrap();
-        assert!(!crate::is_crud_command(&parsed.command));
-        assert!(crate::needs_existing_database(&parsed.command));
+        let plan = crate::cli::runtime::plan(&parsed.command);
+        assert!(!plan.is_data());
+        assert!(plan.requires_existing_database());
     }
 }
 

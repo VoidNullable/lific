@@ -473,11 +473,7 @@ pub(crate) fn build_app_with_store(
 /// `lific start`: bring up the HTTP server for `cfg` and serve until a
 /// shutdown signal arrives.
 pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
-        .with_ansi(false)
-        .with_writer(crate::cli::term::sanitized_stderr())
-        .init();
+    crate::cli::term::init_logging(&cfg.log.level)?;
 
     // Parse trusted proxy CIDRs once at startup. Invalid entries must
     // stop the server rather than quietly disabling the trust boundary

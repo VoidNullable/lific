@@ -694,14 +694,14 @@ mod tests {
     #[test]
     fn only_start_with_the_flag_is_exempt_from_the_existing_database_guard() {
         let with_flag = Cli::parse_from(["lific", "start", "--init-if-missing"]);
-        assert!(!crate::needs_existing_database(&with_flag.command));
+        assert!(!crate::cli::runtime::plan(&with_flag.command).requires_existing_database());
 
         let without_flag = Cli::parse_from(["lific", "start"]);
-        assert!(crate::needs_existing_database(&without_flag.command));
+        assert!(crate::cli::runtime::plan(&without_flag.command).requires_existing_database());
 
         // The flag belongs to `start` alone; nothing else changes shape.
         let mcp = Cli::parse_from(["lific", "mcp"]);
-        assert!(crate::needs_existing_database(&mcp.command));
+        assert!(crate::cli::runtime::plan(&mcp.command).requires_existing_database());
         assert!(matches!(with_flag.command, Command::Start { .. }));
     }
 

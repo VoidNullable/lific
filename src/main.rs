@@ -34,86 +34,6 @@ use cli::ui::TerminalDisplay;
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
 
-// Commands that operate directly on the database (no server required)
-fn is_crud_command(cmd: &Command) -> bool {
-    matches!(
-        cmd,
-        Command::Issue { .. }
-            | Command::Project { .. }
-            | Command::Page { .. }
-            | Command::Export { .. }
-            | Command::Search { .. }
-            | Command::Comment { .. }
-            | Command::Module { .. }
-            | Command::Label { .. }
-            | Command::Folder { .. }
-            // LIF-450: `bind` reads and writes repo bindings, so it belongs on
-            // both backends. Routing it here also puts it under
-            // `needs_existing_database`, which is what stops the SQL path from
-            // conjuring an empty instance in whatever directory it ran from.
-            | Command::Bind { .. }
-            // LIF-5: `git-hook` closes issues, so it belongs on both backends
-            // — a local hook writes to the database directly, a CI step posts
-            // to `/api/git-hook`. Routing it here also puts it under
-            // `needs_existing_database`, so the SQL path refuses rather than
-            // conjuring an empty instance in whatever checkout it ran from.
-            | Command::GitHook { .. }
-    )
-}
-
-/// Whether `cmd` operates on a local database that must already exist.
-///
-/// Only `lific init` creates a database. Every other command that reaches
-/// `db::open` has to find one, because the alternative is the first-run
-/// failure this guard exists for: with no config file anywhere,
-/// `database.path` is the bare relative `lific.db`, so an unguarded command
-/// creates and migrates a fresh empty instance in whatever directory it
-/// happened to run from.
-///
-/// The exemption list is the interesting half, and it is deliberately
-/// exhaustive rather than a catch-all, so a command added later is guarded by
-/// default instead of by somebody remembering to:
-///
-/// - `Init` creates the database; `Restore` writes one into place.
-/// - `Doctor` must be able to *report* a missing database, not die on it.
-/// - `Login`/`Logout` are pure HTTP and never open a database.
-/// - `Connect` carries its own, more specific version of this guard.
-/// - `AgentsMd` only writes a markdown file.
-/// - `Completion` returns before config is even loaded.
-/// - `Mcp --remote` is a stdio proxy in front of a remote instance: it never
-///   opens a database, and the point of it is to run on a machine that has
-///   none. Plain `lific mcp` still serves from a local database and is guarded.
-/// - Of the service actions only `install` needs one, so that installing a
-///   unit whose `start` would immediately fail the guard is refused up front.
-///   `uninstall`/`stop`/`status`/`restart` must keep working on a host whose
-///   database is gone, which is exactly when you need to stop the service.
-/// - `start --init-if-missing` opts out on purpose (LIF-468): a container's
-///   first boot has no earlier moment to run `init` in. Plain `lific start`
-///   is guarded exactly as before, and the flag's own guards in
-///   [`first_boot::decide`] are stricter than this one.
-fn needs_existing_database(cmd: &Command) -> bool {
-    match cmd {
-        Command::Init { .. }
-        | Command::Restore { .. }
-        | Command::Doctor { .. }
-        | Command::Login { .. }
-        | Command::Logout { .. }
-        | Command::Connect { .. }
-        | Command::AgentsMd { .. }
-        | Command::Completion { .. } => false,
-        // `Mcp --instances` is the multi-instance stdio proxy. Like `--remote`
-        // every alias points at a server, so no local database is needed.
-        Command::Mcp {
-            remote, instances, ..
-        } => !remote && instances.is_none(),
-        Command::Start {
-            init_if_missing, ..
-        } => !init_if_missing,
-        Command::Service { action } => matches!(action, cli::ServiceAction::Install),
-        _ => true,
-    }
-}
-
 /// The three operations the in-place rewrite needs from an open config file.
 /// A trait rather than `File` directly so a test can fail the write and prove
 /// the rollback puts the original bytes back.
@@ -400,6 +320,7 @@ fn parse_cli() -> (Cli, clap::ArgMatches) {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (cli, matches) = parse_cli();
+    let plan = cli::runtime::plan(&cli.command);
 
     // Rust ignores SIGPIPE process-wide, which makes println!/stdout writes
     // PANIC when piped into a closed reader (`lific completion fish | head`,
@@ -409,7 +330,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ignored — tokio socket writes rely on that to surface EPIPE as errors
     // instead of killing the process.
     #[cfg(unix)]
-    if !matches!(cli.command, Command::Start { .. } | Command::Mcp { .. }) {
+    if plan.restores_sigpipe() {
         // SAFETY: setting a signal disposition to SIG_DFL before any threads
         // depend on the ignored state; standard practice for CLI tools.
         unsafe {
@@ -419,7 +340,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shell completions must work with no lific.toml present and touch no DB,
     // so handle them before loading config or opening the database.
-    if let Command::Completion { shell } = cli.command {
+    if plan.is_completion()
+        && let Command::Completion { shell } = cli.command
+    {
         clap_complete::generate(shell, &mut Cli::command(), "lific", &mut std::io::stdout());
         return Ok(());
     }
@@ -428,7 +351,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // error; doctor receives the same typed result and reports the failure
     // while continuing independent diagnostics.
     let resolution = Config::resolve(cli.config.as_deref());
-    if let Command::Doctor { key, repair } = &cli.command {
+    if plan.is_doctor()
+        && let Command::Doctor { key, repair } = &cli.command
+    {
         let json = cli::term::wants_json(cli.json);
         cli::doctor::run(resolution, cli.db.as_deref(), key.as_deref(), *repair, json)
             .await
@@ -463,7 +388,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.backend == BackendKind::Http {
-        if !is_crud_command(&cli.command) {
+        if !plan.supports_http() {
             return Err(
                 "the HTTP backend currently supports data commands: issue, project, page, export, search, comment, module, label, folder, bind, and git-hook"
                     .into(),
@@ -486,12 +411,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Only `lific init` creates a database. Checked once, here, after the HTTP
     // backend has had its chance to return (an HTTP command talks to a server
     // and must never need a local database at all).
-    if needs_existing_database(&cli.command) {
+    if plan.requires_existing_database() {
         cfg.require_existing_database()?;
     }
 
     // Handle CRUD commands (direct database access, no server needed)
-    if is_crud_command(&cli.command) {
+    if plan.is_data() {
         // LIF-155: CLI mutations run outside any request task — audit
         // them via the process-default transport.
         actor::set_default_transport(actor::Transport::Cli);
@@ -847,11 +772,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Logs on stderr only: a stray stdout line corrupts the session.
-            tracing_subscriber::fmt()
-                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
-                .with_ansi(false)
-                .with_writer(crate::cli::term::sanitized_stderr())
-                .init();
+            cli::term::init_logging(&cfg.log.level)?;
 
             return cli::mcp_instances::run(&instances).await;
         }
@@ -866,11 +787,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // so a remote deployment gets a local presence in an AI client.
             // Logs must stay on stderr: a stray stdout line corrupts the
             // stdio session.
-            tracing_subscriber::fmt()
-                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
-                .with_ansi(false)
-                .with_writer(crate::cli::term::sanitized_stderr())
-                .init();
+            cli::term::init_logging(&cfg.log.level)?;
 
             let url = mcp_url
                 .or(cli.url)
@@ -892,11 +809,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             url: _,
             instances: None,
         } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(crate::cli::term::logging_filter(&cfg.log.level)?)
-                .with_ansi(false)
-                .with_writer(crate::cli::term::sanitized_stderr())
-                .init();
+            cli::term::init_logging(&cfg.log.level)?;
 
             let pool = db::open(&cfg.database.path)?;
             info!(path = %cfg.database.path.display(), "database ready");

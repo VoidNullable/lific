@@ -35,6 +35,16 @@ pub(crate) fn logging_filter(
     tracing_subscriber::EnvFilter::try_new(format!("lific={configured_level}")).map_err(Into::into)
 }
 
+/// Initialize the stderr-only subscriber used by the server and MCP modes.
+pub(crate) fn init_logging(configured_level: &str) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(logging_filter(configured_level)?)
+        .with_ansi(false)
+        .with_writer(sanitized_stderr())
+        .init();
+    Ok(())
+}
+
 /// A tracing writer that makes every formatted event safe for a terminal.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SanitizedStderr;
