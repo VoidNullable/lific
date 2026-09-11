@@ -25,14 +25,15 @@ pub(crate) fn logging_filter(
         return Ok(filter);
     }
 
-    if !matches!(
-        configured_level,
-        "trace" | "debug" | "info" | "warn" | "error"
-    ) {
-        return Err(format!("invalid configured log level: {configured_level}").into());
-    }
-
-    tracing_subscriber::EnvFilter::try_new(format!("lific={configured_level}")).map_err(Into::into)
+    let level = configured_level
+        .parse::<tracing_subscriber::filter::LevelFilter>()
+        .map_err(|_| {
+            format!(
+                "invalid configured log level: {}",
+                crate::cli::ui::sanitize_terminal_line(configured_level)
+            )
+        })?;
+    tracing_subscriber::EnvFilter::try_new(format!("lific={level}")).map_err(Into::into)
 }
 
 /// Initialize the stderr-only subscriber used by the server and MCP modes.

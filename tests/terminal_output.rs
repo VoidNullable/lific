@@ -191,6 +191,44 @@ fn invalid_log_filter_is_reported_safely_before_tracing_starts() {
     assert!(stderr.contains("not-a-level"), "{stderr:?}");
 }
 
+#[test]
+fn valid_log_levels_and_rust_log_precedence_are_preserved() {
+    let scratch = tempfile::tempdir().unwrap();
+    let config = scratch.path().join("lific.toml");
+    let run = |level: &str, rust_log: Option<&str>| {
+        std::fs::write(&config, format!("[log]\nlevel = \"{level}\"\n")).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lific"));
+        command.env_remove("RUST_LOG");
+        if let Some(rust_log) = rust_log {
+            command.env("RUST_LOG", rust_log);
+        }
+        command
+            .args([
+                "--config",
+                config.to_str().unwrap(),
+                "mcp",
+                "--remote",
+                "--url",
+                "http://127.0.0.1:1",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    for level in ["OFF", "InFo"] {
+        let output = run(level, None);
+        assert!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "{level}: {output:?}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("invalid configured log level"));
+    }
+
+    let output = run("not-a-level", Some("off"));
+    assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("invalid configured log level"));
+}
+
 #[cfg(unix)]
 #[test]
 fn clap_early_output_ignores_closed_pipes() {
@@ -221,14 +259,56 @@ fn clap_early_output_ignores_closed_pipes() {
 fn clap_help_cannot_render_a_terminal_control_in_the_program_name() {
     use std::os::unix::process::CommandExt;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_lific"))
-        .arg0("lific\u{202e}forged")
-        .arg("--help")
+    for argv0 in [
+        "lific\nFORGED_BARE",
+        "./lific\tFORGED_RELATIVE",
+        "/tmp/lific\u{1b}[2J\u{202e}FORGED_ABSOLUTE",
+    ] {
+        for args in [&["--help"][..], &["project", "--help"][..]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_lific"))
+                .arg0(argv0)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{argv0:?} {args:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{argv0:?} {args:?}: {output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("Usage: lific"), "{argv0:?}: {stdout:?}");
+            assert!(!stdout.contains("FORGED_"), "{argv0:?}: {stdout:?}");
+            assert!(!stdout.contains('\u{1b}'), "{argv0:?}: {stdout:?}");
+            assert!(!stdout.contains('\u{202e}'), "{argv0:?}: {stdout:?}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clap_diagnostics_preserve_their_original_scope_and_layout() {
+    let nested = Command::new(env!("CARGO_BIN_EXE_lific"))
+        .arg("project")
         .output()
         .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains('\u{202e}'), "{stdout:?}");
+    assert_eq!(nested.status.code(), Some(2), "{nested:?}");
+    let nested_stderr = String::from_utf8(nested.stderr).unwrap();
+    assert!(
+        nested_stderr.contains("\n\nUsage: lific project [OPTIONS] <COMMAND>"),
+        "{nested_stderr:?}"
+    );
+    assert!(nested_stderr.contains("\n\nCommands:"), "{nested_stderr:?}");
+    assert!(!nested_stderr.contains("Usage: lific [OPTIONS] <COMMAND>"));
+
+    let implicit_help = Command::new(env!("CARGO_BIN_EXE_lific")).output().unwrap();
+    assert_eq!(implicit_help.status.code(), Some(2), "{implicit_help:?}");
+    assert!(implicit_help.stdout.is_empty(), "{implicit_help:?}");
+    let implicit_stderr = String::from_utf8(implicit_help.stderr).unwrap();
+    assert!(
+        implicit_stderr.contains("\n\nUsage: lific [OPTIONS] <COMMAND>"),
+        "{implicit_stderr:?}"
+    );
+    assert!(
+        implicit_stderr.contains("\n\nCommands:"),
+        "{implicit_stderr:?}"
+    );
 }
 
 #[cfg(unix)]

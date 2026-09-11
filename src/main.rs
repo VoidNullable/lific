@@ -273,29 +273,45 @@ fn error_report(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 fn cli_error_message(error: &clap::Error) -> String {
-    match error.kind() {
-        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
-            safe_clap_help(error)
+    let mut rendered = error.to_string();
+    for (_, value) in error.context() {
+        sanitize_clap_context(&mut rendered, value);
+    }
+    rendered.terminal_block().to_string()
+}
+
+fn sanitize_clap_context(rendered: &mut String, value: &clap::error::ContextValue) {
+    match value {
+        clap::error::ContextValue::String(value) => replace_clap_context(rendered, value),
+        clap::error::ContextValue::Strings(values) => {
+            for value in values {
+                replace_clap_context(rendered, value);
+            }
         }
-        _ => format!(
-            "{}\n{}\n",
-            error.to_string().terminal_line(),
-            Cli::command().render_usage().terminal_block()
-        ),
+        clap::error::ContextValue::None
+        | clap::error::ContextValue::Bool(_)
+        | clap::error::ContextValue::StyledStr(_)
+        | clap::error::ContextValue::StyledStrs(_)
+        | clap::error::ContextValue::Number(_) => {}
+        _ => {}
     }
 }
 
-/// Keep Clap's intentional help layout while removing controls from the
-/// process-derived program name. Clap renders that name directly into help,
-/// including for successful `--help`/`--version` requests.
-fn safe_clap_help(error: &clap::Error) -> String {
-    let mut rendered = error.to_string();
-    if let Some(program) = std::env::args_os().next() {
-        let program = program.to_string_lossy().into_owned();
-        let safe_program = program.clone().terminal_line().to_string();
-        rendered = rendered.replace(&program, &safe_program);
+fn replace_clap_context(rendered: &mut String, value: &str) {
+    if value.is_empty() {
+        return;
     }
-    rendered.terminal_block().to_string()
+    let safe = value.terminal_line().to_string();
+    if safe != value {
+        *rendered = rendered.replace(value, &safe);
+    }
+}
+
+/// Keep Clap's displayed program name independent from the process-provided
+/// `argv[0]`. The real argument remains untouched, while all generated help
+/// and diagnostics use this trusted name.
+fn cli_command() -> clap::Command {
+    Cli::command().name("lific").bin_name("lific")
 }
 
 fn exit_cli_error(error: clap::Error) -> ! {
@@ -311,7 +327,7 @@ fn exit_cli_error(error: clap::Error) -> ! {
 
 fn parse_cli() -> (Cli, clap::ArgMatches) {
     let args = std::env::args_os().collect::<Vec<_>>();
-    let matches = Cli::command()
+    let matches = cli_command()
         .try_get_matches_from(&args)
         .unwrap_or_else(|error| exit_cli_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_cli_error(error));
@@ -343,7 +359,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if plan.is_completion()
         && let Command::Completion { shell } = cli.command
     {
-        clap_complete::generate(shell, &mut Cli::command(), "lific", &mut std::io::stdout());
+        clap_complete::generate(shell, &mut cli_command(), "lific", &mut std::io::stdout());
         return Ok(());
     }
 

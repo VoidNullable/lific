@@ -979,7 +979,7 @@ fn print_human(result: &ConnectResult) {
                 if let Some(snippet) = &o.manual_snippet {
                     ui::note(
                         format!("{} — merge this in manually", o.display),
-                        terminal_manual_snippet(snippet),
+                        terminal_manual_snippet(&o.format, snippet),
                     );
                 }
             }
@@ -1045,11 +1045,8 @@ fn print_human(result: &ConnectResult) {
     ui::outro("Restart your client(s) to pick up the new MCP server.");
 }
 
-fn terminal_manual_snippet(snippet: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(snippet)
-        .ok()
-        .and_then(|value| crate::cli::term::json_string(&value).ok())
-        .unwrap_or_else(|| crate::cli::ui::sanitize_terminal_block(snippet))
+fn terminal_manual_snippet(format: &str, snippet: &str) -> String {
+    writer::terminal_contents(format, snippet)
 }
 
 #[cfg(test)]
@@ -1132,13 +1129,32 @@ mod tests {
     }
   }
 }"#;
-        let rendered = terminal_manual_snippet(snippet);
+        let rendered = terminal_manual_snippet("json", snippet);
 
         assert!(!rendered.contains('\u{202e}'));
         let value: serde_json::Value = serde_json::from_str(snippet).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&rendered).unwrap(),
             value
+        );
+    }
+
+    #[test]
+    fn terminal_manual_format_snippets_preserve_toml_and_yaml_values() {
+        let toml = "# merge this\ncommand = \"a\u{200d}b\"\n";
+        let displayed_toml = terminal_manual_snippet("toml", toml);
+        assert!(!displayed_toml.contains('\u{200d}'));
+        assert_eq!(
+            toml::from_str::<toml::Value>(&displayed_toml).unwrap(),
+            toml::from_str::<toml::Value>(toml).unwrap()
+        );
+
+        let yaml = "command: \"a\u{200d}b\"\n";
+        let displayed_yaml = terminal_manual_snippet("yaml", yaml);
+        assert!(!displayed_yaml.contains('\u{200d}'));
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(&displayed_yaml).unwrap(),
+            serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap()
         );
     }
 
