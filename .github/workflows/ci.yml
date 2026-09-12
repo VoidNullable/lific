@@ -118,6 +118,9 @@ jobs:
       - name: Project archive browser round-trip
         run: bun run archives
         working-directory: e2e
+      - name: Public project browser isolation
+        run: bun run public
+        working-directory: e2e
       - name: Sidebar, mobile navigation, and context menu contracts
         run: bun run sidebar && bun run mobile-nav && bun run context-menu
         working-directory: e2e
@@ -134,9 +137,6 @@ jobs:
         run: bun run build
         working-directory: site
       - name: Check documented surfaces and local links
-        # The documentation PRs are intentionally independent slices. The
-        # full parity check compares against the current release baseline and
-        # therefore runs after those slices land on master; PRs still build
-        # the site so MDX/TypeScript errors are caught before merge.
-        if: github.event_name == 'push'
+        # Validate navigation, local links and the advertised MCP tool count
+        # on pull requests too, before documentation changes reach master.
         run: bun scripts/check-docs.mjs
