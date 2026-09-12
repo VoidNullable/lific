@@ -139,15 +139,9 @@ impl Instance {
     }
 
     fn project_count(&self) -> i64 {
-        self.try_project_count().unwrap()
-    }
-
-    /// Fallible, for polling while a writer holds an immediate transaction:
-    /// a shared-cache in-memory reader answers "schema is locked" then.
-    fn try_project_count(&self) -> Option<i64> {
-        let conn = self.db.read().ok()?;
+        let conn = self.db.read().unwrap();
         conn.query_row("SELECT count(*) FROM projects", [], |r| r.get(0))
-            .ok()
+            .unwrap()
     }
 
     async fn get(&self, uri: &str, token: Option<&str>) -> axum::response::Response {
@@ -1070,9 +1064,8 @@ async fn reassigning_an_identifier_does_not_expose_another_project() {
 
 // Cancellation after the worker starts
 
-/// A client that disconnects after the worker is running has already handed
-/// the instance a committed project. Abandoning the import there would leave
-/// the caller with a project they were told did not exist.
+/// The accepted import and its notification finish even after the HTTP
+/// request future is cancelled.
 #[tokio::test]
 async fn a_cancelled_request_still_commits_and_announces_the_import_once() {
     let source = Instance::new();
@@ -1116,31 +1109,35 @@ async fn a_cancelled_request_still_commits_and_announces_the_import_once() {
     started_rx.await.unwrap();
     task.abort();
     assert!(
+        task.await
+            .expect_err("the request is cancelled before the worker resumes")
+            .is_cancelled()
+    );
+    assert!(
         destination.db.acquire_archive_slot().is_err(),
         "the slot is held across the commit, not released with the request"
     );
     assert_eq!(destination.project_count(), 0);
 
     release_tx.send(()).unwrap();
-    let committed = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if destination.try_project_count() == Some(1) {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    assert!(committed.is_ok(), "the abandoned import still commits");
-
-    destination.settle().await;
+    // The event follows the commit. Polling this shared-cache database while
+    // the importer changes its schema can interfere with the worker's locks.
     let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
         .await
         .expect("the commit is announced even though nobody is listening on the request")
         .unwrap();
     assert!(matches!(event.event, RealtimeEvent::ProjectUpdated { .. }));
+    assert_eq!(
+        destination.project_count(),
+        1,
+        "the abandoned import commits"
+    );
+    destination.settle().await;
     assert!(
-        events.try_recv().is_err(),
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
         "exactly one announcement per import"
     );
 }
