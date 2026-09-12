@@ -124,6 +124,14 @@ jobs:
       - name: Sidebar, mobile navigation, and context menu contracts
         run: bun run sidebar && bun run mobile-nav && bun run context-menu
         working-directory: e2e
+      - name: Retain native-link browser traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-link-traces
+          path: /tmp/lific-native-links-*/trace.zip
+          if-no-files-found: ignore
+          retention-days: 7
 
   docs:
     runs-on: ubuntu-latest

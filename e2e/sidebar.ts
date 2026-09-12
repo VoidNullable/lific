@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
 import { accents, appearance, sidebarContrast, checkSidebarContrast, desktopScreenshots, mobileVisualChecks } from "./sidebar-visual";
+import { withNativeLinkDiagnostics } from "./native-links";
 
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/SidebarFixture.svelte";
@@ -626,22 +627,22 @@ try {
   });
 
   await test("native modified sidebar links", async () => {
-    const s = await session({ route: "/ONE/issues" }); const { page, aside, context } = s;
+    const s = await session({ route: "/ONE/issues" }); const { page, aside } = s;
     await aside.getByRole("button", { name: "Recent issues", exact: true }).click();
     const links = [aside.locator('a[title="Two"]'), aside.locator('#project-nav-1 > a[href="#/ONE/board"]'), aside.locator(".recent-link").first(), aside.locator('a[title="Account settings"]')];
-    for (const link of links) {
-      const href = await link.getAttribute("href");
-      for (const options of [{ modifiers: ["Control"] as ("Control")[] }, { button: "middle" as const }]) {
-        const ready = context.waitForEvent("page");
-        await link.click(options);
-        const popup = await ready; await popup.waitForLoadState();
-        assert.equal(new URL(popup.url()).hash, href);
-        assert.equal(new URL(page.url()).hash, "#/ONE/issues");
-        await popup.locator('aside a[title="Account settings"]').waitFor();
-        await settle({ ...s, page: popup });
-        await popup.close();
+    await withNativeLinkDiagnostics(page, async openPopup => {
+      for (const link of links) {
+        const href = await link.getAttribute("href");
+        for (const gesture of ["ctrl", "middle"] as const) {
+          await openPopup(link, gesture, async popup => {
+            assert.equal(new URL(popup.url()).hash, href);
+            assert.equal(new URL(page.url()).hash, "#/ONE/issues");
+            await popup.locator('aside a[title="Account settings"]').waitFor();
+            await settle({ ...s, page: popup });
+          });
+        }
       }
-    }
+    });
   });
 
   await test("group create rename failure retry Cancel Escape", async () => {

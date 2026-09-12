@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium } from "playwright";
 import { createServer } from "../web/node_modules/vite/dist/node/index.js";
+import { withNativeLinkDiagnostics } from "./native-links";
 
 const root = resolve(import.meta.dir, "../web");
 const fixtureId = root + "/src/ContextMenuFixture.svelte";
@@ -149,18 +150,17 @@ try {
     assert.equal(await page.evaluate(() => (window as any).fixture.menuOpen()), true);
     await page.keyboard.press("Escape"); await closedAt("trigger");
   }
-  await open();
-  assert.equal(await item("Navigate").getAttribute("href"), "#/destination");
-  const popupReady = context.waitForEvent("page");
-  await item("Navigate").click({ modifiers: ["Control"] });
-  const popup = await popupReady; await popup.waitForLoadState();
-  assert.ok(popup.url().endsWith("#/destination")); await popup.close();
-  assert.deepEqual(await page.evaluate(() => (window as any).actions), ["middle"]);
-  const middlePopupReady = context.waitForEvent("page");
-  await item("Navigate").click({ button: "middle" });
-  const middlePopup = await middlePopupReady; await middlePopup.waitForLoadState();
-  assert.ok(middlePopup.url().endsWith("#/destination")); await middlePopup.close();
-  assert.deepEqual(await page.evaluate(() => (window as any).actions), ["middle"]);
+  await withNativeLinkDiagnostics(page, async openPopup => {
+    await open();
+    assert.equal(await item("Navigate").getAttribute("href"), "#/destination");
+    for (const gesture of ["ctrl", "middle"] as const) {
+      await openPopup(item("Navigate"), gesture, async popup => {
+        assert.ok(popup.url().endsWith("#/destination"));
+      }, async () => {
+        assert.deepEqual(await page.evaluate(() => (window as any).actions), ["middle"]);
+      });
+    }
+  });
   await item("Navigate").click(); await closedAt("trigger");
   assert.deepEqual(await page.evaluate(() => (window as any).actions), ["middle", "navigate"]);
   assert.ok(!page.url().endsWith("#/destination"));
