@@ -15,6 +15,13 @@ In a terminal, the command asks two questions. First it shows a transport menu, 
 
 `lific connect` requires an initialized instance. It refuses to run without a database and recommends `lific init`. It does not require the HTTP server to be running while it writes configuration.
 
+If your database lives only on a remote server, use the
+[remote stdio proxy](/docs/repository-bindings#use-a-remote-server) instead of
+running `connect` without a local instance. To let an agent infer its project
+from a checkout, set up a [repository binding](/docs/repository-bindings).
+[Multi-instance MCP](/docs/mcp/multi-instance) routes one agent connection to
+several servers with separate credentials and explicit write destinations.
+
 ## Supported clients
 
 | Client | Id | Global configuration | Project configuration |
@@ -79,7 +86,7 @@ Re-run `lific connect` for each affected client to mint a fresh credential and r
 These are two different variables and they are not interchangeable.
 
 - `LIFIC_API_KEY` is the bearer credential for remote HTTP access. Codex reads it, and `lific doctor` falls back to it when `--key` is omitted.
-- `LIFIC_TOKEN` is the identity of a local stdio MCP session. `lific connect --stdio` writes it into the client's environment field; nothing reads it over HTTP.
+- `LIFIC_TOKEN` is the identity of a local stdio MCP session. `lific connect --stdio` writes it into the client's environment field. The CLI may also use it for remote access when the target origin matches `LIFIC_URL`; it is not an unrestricted credential for every URL. Multi-instance MCP reads it only if an alias explicitly names it with `token_env`.
 
 ### Codex environment variable
 

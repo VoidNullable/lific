@@ -48,3 +48,21 @@ Operations that touch two projects, such as linking issues or attaching an issue
 When enforcement is disabled, membership rows do not create default-deny visibility. Interfaces retain their legacy permission behavior.
 
 Connected tool accounts use the access of their owning user.
+
+## Repository context, transfer and publication
+
+A [repository binding](/docs/repository-bindings) lets a stdio MCP session use
+the checkout's project when supported tools omit it. Bindings are lookup keys;
+they do not grant project membership or select a different server.
+
+[Project archives](/docs/project-archives) copy a project to a new private
+destination with its content, linked files and history. Memberships, credentials,
+saved views and repository bindings do not transfer. Importing does not delete
+the source or merge into an existing project.
+
+[Public projects](/docs/public-projects) expose current issues, pages, comments
+and linked files through a separate anonymous read surface. Publication is off
+by default and includes content written before it was enabled. Plans, content
+history and account records stay outside that surface. It does not change the
+ordinary API's authentication policy or make an otherwise open instance safe to
+expose to the Internet.

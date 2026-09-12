@@ -22,7 +22,9 @@ User and system paths vary by platform.
 | macOS | `~/Library/Application Support/lific/lific.toml` | `/Library/Application Support/Lific/lific.toml` |
 | Windows | `%APPDATA%\lific\lific.toml` | `%ProgramData%\lific\lific.toml` |
 
-A file that exists but cannot be read or parsed is a fatal error. Lific stops and names the file and the error; it does not warn and fall through to the next location, because quietly running on different settings than the ones you wrote is the more surprising outcome. Unknown keys are rejected for the same reason, so a typo such as `allow_signupp` fails loudly instead of being ignored. If no file exists at any of these paths, Lific uses its built-in defaults.
+A file that exists but cannot be read or parsed is a fatal error. Lific stops and names the file and the error; it does not fall through to the next location. Unknown keys are rejected, so a typo such as `allow_signupp` fails instead of being ignored. An explicit `--config` path that does not exist is also an error. If automatic discovery finds no file, Lific uses its built-in defaults.
+
+Defaults do not create a database. Ordinary local commands refuse a missing database and name the expected path. Run `lific init` first, restore a backup, or use the explicit [container bootstrap](/docs/self-hosting#containers). `lific doctor` can diagnose an absent or unreadable config; it skips checks that depend on that config rather than silently using defaults.
 
 Relative `database.path` values resolve relative to the directory containing the selected configuration file. A relative backup directory then resolves relative to the database directory.
 
@@ -38,6 +40,8 @@ The following command line flags override configuration values.
 | `lific start --port <PORT>` | Overrides `server.port` for that server process. |
 
 `src/config.rs` does not define environment variable overrides for `lific.toml` keys. Other commands use environment variables for their own inputs. For example, `lific doctor --key` can use `LIFIC_API_KEY`, and import commands can use source-specific credentials.
+
+`start --init-if-missing` reads `LIFIC_INIT_ADMIN_NAME` and `LIFIC_INIT_ADMIN_PASSWORD` to create the first administrator on a fresh instance. These are bootstrap inputs, not general overrides of configuration or existing accounts. Multi-instance MCP uses a [separate TOML file](/docs/mcp/multi-instance) for server aliases and credential sources.
 
 ## Default configuration
 
@@ -92,6 +96,8 @@ Use an HTTPS URL for `public_url` when Lific is exposed through a public HTTPS e
 | `path` | path string | `"lific.db"` | Path to the SQLite database file. Relative paths resolve beside the selected configuration file. |
 
 The attachment directory is named `attachments` and is stored beside the database file.
+
+A relative `--db` path is resolved against the current working directory. `lific init --db <PATH>` records the resulting absolute path in its config, so later commands select the same database regardless of their working directory. It refuses a conflicting path already named by the selected config.
 
 ## `[backup]`
 

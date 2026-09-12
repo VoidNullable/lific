@@ -7,6 +7,17 @@ Lific exposes MCP tools for issues, projects, resources, pages, plans, comments,
 
 This page documents the endpoint and its authentication for manual setup. [Connect agents](/docs/connect) documents `lific connect`, which detects installed AI tools and writes this configuration for you.
 
+For a local command that reaches a remote server without opening a local
+database, use [remote stdio](/docs/repository-bindings#use-a-remote-server).
+Both local and remote stdio can apply a
+[repository binding](/docs/repository-bindings#which-tools-use-the-binding) to
+supported tools. Direct HTTP connections have no checkout context.
+
+[Multi-instance MCP](/docs/mcp/multi-instance) exposes one tool set backed by
+several named servers. It requires explicit destinations for writes when more
+than one server is configured. This mode routes tools only; use a single-server
+connection for MCP resources or prompts.
+
 ## HTTP endpoint
 
 The MCP endpoint is:

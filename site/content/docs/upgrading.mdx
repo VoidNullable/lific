@@ -1,9 +1,18 @@
 ---
-title: Upgrade from 2.0 to 2.7
-description: Back up, upgrade, verify, and adopt the changes from 2.1 through 2.7 on an existing Lific 2.0 installation.
+title: Upgrade from 2.0 through 2.9
+description: Back up an existing Lific instance, check client and hosting compatibility, upgrade to 2.9, and verify the result before resuming work.
 ---
 
-This guide covers upgrades from Lific 2.0 through 2.7. It assumes an existing 2.0 instance and deliberately does not describe older migration paths.
+This guide covers existing installations from Lific 2.0 through 2.9. Read the
+sections newer than your installed version before upgrading to 2.9. You do not
+need to install each intervening binary: the new binary applies pending
+migrations on startup. Migration paths from versions older than 2.0 are outside
+this guide.
+
+If you use CLI device login, upgrade the CLI before a server older than 2.8.
+For multi-instance MCP, plan to upgrade all backends to identical tool
+definitions before restarting the proxy. Keep the pre-upgrade backup: rolling
+back a migrated database requires restoring the backup with a compatible binary.
 
 ## Before upgrading
 
@@ -11,13 +20,20 @@ This guide covers upgrades from Lific 2.0 through 2.7. It assumes an existing 2.
 2. Make a complete backup while the service is stopped or quiesced:
 
    ```shell
-   lific dump --out ./lific-before-2.7.tar.gz
+   lific dump --out ./lific-before-2.9.tar.gz
    ```
 
    The archive includes a consistent database snapshot, attachments, and `manifest.json`.
+   Keep a separate copy of the selected configuration and service definition.
+   Use a whole-instance dump for recovery, not a Markdown export or a
+   [project archive](/docs/project-archives), which omits accounts and permissions.
 3. Record how clients connect: browser URL, API-key users, OAuth clients, and MCP configuration files. Keep one known-good operator key available for recovery.
 4. If the instance is behind a reverse proxy, review `server.trusted_proxies` twice: before starting 2.2, which introduced the setting with a default that trusted loopback peers, and again before 2.7, where the default changes to trust no proxies at all. From 2.7, a deployment whose proxy connects from loopback (Tailscale serve or Funnel, or nginx on the same host) must list that proxy explicitly, or every client shares the proxy's rate-limit bucket. Add only isolated proxy networks you operate.
 5. Confirm that `lific.toml` parses before rolling out 2.6. From 2.6 a config file that exists but cannot be read or parsed stops startup instead of falling back to defaults, and unknown keys are rejected. Run `lific doctor`, which reports the configuration as one check and continues through the rest.
+6. From 2.9, `lific doctor` inspects the database without migrating it. A report
+   of pending migrations does not apply them. Normal server startup applies
+   them, or you can explicitly request `lific doctor --repair` after taking the
+   backup. Do not use `--repair` as a harmless preflight against your only copy.
 
 Stop the background service before replacing the binary or restoring a backup. Keep the same `lific.toml`, database path, attachments directory, and public URL unless you are intentionally relocating the instance.
 
@@ -112,9 +128,185 @@ The largest upgrade since 2.0. Three things need an operator decision before you
 - **Uploads are validated by magic bytes** rather than the declared content type, capped at 10 MiB by default, and rate-limited to 30 per user per 10 minutes. A client uploading a type outside the allowlist is refused.
 - **MCP tool errors are generic.** Raw database text, which could carry table and column names and the database path, no longer reaches the client; it stays in the server log. A script matching on that text needs another signal.
 
+### v2.8
+
+Upgrade CLI device-login clients before upgrading the server. Lific 2.8 requires
+a registered OAuth client for device authorization; a pre-2.8 CLI sends the old
+request and cannot log in to a 2.8 or newer server. A current CLI can still log
+in to an older server, so CLI-first is the compatible order.
+
+**OAuth clients and approvals.** Automated clients using
+`POST /oauth/device_authorization` must register at `/oauth/register`, then
+send the returned `client_id`. Free-text `client_name` is no longer sufficient.
+An omitted scope defaults to `mcp`; an explicitly different scope is refused.
+
+`lific login` stores the registration in `~/.config/lific/clients.json`, keyed
+by server URL, and reuses it on later logins. This file contains no secrets.
+Deleting it causes a new registration on the next login; do not delete it as
+routine upgrade maintenance and consume registration slots unnecessarily.
+
+Device codes issued before the server upgrade must be restarted. They have no
+registered client attached and token exchange returns `invalid_grant`; codes
+expire after 15 minutes. Approval now first shows the registered client and
+requested access, then requires an explicit approval. Entering a device code
+alone does not approve it. Authorization-code approval also requires an explicit
+Approve or Deny choice, bound to the request displayed.
+
+Both approval flows require a signed-in browser. Keep the recent-session rule
+from 2.7: sign out, sign back in and start a new connection if your approval
+session is too old. Existing account-recovery revocation rules still apply.
+PKCE clients must send valid S256 challenges and verifiers with the required
+43 to 128 characters. Registered redirect URIs may not contain fragments.
+
+**Live sync and retained deletes.** Issues, pages and comments now carry sync
+sequence numbers. WebSocket clients can resume by cursor; `sync_required`
+asks the client to backfill through the project's `/changes` endpoint. Fresh
+clients bootstrap through `/index`. Existing clients may ignore the added
+protocol fields, but custom clients adopting replay should persist and advance
+the returned cursor rather than infer ordering from timestamps.
+
+Deleting an issue, page or comment now retains a tombstone. The default
+`retention.trash_days` is 30 days; the retention sweep permanently purges expired
+rows. Maintainers can restore issues and pages through REST. There is no trash
+UI in this release, and soft deletion does not replace a backup. A restore emits
+ordinary create or update events, which older clients can receive.
+
+Updates may include `expected_seq` to reject a stale write with HTTP 409 and the
+current state. Clients omitting it retain last-writer-wins behavior. Adopting
+sequence-based conflict checks is optional, not a new requirement on every
+existing update.
+
+**Other client changes.** SVG attachments download instead of rendering inline.
+Module status writes must use `backlog`, `planned`, `active`, `paused`, `done`
+or `cancelled`; previously stored free-text values are not a supported write
+format. Attachment uploads and deletes can answer HTTP 503 during backup,
+dump or restore, with `Retry-After: 2`; retry after that delay. Restore now
+validates metadata, schema integrity and attachment bytes before installing an
+archive, so a damaged archive that previously appeared usable may be refused.
+
+### v2.9
+
+Four migrations run when upgrading a 2.8 database:
+
+| Migration | Change |
+| --- | --- |
+| 049 | Repository bindings and their identity aliases. |
+| 050 | Project archive attribution and provenance. |
+| 051 | Per-project publication, off by default. |
+| 052 | Personal sidebar project ordering. |
+
+Existing projects remain private. Sidebar ordering uses the existing ranks
+until a user reorders projects; that user's changes no longer rearrange other
+users' sidebars. To roll back after migration, stop the service and restore the
+pre-upgrade whole-instance backup with a compatible binary. Do not point a 2.8
+binary at the migrated database or edit migration records to make it start.
+
+**Initialization is deliberate.** Ordinary local commands, including bare
+`lific mcp` and `lific start`, refuse a missing database and report its expected
+path. An automation job must initialize with `lific init`, restore a backup,
+or use the guarded first-boot path below. HTTP-backed commands and remote MCP
+proxies still need no local database. If a previously working service suddenly
+reports a missing database, check its path and mounted volume before creating
+anything; a new empty instance is not recovery of the old one.
+
+`lific init --db` records the actual absolute database path in its configuration
+and reports conflicts with an already configured path. It can update an existing
+writable config file even when the parent directory is read-only, as with a
+container-mounted config. This does not make an unwritable file writable.
+
+The supplied container image starts with `start --init-if-missing`. On an empty
+volume, this requires a deliberately selected database location, an existing
+writable parent directory and both environment variables:
+
+- `LIFIC_INIT_ADMIN_NAME`
+- `LIFIC_INIT_ADMIN_PASSWORD`
+
+Provide the password through your deployment's secret mechanism, not a committed
+configuration file or image layer. Bootstrap creates a password-protected
+administrator with signup and browser auto-login off, and does not print an
+operator key. Interrupted bootstrap can resume. An initialized instance that
+already has its admin ignores these variables; changing them does not reset
+that account's password. Remove bootstrap credentials from the deployment
+environment after confirming first boot. See [self-hosting](/docs/self-hosting)
+for the current container setup.
+
+**Diagnostics and credentials.** `lific doctor` is read-only with respect to
+database migration unless you pass `--repair`. Configuration errors remain
+visible instead of selecting a default database. The CLI also refuses malformed
+credential storage and unsafe filesystem paths rather than treating them as
+an empty store or overwriting them. Preserve the failing file for diagnosis,
+correct the reported format or filesystem problem, then retry login. Do not
+silently replace it with an empty credential store in automation.
+
+Account recovery through the CLI now stops protected WebSocket delivery without
+waiting for the idle revalidation timer. Credentials are revalidated before
+protected live deliveries, cached activity reads and replay frames. Reconnect
+affected agents and API clients after a reset using the 2.7 recovery procedure.
+Enabling browser auto-login through the CLI now applies the exposure checks used
+by the web API; disabling it remains available for recovery.
+
+**Comment clients must follow continuation metadata.** Interactive comment
+responses have a 2 MiB byte budget as well as a row limit. A short page no longer
+means that a thread ended. REST exposes:
+
+| Header | Meaning |
+| --- | --- |
+| `x-comment-has-more` | Whether another page remains. |
+| `x-comment-returned` | The number of comments returned in this response. |
+| `x-comment-next-offset` | The next offset for offset-based pagination. |
+| `x-comment-next-created-at`, `x-comment-next-id` | The continuation pair for cursor-based pagination. |
+
+Use the continuation for the paging mode you requested, rather than adding the
+requested limit to your offset. For cursor paging, pass the returned pair as
+`before_created_at` and `before_id`. A newest-first offset response can also
+provide that pair so you can switch to cursor paging. MCP counts the encoded
+response, including formatting, and reports continuation instructions too. An
+individually oversized comment fails explicitly rather than disappearing from
+the thread. Handle that error and its instructions; do not mark the thread
+complete. Comment writes allow at most 256 distinct mention tokens and 256
+distinct attachment IDs. Legacy oversized bodies can be edited without growing.
+
+Imported comments can report `user_id: -1`. This means there is no destination
+author account, not a user ID to resolve. Their displayed authors are inert
+names marked `(imported)`. A destination account with a matching username does
+not gain authorship or permission over those comments.
+
+**Repository context and multi-instance routing.**
+[Repository bindings](/docs/repository-bindings) supply defaults only for the
+documented project-scoped MCP tools. Search remains cross-project when unscoped,
+workspace page creation remains available, and destructive tools do not inherit
+an implicit project. Explicit projects win. Restart stdio sessions after setting
+or changing a binding.
+
+[Multi-instance MCP](/docs/mcp/multi-instance) requires complete tool definitions
+to match across every backend at startup, including descriptions, annotations
+and schemas. Equal version numbers or compatible input schemas alone are not
+enough. Upgrade the backends together before restarting the proxy. With several
+backends, writes require an explicit `instance`; only allowlisted reads may use
+the configured default. Calls never fall back to another tracker after failure.
+Resources and prompts are outside this routing mode.
+
+**Archives and publication are opt-in.** A
+[project archive](/docs/project-archives) creates a new private destination;
+it does not merge with an existing project, delete the source or transfer
+memberships and credentials. It includes historical text removed from current
+descriptions, so treat the file as private. If an import loses its connection,
+its outcome is unknown. Check the destination before retrying, since the server
+may already have committed it.
+
+[Publishing a project](/docs/public-projects) exposes its existing current
+issues, pages, comments and linked files to anyone. Review them before
+publication. Plans, history and trash stay outside the public read surface.
+Unpublishing stops subsequent requests but cannot recall downloaded material.
+Require instance authentication and disable browser auto-login before exposing
+the server; publication does not secure other routes for you.
+
 ## Upgrade and verify
 
-1. Install the v2.7 binary and restart the existing service.
+1. Upgrade CLI clients first if the server is older than 2.8 and those clients
+   use `lific login`. Install the v2.9 binary and restart the existing service
+   with the same configuration and database. Confirm `lific --version` using
+   the executable your service actually runs, not an unrelated binary on PATH.
 2. Run `lific doctor` with the operator credential. Resolve configuration, database, backup, server, OAuth, and MCP failures before opening the instance to users.
 3. Check `lific instance info` and confirm the expected database, public URL, signup policy, and `authz_enforced` state.
 4. Review membership and operator keys:
@@ -127,8 +319,15 @@ The largest upgrade since 2.0. Three things need an operator decision before you
    Unbound API keys are operator-trusted/admin-equivalent because they can only be minted with shell access. Audit or rotate any key that is no longer needed. Use user-owned bot keys when an agent should inherit project membership.
 5. Test the browser login and one representative project workflow. Confirm issue, page, plan, comment, attachment, and saved-view data before testing writes.
 6. Test one API and one MCP client. For MCP, refresh tool discovery and replace calls to `export_issue`, `export_page`, or `export_project` with `export`.
+   With multi-instance MCP, confirm every backend passed discovery and inspect
+   `list_instances` before trying writes. Test comment pagination through its
+   continuation metadata. Restart device login flows begun before the upgrade.
 7. If the instance uses a proxy, confirm the server logs the expected client IP and that rate limits do not trust arbitrary forwarded headers.
 8. Keep the pre-upgrade archive until the browser, API, MCP, backups, and service restart have all been verified.
+9. Confirm existing projects remain private. If you deliberately publish one,
+   test its anonymous URL while signed out and verify ordinary private routes
+   still require authentication. If you import an archive, review its report
+   and linked files before switching writers or enabling publication.
 
 ## Authorization rollout
 

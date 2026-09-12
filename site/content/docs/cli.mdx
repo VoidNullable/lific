@@ -5,6 +5,8 @@ description: Commands, arguments, flags, and behavior for the Lific command line
 
 The CLI uses the configured SQLite database by default. Data commands can also use a running Lific server, so the same issue, project, page, export, search, comment, module, label, and folder commands work remotely.
 
+Local data commands require an existing database. Use `lific init` to create one; a missing database is an error rather than an invitation to create an empty tracker in the current directory. HTTP-backed commands and remote MCP proxies do not need a local database.
+
 ## Global options
 
 ```shell
@@ -29,7 +31,9 @@ HTTP mode uses the authenticated server identity for mutations. In particular, `
 
 Both backends print the same thing. Human-readable output goes through one set of renderers, and every data command produces the same JSON, so what you see does not depend on how the command reached the data. A payload from a server this CLI does not recognize still falls back to pretty-printed JSON rather than failing.
 
-When HTTP mode returns issues, projects, pages, plans, modules, or comments, JSON output includes a `web_url` built from the configured server URL. Human-readable output renders the corresponding identifier, name, or comment handle as a Markdown link. Direct SQL mode cannot add these links because it has no authoritative external hostname.
+When HTTP mode returns issues, projects, pages, plans, modules, or comments, JSON output includes a `web_url` built from the configured server URL. Human-readable output renders the corresponding identifier, name, or comment handle as a Markdown link. Direct SQL mode adds these links when `server.public_url` is configured; without it, local output has no external URL to attach.
+
+Credentialed connections to non-loopback hosts require HTTPS. Malformed or unsafe credential files stop credential lookup instead of being treated as an empty store. Help output names `LIFIC_API_KEY` without displaying its value.
 
 Clap also provides `--help` and `--version`.
 
@@ -40,7 +44,7 @@ Clap also provides `--help` and `--version`.
 Starts the HTTP server. The server provides the REST API, the `/mcp` endpoint, OAuth routes, and the embedded web UI when web assets are present.
 
 ```shell
-lific start [--port <PORT>] [--host <HOST>]
+lific start [--port <PORT>] [--host <HOST>] [--init-if-missing]
 ```
 
 **Arguments**
@@ -51,13 +55,16 @@ lific start [--port <PORT>] [--host <HOST>]
 
 - `-p, --port <PORT>` overrides `server.port`.
 - `--host <HOST>` overrides `server.host`.
+- `--init-if-missing` opts into container bootstrap. Creating a database requires a selected config or explicit database path, an existing writable parent directory, and both `LIFIC_INIT_ADMIN_NAME` and `LIFIC_INIT_ADMIN_PASSWORD`. An initialized instance retains its existing administrator and settings. See [container first boot](/docs/self-hosting#containers).
 
 ### mcp
 
-Runs the MCP server over standard input and standard output. Logs are written to standard error.
+Runs the MCP server over standard input and standard output. Logs are written to standard error. Bare `mcp` opens the local database; the proxy modes forward to running servers without opening one.
 
 ```shell
 lific mcp
+lific mcp --remote --url https://lific.example.com
+lific mcp --instances ~/.config/lific/instances.toml
 ```
 
 **Arguments**
@@ -66,7 +73,11 @@ lific mcp
 
 **Flags**
 
-- None.
+- `--remote` proxies stdio MCP to one remote instance, reusing CLI credentials and resolving the current repository's binding.
+- `--url <URL>` selects the base URL for `--remote`; it may also come from `LIFIC_URL`.
+- `--instances <FILE>` routes tools across the named servers in a TOML file. It conflicts with `--remote` and an explicitly passed `--url`. Each alias selects its own credentials. See [multi-instance MCP](/docs/mcp/multi-instance).
+
+Both local stdio and the remote proxy can supply an omitted project when the current checkout is [bound to a project](/docs/repository-bindings). The server retains 30 tools; multi-instance mode adds the proxy's `list_instances` tool and an `instance` selector to the forwarded tools.
 
 ### init
 
@@ -77,6 +88,8 @@ On a fresh install, that is, an instance with no human operator, `init` resolves
 `init` does not create an API key once a human operator exists. Use `lific key create`.
 
 Without `--config` or `--here`, the command uses the platform configuration and data directories. If `./lific.toml` already exists, it uses that file. `--here` uses `./lific.toml` and the default `./lific.db` layout.
+
+With `--db`, `init` records the effective absolute database path in the config it writes. An existing config naming a different database produces a conflict instead of silently creating a second tracker. An existing writable config can be updated even when its parent directory is read-only.
 
 ```shell
 lific init [--no-service] [--here] [--name <NAME>] [--auth-mode <MODE>] [--password <PASSWORD>]
@@ -178,8 +191,10 @@ lific service restart
 
 Checks the configuration, database, backups, local server, OAuth discovery, and MCP initialization. When `server.public_url` is set, it also checks its OAuth discovery endpoint. It exits with a nonzero status when any check fails.
 
+Database inspection is read-only by default: it changes no schema or application data and runs no migrations. SQLite may still create or update WAL/SHM bookkeeping files. If the config cannot be read, dependent checks are skipped rather than pointed at defaults. An explicit `--db <PATH>` still permits inspection of that database.
+
 ```shell
-lific doctor [--key <API_KEY>]
+lific doctor [--key <API_KEY>] [--repair]
 ```
 
 **Arguments**
@@ -189,6 +204,51 @@ lific doctor [--key <API_KEY>]
 **Flags**
 
 - `--key <API_KEY>` performs an authorized MCP check. It falls back to `LIFIC_API_KEY` when the flag is omitted.
+- `--repair` applies pending database migrations while checking the database. It requires a readable config or explicit `--db <PATH>`.
+
+## Repository bindings and commit references
+
+### bind
+
+Associates the repository containing the current working directory with a project. With no project argument, reports its current binding. Works with the local and HTTP backends.
+
+```shell
+lific bind [PROJECT] [--create]
+```
+
+`PROJECT` is the project identifier. `--create` creates that project if it does not exist. Identity comes from the normalized `origin` remote and the root of HEAD's first-parent history, not the directory path. See [repository bindings](/docs/repository-bindings) for clone, worktree, shallow-history and conflict behavior.
+
+### git-hook
+
+Closes issues named by `closes`, `fixes`, or `resolves` references in commit messages. A bare issue mention does not close anything. Works with the local and HTTP backends.
+
+```shell
+lific git-hook [--range <A..B>] [--dry-run]
+```
+
+With no `--range`, reads one message from stdin. `--range` reads messages from git history; `--dry-run` reports what would close without writing. The command installs no hook and does not run merely because a commit message contains a reference. See [hook and CI setup](/docs/repository-bindings#close-issues-from-git-or-ci).
+
+## Project archives
+
+### project-archive export
+
+Writes one complete project, including history and linked files, to a private archive. Requires local database access; this command does not use `--backend http`.
+
+```shell
+lific project-archive export <PROJECT> --out <ARCHIVE>
+```
+
+`PROJECT` is the source identifier. `--out` is required and must name a file that does not already exist.
+
+### project-archive import
+
+Imports an archive into a new private project in the local database. An existing project identifier is rejected. The destination database and administrator must already exist.
+
+```shell
+lific project-archive import <ARCHIVE> --user <USERNAME>
+```
+
+`--user` names an active human instance administrator who becomes the new project's lead. Both archive commands return JSON reports with row/blob counts and unresolved references. See [project archives](/docs/project-archives) for transfer limits, attribution, validation, and the browser workflow for remote instances.
 
 ## Authentication and client connection
 

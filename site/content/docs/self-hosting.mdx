@@ -17,6 +17,32 @@ The server provides the REST API, the `/mcp` endpoint, OAuth routes, and the emb
 
 The process user needs read and write access to the database directory. It also needs write access to the backup directory when automatic backups are enabled.
 
+`start` requires an existing database. Initialize it with `lific init --no-service` using the intended configuration before starting a new service. For container first boot, use the explicit bootstrap path below.
+
+## Containers
+
+Build the supplied image from the source checkout:
+
+```shell
+docker build -t lific .
+```
+
+Set `LIFIC_INIT_ADMIN_NAME` and `LIFIC_INIT_ADMIN_PASSWORD` in the environment used to launch the container, then pass those variable names to Docker:
+
+```shell
+docker run --name lific -p 127.0.0.1:3456:3456 \
+  -v lific-data:/data \
+  -e LIFIC_INIT_ADMIN_NAME \
+  -e LIFIC_INIT_ADMIN_PASSWORD \
+  lific
+```
+
+The image runs `lific --db /data/lific.db start --init-if-missing` as a non-root user. A fresh named volume receives the writable `/data` directory prepared by the image. For a host bind mount, create the directory first and grant the container user (UID 65532) write access. The database, attachments and default backups all live under `/data`; retain the volume across container replacements.
+
+First boot requires both admin variables. Bootstrap creates the password-protected administrator with authentication required, signup closed and browser auto-login off. It does not print an operator API key. If bootstrap is interrupted after creating the database but before creating its administrator, starting again with the same variables completes setup. An initialized instance retains its existing administrator and settings; these variables are not a password-reset mechanism and can be omitted on later starts.
+
+The explicit flag also works outside the supplied image, but it requires a deliberately selected config/database path and an existing writable parent directory. It will not create a missing mount directory or use an unconfigured relative database default. For an HTTPS deployment, supply the appropriate `server.public_url`, CORS origins and trusted proxy settings in a [configuration file](/docs/configuration), then follow the reverse-proxy guidance below.
+
 ## Use the built-in service command
 
 `lific init` installs and starts a supported user service unless `--no-service` is passed.
@@ -133,6 +159,8 @@ Without `--force`, restore refuses to overwrite an existing database. With `--fo
 
 An external backup system can copy the automatic backup directory. It can also call `lific dump` before copying the resulting archive.
 
+To move just one project between instances, use [project archives](/docs/project-archives). They preserve project content and history but create a new private project without copying source accounts, credentials or membership. A project archive does not replace an instance backup for rollback after a schema upgrade. See [upgrading](/docs/upgrading) before replacing a running binary.
+
 ## Expose Lific through HTTPS
 
 Lific listens directly on `server.host` and `server.port`. A reverse proxy can terminate HTTPS and forward requests to this listener. Tailscale Serve or Tailscale Funnel can also provide an HTTPS entry point.
@@ -157,3 +185,5 @@ Lific trusts the proxy, not the header: it accepts client-IP forwarding only fro
 `server.cors_origins = []` allows every browser origin. Set explicit origins when the deployment requires a browser origin allowlist.
 
 Keep API key and OAuth authentication enabled for an exposed instance. If `server.mcp_path_token` is configured, its `/mcp/<token>` endpoint bypasses normal authentication. Treat that path token as a bearer secret and expose it only through HTTPS.
+
+[Public projects](/docs/public-projects) provide per-project anonymous reading while normal authentication remains enabled. A lead or instance admin chooses which project's current issues, pages, comments and linked files to publish; publishing does not expose plans, audit history or the member roster.

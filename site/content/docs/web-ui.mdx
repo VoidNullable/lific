@@ -17,6 +17,8 @@ Each project keeps its own navigation state. Issue tabs are All, Recent, Open, a
 
 The sidebar shows recent items for the active section and deliberately excludes transient search results and items from unrelated sections. Its width is resizable and persists in the browser. On desktop it can also be collapsed out of the way from the control beside the Lific wordmark, and the topbar then carries the control that brings it back.
 
+Project ordering is personal: moving a project changes your sidebar without rearranging other users' projects. Project and group action menus include move-up and move-down commands. Desktop expansion controls are separate from destination links, so a link can open in another tab. On mobile, selecting a project opens its navigation pane; Back returns to the project list before dismissing the drawer.
+
 ## Triage issues
 
 Open a project's issue list to:
@@ -29,11 +31,15 @@ Open a project's issue list to:
 
 Board views support status or priority swimlanes, collapsible columns, and hidden columns. On small screens, the board snaps to a usable column at a time. Select an issue to open its peek panel without losing your place in the list.
 
+Use row selection controls for bulk actions. The desktop sub-tab strip has a select-all control, and Ctrl/Cmd+A selects visible list rows while the list owns the shortcut. Clicking a title or identifier opens the issue; clicking elsewhere on a row does not navigate. Export selected issues as one Markdown file, including canonical metadata and comments, up to 16 MiB. A failed export reports an error rather than saving a partial file.
+
 ## Edit an issue
 
 The issue editor supports Markdown preview, a formatting toolbar, issue-reference autocomplete, Mermaid diagrams, code-block copy, labels, modules, dates, relations, comments, and attachments. Use the keyboard shortcut help or command palette when you do not remember a shortcut.
 
 The status chip in the issue topbar is a picker, not a badge: select it to change status without opening the sidebar field.
+
+Linked issue chips show their current status and refresh as it changes. Duplicate relations display both **Duplicate of** and **Duplicated by** links.
 
 Changes can be undone from the UI. Deletes use a deferred undo window, so confirm the item and use Undo immediately if the deletion was accidental.
 
@@ -43,7 +49,7 @@ Comments on issues and pages are threaded in one list. Your own comments carry a
 
 Each comment has a stable anchor link next to its author, so you can point someone at one comment rather than the whole thread. In Markdown, `#42` becomes a link to comment 42 on the current issue or page, and `LIF-25#comment-42` links to a comment on another issue. Both are skipped inside code spans and code blocks.
 
-A long thread opens on its 50 most recent comments, in reading order, with a "Load older comments" control above them. The comment count next to the heading shows a trailing `+` while older comments are still unloaded, so it never reads as a total it is not.
+A long thread opens on up to 50 of its most recent comments, in reading order, with a "Load older comments" control above them. A response-byte budget can make a page shorter. The comment count next to the heading shows a trailing `+` while older comments are still unloaded, so it never reads as a total it is not.
 
 Opening a link to a comment further back loads the pages between automatically and scrolls to it. The automatic search covers up to 250 older comments. Past that it stops, so a link to a comment that was deleted, or one buried thousands of comments deep, cannot walk an entire thread on its own; use "Load older comments" to keep going by hand.
 
@@ -59,9 +65,17 @@ Labels and modules are managed from the project structure controls. Labels are p
 
 The command palette searches actions and content and highlights matching result text. Deep links let you share or bookmark an issue, page, or plan directly.
 
+For a project already loaded in the browser, the palette searches its local issue and page index first. Sparse results trigger server full-text search, whose matches appear below the local results. Context menus and other overlays take ownership of their shortcuts while open.
+
 Identifiers can be copied wherever you meet them: a copy control sits in the breadcrumb trail, on board cards, and in the issue peek panel, and list rows offer the same action in their context menu. The controls are ordinary buttons, so they are reachable by keyboard, and they flip to a check mark once the identifier is on the clipboard.
 
-Appearance settings include accent color, density, font scale, and reduced motion. The interface also provides a dark/light theme choice where supported by the current release. Keyboard shortcuts are listed in the shortcut help panel.
+Appearance settings include accent color, density, font scale, and reduced motion. Choose Light, Dark or System in Settings or the navigation theme menu. Theme controls share the current preference and follow changes from another tab. Profile edits update the navigation account display without a reload. Keyboard shortcuts are listed in the shortcut help panel.
+
+## Transfer or publish a project
+
+A project lead or instance admin can download a complete archive from the project overview. An instance admin imports it through **New project**. This transfers history and linked files into a new private project, rather than producing the human-readable Markdown export. See [project archives](/docs/project-archives) for limits and reference reports.
+
+The overview's **Public view** panel lets a lead or instance admin publish the project's current issues, pages, comments and linked files. Anonymous readers get the usual browsing views without editing controls. Existing content becomes public too, so review it before confirming publication. [Public projects](/docs/public-projects) explains what is included and how to unpublish.
 
 ## Accounts and administration
 
@@ -84,10 +98,10 @@ Signing out of a device, demoting an admin, deactivating an account, lowering a 
 
 Use the connected-tools and API-key controls to review which agents can access the instance. Prefer user-owned bot identities for agents that should follow project membership. See [self-hosting](/docs/self-hosting) and the [REST authorization notes](/docs/rest-api) for operator-level access rules.
 
-The browser's Connected Tools page is a smaller manual-configuration subset: OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code, and Zed. The CLI [connect](/docs/connect) flow supports those clients plus Gemini CLI, Windsurf, Goose, and Crush, with detection and per-client file writes.
+Connected Tools provides templates for OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code, and Zed. **Add custom or named connection** supports other HTTP MCP clients and separate identities for multiple agents or machines. Give each connection its own ID, such as `codex-laptop`; disconnecting it leaves your other connections intact. The CLI [connect](/docs/connect) flow also supports Gemini CLI, Windsurf, Goose, and Crush, with detection and per-client file writes.
 
 ## Mobile and realtime behavior
 
 Lific includes a PWA manifest and icons, so supported browsers can add the site to a phone or desktop home screen and open it in a standalone window. Installation does not provide offline editing or replica synchronization; the app still connects to the Lific server for data.
 
-Open views update through realtime invalidation. If a second browser tab or an agent changes data, the current view refetches the affected state. After a reconnect or resync, wait for the view to refresh before continuing an edit.
+Loaded project lists use a shared browser read model kept current by realtime events. Tabs can share one WebSocket through Web Locks, and reconnecting clients resume by sequence cursor or backfill missed changes. Other views refresh their affected state when needed. After a reconnect or resync, wait for the view to catch up before continuing an edit.

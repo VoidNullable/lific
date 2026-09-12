@@ -1,0 +1,220 @@
+---
+title: Repository bindings and git hooks
+description: Associate a checkout with a Lific project, give stdio agents that context, and close issues from explicitly invoked git hooks or CI jobs.
+---
+
+`lific bind` associates the repository containing your current directory with a
+project. A stdio MCP agent launched from that checkout can then omit the project
+on supported tools. The server stores repository aliases, never your checkout's
+directory path, and never runs git on your machine.
+
+Git-hook automation is separate. A closing reference in a commit message changes
+nothing until you invoke `lific git-hook` or its HTTP endpoint.
+
+## Bind a checkout
+
+Run these commands from inside the repository, using an initialized local
+instance:
+
+```shell
+lific bind PRO
+lific bind
+lific bind --json
+```
+
+The first command binds to an existing project. The next two inspect the binding
+without changing it. If you want to create the project when it does not exist:
+
+```shell
+lific bind PRO --create
+```
+
+The new project's initial name is its identifier. Rename it afterwards in the
+web UI or with `lific project update`. Select the intended database with the
+ordinary global `--config` or `--db` option; a binding does not select an instance
+for you. Local database commands run with the authority of the operator who
+holds that database file.
+
+## Use a remote server
+
+Authenticate with the remote instance, then bind from the local checkout:
+
+```shell
+lific login --url https://tracker.example.com
+lific --backend http --url https://tracker.example.com bind PRO
+lific --backend http --url https://tracker.example.com bind --json
+```
+
+The remote commands need no local database. They compute the aliases locally
+and send them to the selected server. Binding requires project lead or admin
+authority through the server's authorization checks. The credential used by
+your agent must also be able to read the bound project.
+
+For repository-aware remote MCP, configure your client to launch this local
+stdio command from the checkout:
+
+```shell
+lific mcp --remote --url https://tracker.example.com
+```
+
+Use the server's base URL, without `/mcp`. The proxy appends the endpoint and
+reuses CLI credentials, including stored login credentials or an API key supplied
+through `LIFIC_API_KEY`. Credentialed connections to non-loopback hosts require
+HTTPS. A rejected credential or unreachable server produces a JSON-RPC error
+for the call; it does not switch to a local database.
+
+`lific connect --url` configures clients using a local initialized instance. It
+does not provision a remote-only account. Use the manual launch command above
+when no local database exists. See [Connect agents](/docs/connect) for generated
+client configuration and [MCP](/docs/mcp) for direct HTTP authentication.
+
+A client connected directly to the remote HTTP endpoint cannot supply checkout
+context automatically: the server cannot inspect the client's working directory.
+For several servers behind one stdio connection, use
+[multi-instance MCP](/docs/mcp/multi-instance).
+
+## How repository identity works
+
+Lific asks git for up to two aliases:
+
+| Kind | Identity |
+| --- | --- |
+| `remote` | The normalized `origin` URL, prefixed with `v1:`. |
+| `root` | The root commit of HEAD's first-parent history, prefixed with `v1:`. |
+
+Remote normalization removes transport syntax, credentials and a trailing
+`.git`, and lowercases the host. Repository path case and explicit ports remain
+significant. SSH and HTTPS URLs for the same host and path can therefore match.
+Local filesystem paths and `file://` remotes do not produce a remote alias.
+
+A shallow clone omits the root alias because its oldest visible commit may be
+a shallow boundary. An empty repository has no root alias either. A checkout
+with neither usable alias cannot be bound; add a hosted `origin` or create a
+commit in a non-shallow repository first.
+
+Moving a checkout does not change these identities. Another clone can resolve
+the existing binding when its aliases match. Forks can share a root commit, so
+an alias is a lookup key, not proof of repository ownership or a grant of project
+access. Resolution only reports projects the caller can see under the instance's
+authorization policy.
+
+Reads never accumulate aliases. If the remote changes but the root still
+matches, the repository can keep resolving without recording the new remote.
+Run `lific bind PRO` explicitly to add the currently presented aliases after
+reviewing them. Repository bindings do not transfer in
+[project archives](/docs/project-archives).
+
+## Which tools use the binding
+
+Local stdio and the remote stdio proxy resolve repository context at startup.
+Launch them from the intended checkout and restart the MCP process after
+changing a binding. The initialization instructions report whether the session
+has a bound project. A missing or conflicting binding does not choose a project
+for you; pass explicit projects while diagnosing it.
+
+| Tool | When an omitted `project` uses the binding |
+| --- | --- |
+| `list_issues`, `create_issue`, `get_board`, `create_plan` | Whenever the session has a bound project. |
+| `list_resources` | Only for `resource_type` values `issue`, `plan`, `module`, `label` and `folder`. |
+
+An explicit project always wins. These defaults do not narrow `search`, make
+`create_page` stop creating workspace pages, or narrow `list_resources` for
+pages. Tools taking a resource identifier still need that identifier. Destructive
+tools do not gain an implicit project, and a binding never increases permissions.
+
+## Diagnose or remove a binding
+
+`lific bind --json` reports `resolution` as `none`, `one` or `conflict`, alongside
+the presented aliases. `project` is populated for `one`; `projects` lists
+candidates for `conflict`. Each alias reports whether it matched. An unmatched
+alias alongside a resolved project is normal when only the other alias is stored.
+
+If no binding appears, check the selected instance, the agent's working
+directory, its project access and whether git is installed. A caller without
+visibility cannot distinguish an inaccessible binding from no binding.
+
+If aliases point to different bindings, the CLI refuses to reassign them
+silently. Inspect the REST binding records, then delete an incorrect binding or
+merge them deliberately:
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/repos/resolve` | Resolve an `aliases` array of objects with `kind` and `value`. Visible matches include binding IDs. |
+| `POST /api/repos/bind` | Bind a `project` identifier and an `aliases` array. Existing aliases on another binding are refused. |
+| `GET /api/projects/{id}/bindings` | List a project's bindings and their identities, with project read access. |
+| `DELETE /api/repos/bindings/{id}` | Remove a binding with lead or admin authority on its project. |
+| `POST /api/repos/merge` | Move aliases from binding ID `from` into binding ID `into`, with lead or admin authority on both projects. |
+
+`from` and `into` are numeric binding IDs, not project IDs. Merging bindings does
+not merge project contents. The destination binding survives; the source binding
+is removed. After correcting the records, rerun `lific bind` and restart the agent.
+
+## Close issues from git or CI
+
+The parser recognizes `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+`resolve`, `resolves` and `resolved`, followed by whitespace and an issue
+identifier. Matching is case-insensitive. Repeat the keyword for each issue:
+
+```text
+Fixes PRO-42. Closes PRO-43.
+```
+
+A bare mention such as `see PRO-42` does nothing. Repeated references are
+deduplicated. There is no branch or repository-binding filter: the identifiers
+in the messages select the issues, subject to the caller's permissions.
+
+Preview an existing message without writing:
+
+```shell
+git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook --dry-run
+```
+
+For local post-commit automation, put this in the repository's configured
+`post-commit` hook and make the hook executable. Use your actual server address
+and ensure the hook process can read the intended CLI credentials:
+
+```sh
+#!/bin/sh
+git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook
+```
+
+Respect any existing `core.hooksPath` and existing hooks rather than overwriting
+them. A post-commit failure does not undo the commit; inspect the error and rerun
+the command after fixing access. For a local tracker, replace the HTTP options
+with an explicit database or configuration path.
+
+In CI, select the exact commits you intend to process:
+
+```shell
+lific --backend http --url https://tracker.example.com git-hook --range origin/master..HEAD --dry-run
+```
+
+Remove `--dry-run` only after checking the preview. The range is passed to
+`git log`; choose the base and head for your CI event and fetch the required
+history first. The example range can be empty after a fetch moves `origin/master`
+to `HEAD`. Run write-enabled automation only for trusted commits, using a
+credential scoped to the projects that job should update.
+
+The stdin form also works in a `commit-msg` hook as `lific git-hook < "$1"`, but
+it writes before the commit is guaranteed to succeed. Use post-commit or a CI
+step after your acceptance checks when closure should follow completed work.
+
+The equivalent HTTP endpoint is `POST /api/git-hook`:
+
+```json
+{
+  "messages": ["Fixes PRO-42. Closes PRO-43."],
+  "dry_run": true
+}
+```
+
+CLI JSON and HTTP responses contain `closed` and `skipped`; a dry run uses
+`would_close` instead of `closed`. Skipped entries report `not found`,
+`already closed`, or, over HTTP, `forbidden` for a visible issue the caller may
+not update. Issues already done or cancelled remain unchanged. Invisible issues
+are reported as not found. HTTP checks maintainer authority on each issue;
+local database writes use operator authority.
+
+Closures use ordinary status updates, including content history, status
+transitions and live notifications. Inspect the per-issue results rather than
+assuming every reference closed successfully.
