@@ -5,7 +5,7 @@
 //! `ServerInitializeError::ExpectedInitializeRequest` and the session dies with
 //! no reply, so a discovery-capable client reads EOF mid-handshake instead of a
 //! JSON-RPC error it could fall back from (`client is closing: EOF`). See
-//! `BUG-MCP-server-discover-crash.md`.
+//! https://github.com/VoidNullable/lific/issues/57.
 //!
 //! This transport hands rmcp a stream that swallows pre-initialize traffic rmcp
 //! would abort on, and answers unsupported requests itself with `-32601`
@@ -16,17 +16,15 @@ use rmcp::model::{
     ClientJsonRpcMessage, ClientRequest, ErrorCode, ErrorData, ServerJsonRpcMessage,
 };
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
-use rmcp::transport::{
-    IntoTransport, Transport, async_rw::TransportAdapterAsyncRW,
-};
+use rmcp::transport::{IntoTransport, Transport, async_rw::TransportAdapterAsyncRW};
 
 /// Wraps a [`Transport`] so rmcp's `serve` loop never sees a pre-initialize
 /// message it would reject the session for. Unsupported requests are answered
 /// with `-32601` and everything else is dropped until a real `initialize`
 /// arrives; after that every message is forwarded untouched.
-pub(crate) struct PreInitGuard<T>
+struct PreInitGuard<T>
 where
-    T: Transport<RoleServer> + Send + 'static,
+    T: Transport<RoleServer> + 'static,
 {
     inner: T,
     initialized: bool,
@@ -34,10 +32,13 @@ where
 
 impl<T> PreInitGuard<T>
 where
-    T: Transport<RoleServer> + Send + 'static,
+    T: Transport<RoleServer> + 'static,
 {
-    pub(crate) fn new(inner: T) -> Self {
-        Self { inner, initialized: false }
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            initialized: false,
+        }
     }
 }
 
@@ -47,18 +48,17 @@ where
 pub(crate) fn guard_stdio(
     reader: tokio::io::Stdin,
     writer: tokio::io::Stdout,
-) -> impl Transport<RoleServer, Error = std::io::Error> + Send + 'static {
-    let inner = IntoTransport::<
-        RoleServer,
-        std::io::Error,
-        TransportAdapterAsyncRW
-    >::into_transport((reader, writer));
+) -> impl Transport<RoleServer, Error = std::io::Error> + 'static {
+    let inner =
+        IntoTransport::<RoleServer, std::io::Error, TransportAdapterAsyncRW>::into_transport((
+            reader, writer,
+        ));
     PreInitGuard::new(inner)
 }
 
 impl<T> Transport<RoleServer> for PreInitGuard<T>
 where
-    T: Transport<RoleServer> + Send + 'static,
+    T: Transport<RoleServer> + 'static,
 {
     type Error = T::Error;
 
@@ -79,9 +79,9 @@ where
                     }
                     match msg {
                         ClientJsonRpcMessage::Request(req) => match req.request {
-                            ClientRequest::PingRequest(_) => return Some(
-                                ClientJsonRpcMessage::Request(req),
-                            ),
+                            ClientRequest::PingRequest(_) => {
+                                return Some(ClientJsonRpcMessage::Request(req));
+                            }
                             ClientRequest::InitializeRequest(_) => {
                                 self.initialized = true;
                                 return Some(ClientJsonRpcMessage::Request(req));
@@ -90,25 +90,32 @@ where
                                 // rmcp would abort on this request; answer it
                                 // ourselves so a discovery client falls back to
                                 // `initialize` instead of seeing EOF.
-                                self.inner
+                                if let Err(error) = self
+                                    .inner
                                     .send(ServerJsonRpcMessage::error(
                                         ErrorData::new(
                                             ErrorCode::METHOD_NOT_FOUND,
                                             "Method not found",
                                             None,
                                         ),
-                                        req.id.clone(),
+                                        req.id,
                                     ))
                                     .await
-                                    .ok();
-                                continue
+                                {
+                                    tracing::warn!(%error, "failed to send pre-init rejection");
+                                    // receive() represents transport failure as EOF.
+                                    // Stop the handshake instead of waiting on a
+                                    // client that cannot receive our responses.
+                                    return None;
+                                }
+                                continue;
                             }
                         },
                         _ => {
                             // A pre-initialize notification, response or error
                             // has no request to answer; drop it rather than let
                             // rmcp's loop abort the session on it.
-                            continue
+                            continue;
                         }
                     }
                 }
@@ -116,9 +123,10 @@ where
         }
     }
 
-    fn close(
-        &mut self,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         self.inner.close()
     }
 }
+
+#[cfg(test)]
+mod tests;
