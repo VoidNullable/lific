@@ -108,8 +108,9 @@ export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: Ope
       } finally {
         if (gesture === "ctrl") await page.keyboard.up("Control");
       }
-      phase = `${label}: popup load`;
-      await popup.waitForLoadState();
+      // Hash-only links can create a correctly addressed page without another
+      // document lifecycle event. The verifier owns readiness by waiting for
+      // content from the rendered app.
       phase = `${label}: verify popup`;
       await verify(popup);
       await mark(`${label}: before popup close`);
