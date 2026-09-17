@@ -110,11 +110,16 @@ export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: Ope
       }
       // Hash-only links can create a correctly addressed page without another
       // document lifecycle event. The verifier owns readiness by waiting for
-      // content from the rendered app.
+      // content from the rendered app. Activate the new tab like a user would:
+      // Chromium can defer script execution in background tabs, even after the
+      // document response arrives. A URL alone does not prove the app mounted.
+      phase = `${label}: activate popup`;
+      await popup.bringToFront();
       phase = `${label}: verify popup`;
       await verify(popup);
       await mark(`${label}: before popup close`);
       await popup.close();
+      await page.bringToFront();
       await mark(`${label}: after popup close`);
       await afterClose?.();
       console.log(`[native links:${label}] passed; popup closed`);
