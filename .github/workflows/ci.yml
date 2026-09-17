@@ -81,6 +81,8 @@ jobs:
       - name: Frontend unit tests
         run: bun test
         working-directory: web
+      - name: Community proxy security tests
+        run: bun test ./deploy/community-redirect/worker.test.mjs
       - name: Build
         run: bun run build
         working-directory: web

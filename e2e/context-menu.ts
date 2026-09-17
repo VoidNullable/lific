@@ -156,6 +156,7 @@ try {
     for (const gesture of ["ctrl", "middle"] as const) {
       await openPopup(item("Navigate"), gesture, async popup => {
         assert.ok(popup.url().endsWith("#/destination"));
+        await popup.locator("#trigger").waitFor();
       }, async () => {
         assert.deepEqual(await page.evaluate(() => (window as any).actions), ["middle"]);
       });

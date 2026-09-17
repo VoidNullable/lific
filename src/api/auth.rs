@@ -99,6 +99,7 @@ pub(super) async fn auth_signup(
     let ip_key = format!(
         "signup_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+            .map_err(|_| LificError::Unavailable("invalid proxy identity".into()))?
     );
     if let Some(Extension(ref rl)) = limiter {
         if !rl.check(&ip_key) {
@@ -267,6 +268,7 @@ pub(super) async fn auth_login(
     let ip_key = format!(
         "login_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+            .map_err(|_| LificError::Unavailable("invalid proxy identity".into()))?
     );
     let reservation = match &limiter {
         Some(Extension(rl)) => match crate::ratelimit::Reservation::acquire(rl, &ip_key, &id_key) {
@@ -709,6 +711,7 @@ pub(super) async fn refresh_session(
     let ip_key = format!(
         "reauth_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+            .map_err(|_| LificError::Unavailable("invalid proxy identity".into()))?
     );
     let user_key = format!("reauth_user:{}", caller.id);
     let reservation = match (&supplied_password, &limiter) {
@@ -882,6 +885,7 @@ pub(super) async fn change_password(
     let ip_key = format!(
         "password_change_ip:{}",
         crate::ratelimit::client_ip(peer.ip(), &headers, &trusted_proxies)
+            .map_err(|_| LificError::Unavailable("invalid proxy identity".into()))?
     );
     let user_key = format!("password_change_user:{}", user.id);
     let reservation = match &limiter {

@@ -103,6 +103,16 @@ const PUBLIC_READS_PER_MINUTE: usize = 240;
 /// a `Retry-After`, not a queue.
 const PUBLIC_CONCURRENCY: usize = 4;
 
+/// Public attachment downloads that may stream at once. Downloads use their
+/// own budget because a slow reader can hold one for minutes, while ordinary
+/// public reads need the database budget only until their response is built.
+const PUBLIC_DOWNLOAD_CONCURRENCY: usize = 4;
+
+/// Expensive public thumbnail and preview derivations allowed at once. A
+/// maximum-size raster can decode to roughly 200 MB before output buffers, so
+/// one at a time keeps the 512 MB deployment within its memory budget.
+const PUBLIC_DERIVE_CONCURRENCY: usize = 1;
+
 /// Largest attachment a public thumbnail or preview will be *derived* from.
 /// The download streams, but a thumbnail decodes the whole image and a
 /// preview parses the whole archive in memory; four anonymous requests for a
@@ -119,6 +129,10 @@ const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 pub struct PublicReadLimiter(pub RateLimiter);
 
 pub struct PublicConcurrency(pub Arc<Semaphore>);
+
+pub struct PublicDownloadConcurrency(pub Arc<Semaphore>);
+
+pub struct PublicDeriveConcurrency(pub Arc<Semaphore>);
 
 /// Build the anonymous router.
 ///
@@ -140,6 +154,12 @@ pub fn router(db: DbPool, store: AttachmentStore, trusted_proxies: Arc<[IpNetwor
         Arc::new(PublicConcurrency(Arc::new(Semaphore::new(
             PUBLIC_CONCURRENCY,
         )))),
+        Arc::new(PublicDownloadConcurrency(Arc::new(Semaphore::new(
+            PUBLIC_DOWNLOAD_CONCURRENCY,
+        )))),
+        Arc::new(PublicDeriveConcurrency(Arc::new(Semaphore::new(
+            PUBLIC_DERIVE_CONCURRENCY,
+        )))),
     )
 }
 
@@ -151,6 +171,8 @@ fn router_with_bounds(
     trusted_proxies: Arc<[IpNetwork]>,
     limiter: Arc<PublicReadLimiter>,
     concurrency: Arc<PublicConcurrency>,
+    download_concurrency: Arc<PublicDownloadConcurrency>,
+    derive_concurrency: Arc<PublicDeriveConcurrency>,
 ) -> Router {
     const P: &str = "/public/api/projects/{project}";
     Router::new()
@@ -196,6 +218,8 @@ fn router_with_bounds(
         .layer(middleware::from_fn(no_store_headers))
         .layer(Extension(limiter))
         .layer(Extension(concurrency))
+        .layer(Extension(download_concurrency))
+        .layer(Extension(derive_concurrency))
         .layer(Extension(trusted_proxies))
         .layer(Extension(store))
         .with_state(db)
@@ -233,10 +257,8 @@ async fn no_store_headers(request: Request<Body>, next: Next) -> Response<Body> 
 /// concurrency budget, before it reaches a database connection.
 ///
 /// The permit is held in a local across `next.run`, so it covers the whole
-/// handler. It is then handed to the response so it also covers a streaming
-/// body, which is polled long after this function returns: the download
-/// handler moves it into the stream, and for a buffered response it is dropped
-/// here, which is correct because the body is already in memory.
+/// handler. Streaming downloads have a separate concurrency budget because
+/// their bodies are polled long after this function returns.
 ///
 /// Both extensions are read as `Option` so a router assembled without them is
 /// unbounded rather than broken; `router` above always installs both.
@@ -255,7 +277,11 @@ async fn enforce_load_bounds(mut request: Request<Body>, next: Next) -> Response
         .get::<Arc<PublicReadLimiter>>()
         .cloned()
     {
-        let key = format!("public:{}", public_client_ip(peer, &request));
+        let client = match public_client_ip(peer, &request) {
+            Ok(client) => client,
+            Err(error) => return error.into_response(),
+        };
+        let key = format!("public:{client}");
         if !limiter.0.check(&key) {
             return LificError::TooManyRequests(
                 "too many requests; slow down and try again shortly".into(),
@@ -278,42 +304,21 @@ async fn enforce_load_bounds(mut request: Request<Body>, next: Next) -> Response
         None => None,
     };
 
-    // The handler extracts what it needs and drops the request before it runs,
-    // so a permit parked only in the extensions would be released immediately.
-    // `held` stays in this frame across `next.run`, and the handler gets a
-    // clone of the same `Arc`: a streaming body can take ownership out of it,
-    // and anything else leaves it here to be dropped when this returns.
-    let held = permit.map(|permit| HeldPermit(Arc::new(std::sync::Mutex::new(Some(permit)))));
-    if let Some(held) = held.clone() {
-        request.extensions_mut().insert(held);
-    }
     let response = next.run(request).await;
-    drop(held);
+    drop(permit);
     response
-}
-
-/// The concurrency permit for the request in flight, offered to a handler that
-/// returns a streaming body so the permit outlives this middleware.
-///
-/// A handler that does not take it leaves the permit here, and it is released
-/// when the request extensions are dropped after the response is built, which
-/// is the right moment for a buffered body.
-#[derive(Clone)]
-struct HeldPermit(Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>);
-
-impl HeldPermit {
-    fn take(&self) -> Option<OwnedSemaphorePermit> {
-        self.0.lock().ok().and_then(|mut slot| slot.take())
-    }
 }
 
 /// The rate-limit key: the client IP as [`ratelimit::client_ip`] resolves it,
 /// which believes a forwarding header only when the peer is a trusted proxy.
 /// A request with no peer keys on one shared bucket, so the failure direction
 /// is "shared limit", not "no limit".
-fn public_client_ip(peer: Option<SocketAddr>, request: &Request<Body>) -> String {
+fn public_client_ip(
+    peer: Option<SocketAddr>,
+    request: &Request<Body>,
+) -> Result<String, LificError> {
     let Some(peer) = peer else {
-        return "unknown".into();
+        return Ok("unknown".into());
     };
     let empty: Arc<[IpNetwork]> = Arc::from(Vec::new());
     let trusted = request
@@ -323,6 +328,7 @@ fn public_client_ip(peer: Option<SocketAddr>, request: &Request<Body>) -> String
         .unwrap_or(empty);
     let headers: &HeaderMap = request.headers();
     ratelimit::client_ip(peer.ip(), headers, &trusted)
+        .map_err(|_| LificError::Unavailable("invalid proxy identity".into()))
 }
 
 // ── Handlers ─────────────────────────────────────────────────
@@ -550,6 +556,28 @@ fn public_blob(db: &DbPool, project: &str, id: &str) -> Result<Attachment, Lific
     })
 }
 
+async fn run_public_blocking<T, F>(job: F) -> Result<T, LificError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, LificError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|error| LificError::Internal(format!("public media task failed: {error}")))?
+}
+
+async fn run_public_derivation<T, F>(permit: OwnedSemaphorePermit, job: F) -> Result<T, LificError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, LificError> + Send + 'static,
+{
+    run_public_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+}
+
 /// `GET /public/api/projects/{project}/attachments/{id}`
 ///
 /// Re-authorized from scratch against the project in the path: an id lifted
@@ -568,7 +596,7 @@ fn public_blob(db: &DbPool, project: &str, id: &str) -> Result<Attachment, Lific
 async fn download_attachment(
     State(db): State<DbPool>,
     Extension(store): Extension<AttachmentStore>,
-    permit: Option<Extension<HeldPermit>>,
+    Extension(download_concurrency): Extension<Arc<PublicDownloadConcurrency>>,
     Path((project, id)): Path<(String, String)>,
 ) -> Result<Response<Body>, LificError> {
     let blob = public_blob(&db, &project, &id)?;
@@ -593,10 +621,12 @@ async fn download_attachment(
         format!("attachment; filename=\"{}\"", header_safe(&blob.filename))
     };
 
-    let held = permit.and_then(|Extension(held)| held.take());
+    let permit = Arc::clone(&download_concurrency.0)
+        .try_acquire_owned()
+        .map_err(|_| LificError::Unavailable("public downloads are busy".into()))?;
     let body = download_body(
         file,
-        held,
+        permit,
         std::time::Duration::from_secs(15),
         std::time::Duration::from_secs(5 * 60),
     );
@@ -623,27 +653,47 @@ async fn download_attachment(
 async fn attachment_thumbnail(
     State(db): State<DbPool>,
     Extension(store): Extension<AttachmentStore>,
+    Extension(derive_concurrency): Extension<Arc<PublicDeriveConcurrency>>,
     Path((project, id)): Path<(String, String)>,
 ) -> Result<Response<Body>, LificError> {
     let blob = public_blob(&db, &project, &id)?;
     if !storage::is_raster_mime(&blob.mime) {
         return Err(not_found());
     }
-    let thumb = match store.read_thumb(&blob.sha256)? {
+    let cached = run_public_blocking({
+        let store = store.clone();
+        let sha256 = blob.sha256.clone();
+        move || store.read_thumb(&sha256)
+    })
+    .await?;
+    let thumb = match cached {
         Some(bytes) => bytes,
         None => {
             if blob.size_bytes > PUBLIC_DERIVE_MAX_BYTES {
                 return Err(not_found());
             }
-            let source = store.read(&blob.sha256)?;
-            match storage::generate_thumbnail(&source) {
-                Ok(Some(bytes)) => {
-                    if let Err(e) = store.write_thumb(&blob.sha256, &bytes) {
+            let permit = Arc::clone(&derive_concurrency.0)
+                .try_acquire_owned()
+                .map_err(|_| LificError::Unavailable("public media processing is busy".into()))?;
+            let derived = run_public_derivation(permit, {
+                let store = store.clone();
+                let sha256 = blob.sha256.clone();
+                move || {
+                    let source = store.read(&sha256)?;
+                    let bytes = match storage::generate_thumbnail(&source) {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) | Err(_) => return Ok(None),
+                    };
+                    if let Err(e) = store.write_thumb(&sha256, &bytes) {
                         tracing::warn!(error = %e, "failed to cache public attachment thumbnail");
                     }
-                    bytes
+                    Ok(Some(bytes))
                 }
-                Ok(None) | Err(_) => return Err(not_found()),
+            })
+            .await?;
+            match derived {
+                Some(bytes) => bytes,
+                None => return Err(not_found()),
             }
         }
     };
@@ -668,19 +718,31 @@ async fn attachment_thumbnail(
 async fn attachment_preview(
     State(db): State<DbPool>,
     Extension(store): Extension<AttachmentStore>,
+    Extension(derive_concurrency): Extension<Arc<PublicDeriveConcurrency>>,
     Path((project, id)): Path<(String, String)>,
 ) -> Result<axum::Json<crate::preview::Preview>, LificError> {
     let blob = public_blob(&db, &project, &id)?;
     if blob.size_bytes > PUBLIC_DERIVE_MAX_BYTES {
         return Err(not_found());
     }
-    let bytes = store.read(&blob.sha256)?;
-    Ok(axum::Json(crate::preview::preview_bytes(&bytes)?))
+    let permit = Arc::clone(&derive_concurrency.0)
+        .try_acquire_owned()
+        .map_err(|_| LificError::Unavailable("public media processing is busy".into()))?;
+    let preview = run_public_derivation(permit, {
+        let store = store.clone();
+        let sha256 = blob.sha256.clone();
+        move || {
+            let bytes = store.read(&sha256)?;
+            crate::preview::preview_bytes(&bytes)
+        }
+    })
+    .await?;
+    Ok(axum::Json(preview))
 }
 
 fn download_body(
     file: std::fs::File,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: OwnedSemaphorePermit,
     idle_timeout: std::time::Duration,
     max_duration: std::time::Duration,
 ) -> Body {
@@ -750,6 +812,8 @@ mod tests {
         /// The router's own semaphore, so a test can observe permits rather
         /// than infer them from status codes.
         concurrency: Arc<PublicConcurrency>,
+        download_concurrency: Arc<PublicDownloadConcurrency>,
+        derive_concurrency: Arc<PublicDeriveConcurrency>,
     }
 
     /// The peer every fixture request appears to come from. Inside the trusted
@@ -785,6 +849,12 @@ mod tests {
         let concurrency = Arc::new(PublicConcurrency(Arc::new(Semaphore::new(
             PUBLIC_CONCURRENCY,
         ))));
+        let download_concurrency = Arc::new(PublicDownloadConcurrency(Arc::new(Semaphore::new(
+            PUBLIC_DOWNLOAD_CONCURRENCY,
+        ))));
+        let derive_concurrency = Arc::new(PublicDeriveConcurrency(Arc::new(Semaphore::new(
+            PUBLIC_DERIVE_CONCURRENCY,
+        ))));
         let app = router_with_bounds(
             db.clone(),
             store.clone(),
@@ -794,6 +864,8 @@ mod tests {
                 std::time::Duration::from_secs(60),
             ))),
             Arc::clone(&concurrency),
+            Arc::clone(&download_concurrency),
+            Arc::clone(&derive_concurrency),
         )
         .layer(MockConnectInfo(peer()));
         Fixture {
@@ -802,6 +874,8 @@ mod tests {
             _store_guard: tmp,
             store,
             concurrency,
+            download_concurrency,
+            derive_concurrency,
         }
     }
 
@@ -1336,6 +1410,76 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+    }
+
+    /// Thumbnail decoding and preview parsing read attacker-selected files
+    /// into memory. They share a separate, fail-fast budget so public readers
+    /// cannot start several maximum-size derivations at once.
+    #[tokio::test]
+    async fn derived_views_are_refused_while_the_derivation_budget_is_busy() {
+        let f = fixture();
+        let project = f.seed_project("PUB", true);
+        let issue = f.seed_issue(project, "Public issue", "");
+        let id = f.seed_attachment(AttachmentEntity::Issue, issue, "image.png");
+        f.db.write()
+            .unwrap()
+            .execute(
+                "UPDATE attachments SET mime = 'image/png' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let _busy = Arc::clone(&f.derive_concurrency.0)
+            .try_acquire_owned()
+            .unwrap();
+
+        for suffix in ["/thumbnail", "/preview"] {
+            assert_eq!(
+                f.get(&format!(
+                    "/public/api/projects/PUB/attachments/{id}{suffix}"
+                ))
+                .await
+                .status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{suffix} must fail before reading the source"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_derivation_work_leaves_the_async_runtime_responsive() {
+        let runtime_thread = std::thread::current().id();
+        let worker_thread = run_public_blocking(|| Ok(std::thread::current().id()))
+            .await
+            .unwrap();
+        assert_ne!(runtime_thread, worker_thread);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_derivation_keeps_its_permit_until_blocking_work_stops() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore).try_acquire_owned().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(run_public_derivation(permit, move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Ok(())
+        }));
+
+        started_rx.await.unwrap();
+        task.abort();
+        tokio::task::yield_now().await;
+        assert_eq!(semaphore.available_permits(), 0);
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while semaphore.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     /// The attachment id space is global and countable, so the download has
@@ -1894,9 +2038,10 @@ mod tests {
         assert_eq!(semaphore.available_permits(), 1);
     }
 
-    /// An active producer retains its permit while the bounded channel is full.
+    /// An active producer must not retain a permit needed by ordinary public
+    /// reads while its bounded channel is full.
     #[tokio::test]
-    async fn a_stalled_large_download_holds_its_permit_until_production_ends() {
+    async fn a_stalled_large_download_releases_the_public_read_permit() {
         let f = fixture();
         let project = f.seed_project("PUB", true);
         let issue = f.seed_issue(project, "Public issue", "");
@@ -1923,16 +2068,39 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(
             f.concurrency.0.available_permits(),
-            PUBLIC_CONCURRENCY - 1,
-            "the permit must still be held while the producer is blocked"
+            PUBLIC_CONCURRENCY,
+            "a stalled download must not occupy an ordinary public read permit"
         );
+        assert_eq!(
+            f.download_concurrency.0.available_permits(),
+            PUBLIC_DOWNLOAD_CONCURRENCY - 1,
+            "the producer must retain its separate download permit"
+        );
+        let remaining_downloads = Arc::clone(&f.download_concurrency.0)
+            .try_acquire_many_owned((PUBLIC_DOWNLOAD_CONCURRENCY - 1) as u32)
+            .unwrap();
+        assert_eq!(
+            f.get(&format!(
+                "/public/api/projects/PUB/attachments/{attachment}"
+            ))
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an exhausted download budget must fail fast"
+        );
+        assert_eq!(
+            f.get("/public/api/projects/PUB").await.status(),
+            StatusCode::OK,
+            "download exhaustion must not close ordinary public reads"
+        );
+        drop(remaining_downloads);
 
         let remaining = body.collect().await.unwrap().to_bytes();
         assert_eq!([first.as_ref(), remaining.as_ref()].concat(), expected);
+        assert_eq!(f.concurrency.0.available_permits(), PUBLIC_CONCURRENCY);
         assert_eq!(
-            f.concurrency.0.available_permits(),
-            PUBLIC_CONCURRENCY,
-            "the permit is released once the body is finished"
+            f.download_concurrency.0.available_permits(),
+            PUBLIC_DOWNLOAD_CONCURRENCY
         );
     }
 
@@ -1943,7 +2111,7 @@ mod tests {
         let permit = Arc::clone(&semaphore).try_acquire_owned().unwrap();
         let body = download_body(
             file,
-            Some(permit),
+            permit,
             std::time::Duration::from_millis(idle_ms),
             std::time::Duration::from_millis(max_ms),
         );

@@ -393,6 +393,17 @@ struct RegisterRequest {
     response_types: Option<Vec<String>>,
 }
 
+fn invalid_proxy_identity_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "temporarily_unavailable",
+            "error_description": "request proxy identity could not be verified"
+        })),
+    )
+        .into_response()
+}
+
 async fn register_client(
     State(state): State<OAuthState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -402,7 +413,10 @@ async fn register_client(
     // ── Rate limit per source IP ──
     // /oauth/register is unauthenticated by spec (RFC 7591), so without this
     // anyone on the internet can mint unlimited clients.
-    let ip = crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies);
+    let ip = match crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies) {
+        Ok(ip) => ip,
+        Err(_) => return invalid_proxy_identity_response(),
+    };
     let key = format!("oauth_register:{ip}");
     if !state.register_limiter.check(&key) {
         let retry = state.register_limiter.retry_after(&key);
@@ -1450,7 +1464,10 @@ async fn device_authorization(
     body: axum::body::Bytes,
 ) -> Response {
     // ── Rate limit per source IP (reuse the register limiter) ──
-    let ip = crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies);
+    let ip = match crate::ratelimit::client_ip(peer.ip(), &headers, &state.trusted_proxies) {
+        Ok(ip) => ip,
+        Err(_) => return invalid_proxy_identity_response(),
+    };
     let key = format!("oauth_device_authorization:{ip}");
     if !state.register_limiter.check(&key) {
         let retry = state.register_limiter.retry_after(&key);

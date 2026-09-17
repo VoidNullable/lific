@@ -11,10 +11,11 @@ port = 3456
 # are allowed because the .fly.dev address still answers directly.
 public_url = "https://community.lific.dev"
 cors_origins = ["https://community.lific.dev", "https://lific-community.fly.dev"]
-# Fly Proxy is the only thing that can reach this port: it connects from the
-# private 6PN / 172.16 networks and appends the app's own anycast address to
-# X-Forwarded-For. Every hop has to be listed or all visitors share one
-# rate-limit bucket. The last two are this app's anycast addresses.
+# Fly Proxy is the only direct peer of this port. The community Worker sends
+# the original client in an authenticated header using the shared
+# LIFIC_TRUSTED_PROXY_SECRET environment secret. Direct .fly.dev requests lack
+# that secret and still resolve through Fly's appended X-Forwarded-For chain.
+# The last two entries are this app's anycast addresses.
 trusted_proxies = [
   "fdaa::/16",
   "172.16.0.0/12",

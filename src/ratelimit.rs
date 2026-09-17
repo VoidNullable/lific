@@ -4,10 +4,20 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 /// Maximum number of live keys retained by one limiter.
 const MAX_KEYS: usize = 10_000;
 const MAX_KEY_BYTES: usize = 1024;
+const TRUSTED_PROXY_SECRET_ENV: &str = "LIFIC_TRUSTED_PROXY_SECRET";
+const AUTHENTICATED_CLIENT_IP_HEADER: &str = "x-lific-client-ip";
+const PROXY_SECRET_HEADER: &str = "x-lific-proxy-secret";
+
+/// A trusted peer supplied only part of the authenticated client identity, or
+/// its shared secret did not match. Callers fail the request closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidProxyIdentity;
 
 /// Format a rate-limit response without claiming that an unavailable retry
 /// delay is zero seconds.
@@ -146,11 +156,59 @@ fn x_forwarded_for_client_ip(headers: &HeaderMap, trusted_proxies: &[IpNetwork])
 /// a trusted peer, all XFF header lines form one ordered chain: walk it right
 /// to left, skip trusted proxy hops, and use the first untrusted IP. A malformed
 /// or all-trusted XFF chain falls back to the peer; `X-Real-IP` is consulted
-/// only when XFF is absent. Header-derived values are always strict `IpAddr`s.
-pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted_proxies: &[IpNetwork]) -> String {
+/// only when XFF is absent. When `LIFIC_TRUSTED_PROXY_SECRET` is set, a trusted
+/// peer may instead authenticate `X-Lific-Client-IP` with
+/// `X-Lific-Proxy-Secret`. Supplying either dedicated header without a valid
+/// pair is an error instead of silently sharing the proxy's limiter bucket.
+/// Header-derived values are always strict `IpAddr`s.
+pub fn client_ip(
+    peer: IpAddr,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpNetwork],
+) -> Result<String, InvalidProxyIdentity> {
+    let proxy_secret = std::env::var(TRUSTED_PROXY_SECRET_ENV).ok();
+    client_ip_checked(peer, headers, trusted_proxies, proxy_secret.as_deref())
+}
+
+fn proxy_secrets_match(expected: &str, provided: &str) -> bool {
+    let Ok(mut expected_mac) = Hmac::<Sha256>::new_from_slice(expected.as_bytes()) else {
+        return false;
+    };
+    let Ok(mut provided_mac) = Hmac::<Sha256>::new_from_slice(provided.as_bytes()) else {
+        return false;
+    };
+    expected_mac.update(b"lific trusted proxy");
+    provided_mac.update(b"lific trusted proxy");
+    expected_mac
+        .verify_slice(&provided_mac.finalize().into_bytes())
+        .is_ok()
+}
+
+fn client_ip_checked(
+    peer: IpAddr,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpNetwork],
+    proxy_secret: Option<&str>,
+) -> Result<String, InvalidProxyIdentity> {
     let peer = normalize_ip(peer);
     if !trusted_proxies.iter().any(|range| range.contains(peer)) {
-        return peer.to_string();
+        return Ok(peer.to_string());
+    }
+
+    let has_dedicated_identity = headers.contains_key(AUTHENTICATED_CLIENT_IP_HEADER)
+        || headers.contains_key(PROXY_SECRET_HEADER);
+    if has_dedicated_identity {
+        let expected = proxy_secret
+            .filter(|secret| !secret.is_empty())
+            .ok_or(InvalidProxyIdentity)?;
+        let provided = headers
+            .get(PROXY_SECRET_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(InvalidProxyIdentity)?;
+        let client = header_ip(headers, AUTHENTICATED_CLIENT_IP_HEADER)
+            .filter(|_| proxy_secrets_match(expected, provided))
+            .ok_or(InvalidProxyIdentity)?;
+        return Ok(normalize_ip(client).to_string());
     }
 
     let client = if headers.contains_key("x-forwarded-for") {
@@ -158,7 +216,7 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted_proxies: &[IpNetwork
     } else {
         header_ip(headers, "x-real-ip").map_or(peer, normalize_ip)
     };
-    normalize_ip(client).to_string()
+    Ok(normalize_ip(client).to_string())
 }
 
 /// Simple in-memory rate limiter.
@@ -691,7 +749,7 @@ mod tests {
         let peer = "127.0.0.1".parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "198.51.100.9".parse().unwrap());
-        assert_eq!(client_ip(peer, &headers, &[]), "127.0.0.1");
+        assert_eq!(client_ip(peer, &headers, &[]).unwrap(), "127.0.0.1");
     }
 
     // ── LIF-75: one failed attempt costs exactly one slot ────
@@ -769,7 +827,73 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
         h.insert("x-real-ip", "198.51.100.4".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "203.0.113.5");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "203.0.113.5");
+    }
+
+    #[test]
+    fn authenticated_proxy_header_uses_the_original_client() {
+        let trusted = parse_trusted_proxies(&["127.0.0.0/8".into()]).unwrap();
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-lific-client-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("x-lific-proxy-secret", "correct-secret".parse().unwrap());
+        headers.insert("x-forwarded-for", "198.51.100.88".parse().unwrap());
+
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, Some("correct-secret")),
+            Ok("203.0.113.7".into())
+        );
+    }
+
+    #[test]
+    fn missing_or_wrong_proxy_secret_cannot_choose_the_client_key() {
+        let trusted = parse_trusted_proxies(&["127.0.0.0/8".into()]).unwrap();
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-lific-client-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("x-forwarded-for", "198.51.100.88".parse().unwrap());
+
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, Some("correct-secret")),
+            Err(InvalidProxyIdentity)
+        );
+        headers.insert("x-lific-proxy-secret", "wrong-secret".parse().unwrap());
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, Some("correct-secret")),
+            Err(InvalidProxyIdentity)
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_requests_with_invalid_dedicated_headers_are_rejected() {
+        let trusted = parse_trusted_proxies(&["127.0.0.0/8".into()]).unwrap();
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-lific-client-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("x-lific-proxy-secret", "wrong-secret".parse().unwrap());
+
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, Some("correct-secret")),
+            Err(InvalidProxyIdentity)
+        );
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, None),
+            Err(InvalidProxyIdentity)
+        );
+    }
+
+    #[test]
+    fn untrusted_direct_peer_ignores_even_a_valid_proxy_secret() {
+        let trusted = parse_trusted_proxies(&["127.0.0.0/8".into()]).unwrap();
+        let peer = "198.51.100.88".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-lific-client-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("x-lific-proxy-secret", "correct-secret".parse().unwrap());
+
+        assert_eq!(
+            client_ip_checked(peer, &headers, &trusted, Some("correct-secret")),
+            Ok("198.51.100.88".into())
+        );
     }
 
     #[test]
@@ -779,7 +903,7 @@ mod tests {
         let mut h = HeaderMap::new();
         h.append("x-forwarded-for", "198.51.100.10".parse().unwrap());
         h.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "203.0.113.9");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "203.0.113.9");
     }
 
     #[test]
@@ -788,7 +912,7 @@ mod tests {
         let peer = "127.0.0.1".parse().unwrap();
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.9, 10.0.0.2".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "203.0.113.9");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "203.0.113.9");
     }
 
     #[test]
@@ -797,7 +921,7 @@ mod tests {
         let peer = "127.0.0.1".parse().unwrap();
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "10.0.0.2, 127.0.0.2".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "127.0.0.1");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "127.0.0.1");
     }
 
     #[test]
@@ -806,7 +930,7 @@ mod tests {
         let peer = "127.0.0.1".parse().unwrap();
         let mut h = HeaderMap::new();
         h.insert("x-real-ip", "198.51.100.4".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "198.51.100.4");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "198.51.100.4");
     }
 
     #[test]
@@ -816,7 +940,7 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "1.2.3.4:5678".parse().unwrap());
         h.insert("x-real-ip", "198.51.100.4".parse().unwrap());
-        assert_eq!(client_ip(peer, &h, &trusted), "127.0.0.1");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "127.0.0.1");
     }
 
     #[test]
@@ -824,7 +948,7 @@ mod tests {
         let trusted = parse_trusted_proxies(&["127.0.0.0/8".into()]).unwrap();
         let peer = "127.0.0.1".parse().unwrap();
         let h = HeaderMap::new();
-        assert_eq!(client_ip(peer, &h, &trusted), "127.0.0.1");
+        assert_eq!(client_ip(peer, &h, &trusted).unwrap(), "127.0.0.1");
     }
 
     #[test]
@@ -858,7 +982,10 @@ mod tests {
     #[test]
     fn ipv4_mapped_ipv6_is_normalized_for_bucket_keys() {
         let peer = "::ffff:192.0.2.1".parse().unwrap();
-        assert_eq!(client_ip(peer, &HeaderMap::new(), &[]), "192.0.2.1");
+        assert_eq!(
+            client_ip(peer, &HeaderMap::new(), &[]).unwrap(),
+            "192.0.2.1"
+        );
     }
 
     #[test]

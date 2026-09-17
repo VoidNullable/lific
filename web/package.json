@@ -14,7 +14,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^24.12.0",
-    "svelte": "^5.53.12",
+    "svelte": "^5.55.7",
     "svelte-check": "^4.4.5",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
@@ -22,11 +22,11 @@
   },
   "dependencies": {
     "@xyflow/svelte": "^1.6.3",
-    "dompurify": "^3.4.10",
+    "dompurify": "^3.4.13",
     "lucide": "^1.7.0",
     "lucide-svelte": "^1.0.1",
     "marked": "^17.0.6",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.1",
     "svelte-dnd-action": "^0.9.69",
     "unicode-emoji-json": "^0.8.0"
   }
