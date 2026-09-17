@@ -6,7 +6,7 @@ const MAX_RADAR_TICKS = 128;
 
 const NUMBER = "[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[-+]?\\d+)?";
 const XY_AXIS_RANGE = new RegExp(
-  `^\\s*x-axis\\s+(${NUMBER})\\s*-->\\s*(${NUMBER})`,
+  `^\\s*x-axis\\s+(?:(?:[^\\d+\\-.\\s][^\\r\\n]*?)\\s+)?(${NUMBER})\\s*-->\\s*(${NUMBER})`,
   "im",
 );
 

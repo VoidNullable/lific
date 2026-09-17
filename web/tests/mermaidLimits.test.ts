@@ -16,6 +16,9 @@ describe("mermaidIsTooComplex", () => {
   test("rejects tiny inputs that trigger known Mermaid resource exhaustion", () => {
     expect(mermaidIsTooComplex("xychart\n  x-axis 1 --> 1\n  line [1, 2]")).toBe(true);
     expect(
+      mermaidIsTooComplex("xychart\n  x-axis score 1 --> 1\n  line [1, 2]"),
+    ).toBe(true);
+    expect(
       mermaidIsTooComplex(
         "radar-beta\n  axis a, b\n  curve c {1,1}\n  ticks 1000000000",
       ),
