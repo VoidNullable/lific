@@ -6,9 +6,27 @@ const MAX_RADAR_TICKS = 128;
 
 const NUMBER = "[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[-+]?\\d+)?";
 const XY_AXIS_RANGE = new RegExp(
-  `^\\s*x-axis\\s+(?:(?:[^\\d+\\-.\\s][^\\r\\n]*?)\\s+)?(${NUMBER})\\s*-->\\s*(${NUMBER})`,
-  "im",
+  `^x-axis\\b.*?(${NUMBER})\\s*-->\\s*(${NUMBER})\\s*$`,
+  "is",
 );
+
+// Mermaid accepts semicolon-separated statements and trailing comments. Keep
+// quoted labels intact so their punctuation and keywords are never directives.
+function mermaidStatements(source: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  for (const token of source.match(/"[^"]*"|%%[^\r\n]*|[;\r\n]|[^";%\r\n]+|["%]/g) ?? []) {
+    if (token.startsWith("%%")) continue;
+    if (/^[;\r\n]$/.test(token)) {
+      if (statement.trim()) statements.push(statement.trim());
+      statement = "";
+    } else {
+      statement += token;
+    }
+  }
+  if (statement.trim()) statements.push(statement.trim());
+  return statements;
+}
 
 export type MermaidBudget = {
   blocks: number;
@@ -27,19 +45,24 @@ export function mermaidIsTooComplex(source: string): boolean {
     return true;
   }
 
-  if (/^\s*xychart(?:-beta)?\b/im.test(source)) {
-    const range = source.match(XY_AXIS_RANGE);
-    if (range && Number(range[1]) === Number(range[2])) return true;
+  const directives = mermaidStatements(source);
+  if (directives.some((statement) => /^xychart(?:-beta)?\b/i.test(statement))) {
+    for (const statement of directives) {
+      const range = statement.match(XY_AXIS_RANGE);
+      if (range && Number(range[1]) === Number(range[2])) return true;
+    }
   }
 
-  if (/^\s*radar-beta\b/im.test(source)) {
-    const ticks = source.match(/^\s*ticks\s+(\d+)\s*$/im);
-    if (ticks && Number(ticks[1]) > MAX_RADAR_TICKS) return true;
+  if (directives.some((statement) => /^radar-beta\b/i.test(statement))) {
+    for (const statement of directives) {
+      const ticks = statement.match(/^ticks\s+(\d+)\s*$/i);
+      if (ticks && Number(ticks[1]) > MAX_RADAR_TICKS) return true;
+    }
   }
 
   return (
-    /^\s*architecture-beta\b/im.test(source) &&
-    /^\s*group\s+(?:__proto__|prototype|constructor)\b/im.test(source)
+    directives.some((statement) => /^architecture-beta\b/i.test(statement)) &&
+    directives.some((statement) => /^group\s+(?:__proto__|prototype|constructor)\b/i.test(statement))
   );
 }
 

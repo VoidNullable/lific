@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import mermaid from "mermaid";
 import {
   claimMermaidBudget,
   createMermaidBudget,
@@ -31,6 +32,29 @@ describe("mermaidIsTooComplex", () => {
         "architecture-beta\n  group __proto__(cloud)[Attacker controlled]",
       ),
     ).toBe(true);
+  });
+
+  test.each([
+    "xychart; x-axis 1 --> 1; line [1, 2]",
+    "xychart\nx-axis 1 --> 10\nx-axis 2 --> 2\nline [1, 2]",
+    "radar-beta\naxis a, b\ncurve c {1,1}\nticks 5\nticks 1000000000",
+    "radar-beta\naxis a, b\ncurve c {1,1}\nticks 1000000000 %% comment",
+  ])("rejects dangerous directives in valid Mermaid syntax: %s", async (source) => {
+    // Parse only: a regression must never render a potentially hostile input.
+    await expect(mermaid.parse(source)).resolves.toBeTruthy();
+    expect(mermaidIsTooComplex(source)).toBe(true);
+  });
+
+  test("preserves safe ranges and quoted labels containing directive-like text", () => {
+    for (const source of [
+      "xychart; x-axis 1 --> 10; line [1, 2]",
+      'xychart\ntitle "Example; x-axis 1 --> 1"\nx-axis 1 --> 10\nline [1, 2]',
+      'xychart\nx-axis "Revenue; %% total" 1 --> 10\nline [1, 2]',
+      "radar-beta\naxis a, b\ncurve c {1,1}\nticks 128 %% allowed",
+      'architecture-beta\ngroup safe(cloud)[Safe]',
+    ]) {
+      expect(mermaidIsTooComplex(source)).toBe(false);
+    }
   });
 });
 
