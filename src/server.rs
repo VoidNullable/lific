@@ -17,7 +17,7 @@ use axum::{
     extract::Request,
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{any, get},
 };
 use rmcp::transport::streamable_http_server::{
@@ -93,6 +93,31 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+/// Apply browser security policy to every response, including OAuth consent
+/// pages and CORS preflights. Route-specific policies such as the attachment
+/// sandbox win when they are already present.
+async fn add_security_headers(request: Request<Body>, next: middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::X_FRAME_OPTIONS, "DENY"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (
+            header::CONTENT_SECURITY_POLICY,
+            "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+        ),
+    ] {
+        headers
+            .entry(name)
+            .or_insert(HeaderValue::from_static(value));
+    }
+    headers
+        .entry(HeaderName::from_static("cross-origin-resource-policy"))
+        .or_insert(HeaderValue::from_static("same-origin"));
+    response
 }
 
 /// How far this instance can be reached from, as configured.
@@ -468,6 +493,7 @@ pub(crate) fn build_app_with_store(
         // (text/event-stream — so MCP streaming is untouched), gRPC,
         // already-compressed images, and bodies under 32 bytes.
         .layer(CompressionLayer::new())
+        .layer(middleware::from_fn(add_security_headers))
 }
 
 /// `lific start`: bring up the HTTP server for `cfg` and serve until a
@@ -1067,6 +1093,60 @@ mod cors_tests {
         assert!(
             expose.contains("www-authenticate"),
             "www-authenticate must be exposed, got: {expose}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frontend_security_headers_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn frontend_responses_cannot_be_framed_or_mime_sniffed() {
+        let app = Router::new()
+            .fallback(get(serve_frontend))
+            .layer(middleware::from_fn(add_security_headers));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/public/PUB")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+
+        assert_eq!(
+            headers
+                .get(header::X_FRAME_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some("frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
+        );
+        assert_eq!(
+            headers
+                .get(header::REFERRER_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-referrer")
+        );
+        assert_eq!(
+            headers
+                .get("cross-origin-resource-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
         );
     }
 }

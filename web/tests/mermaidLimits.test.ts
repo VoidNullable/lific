@@ -12,6 +12,23 @@ describe("mermaidIsTooComplex", () => {
     expect(mermaidIsTooComplex(Array(129).fill("node").join("\n"))).toBe(true);
     expect(mermaidIsTooComplex(`graph TD\nA${"-->A".repeat(128)}`)).toBe(true);
   });
+
+  test("rejects tiny inputs that trigger known Mermaid resource exhaustion", () => {
+    expect(mermaidIsTooComplex("xychart\n  x-axis 1 --> 1\n  line [1, 2]")).toBe(true);
+    expect(
+      mermaidIsTooComplex(
+        "radar-beta\n  axis a, b\n  curve c {1,1}\n  ticks 1000000000",
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects Mermaid architecture prototype pollution keys", () => {
+    expect(
+      mermaidIsTooComplex(
+        "architecture-beta\n  group __proto__(cloud)[Attacker controlled]",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("claimMermaidBudget", () => {

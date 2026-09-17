@@ -10,6 +10,11 @@ import { resolve } from "node:path";
 // Defaults to a local lific binary on 127.0.0.1:3456.
 const API_TARGET = process.env.VITE_API_TARGET ?? "http://127.0.0.1:3456";
 const PROXY_SECURE = process.env.VITE_API_INSECURE !== "1";
+const API_PROXY = {
+  target: API_TARGET,
+  changeOrigin: true,
+  secure: PROXY_SECURE,
+};
 
 // Pull the canonical version from Cargo.toml so the UI never drifts from the
 // binary. Cargo.toml is the single source of truth (see AGENTS.md).
@@ -46,11 +51,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/api": {
-        target: API_TARGET,
-        changeOrigin: true,
-        secure: PROXY_SECURE,
-      },
+      "/api": API_PROXY,
+      "/public/api": API_PROXY,
     },
   },
 });
