@@ -82,7 +82,8 @@ const deadline = setTimeout(() => { console.error("Mobile navigation test deadli
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true });
+  // Match the sidebar suite's full-browser native-tab behavior.
+  browser = await chromium.launch({ headless: true, channel: "chromium" });
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   page.setDefaultTimeout(8_000);
   const errors: string[] = [];

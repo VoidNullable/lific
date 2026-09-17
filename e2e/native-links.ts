@@ -130,6 +130,13 @@ export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: Ope
       console.error(JSON.stringify({ phase, windowOpens, pages: context.pages().map(p => p.url()),
         source: await page.evaluate(() => (window as any).nativeLinkDiagnostics?.dump() ?? { diagnosticsLost: true, url: location.href }),
       }, null, 2));
+      for (const popup of context.pages().filter(p => p !== page)) {
+        console.error("Popup document state:", await popup.evaluate(() => ({
+          url: location.href, readyState: document.readyState,
+          visibility: document.visibilityState, html: document.documentElement.outerHTML.slice(0, 2000),
+          resources: performance.getEntriesByType("resource").map(resource => resource.name),
+        })));
+      }
     } catch (diagnosticError) { console.error("Native link state capture failed", diagnosticError); }
     if (tracing) {
       try {
