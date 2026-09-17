@@ -349,34 +349,34 @@ lific dump --out /srv/backup-staging/lific.tar.gz && restic backup /srv/backup-s
 
 ## Building from source
 
-### Requirements
-
-- **Rust 1.88+** required
-- **Bun** optional, only needed if you want the web UI
-
-SQLite is bundled via `rusqlite` and compiled into the binary. No system SQLite required.
-
-### API-only build (no web UI)
+The repository provides Rust, Bun, and the release toolchains through
+[devenv](https://devenv.sh/). Approve the checkout, enter the shell, and use
+the task graph:
 
 ```bash
 git clone https://github.com/VoidNullable/lific
 cd lific
-mkdir -p web/dist
-cargo build --release
+devenv allow
+devenv shell
+# inside the devenv shell:
+devenv tasks run lific:debug-build
 ```
 
-The `mkdir -p web/dist` creates the empty directory that `rust-embed` expects at compile time. The resulting binary has full functionality (MCP, REST API, CLI, OAuth, backups) but visiting the web UI will return a message pointing you to build the frontend.
+To activate Devenv automatically when changing into the checkout, add the
+Devenv hook for your shell once (for zsh, `eval "$(devenv hook zsh)"`), then
+run `devenv allow` in this checkout.
 
-### Full build (with web UI)
+Release builds always build and embed the Svelte 5 web UI:
 
 ```bash
-git clone https://github.com/VoidNullable/lific
-cd lific
-cd web && bun install && bun run build && cd ..
-cargo build --release
+devenv --profile release-linux tasks run lific:release:x86_64-unknown-linux-gnu
 ```
 
-The frontend is a Svelte 5 SPA built with Vite. `bun run build` outputs static files to `web/dist/`, which `cargo build` embeds into the binary. The final binary is fully self-contained with no runtime dependencies.
+Use `release-darwin` for macOS targets and `release-windows` for the
+cross-compiled Windows GNU release. `devenv build outputs.lific` builds the
+native, Nix-packaged release; it builds the locked frontend in an isolated
+derivation and embeds it before compiling Rust. SQLite is bundled via
+`rusqlite`; no system SQLite is required.
 
 ### Docker (optional)
 

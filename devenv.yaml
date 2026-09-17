@@ -1,0 +1,27 @@
+require_version: true
+
+inputs:
+  bun2nix:
+    url: github:nix-community/bun2nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+      treefmt-nix:
+        follows: treefmt-nix
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    overlays:
+      - default
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  treefmt-nix:
+    url: github:numtide/treefmt-nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

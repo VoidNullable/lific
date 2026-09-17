@@ -31,9 +31,11 @@ match_wildcard_for_single_variants = "deny"
 needless_collect = "deny"
 or_fun_call = "deny"
 redundant_clone = "deny"
-unchecked_time_subtraction = "deny"
+unchecked_duration_subtraction = "deny"
 unnecessary_struct_initialization = "deny"
 unnecessary_wraps = "deny"
+# Defer format-string interpolation cleanup to the dedicated formatting pass.
+uninlined_format_args = "allow"
 useless_let_if_seq = "deny"
 unused_async = "deny"
 
@@ -163,8 +165,8 @@ opt-level = 3
 strip = true
 
 # For distribution builds (AUR, GitHub releases):
-# cargo build --profile release-dist
-[profile.release-dist]
+# cargo build --profile dist
+[profile.dist]
 inherits = "release"
 lto = true
 codegen-units = 1
