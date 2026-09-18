@@ -9,6 +9,36 @@ let
   repoRoot = if config.git.root != null then config.git.root else builtins.toString ./.;
   lificVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
   bun2nix = inputs.bun2nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  msvcPkgs = import inputs.nixpkgs {
+    system = pkgs.stdenv.hostPlatform.system;
+    config = {
+      allowUnfreePredicate =
+        pkg:
+        builtins.elem (lib.getName pkg) [
+          "win-sdk"
+          "xwin-fetch-msvc"
+        ];
+      microsoftVisualStudioLicenseAccepted = true;
+    };
+  };
+  msvcSdk = msvcPkgs.pkgsCross.x86_64-windows.windows.sdk;
+  msvcClang = pkgs.llvmPackages.clang-unwrapped;
+  msvcLlvm = pkgs.llvmPackages.llvm;
+  msvcLld = pkgs.llvmPackages.lld;
+  msvcCompiler = pkgs.writeShellScript "lific-msvc-clang-cl" ''
+    exec ${msvcClang}/bin/clang-cl \
+      --target=x86_64-pc-windows-msvc \
+      /vctoolsdir ${msvcSdk}/crt \
+      /winsdkdir ${msvcSdk}/sdk \
+      "$@"
+  '';
+  msvcLinker = pkgs.writeShellScript "lific-msvc-linker" ''
+    exec ${msvcLld}/bin/lld-link \
+      /libpath:${msvcSdk}/crt/lib/x64 \
+      /libpath:${msvcSdk}/sdk/lib/um/x64 \
+      /libpath:${msvcSdk}/sdk/lib/ucrt/x64 \
+      "$@"
+  '';
   rustPlatform = pkgs.makeRustPlatform {
     cargo = config.languages.rust.toolchainPackage;
     rustc = config.languages.rust.toolchainPackage;
@@ -305,17 +335,24 @@ in
         };
       };
     };
-    release-windows.module = {
-      languages.rust.targets = [ "x86_64-pc-windows-gnu" ];
-      unsetEnvVars = [ "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER" ];
-      languages.zig = {
-        enable = true;
-        lsp.enable = false;
+    release-windows-msvc.module = {
+      languages.rust.targets = [ "x86_64-pc-windows-msvc" ];
+      unsetEnvVars = [ "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER" ];
+      packages = [
+        msvcClang
+        msvcLlvm
+        msvcLld
+        msvcSdk
+      ];
+      env = {
+        CC_x86_64_pc_windows_msvc = msvcCompiler;
+        CXX_x86_64_pc_windows_msvc = msvcCompiler;
+        AR_x86_64_pc_windows_msvc = "${msvcLlvm}/bin/llvm-lib";
+        CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = msvcLinker;
       };
-      packages = [ pkgs.cargo-zigbuild ];
-      tasks."lific:release:x86_64-pc-windows-gnu" = {
+      tasks."lific:release:x86_64-pc-windows-msvc" = {
         cwd = repoRoot;
-        exec = "cargo zigbuild --locked --profile dist --target x86_64-pc-windows-gnu";
+        exec = "cargo build --locked --profile dist --target x86_64-pc-windows-msvc";
         after = [ "lific:web:build" ];
       };
     };
