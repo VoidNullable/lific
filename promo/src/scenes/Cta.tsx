@@ -16,7 +16,11 @@ export const Cta: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const logoIn = spring({ frame, fps, config: { damping: 200, stiffness: 100 } });
+  const logoIn = spring({
+    frame,
+    fps,
+    config: { damping: 200, stiffness: 100 },
+  });
   const urlIn = spring({
     frame: frame - 10,
     fps,

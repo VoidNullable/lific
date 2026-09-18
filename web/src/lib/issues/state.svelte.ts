@@ -77,7 +77,10 @@ export function describeIssueChange(
   }
   if ("module_id" in patch && patch.module_id !== prevPatch.module_id) {
     const id = patch.module_id as number | null;
-    const name = id == null ? "No module" : modules.find((m) => m.id === id)?.name ?? "a module";
+    const name =
+      id == null
+        ? "No module"
+        : (modules.find((m) => m.id === id)?.name ?? "a module");
     return `→ ${name}`;
   }
   if ("priority" in patch && patch.priority !== prevPatch.priority) {
@@ -89,7 +92,10 @@ export function describeIssueChange(
 /** Build the inverse of `patch` from an issue's current field values —
  *  only for the keys `patch` actually touches, so the resulting undo call
  *  is a minimal, field-for-field opposite. */
-export function prevPatchFor(issue: Issue, patch: Record<string, unknown>): Record<string, unknown> {
+export function prevPatchFor(
+  issue: Issue,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
   const prev: Record<string, unknown> = {};
   if ("status" in patch) prev.status = issue.status;
   if ("priority" in patch) prev.priority = issue.priority;
@@ -115,25 +121,35 @@ export async function updateIssueWithUndo(opts: {
 }): Promise<boolean> {
   const res = await updateIssue(opts.id, opts.patch);
   if (!res.ok) {
-    toast(`Couldn't update ${opts.identifier}: ${res.error}`, { kind: "error" });
+    toast(`Couldn't update ${opts.identifier}: ${res.error}`, {
+      kind: "error",
+    });
     return false;
   }
   opts.onApplied?.(opts.patch);
-  toast(`${opts.identifier} ${describeIssueChange(opts.patch, opts.prevPatch, opts.modules)}`, {
-    kind: "success",
-    action: {
-      label: "Undo",
-      fn: async () => {
-        const undoRes = await updateIssue(opts.id, opts.prevPatch);
-        if (undoRes.ok) {
-          opts.onApplied?.(opts.prevPatch);
-          toast(`Restored ${opts.identifier}`, { kind: "info", duration: 3000 });
-        } else {
-          toast(`Couldn't undo ${opts.identifier}: ${undoRes.error}`, { kind: "error" });
-        }
+  toast(
+    `${opts.identifier} ${describeIssueChange(opts.patch, opts.prevPatch, opts.modules)}`,
+    {
+      kind: "success",
+      action: {
+        label: "Undo",
+        fn: async () => {
+          const undoRes = await updateIssue(opts.id, opts.prevPatch);
+          if (undoRes.ok) {
+            opts.onApplied?.(opts.prevPatch);
+            toast(`Restored ${opts.identifier}`, {
+              kind: "info",
+              duration: 3000,
+            });
+          } else {
+            toast(`Couldn't undo ${opts.identifier}: ${undoRes.error}`, {
+              kind: "error",
+            });
+          }
+        },
       },
     },
-  });
+  );
   return true;
 }
 
@@ -144,7 +160,11 @@ export async function updateIssueWithUndo(opts: {
  *  Promise.allSettled and report partial failure honestly rather than
  *  implying an all-or-nothing result. */
 export async function bulkUpdateIssuesWithUndo(opts: {
-  targets: { id: number; identifier: string; prevPatch: Record<string, unknown> }[];
+  targets: {
+    id: number;
+    identifier: string;
+    prevPatch: Record<string, unknown>;
+  }[];
   patch: Record<string, unknown>;
   modules: Module[];
   onApplied?: (patches: Map<number, Record<string, unknown>>) => void;
@@ -181,35 +201,43 @@ export async function bulkUpdateIssuesWithUndo(opts: {
       okTargets.length === 1
         ? okTargets[0].identifier
         : `${okTargets.length} issue${okTargets.length === 1 ? "" : "s"}`;
-    toast(`${label} ${describeIssueChange(opts.patch, okTargets[0].prevPatch, opts.modules)}`, {
-      kind: "success",
-      action: {
-        label: "Undo",
-        fn: async () => {
-          const undoResults = await Promise.allSettled(
-            okTargets.map((t) => updateIssue(t.id, t.prevPatch)),
-          );
-          const restored = new Map<number, Record<string, unknown>>();
-          let failCount = 0;
-          undoResults.forEach((r, i) => {
-            if (r.status === "fulfilled" && r.value.ok) {
-              restored.set(okTargets[i].id, okTargets[i].prevPatch);
-            } else {
-              failCount++;
-            }
-          });
-          if (restored.size > 0) opts.onApplied?.(restored);
-          if (failCount > 0) {
-            toast(`Restored ${restored.size} of ${okTargets.length}`, { kind: "error" });
-          } else {
-            toast(`Restored ${restored.size} issue${restored.size === 1 ? "" : "s"}`, {
-              kind: "info",
-              duration: 3000,
+    toast(
+      `${label} ${describeIssueChange(opts.patch, okTargets[0].prevPatch, opts.modules)}`,
+      {
+        kind: "success",
+        action: {
+          label: "Undo",
+          fn: async () => {
+            const undoResults = await Promise.allSettled(
+              okTargets.map((t) => updateIssue(t.id, t.prevPatch)),
+            );
+            const restored = new Map<number, Record<string, unknown>>();
+            let failCount = 0;
+            undoResults.forEach((r, i) => {
+              if (r.status === "fulfilled" && r.value.ok) {
+                restored.set(okTargets[i].id, okTargets[i].prevPatch);
+              } else {
+                failCount++;
+              }
             });
-          }
+            if (restored.size > 0) opts.onApplied?.(restored);
+            if (failCount > 0) {
+              toast(`Restored ${restored.size} of ${okTargets.length}`, {
+                kind: "error",
+              });
+            } else {
+              toast(
+                `Restored ${restored.size} issue${restored.size === 1 ? "" : "s"}`,
+                {
+                  kind: "info",
+                  duration: 3000,
+                },
+              );
+            }
+          },
         },
       },
-    });
+    );
   }
 
   return { okIds, failedIds };
@@ -447,7 +475,8 @@ export class IssueListState {
   /** Load a project's saved content slice without writing a default. */
   hydrateIssueSubTab(projectId: string): void {
     this.issueSubTabProjectId = projectId;
-    this.issueSubTab = (loadSubTab("issues", projectId, ISSUE_SUB_TAB_IDS) ?? "all") as IssueSubTab;
+    this.issueSubTab = (loadSubTab("issues", projectId, ISSUE_SUB_TAB_IDS) ??
+      "all") as IssueSubTab;
   }
 
   /** Save only an explicit user selection; hydrate/reset never persist. */

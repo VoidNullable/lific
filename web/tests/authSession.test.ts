@@ -56,7 +56,11 @@ describe("changePassword", () => {
     storage.setItem("lific_token", "lific_sess_old");
     reply = {
       status: 200,
-      body: { ok: true, token: "lific_sess_new", expires_at: "2099-01-01T00:00:00Z" },
+      body: {
+        ok: true,
+        token: "lific_sess_new",
+        expires_at: "2099-01-01T00:00:00Z",
+      },
     };
 
     const result = await changePassword({

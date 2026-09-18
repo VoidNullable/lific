@@ -11,7 +11,9 @@ type Patch = Record<string, unknown>;
 
 describe("parking a refused settings patch", () => {
   test("with nothing parked, a patch is sent", () => {
-    expect(disposePatch(null, { a: 1 }, { replaying: false, hold: false })).toEqual({
+    expect(
+      disposePatch(null, { a: 1 }, { replaying: false, hold: false }),
+    ).toEqual({
       action: "send",
     });
   });
@@ -19,7 +21,11 @@ describe("parking a refused settings patch", () => {
   test("with a patch parked, later ones merge instead of being sent", () => {
     const parked = { allow_signup: true };
     expect(
-      disposePatch(parked, { instance_name: "Lific" }, { replaying: false, hold: false }),
+      disposePatch(
+        parked,
+        { instance_name: "Lific" },
+        { replaying: false, hold: false },
+      ),
     ).toEqual({
       action: "park",
       patch: { allow_signup: true, instance_name: "Lific" },
@@ -27,7 +33,9 @@ describe("parking a refused settings patch", () => {
   });
 
   test("a later edit to the same field wins", () => {
-    expect(mergePendingPatch({ allow_signup: true }, { allow_signup: false })).toEqual({
+    expect(
+      mergePendingPatch({ allow_signup: true }, { allow_signup: false }),
+    ).toEqual({
       allow_signup: false,
     });
   });
@@ -45,12 +53,16 @@ describe("parking a refused settings patch", () => {
   test("an edit during the replay parks instead of racing it", () => {
     // The drain clears the slot before each send, so `parked` is null here.
     // Only `hold` can stop this reaching the network.
-    expect(disposePatch(null, { d: 4 }, { replaying: false, hold: true })).toEqual({
+    expect(
+      disposePatch(null, { d: 4 }, { replaying: false, hold: true }),
+    ).toEqual({
       action: "park",
       patch: { d: 4 },
     });
     // And a second edit merges with the first.
-    expect(disposePatch({ d: 4 }, { e: 5 }, { replaying: false, hold: true })).toEqual({
+    expect(
+      disposePatch({ d: 4 }, { e: 5 }, { replaying: false, hold: true }),
+    ).toEqual({
       action: "park",
       patch: { d: 4, e: 5 },
     });
@@ -63,7 +75,10 @@ describe("parking a refused settings patch", () => {
       { allow_signup: false },
       { instance_name: "Lific" },
     ) as Record<string, unknown>;
-    expect(Object.keys(parked).sort()).toEqual(["allow_signup", "instance_name"]);
+    expect(Object.keys(parked).sort()).toEqual([
+      "allow_signup",
+      "instance_name",
+    ]);
   });
 });
 
@@ -75,7 +90,10 @@ describe("save queue with a parked patch", () => {
     let parked: Patch | null = null;
 
     const send = async (patch: Patch) => {
-      const disposition = disposePatch(parked, patch, { replaying: false, hold: false });
+      const disposition = disposePatch(parked, patch, {
+        replaying: false,
+        hold: false,
+      });
       if (disposition.action === "park") {
         parked = disposition.patch;
         return false;
@@ -107,7 +125,10 @@ describe("save queue with a parked patch", () => {
     expect(queue.pending).toBeNull();
 
     // The confirmation replays the merged patch, once.
-    const replay = disposePatch(parked, parked!, { replaying: true, hold: true });
+    const replay = disposePatch(parked, parked!, {
+      replaying: true,
+      hold: true,
+    });
     expect(replay).toEqual({ action: "send" });
   });
 });
@@ -123,7 +144,10 @@ describe("the confirmation drain", () => {
   });
 
   test("continues with whatever arrived while the send was in flight", () => {
-    expect(drainStep(true, { c: 3 })).toEqual({ next: "continue", patch: { c: 3 } });
+    expect(drainStep(true, { c: 3 })).toEqual({
+      next: "continue",
+      patch: { c: 3 },
+    });
   });
 
   test("taking a snapshot clears the slot so new edits start a fresh one", () => {
@@ -141,7 +165,11 @@ describe("the confirmation drain", () => {
 
     // One send, honouring the parking rule. `replaying` is the drain's own.
     let hold = false;
-    async function send(patch: Record<string, unknown>, replaying: boolean, during?: () => void) {
+    async function send(
+      patch: Record<string, unknown>,
+      replaying: boolean,
+      during?: () => void,
+    ) {
       const disposition = disposePatch(parked, patch, { replaying, hold });
       if (disposition.action === "park") {
         parked = disposition.patch;
@@ -169,10 +197,14 @@ describe("the confirmation drain", () => {
       rounds += 1;
       const landed = await send(patch, true, () => {
         if (rounds === 1) {
-          const disposition = disposePatch(parked, { session_lifetime_days: 14 }, {
-            replaying: false,
-            hold,
-          });
+          const disposition = disposePatch(
+            parked,
+            { session_lifetime_days: 14 },
+            {
+              replaying: false,
+              hold,
+            },
+          );
           expect(disposition.action).toBe("park");
           if (disposition.action === "park") parked = disposition.patch;
         }

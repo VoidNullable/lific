@@ -14,7 +14,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -172,7 +172,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd binaries
-          sha256sum * > sha256sums.txt
+          sha256sum -- * > sha256sums.txt
           cat sha256sums.txt
 
       # Use the curated top section of CHANGELOG.md as the release notes
@@ -199,7 +199,7 @@ jobs:
           fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            $NOTES_ARG \
+            "$NOTES_ARG" \
             --latest \
             binaries/lific-linux-x86_64 \
             binaries/lific-linux-aarch64 \
@@ -272,7 +272,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
-      id-token: write   # required for `mcp-publisher login github-oidc`
+      id-token: write # required for `mcp-publisher login github-oidc`
       contents: read
     env:
       # Pin the publisher CLI + its linux/amd64 checksum rather than tracking

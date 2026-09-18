@@ -15,7 +15,9 @@ describe("mermaidIsTooComplex", () => {
   });
 
   test("rejects tiny inputs that trigger known Mermaid resource exhaustion", () => {
-    expect(mermaidIsTooComplex("xychart\n  x-axis 1 --> 1\n  line [1, 2]")).toBe(true);
+    expect(
+      mermaidIsTooComplex("xychart\n  x-axis 1 --> 1\n  line [1, 2]"),
+    ).toBe(true);
     expect(
       mermaidIsTooComplex("xychart\n  x-axis score 1 --> 1\n  line [1, 2]"),
     ).toBe(true);
@@ -39,11 +41,14 @@ describe("mermaidIsTooComplex", () => {
     "xychart\nx-axis 1 --> 10\nx-axis 2 --> 2\nline [1, 2]",
     "radar-beta\naxis a, b\ncurve c {1,1}\nticks 5\nticks 1000000000",
     "radar-beta\naxis a, b\ncurve c {1,1}\nticks 1000000000 %% comment",
-  ])("rejects dangerous directives in valid Mermaid syntax: %s", async (source) => {
-    // Parse only: a regression must never render a potentially hostile input.
-    await expect(mermaid.parse(source)).resolves.toBeTruthy();
-    expect(mermaidIsTooComplex(source)).toBe(true);
-  });
+  ])(
+    "rejects dangerous directives in valid Mermaid syntax: %s",
+    async (source) => {
+      // Parse only: a regression must never render a potentially hostile input.
+      await expect(mermaid.parse(source)).resolves.toBeTruthy();
+      expect(mermaidIsTooComplex(source)).toBe(true);
+    },
+  );
 
   test("preserves safe ranges and quoted labels containing directive-like text", () => {
     for (const source of [
@@ -51,7 +56,7 @@ describe("mermaidIsTooComplex", () => {
       'xychart\ntitle "Example; x-axis 1 --> 1"\nx-axis 1 --> 10\nline [1, 2]',
       'xychart\nx-axis "Revenue; %% total" 1 --> 10\nline [1, 2]',
       "radar-beta\naxis a, b\ncurve c {1,1}\nticks 128 %% allowed",
-      'architecture-beta\ngroup safe(cloud)[Safe]',
+      "architecture-beta\ngroup safe(cloud)[Safe]",
     ]) {
       expect(mermaidIsTooComplex(source)).toBe(false);
     }

@@ -29,9 +29,9 @@ describe("voiceNoteFilename", () => {
     expect(voiceNoteFilename(new Date(2026, 7, 17, 14, 5), "audio/mp4")).toBe(
       "voice-note-20260817-1405.m4a",
     );
-    expect(voiceNoteFilename(new Date(2026, 7, 17, 14, 5), "audio/ogg;codecs=opus")).toBe(
-      "voice-note-20260817-1405.ogg",
-    );
+    expect(
+      voiceNoteFilename(new Date(2026, 7, 17, 14, 5), "audio/ogg;codecs=opus"),
+    ).toBe("voice-note-20260817-1405.ogg");
   });
 });
 
@@ -68,7 +68,8 @@ describe("pickAudioMime", () => {
   });
 
   test("every candidate is a concrete audio type", () => {
-    for (const mime of VOICE_MIME_CANDIDATES) expect(mime.startsWith("audio/")).toBe(true);
+    for (const mime of VOICE_MIME_CANDIDATES)
+      expect(mime.startsWith("audio/")).toBe(true);
   });
 });
 
@@ -101,7 +102,10 @@ describe("meterLevel", () => {
   test("scales quiet speech into a visible range", () => {
     // ±13/128 is roughly conversational RMS; the meter should read it as
     // clearly alive rather than a dead bar.
-    const wave = Array.from({ length: 64 }, (_, i) => 128 + (i % 2 === 0 ? 13 : -13));
+    const wave = Array.from(
+      { length: 64 },
+      (_, i) => 128 + (i % 2 === 0 ? 13 : -13),
+    );
     const level = meterLevel(wave);
     expect(level).toBeGreaterThan(0.35);
     expect(level).toBeLessThan(0.6);

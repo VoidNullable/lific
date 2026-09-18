@@ -40,7 +40,10 @@ export function findAltSpan(
   return at;
 }
 
-function locate(markdown: string, from: number): { start: number; end: number } | null {
+function locate(
+  markdown: string,
+  from: number,
+): { start: number; end: number } | null {
   let cursor = from;
   for (;;) {
     const bang = markdown.indexOf("![", cursor);
@@ -62,7 +65,11 @@ function locate(markdown: string, from: number): { start: number; end: number } 
  * whitespace-only) `alt` is a no-op so "press Enter on a blank field" reads as
  * skip, not as "erase the filename".
  */
-export function applyAltText(markdown: string, offset: number, alt: string): string {
+export function applyAltText(
+  markdown: string,
+  offset: number,
+  alt: string,
+): string {
   const clean = sanitizeAltText(alt);
   if (!clean) return markdown;
   const span = findAltSpan(markdown, offset);

@@ -2222,7 +2222,7 @@ mod tests {
 
     /// Insert an active (non-revoked) `oauth_tokens` row bound to `user_id`.
     fn insert_oauth_token_for(conn: &Connection, user_id: i64) -> i64 {
-        let token_hash = format!("testtoken-{user_id}-{}", user_id);
+        let token_hash = format!("testtoken-{user_id}-{user_id}");
         let client_id = "test-client";
         conn.execute(
             "INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?1, 'Test', '[\"http://localhost\"]')",

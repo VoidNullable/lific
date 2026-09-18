@@ -57,21 +57,49 @@ export const InitScene: React.FC = () => {
             }}
           >
             {["#f87171", "#fbbf24", "#4ade80"].map((c) => (
-              <div key={c} style={{ width: 13, height: 13, borderRadius: 7, backgroundColor: c }} />
+              <div
+                key={c}
+                style={{
+                  width: 13,
+                  height: 13,
+                  borderRadius: 7,
+                  backgroundColor: c,
+                }}
+              />
             ))}
-            <div style={{ flex: 1, textAlign: "center", fontFamily: MONO, fontSize: 15, color: C.textFaint }}>
+            <div
+              style={{
+                flex: 1,
+                textAlign: "center",
+                fontFamily: MONO,
+                fontSize: 15,
+                color: C.textFaint,
+              }}
+            >
               fish — ~
             </div>
             <div style={{ width: 55 }} />
           </div>
-          <div style={{ padding: "24px 30px", fontFamily: MONO, fontSize: 31, lineHeight: 1.7 }}>
+          <div
+            style={{
+              padding: "24px 30px",
+              fontFamily: MONO,
+              fontSize: 31,
+              lineHeight: 1.7,
+            }}
+          >
             {LINES.filter((l) => frame >= l.at).map((l, i) => {
               const chars = l.typed
                 ? Math.min(l.text.length, Math.floor((frame - l.at) / 1.2))
                 : l.text.length;
               return (
-                <div key={i} style={{ color: l.color ?? C.text, whiteSpace: "pre" }}>
-                  {l.typed ? <span style={{ color: C.success }}>{"$ "}</span> : null}
+                <div
+                  key={i}
+                  style={{ color: l.color ?? C.text, whiteSpace: "pre" }}
+                >
+                  {l.typed ? (
+                    <span style={{ color: C.success }}>{"$ "}</span>
+                  ) : null}
                   {l.text.slice(0, chars)}
                 </div>
               );

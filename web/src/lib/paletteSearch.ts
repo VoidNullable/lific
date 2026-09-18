@@ -109,7 +109,11 @@ export function tokenize(query: string): string[] {
 
 /** Levenshtein distance, abandoned as soon as it cannot come in at or under
  *  `budget`. Returns `budget + 1` to signal "further than allowed". */
-export function boundedEditDistance(a: string, b: string, budget: number): number {
+export function boundedEditDistance(
+  a: string,
+  b: string,
+  budget: number,
+): number {
   if (a === b) return 0;
   if (Math.abs(a.length - b.length) > budget) return budget + 1;
   if (a.length === 0) return b.length;
@@ -147,7 +151,11 @@ export function typoBudget(term: string): number {
  * is false for numeric fields, where a one-character edit turns 445 into 45
  * and the result is nonsense rather than a near miss.
  */
-export function matchQuality(term: string, text: string, allowFuzzy = true): number {
+export function matchQuality(
+  term: string,
+  text: string,
+  allowFuzzy = true,
+): number {
   if (!term || !text) return 0;
   const t = text.toLowerCase();
   if (t === term) return QUALITY.exact;
@@ -162,7 +170,9 @@ export function matchQuality(term: string, text: string, allowFuzzy = true): num
 
   if (at === 0) return QUALITY.prefix;
   if (at > 0) {
-    return WORD_BOUNDARY.test(t[at - 1]) ? QUALITY.wordPrefix : QUALITY.substring;
+    return WORD_BOUNDARY.test(t[at - 1])
+      ? QUALITY.wordPrefix
+      : QUALITY.substring;
   }
 
   if (!allowFuzzy) return 0;
@@ -195,15 +205,24 @@ export function scoreDoc(terms: string[], doc: PaletteDoc): number {
     let best = FIELD_WEIGHTS.title * matchQuality(term, doc.title);
 
     if (best < MAX_FIELD_WEIGHT) {
-      best = Math.max(best, FIELD_WEIGHTS.ref * matchQuality(term, doc.identifier));
+      best = Math.max(
+        best,
+        FIELD_WEIGHTS.ref * matchQuality(term, doc.identifier),
+      );
       if (number) {
-        best = Math.max(best, FIELD_WEIGHTS.number * matchQuality(term, number, false));
+        best = Math.max(
+          best,
+          FIELD_WEIGHTS.number * matchQuality(term, number, false),
+        );
       }
       for (const label of doc.labels) {
         best = Math.max(best, FIELD_WEIGHTS.label * matchQuality(term, label));
       }
       if (doc.preview) {
-        best = Math.max(best, FIELD_WEIGHTS.preview * matchQuality(term, doc.preview));
+        best = Math.max(
+          best,
+          FIELD_WEIGHTS.preview * matchQuality(term, doc.preview),
+        );
       }
     }
 
@@ -217,7 +236,8 @@ export function scoreDoc(terms: string[], doc: PaletteDoc): number {
 /** Newest first. ISO-8601 timestamps compare correctly as strings; the
  *  identifier is a last resort so the order is deterministic in tests. */
 function tieBreak(a: PaletteDoc, b: PaletteDoc): number {
-  if (a.updated_at !== b.updated_at) return a.updated_at < b.updated_at ? 1 : -1;
+  if (a.updated_at !== b.updated_at)
+    return a.updated_at < b.updated_at ? 1 : -1;
   return a.identifier < b.identifier ? -1 : a.identifier > b.identifier ? 1 : 0;
 }
 
@@ -330,7 +350,9 @@ export function isStaleSearch(
   issued: { gen: number; projectIdent: string | null },
   current: { gen: number; projectIdent: string | null },
 ): boolean {
-  return issued.gen !== current.gen || issued.projectIdent !== current.projectIdent;
+  return (
+    issued.gen !== current.gen || issued.projectIdent !== current.projectIdent
+  );
 }
 
 /**

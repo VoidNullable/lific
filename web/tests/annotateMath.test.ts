@@ -23,7 +23,9 @@ describe("rect helpers", () => {
   });
 
   test("clips a rect that overhangs the image", () => {
-    expect(clampRect({ x: -20, y: 10, w: 100, h: 500 }, { w: 60, h: 80 })).toEqual({
+    expect(
+      clampRect({ x: -20, y: 10, w: 100, h: 500 }, { w: 60, h: 80 }),
+    ).toEqual({
       x: 0,
       y: 10,
       w: 60,
@@ -32,7 +34,9 @@ describe("rect helpers", () => {
   });
 
   test("collapses a rect that lies entirely outside the image", () => {
-    expect(clampRect({ x: 200, y: 200, w: 50, h: 50 }, { w: 100, h: 100 })).toEqual({
+    expect(
+      clampRect({ x: 200, y: 200, w: 50, h: 50 }, { w: 100, h: 100 }),
+    ).toEqual({
       x: 100,
       y: 100,
       w: 0,
@@ -51,7 +55,10 @@ describe("pixelation region math", () => {
   });
 
   test("downsamples to one pixel per block and paints back over the region", () => {
-    const steps = pixelateSteps({ x: 10, y: 20, w: 400, h: 80 }, { w: 1000, h: 1000 });
+    const steps = pixelateSteps(
+      { x: 10, y: 20, w: 400, h: 80 },
+      { w: 1000, h: 1000 },
+    );
     expect(steps).not.toBeNull();
     expect(steps!.block).toBe(20);
     expect(steps!.small).toEqual({ w: 20, h: 4 });
@@ -68,17 +75,27 @@ describe("pixelation region math", () => {
   });
 
   test("clips the sampled region to the image before sampling", () => {
-    const steps = pixelateSteps({ x: -50, y: -50, w: 200, h: 200 }, { w: 100, h: 100 })!;
+    const steps = pixelateSteps(
+      { x: -50, y: -50, w: 200, h: 200 },
+      { w: 100, h: 100 },
+    )!;
     expect(steps.source).toEqual({ x: 0, y: 0, w: 100, h: 100 });
   });
 
   test("returns null for a degenerate region", () => {
-    expect(pixelateSteps({ x: 5, y: 5, w: 0, h: 40 }, { w: 100, h: 100 })).toBeNull();
-    expect(pixelateSteps({ x: 500, y: 5, w: 40, h: 40 }, { w: 100, h: 100 })).toBeNull();
+    expect(
+      pixelateSteps({ x: 5, y: 5, w: 0, h: 40 }, { w: 100, h: 100 }),
+    ).toBeNull();
+    expect(
+      pixelateSteps({ x: 500, y: 5, w: 40, h: 40 }, { w: 100, h: 100 }),
+    ).toBeNull();
   });
 
   test("never produces a zero-dimension buffer for a sub-block region", () => {
-    const steps = pixelateSteps({ x: 0, y: 0, w: 6, h: 3 }, { w: 100, h: 100 })!;
+    const steps = pixelateSteps(
+      { x: 0, y: 0, w: 6, h: 3 },
+      { w: 100, h: 100 },
+    )!;
     expect(steps.small.w).toBeGreaterThanOrEqual(1);
     expect(steps.small.h).toBeGreaterThanOrEqual(1);
   });
@@ -172,7 +189,11 @@ describe("output naming", () => {
     expect(outputFilename("Screenshot 2026-08-17.png", "image/png")).toBe(
       "Screenshot 2026-08-17-annotated.png",
     );
-    expect(outputFilename("photo.jpeg", "image/jpeg")).toBe("photo-annotated.jpg");
-    expect(outputFilename("clipboard", "image/png")).toBe("clipboard-annotated.png");
+    expect(outputFilename("photo.jpeg", "image/jpeg")).toBe(
+      "photo-annotated.jpg",
+    );
+    expect(outputFilename("clipboard", "image/png")).toBe(
+      "clipboard-annotated.png",
+    );
   });
 });

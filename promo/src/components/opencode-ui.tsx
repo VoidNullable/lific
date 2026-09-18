@@ -139,7 +139,6 @@ export const OpenCodeTUI: React.FC<OpenCodeProps> = ({
   // Block cursor blink — pure function of frame.
   const blink = interpolate(frame % 24, [0, 12, 24], [1, 0.15, 1]);
 
-
   return (
     <div
       style={{

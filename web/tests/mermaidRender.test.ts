@@ -21,13 +21,20 @@ function block(source: string): HTMLDivElement {
 
 describe("renderMermaidBlock", () => {
   test("rejects a forged complex placeholder before rendering", async () => {
-    const target = block(encodeURIComponent(`graph TD\nA${"-->A".repeat(128)}`));
+    const target = block(
+      encodeURIComponent(`graph TD\nA${"-->A".repeat(128)}`),
+    );
     let renders = 0;
 
-    await renderMermaidBlock(target, async () => {
-      renders += 1;
-      return { svg: "<svg></svg>" };
-    }, createMermaidBudget(), () => false);
+    await renderMermaidBlock(
+      target,
+      async () => {
+        renders += 1;
+        return { svg: "<svg></svg>" };
+      },
+      createMermaidBudget(),
+      () => false,
+    );
 
     expect(renders).toBe(0);
     expect(target.textContent).toContain("too complex");
@@ -38,10 +45,15 @@ describe("renderMermaidBlock", () => {
     const target = block("%invalid");
     let renders = 0;
 
-    await renderMermaidBlock(target, async () => {
-      renders += 1;
-      return { svg: "<svg></svg>" };
-    }, createMermaidBudget(), () => false);
+    await renderMermaidBlock(
+      target,
+      async () => {
+        renders += 1;
+        return { svg: "<svg></svg>" };
+      },
+      createMermaidBudget(),
+      () => false,
+    );
 
     expect(renders).toBe(0);
     expect(target.textContent).toContain("malformed");
@@ -49,14 +61,21 @@ describe("renderMermaidBlock", () => {
 
   test("enforces one shared budget across blocks", async () => {
     const budget = createMermaidBudget();
-    const blocks = ["A", "B", "C"].map((source) => block(encodeURIComponent(source)));
+    const blocks = ["A", "B", "C"].map((source) =>
+      block(encodeURIComponent(source)),
+    );
     let renders = 0;
 
     for (const target of blocks) {
-      await renderMermaidBlock(target, async () => {
-        renders += 1;
-        return { svg: "<svg></svg>" };
-      }, budget, () => false);
+      await renderMermaidBlock(
+        target,
+        async () => {
+          renders += 1;
+          return { svg: "<svg></svg>" };
+        },
+        budget,
+        () => false,
+      );
     }
 
     expect(renders).toBe(2);
@@ -87,13 +106,20 @@ describe("renderMermaidBlock", () => {
     // Even the reject paths (this source is deliberately too complex) must not
     // write to it, and nothing may be billed to a budget the next render owns.
     const budget = createMermaidBudget();
-    const target = block(encodeURIComponent(`graph TD\nA${"-->A".repeat(128)}`));
+    const target = block(
+      encodeURIComponent(`graph TD\nA${"-->A".repeat(128)}`),
+    );
     let renders = 0;
 
-    await renderMermaidBlock(target, async () => {
-      renders += 1;
-      return { svg: "<svg></svg>" };
-    }, budget, () => true);
+    await renderMermaidBlock(
+      target,
+      async () => {
+        renders += 1;
+        return { svg: "<svg></svg>" };
+      },
+      budget,
+      () => true,
+    );
 
     expect(renders).toBe(0);
     expect(target.textContent).toBe("");
@@ -129,10 +155,15 @@ describe("renderMermaidBlock", () => {
     );
     let renders = 0;
     for (const target of blocks) {
-      await renderMermaidBlock(target, async () => {
-        renders += 1;
-        return { svg: "<svg></svg>" };
-      }, fresh, () => false);
+      await renderMermaidBlock(
+        target,
+        async () => {
+          renders += 1;
+          return { svg: "<svg></svg>" };
+        },
+        fresh,
+        () => false,
+      );
     }
 
     expect(renders).toBe(2);
@@ -184,7 +215,11 @@ describe("renderMermaidBlock", () => {
     for (const target of first) {
       await renderMermaidBlock(target, render, firstBudget, () => false);
     }
-    expect(first.map((b) => b.dataset.rendered)).toEqual(["true", "true", "error"]);
+    expect(first.map((b) => b.dataset.rendered)).toEqual([
+      "true",
+      "true",
+      "error",
+    ]);
 
     // Candidates land and every body re-renders. One fresh budget for the whole
     // remount, so the two diagrams still on screen are charged exactly once and
@@ -196,7 +231,11 @@ describe("renderMermaidBlock", () => {
       await renderMermaidBlock(target, render, secondBudget, () => false);
     }
 
-    expect(second.map((b) => b.dataset.rendered)).toEqual(["true", "true", "error"]);
+    expect(second.map((b) => b.dataset.rendered)).toEqual([
+      "true",
+      "true",
+      "error",
+    ]);
     expect(secondBudget.blocks).toBe(2);
     expect(firstBudget).toEqual(secondBudget);
   });
@@ -213,7 +252,9 @@ describe("renderMermaidBlock", () => {
     );
     await renderMermaidBlock(
       failure,
-      async () => { throw new Error("invalid diagram"); },
+      async () => {
+        throw new Error("invalid diagram");
+      },
       createMermaidBudget(),
       () => false,
     );

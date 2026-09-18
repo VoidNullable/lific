@@ -23,8 +23,12 @@ export function getUserRevision(): number {
 }
 
 /** Capture the revision before me(); reject late loads after another publication. */
-export function publishUser(next: AuthUser | null, expectedRevision?: number): boolean {
-  if (expectedRevision !== undefined && expectedRevision !== revision) return false;
+export function publishUser(
+  next: AuthUser | null,
+  expectedRevision?: number,
+): boolean {
+  if (expectedRevision !== undefined && expectedRevision !== revision)
+    return false;
   currentUser.set(next);
   return true;
 }

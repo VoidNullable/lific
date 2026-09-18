@@ -34,7 +34,8 @@ export interface ComposerAttachmentsOptions {
    *  this module inserted. */
   text: ComposerText;
   /** Entity to link finished uploads to, when it already exists. */
-  link?: () => { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
+  link?: () =>
+    { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
 }
 
 export interface PendingPaste {

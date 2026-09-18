@@ -181,7 +181,13 @@ const TOOLS: FossTool[] = [
     icon: (
       <Img src={staticFile("taiga.png")} style={{ width: 40, height: 40 }} />
     ),
-    blocks: ["postgres", "taiga-back", "async-rabbitmq", "events-rabbitmq", "+5 more"],
+    blocks: [
+      "postgres",
+      "taiga-back",
+      "async-rabbitmq",
+      "events-rabbitmq",
+      "+5 more",
+    ],
     fact: "9 containers, 2 RabbitMQ instances",
   },
   {
@@ -195,7 +201,14 @@ const TOOLS: FossTool[] = [
   {
     name: "OpenProject",
     icon: iconSvg(OPENPROJECT_PATH, "#0770B8"),
-    blocks: ["postgres", "memcached", "worker", "cron", "hocuspocus", "+4 more"],
+    blocks: [
+      "postgres",
+      "memcached",
+      "worker",
+      "cron",
+      "hocuspocus",
+      "+4 more",
+    ],
     fact: "9 services, quad-core + 4 GB minimum",
   },
 ];
@@ -276,7 +289,8 @@ export const AgitateFoss: React.FC = () => {
   // ONE frame shudder, on the "heavy." boom only.
   let thud = 0;
   if (frame >= HEAVY_AT && frame < HEAVY_AT + 10) {
-    thud = Math.sin((frame - HEAVY_AT) * 2.2) * 10 * (1 - (frame - HEAVY_AT) / 10);
+    thud =
+      Math.sin((frame - HEAVY_AT) * 2.2) * 10 * (1 - (frame - HEAVY_AT) / 10);
   }
 
   const lineIn = (at: number) =>

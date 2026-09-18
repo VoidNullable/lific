@@ -52,8 +52,20 @@ type Step = {
 };
 
 const STEPS: Step[] = [
-  { id: 1, depth: 0, title: "Schema migration for pending ops", issue: "APP-39", done0: true },
-  { id: 2, depth: 0, title: "Write-ahead op queue", issue: "APP-40", done0: true },
+  {
+    id: 1,
+    depth: 0,
+    title: "Schema migration for pending ops",
+    issue: "APP-39",
+    done0: true,
+  },
+  {
+    id: 2,
+    depth: 0,
+    title: "Write-ahead op queue",
+    issue: "APP-40",
+    done0: true,
+  },
   { id: 3, depth: 0, title: "Conflict resolution", issue: "APP-42" },
   { id: 6, depth: 1, title: "Detect conflicting ops", done0: true },
   { id: 7, depth: 1, title: "Last-write-wins merge" },
@@ -98,7 +110,8 @@ const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({
 
 const Typed: React.FC<{ at: number; text: string }> = ({ at, text }) => {
   const frame = useCurrentFrame();
-  const chars = frame >= at ? Math.min(text.length, Math.floor((frame - at) * 1.5)) : 0;
+  const chars =
+    frame >= at ? Math.min(text.length, Math.floor((frame - at) * 1.5)) : 0;
   if (chars === 0) return null;
   return (
     <div style={{ fontFamily: MONO, fontSize: 22, color: TUI.text }}>
@@ -152,7 +165,11 @@ export const PlanSync: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const panelIn = spring({ frame, fps, config: { damping: 200, stiffness: 90 } });
+  const panelIn = spring({
+    frame,
+    fps,
+    config: { damping: 200, stiffness: 90 },
+  });
 
   // Completion pops.
   const pop7 = spring({
@@ -236,11 +253,15 @@ export const PlanSync: React.FC = () => {
               }),
             }}
           >
-            <div style={{ flex: 1, height: 1, backgroundColor: `${TUI.dim}55` }} />
+            <div
+              style={{ flex: 1, height: 1, backgroundColor: `${TUI.dim}55` }}
+            />
             <span style={{ fontFamily: MONO, fontSize: 17, color: TUI.dim }}>
               new session &middot; fresh context
             </span>
-            <div style={{ flex: 1, height: 1, backgroundColor: `${TUI.dim}55` }} />
+            <div
+              style={{ flex: 1, height: 1, backgroundColor: `${TUI.dim}55` }}
+            />
           </div>
         ) : null}
 

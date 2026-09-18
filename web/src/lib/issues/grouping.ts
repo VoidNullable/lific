@@ -64,8 +64,13 @@ export type IssueGroup = {
  *  preview. Cheap markdown strip, capped at 160 chars. */
 export function descriptionPreview(content: string): string {
   if (!content) return "";
-  const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-  return (lines[0] ?? "").replace(/[*_`>[\]]/g, "").trim().slice(0, 160);
+  const lines = content
+    .split("\n")
+    .filter((l) => l.trim() && !l.startsWith("#"));
+  return (lines[0] ?? "")
+    .replace(/[*_`>[\]]/g, "")
+    .trim()
+    .slice(0, 160);
 }
 
 /** LIF-191: build ordered groups for the active `groupBy`, or null when the
@@ -89,28 +94,46 @@ export function buildGroups(opts: {
   // A single literal status filter makes status buckets pointless (one
   // bucket). The "Unresolved" group filter still spans backlog/todo/active,
   // so status grouping stays meaningful there — don't suppress it.
-  if (groupBy === "status" && filterStatus && filterStatus !== STATUS_UNRESOLVED)
+  if (
+    groupBy === "status" &&
+    filterStatus &&
+    filterStatus !== STATUS_UNRESOLVED
+  )
     return null;
 
   const out: IssueGroup[] = [];
   if (groupBy === "status") {
     for (const s of STATUSES) {
       const items = sortedIssues.filter((i) => i.status === s);
-      if (items.length) out.push({ key: s, label: s, kind: "status", issues: items });
+      if (items.length)
+        out.push({ key: s, label: s, kind: "status", issues: items });
     }
   } else if (groupBy === "priority") {
     for (const p of PRIORITIES) {
       const items = sortedIssues.filter((i) => i.priority === p);
-      if (items.length) out.push({ key: p, label: p, kind: "priority", issues: items });
+      if (items.length)
+        out.push({ key: p, label: p, kind: "priority", issues: items });
     }
   } else if (groupBy === "module") {
     for (const m of modules) {
       const items = sortedIssues.filter((i) => i.module_id === m.id);
       if (items.length)
-        out.push({ key: String(m.id), label: m.name, kind: "module", module: m, issues: items });
+        out.push({
+          key: String(m.id),
+          label: m.name,
+          kind: "module",
+          module: m,
+          issues: items,
+        });
     }
     const none = sortedIssues.filter((i) => i.module_id == null);
-    if (none.length) out.push({ key: "none", label: "No module", kind: "module", issues: none });
+    if (none.length)
+      out.push({
+        key: "none",
+        label: "No module",
+        kind: "module",
+        issues: none,
+      });
   }
   return out;
 }
@@ -180,6 +203,7 @@ export function buildLanes(opts: {
  *  IssueList already uses for cross-column status drops. */
 export function laneKeyForIssue(issue: Issue, laneBy: LaneBy): string {
   if (laneBy === "priority") return issue.priority;
-  if (laneBy === "module") return issue.module_id == null ? "none" : String(issue.module_id);
+  if (laneBy === "module")
+    return issue.module_id == null ? "none" : String(issue.module_id);
   return "";
 }

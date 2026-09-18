@@ -62,7 +62,9 @@ export class ProjectReadModel {
    *  rendered before. A warm project is never `coldStart`, which is what
    *  keeps navigation between the list, the board and the page tree free of
    *  loading skeletons. */
-  coldStart = $derived(this.status !== "ready" && this.issues.size === 0 && this.pages.size === 0);
+  coldStart = $derived(
+    this.status !== "ready" && this.issues.size === 0 && this.pages.size === 0,
+  );
 
   // Non-reactive plumbing.
   private pullTimer: ReturnType<typeof setTimeout> | null = null;
@@ -257,7 +259,9 @@ const models = new Map<string, ProjectReadModel>();
 
 function modelKey(projectId: number): string {
   const audience = getPublicProject();
-  return audience === null ? `private:${projectId}` : `public:${audience}:${projectId}`;
+  return audience === null
+    ? `private:${projectId}`
+    : `public:${audience}:${projectId}`;
 }
 
 /** The project whose websocket resume frame we send on reconnect. Set by
@@ -291,7 +295,9 @@ export function setActiveProject(projectId: number | null): void {
 
 /** Force an immediate reconcile for one project — used by routes right
  *  after a local mutation that they could not apply optimistically. */
-export function refreshProjectModel(projectId: number | null | undefined): void {
+export function refreshProjectModel(
+  projectId: number | null | undefined,
+): void {
   if (projectId == null) return;
   const model = models.get(modelKey(projectId));
   if (model) void model.pull();
@@ -339,7 +345,8 @@ export function handleRealtimeEvent(event: SyncEvent): void {
     return;
   }
 
-  const projectId = typeof event.project_id === "number" ? event.project_id : null;
+  const projectId =
+    typeof event.project_id === "number" ? event.project_id : null;
   if (projectId == null) return;
   // Realtime is a private channel; it only ever feeds private replicas.
   const model = models.get(`private:${projectId}`);

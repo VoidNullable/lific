@@ -25,10 +25,18 @@ const PAID_AT = 40;
 const ROW2_AT = 60;
 const HEAVY_AT = 100;
 
-const Slam: React.FC<{ at: number; color: string; children: string }> = ({ at, color, children }) => {
+const Slam: React.FC<{ at: number; color: string; children: string }> = ({
+  at,
+  color,
+  children,
+}) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const s = spring({ frame: frame - at, fps, config: { damping: 13, stiffness: 220, mass: 0.6 } });
+  const s = spring({
+    frame: frame - at,
+    fps,
+    config: { damping: 13, stiffness: 220, mass: 0.6 },
+  });
   if (frame < at) return null;
   return (
     <span
@@ -49,14 +57,19 @@ const Slam: React.FC<{ at: number; color: string; children: string }> = ({ at, c
 };
 
 const fadeIn = (frame: number, at: number) =>
-  interpolate(frame, [at, at + 12], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  interpolate(frame, [at, at + 12], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
 export const ProblemFlash: React.FC = () => {
   const frame = useCurrentFrame();
 
   // One shudder per slam.
   const shake = (at: number) =>
-    frame >= at && frame < at + 8 ? Math.sin((frame - at) * 2.3) * 7 * (1 - (frame - at) / 8) : 0;
+    frame >= at && frame < at + 8
+      ? Math.sin((frame - at) * 2.3) * 7 * (1 - (frame - at) / 8)
+      : 0;
   const dy = shake(PAID_AT) + shake(HEAVY_AT);
 
   return (
@@ -69,23 +82,55 @@ export const ProblemFlash: React.FC = () => {
           transform: `translateY(${dy}px)`,
         }}
       >
-        <div style={{ fontFamily: BODY, fontSize: 40, fontWeight: 500, color: C.textMuted, opacity: fadeIn(frame, 6) }}>
+        <div
+          style={{
+            fontFamily: BODY,
+            fontSize: 40,
+            fontWeight: 500,
+            color: C.textMuted,
+            opacity: fadeIn(frame, 6),
+          }}
+        >
           The trackers you could be using:
         </div>
 
         {/* Row 1: Paid */}
-        <div style={{ display: "flex", alignItems: "center", gap: 40, opacity: fadeIn(frame, 20) }}>
-          <svg width="56" height="56" viewBox="0 0 24 24"><path d={JIRA_PATH} fill="#0052CC" /></svg>
-          <span style={{ fontFamily: BODY, fontSize: 34, color: C.text }}>$7.91 / user / month</span>
-          <svg width="56" height="56" viewBox="0 0 24 24"><path d={LINEAR_PATH} fill="#5E6AD2" /></svg>
-          <span style={{ fontFamily: BODY, fontSize: 34, color: C.text }}>$10&ndash;16 / user / month</span>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 40,
+            opacity: fadeIn(frame, 20),
+          }}
+        >
+          <svg width="56" height="56" viewBox="0 0 24 24">
+            <path d={JIRA_PATH} fill="#0052CC" />
+          </svg>
+          <span style={{ fontFamily: BODY, fontSize: 34, color: C.text }}>
+            $7.91 / user / month
+          </span>
+          <svg width="56" height="56" viewBox="0 0 24 24">
+            <path d={LINEAR_PATH} fill="#5E6AD2" />
+          </svg>
+          <span style={{ fontFamily: BODY, fontSize: 34, color: C.text }}>
+            $10&ndash;16 / user / month
+          </span>
           <div style={{ width: 260, textAlign: "left" }}>
-            <Slam at={PAID_AT} color={C.warn}>Paid.</Slam>
+            <Slam at={PAID_AT} color={C.warn}>
+              Paid.
+            </Slam>
           </div>
         </div>
 
         {/* Row 2: Heavy */}
-        <div style={{ display: "flex", alignItems: "center", gap: 40, opacity: fadeIn(frame, ROW2_AT) }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 40,
+            opacity: fadeIn(frame, ROW2_AT),
+          }}
+        >
           <span style={{ fontFamily: BODY, fontSize: 34, color: C.text }}>
             Plane &middot; Taiga &middot; Huly &middot; OpenProject
           </span>
@@ -93,11 +138,20 @@ export const ProblemFlash: React.FC = () => {
             9&ndash;14 services, 8&ndash;16 GB RAM
           </span>
           <div style={{ width: 320, textAlign: "left" }}>
-            <Slam at={HEAVY_AT} color={C.error}>Heavy.</Slam>
+            <Slam at={HEAVY_AT} color={C.error}>
+              Heavy.
+            </Slam>
           </div>
         </div>
 
-        <div style={{ fontFamily: BODY, fontSize: 21, color: C.textFaint, opacity: fadeIn(frame, 118) }}>
+        <div
+          style={{
+            fontFamily: BODY,
+            fontSize: 21,
+            color: C.textFaint,
+            opacity: fadeIn(frame, 118),
+          }}
+        >
           their own pricing pages and compose files
         </div>
       </AbsoluteFill>

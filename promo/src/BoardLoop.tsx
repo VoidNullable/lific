@@ -51,9 +51,41 @@ const HERO: IssueData = {
 };
 
 const OTHERS: { issue: IssueData; col: number; slot: number }[] = [
-  { col: 0, slot: 1, issue: { identifier: "LIF-243", title: "OG image for social cards", priority: "low", labels: [L.site], updated: "1d ago", status: "todo" } },
-  { col: 1, slot: 0, issue: { identifier: "LIF-238", title: "Sync landing copy with README", priority: "medium", labels: [L.site], updated: "3h ago", status: "active" } },
-  { col: 2, slot: 0, issue: { identifier: "LIF-236", title: "Register lific.dev DNS", labels: [L.webui], updated: "2d ago", status: "done" } },
+  {
+    col: 0,
+    slot: 1,
+    issue: {
+      identifier: "LIF-243",
+      title: "OG image for social cards",
+      priority: "low",
+      labels: [L.site],
+      updated: "1d ago",
+      status: "todo",
+    },
+  },
+  {
+    col: 1,
+    slot: 0,
+    issue: {
+      identifier: "LIF-238",
+      title: "Sync landing copy with README",
+      priority: "medium",
+      labels: [L.site],
+      updated: "3h ago",
+      status: "active",
+    },
+  },
+  {
+    col: 2,
+    slot: 0,
+    issue: {
+      identifier: "LIF-236",
+      title: "Register lific.dev DNS",
+      labels: [L.webui],
+      updated: "2d ago",
+      status: "done",
+    },
+  },
 ];
 
 // ── Geometry ─────────────────────────────────────────────────
@@ -111,13 +143,22 @@ export const BoardLoop: React.FC = () => {
   };
 
   // Settle bounce after each drop.
-  const settle1 = spring({ frame: frame - DROP_1, fps, config: { damping: 15, stiffness: 170, mass: 0.6 } });
-  const settle2 = spring({ frame: frame - DROP_2, fps, config: { damping: 15, stiffness: 170, mass: 0.6 } });
+  const settle1 = spring({
+    frame: frame - DROP_1,
+    fps,
+    config: { damping: 15, stiffness: 170, mass: 0.6 },
+  });
+  const settle2 = spring({
+    frame: frame - DROP_2,
+    fps,
+    config: { damping: 15, stiffness: 170, mass: 0.6 },
+  });
   const settle = frame < GRAB_2 ? settle1 : settle2;
   const landed = (frame >= DROP_1 && frame < GRAB_2) || frame >= DROP_2;
 
   // Status flips at each drop; counts follow, like the live app.
-  const heroStatus = frame < DROP_1 ? "todo" : frame < DROP_2 ? "active" : "done";
+  const heroStatus =
+    frame < DROP_1 ? "todo" : frame < DROP_2 ? "active" : "done";
   const counts =
     frame < DROP_1
       ? { backlog: 1, todo: 2, active: 1, done: 1 }
@@ -220,7 +261,8 @@ export const BoardLoop: React.FC = () => {
           {/* Static cards */}
           {OTHERS.map((card, i) => {
             const inAnim = cardIn(i + 1);
-            const y = card.issue.identifier === "LIF-243" ? lif243Y : slotY(card.slot);
+            const y =
+              card.issue.identifier === "LIF-243" ? lif243Y : slotY(card.slot);
             return (
               <div
                 key={card.issue.identifier}
@@ -256,10 +298,7 @@ export const BoardLoop: React.FC = () => {
                   : undefined,
             }}
           >
-            <IssueCard
-              issue={{ ...HERO, status: heroStatus }}
-              width={CARD_W}
-            />
+            <IssueCard issue={{ ...HERO, status: heroStatus }} width={CARD_W} />
           </div>
 
           {/* Cursor rides inside the content panel. */}

@@ -40,7 +40,6 @@ const JSONLD = JSON.stringify([
   },
 ]);
 
-
 // The section-label hallmark pattern (LIF-DOC-14 §2). Used only for
 // the hero eyebrow; the pitch sections carry their own big titles.
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -132,8 +131,8 @@ const agentFacts: {
     head: <>&quot;What can I work on?&quot; in one call</>,
     body: (
       <>
-        The <Cmd>workable</Cmd> filter returns only issues with every
-        blocker resolved, so triage happens without a graph query.
+        The <Cmd>workable</Cmd> filter returns only issues with every blocker
+        resolved, so triage happens without a graph query.
       </>
     ),
   },
@@ -143,8 +142,7 @@ const agentFacts: {
     body: (
       <>
         Generates tracker instructions for your repo&apos;s AGENTS.md, so a
-        fresh session knows where the work lives before it reads a single
-        file.
+        fresh session knows where the work lives before it reads a single file.
       </>
     ),
   },
@@ -154,8 +152,8 @@ const agentFacts: {
     body: (
       <>
         Everything gets a name like{" "}
-        <span className="identifier-link">APP-42</span> that holds up in a
-        log, a grep, a commit message, or a conversation.
+        <span className="identifier-link">APP-42</span> that holds up in a log,
+        a grep, a commit message, or a conversation.
       </>
     ),
   },
@@ -222,8 +220,7 @@ export default function Home() {
                 <SectionTitle>agents</SectionTitle>
                 <Body className="mt-8">
                   <Cmd>lific connect</Cmd> detects the AI tools installed on
-                  your machine and writes the MCP config for each one you
-                  pick:
+                  your machine and writes the MCP config for each one you pick:
                 </Body>
               </div>
               <img
@@ -293,9 +290,9 @@ export default function Home() {
           <Reveal delay={150}>
             <Body className="mt-9">
               After the restart, the agent has the whole tracker as MCP tools:
-              issues, plans, pages, comments, and search. The full tool
-              surface costs <Em>about 5.8k tokens of context</Em>, roughly one
-              long file read, so it leaves room for the actual work.
+              issues, plans, pages, comments, and search. The full tool surface
+              costs <Em>about 5.8k tokens of context</Em>, roughly one long file
+              read, so it leaves room for the actual work.
             </Body>
             <Body>
               Agents without MCP support get the same verbs through the CLI.
@@ -323,16 +320,19 @@ export default function Home() {
           <Reveal>
             <SectionTitle>humans</SectionTitle>
             <Body className="mt-8">
-              Agents work over MCP. Humans get a full web UI in the same
-              binary, at <Cmd>localhost:3456</Cmd>: an issue list, a kanban board, documents, modules, and{" "}
-              <Em>comment threads where you and your agents talk to each
-              other</Em>. Dark mode is the default, with accent presets and a
-              light theme in settings.
+              Agents work over MCP. Humans get a full web UI in the same binary,
+              at <Cmd>localhost:3456</Cmd>: an issue list, a kanban board,
+              documents, modules, and{" "}
+              <Em>
+                comment threads where you and your agents talk to each other
+              </Em>
+              . Dark mode is the default, with accent presets and a light theme
+              in settings.
             </Body>
             <Body>
-              It also catches the ideas. File a half-formed thought as a
-              backlog issue from your phone, and it&apos;s still sitting there
-              next week when an agent asks for work.
+              It also catches the ideas. File a half-formed thought as a backlog
+              issue from your phone, and it&apos;s still sitting there next week
+              when an agent asks for work.
             </Body>
           </Reveal>
           <Reveal delay={100} className="mt-9 lg:-mr-16">
@@ -353,10 +353,10 @@ export default function Home() {
             <SectionTitle>teams</SectionTitle>
             <Body className="mt-8">
               Before an agent writes code, it writes a plan: a tree of steps,
-              nested wherever a step needs its own sub-steps. Lific stores
-              that tree in the tracker and ties each step to a real issue.{" "}
-              <Em>Finishing a step closes its issue</Em>, so the board your
-              team watches stays current while the agent works.
+              nested wherever a step needs its own sub-steps. Lific stores that
+              tree in the tracker and ties each step to a real issue.{" "}
+              <Em>Finishing a step closes its issue</Em>, so the board your team
+              watches stays current while the agent works.
             </Body>
           </Reveal>
 
@@ -376,9 +376,9 @@ export default function Home() {
 
           <Reveal delay={150}>
             <Body className="mt-9">
-              Planning a quarter is the same act as planning a coding
-              session, just a longer tree: steps and sub-steps checked off
-              one by one, top to bottom.
+              Planning a quarter is the same act as planning a coding session,
+              just a longer tree: steps and sub-steps checked off one by one,
+              top to bottom.
             </Body>
             <ul className="mt-8 max-w-4xl">
               <li className="border-t border-border/60 py-4 text-body leading-relaxed">
@@ -392,7 +392,9 @@ export default function Home() {
                 </p>
               </li>
               <li className="border-t border-border/60 py-4 text-body leading-relaxed">
-                <p className="font-medium text-text">OAuth 2.1 for connected tools</p>
+                <p className="font-medium text-text">
+                  OAuth 2.1 for connected tools
+                </p>
                 <p className="mt-0.5 text-text-faint">
                   Connected clients can sign in through a standard flow instead
                   of pasted keys, so agent actions land under the right name.
@@ -419,11 +421,10 @@ export default function Home() {
             <Body className="mt-8">
               Setup takes about a minute. <Cmd>lific init</Cmd> writes the
               config, creates the database, and asks how you want to sign in:
-              login-free, or with a password. It creates the first admin
-              account from that answer, then installs a background service
-              where the system offers one (a systemd user session on Linux,
-              launchd on macOS), so{" "}
-              <Em>the server is still running tomorrow</Em>.{" "}
+              login-free, or with a password. It creates the first admin account
+              from that answer, then installs a background service where the
+              system offers one (a systemd user session on Linux, launchd on
+              macOS), so <Em>the server is still running tomorrow</Em>.{" "}
               <Cmd>lific connect</Cmd> finds the AI tools on your machine and
               writes their MCP config for them. Restart your client and the
               tools show up.
@@ -435,7 +436,10 @@ export default function Home() {
             </Body>
           </Reveal>
           <Reveal delay={100} className="mt-9 min-w-0">
-            <Window title="~" className="w-full min-w-0 max-w-full md:max-w-4xl">
+            <Window
+              title="~"
+              className="w-full min-w-0 max-w-full md:max-w-4xl"
+            >
               <pre className="max-w-full overflow-x-auto whitespace-pre bg-bg p-4 font-mono text-body-sm leading-loose text-text sm:p-6">
                 <code>
                   <span className="text-success">$</span> cargo install lific
@@ -501,16 +505,28 @@ export default function Home() {
             © 2026{"\u00a0·\u00a0"}Apache-2.0{"\u00a0·\u00a0"}no telemetry
           </span>
           <div className="flex w-full flex-wrap items-center gap-x-5 gap-y-1 sm:w-auto sm:gap-y-0">
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href="/compare">
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href="/compare"
+            >
               compare
             </a>
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={GITHUB}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={GITHUB}
+            >
               github
             </a>
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={CRATE}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={CRATE}
+            >
               crates.io
             </a>
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={DISCORD}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={DISCORD}
+            >
               discord
             </a>
           </div>

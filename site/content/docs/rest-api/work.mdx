@@ -126,7 +126,7 @@ Lists one page of comments on an issue. Path parameter: `issue_id` (integer). Qu
 The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
 
 - Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
-- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
+- `order` must be `desc`. Paging to what comes _before_ a position is a backwards read.
 - `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
 
 No request body. Response: a `Comment` array, capped by row count and a 2 MiB byte budget. A short page does not necessarily end the thread. Read `x-comment-has-more` and `x-comment-returned`; continuation headers are `x-comment-next-offset` in offset mode and `x-comment-next-created-at` plus `x-comment-next-id` for descending reads.
@@ -150,7 +150,7 @@ Lists one page of comments on a page. Path parameter: `page_id` (integer). Query
 The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
 
 - Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
-- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
+- `order` must be `desc`. Paging to what comes _before_ a position is a backwards read.
 - `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
 
 No request body. Response: a `Comment` array, capped by row count and a 2 MiB byte budget. A short page does not necessarily end the thread. Read `x-comment-has-more` and `x-comment-returned`; continuation headers are `x-comment-next-offset` in offset mode and `x-comment-next-created-at` plus `x-comment-next-id` for descending reads.
@@ -449,9 +449,7 @@ It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`,
 ```json
 {
   "root": "LIF",
-  "files": [
-    { "path": "LIF/issues/lif-1-example.md", "content": "# Example\n" }
-  ]
+  "files": [{ "path": "LIF/issues/lif-1-example.md", "content": "# Example\n" }]
 }
 ```
 

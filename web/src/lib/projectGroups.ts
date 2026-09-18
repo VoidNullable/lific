@@ -16,7 +16,9 @@ export function loadCollapsedGroups(): Set<number> {
     if (raw !== null) {
       const ids: unknown = JSON.parse(raw);
       if (Array.isArray(ids)) {
-        return new Set(ids.filter((id): id is number => typeof id === "number"));
+        return new Set(
+          ids.filter((id): id is number => typeof id === "number"),
+        );
       }
     }
   } catch {

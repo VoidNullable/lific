@@ -9,7 +9,11 @@ export const SIDEBAR_DEFAULT_WIDTH = 230;
 export const SIDEBAR_MIN_WIDTH = 180;
 export const SIDEBAR_MAX_WIDTH = 400;
 
-export function clampSidebarWidth(width: number, min = SIDEBAR_MIN_WIDTH, max = SIDEBAR_MAX_WIDTH): number {
+export function clampSidebarWidth(
+  width: number,
+  min = SIDEBAR_MIN_WIDTH,
+  max = SIDEBAR_MAX_WIDTH,
+): number {
   return Math.min(max, Math.max(min, width));
 }
 
@@ -44,14 +48,26 @@ export function saveSidebarWidth(width: number | null): void {
 
 /** A temporary text-size constraint must never replace the user's saved width. */
 export function sidebarSizing(preferred: number | null, rootFontSize: number) {
-  const scale = Number.isFinite(rootFontSize) && rootFontSize > 0 ? rootFontSize / 16 : 1;
+  const scale =
+    Number.isFinite(rootFontSize) && rootFontSize > 0 ? rootFontSize / 16 : 1;
   const min = SIDEBAR_MIN_WIDTH * Math.max(1, scale);
   const max = Math.max(SIDEBAR_MAX_WIDTH, min);
-  return { min, max, width: clampSidebarWidth(preferred ?? SIDEBAR_DEFAULT_WIDTH * scale, min, max) };
+  return {
+    min,
+    max,
+    width: clampSidebarWidth(
+      preferred ?? SIDEBAR_DEFAULT_WIDTH * scale,
+      min,
+      max,
+    ),
+  };
 }
 
 /** Observe a 1rem probe so live text preferences and browser font settings agree. */
-export function observeSidebarFontSize(node: HTMLElement, update: (size: number) => void) {
+export function observeSidebarFontSize(
+  node: HTMLElement,
+  update: (size: number) => void,
+) {
   update(parseFloat(getComputedStyle(document.documentElement).fontSize));
   const observer = new ResizeObserver(([entry]) => {
     // display:none while collapsed must not reset the scale.

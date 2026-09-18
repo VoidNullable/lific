@@ -234,7 +234,10 @@ export function createSyncClient(options: SyncClientOptions): SyncClient {
     if (leader) {
       if (message.kind === "outbound") {
         sendOnSocket(message.frame);
-      } else if (message.kind === "hello" && socket?.readyState === WebSocket.OPEN) {
+      } else if (
+        message.kind === "hello" &&
+        socket?.readyState === WebSocket.OPEN
+      ) {
         post({ kind: "open" });
       }
       return;

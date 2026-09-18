@@ -1,6 +1,10 @@
 import React from "react";
 import { Audio, staticFile, interpolate } from "remotion";
-import { TransitionSeries, linearTiming, springTiming } from "@remotion/transitions";
+import {
+  TransitionSeries,
+  linearTiming,
+  springTiming,
+} from "@remotion/transitions";
 import { fade } from "@remotion/transitions/fade";
 import { slide } from "@remotion/transitions/slide";
 import { AgentHook } from "./scenes/AgentHook";
@@ -41,7 +45,8 @@ export const SCENES_B = {
 
 const T = 12;
 const durs = Object.values(SCENES_B);
-export const TOTAL_FRAMES_B = durs.reduce((a, b) => a + b, 0) - (durs.length - 1) * T;
+export const TOTAL_FRAMES_B =
+  durs.reduce((a, b) => a + b, 0) - (durs.length - 1) * T;
 
 const cut = linearTiming({ durationInFrames: T });
 const springy = springTiming({ config: { damping: 200 }, durationInFrames: T });

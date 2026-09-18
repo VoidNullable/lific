@@ -48,13 +48,82 @@ type BoardCard = {
 };
 
 const CARDS: BoardCard[] = [
-  { col: 0, slot: 0, issue: { identifier: "LIF-231", title: "Board column virtualization", priority: "medium", labels: [L.webui], updated: "2d ago" } },
-  { col: 0, slot: 1, issue: { identifier: "LIF-214", title: "Bulk-edit issues from the list", priority: "high", labels: [L.webui], updated: "4h ago" } },
-  { col: 0, slot: 2, issue: { identifier: "LIF-207", title: "Saved filters per project", priority: "low", updated: "1d ago" } },
-  { col: 1, slot: 0, issue: { identifier: "LIF-198", title: "Fix WAL checkpoint race", priority: "high", labels: [L.core, L.bug], updated: "26m ago" } },
-  { col: 1, slot: 1, issue: { identifier: "LIF-226", title: "MCP: recurring plan templates", priority: "medium", labels: [L.mcp], updated: "2h ago" } },
-  { col: 2, slot: 0, issue: { identifier: "LIF-183", title: "OAuth device flow for CLI", labels: [L.auth], updated: "5h ago", status: "done" } },
-  { col: 2, slot: 1, issue: { identifier: "LIF-171", title: "Backup retention config", labels: [L.core], updated: "1d ago", status: "done" } },
+  {
+    col: 0,
+    slot: 0,
+    issue: {
+      identifier: "LIF-231",
+      title: "Board column virtualization",
+      priority: "medium",
+      labels: [L.webui],
+      updated: "2d ago",
+    },
+  },
+  {
+    col: 0,
+    slot: 1,
+    issue: {
+      identifier: "LIF-214",
+      title: "Bulk-edit issues from the list",
+      priority: "high",
+      labels: [L.webui],
+      updated: "4h ago",
+    },
+  },
+  {
+    col: 0,
+    slot: 2,
+    issue: {
+      identifier: "LIF-207",
+      title: "Saved filters per project",
+      priority: "low",
+      updated: "1d ago",
+    },
+  },
+  {
+    col: 1,
+    slot: 0,
+    issue: {
+      identifier: "LIF-198",
+      title: "Fix WAL checkpoint race",
+      priority: "high",
+      labels: [L.core, L.bug],
+      updated: "26m ago",
+    },
+  },
+  {
+    col: 1,
+    slot: 1,
+    issue: {
+      identifier: "LIF-226",
+      title: "MCP: recurring plan templates",
+      priority: "medium",
+      labels: [L.mcp],
+      updated: "2h ago",
+    },
+  },
+  {
+    col: 2,
+    slot: 0,
+    issue: {
+      identifier: "LIF-183",
+      title: "OAuth device flow for CLI",
+      labels: [L.auth],
+      updated: "5h ago",
+      status: "done",
+    },
+  },
+  {
+    col: 2,
+    slot: 1,
+    issue: {
+      identifier: "LIF-171",
+      title: "Backup retention config",
+      labels: [L.core],
+      updated: "1d ago",
+      status: "done",
+    },
+  },
 ];
 
 // Deterministic card metrics (single-line titles): 87px card, 8px gap.
@@ -115,7 +184,11 @@ export const UIScene: React.FC<{ dragStart?: number }> = ({
     { at: DRAG_END + 45, x: dstX + 260, y: dstY + 220 },
   ];
 
-  const frameIn = spring({ frame, fps, config: { damping: 200, stiffness: 90 } });
+  const frameIn = spring({
+    frame,
+    fps,
+    config: { damping: 200, stiffness: 90 },
+  });
   const captionIn = interpolate(frame, [20, 36], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
@@ -136,7 +209,11 @@ export const UIScene: React.FC<{ dragStart?: number }> = ({
             marginTop: -40,
           }}
         >
-          <BrowserFrame url="localhost:3456/#/LIF/board" width={APP_W} height={APP_H + 52}>
+          <BrowserFrame
+            url="localhost:3456/#/LIF/board"
+            width={APP_W}
+            height={APP_H + 52}
+          >
             <LificApp
               width={APP_W}
               height={APP_H}
@@ -169,7 +246,10 @@ export const UIScene: React.FC<{ dragStart?: number }> = ({
                     fps,
                     config: { damping: 200, stiffness: 140 },
                   });
-                  y = frame < DRAG_START + 6 ? slotYAt(2) : slotYAt(2) + (slotYAt(1) - slotYAt(2)) * s;
+                  y =
+                    frame < DRAG_START + 6
+                      ? slotYAt(2)
+                      : slotYAt(2) + (slotYAt(1) - slotYAt(2)) * s;
                 }
                 const enter = spring({
                   frame: frame - 4 - (card.col * 2 + card.slot) * 2,
@@ -238,7 +318,9 @@ export const UIScene: React.FC<{ dragStart?: number }> = ({
           }}
         >
           Issues, kanban, pages, modules.{" "}
-          <span style={{ color: C.textMuted }}>The whole tracker, no seat math.</span>
+          <span style={{ color: C.textMuted }}>
+            The whole tracker, no seat math.
+          </span>
         </div>
       </AbsoluteFill>
     </Background>

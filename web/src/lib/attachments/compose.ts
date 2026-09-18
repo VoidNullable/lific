@@ -47,7 +47,10 @@ export function insertSnippetAt(
   const after = current.slice(end);
   const needsLeadingBreak = before.length > 0 && !before.endsWith("\n");
   const insertion = `${needsLeadingBreak ? "\n" : ""}${snippet}\n`;
-  return { text: before + insertion + after, caret: before.length + insertion.length };
+  return {
+    text: before + insertion + after,
+    caret: before.length + insertion.length,
+  };
 }
 
 /** Insert `snippet` into `textarea` at the caret. Thin wrapper over

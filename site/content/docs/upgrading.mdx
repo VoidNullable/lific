@@ -27,6 +27,7 @@ back a migrated database requires restoring the backup with a compatible binary.
    Keep a separate copy of the selected configuration and service definition.
    Use a whole-instance dump for recovery, not a Markdown export or a
    [project archive](/docs/project-archives), which omits accounts and permissions.
+
 3. Record how clients connect: browser URL, API-key users, OAuth clients, and MCP configuration files. Keep one known-good operator key available for recovery.
 4. If the instance is behind a reverse proxy, review `server.trusted_proxies` twice: before starting 2.2, which introduced the setting with a default that trusted loopback peers, and again before 2.7, where the default changes to trust no proxies at all. From 2.7, a deployment whose proxy connects from loopback (Tailscale serve or Funnel, or nginx on the same host) must list that proxy explicitly, or every client shares the proxy's rate-limit bucket. Add only isolated proxy networks you operate.
 5. Confirm that `lific.toml` parses before rolling out 2.6. From 2.6 a config file that exists but cannot be read or parsed stops startup instead of falling back to defaults, and unknown keys are rejected. Run `lific doctor`, which reports the configuration as one check and continues through the rest.
@@ -100,10 +101,10 @@ The largest upgrade since 2.0. Three things need an operator decision before you
 - **A password change returns a replacement session in `token`, and it is the only credential left that works.** A REST client that changes a password on a user's behalf must store that token before its next request. The web UI does this for you.
 - **A running stdio MCP agent stops at its next tool call once its key is revoked.** `LIFIC_TOKEN` is revalidated on every tool call rather than only at startup. Expect agents to need `lific connect` plus a client restart after any recovery.
 - **OAuth access tokens can no longer approve an authorization request or a device code**, and the browser session that approves must have signed in within the last 15 minutes. Approve from a signed-in browser, signing in again first if prompted. A tool that scripted its own re-approval through a token it already held will stop working.
-- **Every access-expanding admin endpoint requires a recent browser session.** `POST /api/users`, `POST /api/users/{id}/promote`, `POST /api/users/{id}/reactivate`, `PATCH /api/instance/settings`, `POST /api/projects/{id}/members`, role *increases* through `PATCH /api/projects/{id}/members/{user_id}`, `PUT /api/projects/{id}` when it sets `lead_user_id` (which grants a lead membership), and `POST /api/projects` when it names a lead **other than the caller**. Creating a project with no lead, or with yourself as lead, is unchanged, so automation that creates its own projects keeps working. Each answers `403 recent authentication required` to an API key or OAuth token, because each leaves access behind that a lockdown aimed at the calling credential cannot reach. Scripted user provisioning moves to `lific user create` and `lific user promote` on the server. Reductions are untouched: `demote`, `deactivate`, role downgrades and member removal all still work from an API key, so containment stays fast.
+- **Every access-expanding admin endpoint requires a recent browser session.** `POST /api/users`, `POST /api/users/{id}/promote`, `POST /api/users/{id}/reactivate`, `PATCH /api/instance/settings`, `POST /api/projects/{id}/members`, role _increases_ through `PATCH /api/projects/{id}/members/{user_id}`, `PUT /api/projects/{id}` when it sets `lead_user_id` (which grants a lead membership), and `POST /api/projects` when it names a lead **other than the caller**. Creating a project with no lead, or with yourself as lead, is unchanged, so automation that creates its own projects keeps working. Each answers `403 recent authentication required` to an API key or OAuth token, because each leaves access behind that a lockdown aimed at the calling credential cannot reach. Scripted user provisioning moves to `lific user create` and `lific user promote` on the server. Reductions are untouched: `demote`, `deactivate`, role downgrades and member removal all still work from an API key, so containment stays fast.
 - **Instance settings are gated as a whole, not field by field.** A patch that only changes `instance_name` is refused from an API key just like one that turns on `web_auto_login`. Classifying each field as expanding or not is a rule that has to be re-derived every time a field is added, and one miss reopens the hole.
 - **An OAuth grant that is not bound to an identity can no longer be exchanged.** Authorization codes and device approvals stored before 2.1 have no user attached; exchanging one produced an access token that named nobody and was therefore treated as the operator, and which no account recovery could revoke. Both exchange paths now return `invalid_grant` for these. Codes expire in ten minutes and device codes in fifteen, so in practice this only affects a client mid-flow across the upgrade: have it authorize again. Access tokens already issued are unchanged; revoke any unbound one you find with `DELETE FROM oauth_tokens WHERE user_id IS NULL` and reconnect the tool.
-**Rolling back is now a restore, not a binary swap.**
+  **Rolling back is now a restore, not a binary swap.**
 
 - **Five migrations run automatically on first start**: bot-identity uniqueness (which merges any duplicate agent identities into the oldest, keeping memberships, groups, and saved views), case-insensitive project identifiers, the account active flag, attachment dimensions and alt text, and the attachment search index. The `_migrations` table also gains a checksum column, backfilled from the migrations this binary carries. No manual steps.
 - **An older Lific will refuse to open a 2.7 database.** Migrations only run forwards, so an older binary used to find the version already stamped, apply nothing, and serve a schema it was never compiled against. Startup now fails with an error naming the database's schema version and the highest the binary supports. To go back, restore the pre-upgrade archive.
@@ -188,12 +189,12 @@ archive, so a damaged archive that previously appeared usable may be refused.
 
 Four migrations run when upgrading a 2.8 database:
 
-| Migration | Change |
-| --- | --- |
-| 049 | Repository bindings and their identity aliases. |
-| 050 | Project archive attribution and provenance. |
-| 051 | Per-project publication, off by default. |
-| 052 | Personal sidebar project ordering. |
+| Migration | Change                                          |
+| --------- | ----------------------------------------------- |
+| 049       | Repository bindings and their identity aliases. |
+| 050       | Project archive attribution and provenance.     |
+| 051       | Per-project publication, off by default.        |
+| 052       | Personal sidebar project ordering.              |
 
 Existing projects remain private. Sidebar ordering uses the existing ranks
 until a user reorders projects; that user's changes no longer rearrange other
@@ -249,11 +250,11 @@ by the web API; disabling it remains available for recovery.
 responses have a 2 MiB byte budget as well as a row limit. A short page no longer
 means that a thread ended. REST exposes:
 
-| Header | Meaning |
-| --- | --- |
-| `x-comment-has-more` | Whether another page remains. |
-| `x-comment-returned` | The number of comments returned in this response. |
-| `x-comment-next-offset` | The next offset for offset-based pagination. |
+| Header                                           | Meaning                                            |
+| ------------------------------------------------ | -------------------------------------------------- |
+| `x-comment-has-more`                             | Whether another page remains.                      |
+| `x-comment-returned`                             | The number of comments returned in this response.  |
+| `x-comment-next-offset`                          | The next offset for offset-based pagination.       |
 | `x-comment-next-created-at`, `x-comment-next-id` | The continuation pair for cursor-based pagination. |
 
 Use the continuation for the paging mode you requested, rather than adding the
@@ -317,6 +318,7 @@ the server; publication does not secure other routes for you.
    ```
 
    Unbound API keys are operator-trusted/admin-equivalent because they can only be minted with shell access. Audit or rotate any key that is no longer needed. Use user-owned bot keys when an agent should inherit project membership.
+
 5. Test the browser login and one representative project workflow. Confirm issue, page, plan, comment, attachment, and saved-view data before testing writes.
 6. Test one API and one MCP client. For MCP, refresh tool discovery and replace calls to `export_issue`, `export_page`, or `export_project` with `export`.
    With multi-instance MCP, confirm every backend passed discovery and inspect

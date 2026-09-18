@@ -60,7 +60,10 @@ export function registerPeekSync(fn: PeekSyncFn): () => void {
 
 /** Called by PeekPanel after every successful mutation. Forwards to
  *  whatever registered (if anything) — see the module doc above. */
-export function notifyPeekSync(id: number, patch: Record<string, unknown>): void {
+export function notifyPeekSync(
+  id: number,
+  patch: Record<string, unknown>,
+): void {
   syncFn?.(id, patch);
 }
 

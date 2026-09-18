@@ -106,9 +106,12 @@ export const PriorityIcon: React.FC<{ priority: string; size?: number }> = ({
   size = 14,
 }) => {
   if (priority === "urgent") return <CircleAlert size={size} color={C.error} />;
-  if (priority === "high") return <Bars size={size} color={C.warn} ys={[6, 12, 18]} />;
-  if (priority === "medium") return <Bars size={size} color={C.accent} ys={[9, 15]} />;
-  if (priority === "low") return <Bars size={size} color={C.textMuted} ys={[12]} />;
+  if (priority === "high")
+    return <Bars size={size} color={C.warn} ys={[6, 12, 18]} />;
+  if (priority === "medium")
+    return <Bars size={size} color={C.accent} ys={[9, 15]} />;
+  if (priority === "low")
+    return <Bars size={size} color={C.textMuted} ys={[12]} />;
   return null;
 };
 
@@ -406,8 +409,7 @@ export const Topbar: React.FC<{
   const t = switchT !== undefined ? switchT : active === "board" ? 1 : 0;
   const listOn = 1 - t;
   const boardOn = t;
-  const activeShadow =
-    "0 1px 2px rgba(0,0,0,0.16), 0 1px 1px rgba(0,0,0,0.10)";
+  const activeShadow = "0 1px 2px rgba(0,0,0,0.16), 0 1px 1px rgba(0,0,0,0.10)";
   const seg = (on: number): React.CSSProperties => ({
     display: "flex",
     alignItems: "center",
@@ -422,183 +424,204 @@ export const Topbar: React.FC<{
     boxShadow: on > 0.02 ? activeShadow : "none",
   });
   return (
-  <div
-    style={{
-      height: TOPBAR_H,
-      display: "flex",
-      alignItems: "center",
-      gap: 12, // gap-3
-      padding: "8px 24px", // px-6 py-2
-      boxSizing: "border-box",
-      backgroundColor: C.chrome,
-      fontFamily: BODY,
-    }}
-  >
-    {/* Breadcrumb */}
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <span
-        style={{
-          fontSize: BODY_SM,
-          fontFamily: MONO,
-          fontWeight: 500,
-          color: C.textMuted,
-        }}
-      >
-        LIF
-      </span>
-      <ChevronRight size={12} color={C.textFaint} />
-      <span style={{ fontSize: BODY_SM, fontWeight: 500, color: C.text }}>
-        {active === "list" ? "Issues" : "Board"}
-      </span>
-    </div>
-
-    {/* View switcher pill */}
     <div
       style={{
+        height: TOPBAR_H,
         display: "flex",
         alignItems: "center",
-        gap: 2,
-        padding: 2,
-        borderRadius: 6,
-        backgroundColor: C.bg,
-        boxShadow: "inset 0 1px 2px rgba(0,0,0,0.10)",
+        gap: 12, // gap-3
+        padding: "8px 24px", // px-6 py-2
+        boxSizing: "border-box",
+        backgroundColor: C.chrome,
+        fontFamily: BODY,
       }}
     >
-      <div style={seg(listOn)}>
-        <ListIcon size={11} color={listOn > 0.5 ? C.text : C.textMuted} />
-        List
-      </div>
-      <div style={seg(boardOn)}>
-        <LayoutGrid size={11} color={boardOn > 0.5 ? C.text : C.textMuted} />
-        Board
-      </div>
-    </div>
-
-    {/* Status tallies */}
-    <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
-      {tallies.map(({ status, count }) => (
-        <div
-          key={status}
+      {/* Breadcrumb */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
           style={{
-            height: 24, // h-6
-            display: "flex",
-            alignItems: "center",
-            gap: 4,
-            padding: "0 6px", // px-1.5
-            borderRadius: 4,
-            fontSize: MICRO,
+            fontSize: BODY_SM,
+            fontFamily: MONO,
             fontWeight: 500,
             color: C.textMuted,
+          }}
+        >
+          LIF
+        </span>
+        <ChevronRight size={12} color={C.textFaint} />
+        <span style={{ fontSize: BODY_SM, fontWeight: 500, color: C.text }}>
+          {active === "list" ? "Issues" : "Board"}
+        </span>
+      </div>
+
+      {/* View switcher pill */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          padding: 2,
+          borderRadius: 6,
+          backgroundColor: C.bg,
+          boxShadow: "inset 0 1px 2px rgba(0,0,0,0.10)",
+        }}
+      >
+        <div style={seg(listOn)}>
+          <ListIcon size={11} color={listOn > 0.5 ? C.text : C.textMuted} />
+          List
+        </div>
+        <div style={seg(boardOn)}>
+          <LayoutGrid size={11} color={boardOn > 0.5 ? C.text : C.textMuted} />
+          Board
+        </div>
+      </div>
+
+      {/* Status tallies */}
+      <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+        {tallies.map(({ status, count }) => (
+          <div
+            key={status}
+            style={{
+              height: 24, // h-6
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "0 6px", // px-1.5
+              borderRadius: 4,
+              fontSize: MICRO,
+              fontWeight: 500,
+              color: C.textMuted,
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            <StatusIcon status={status} size={12} />
+            {count}
+          </div>
+        ))}
+      </div>
+
+      <Sep />
+      <TopbarBtn
+        icon={<SlidersVertical size={12} color={C.textMuted} />}
+        label="Filter"
+      />
+
+      <div
+        style={{
+          marginLeft: "auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+        }}
+      >
+        <span
+          style={{
+            marginRight: 6,
+            fontSize: MICRO,
+            fontWeight: 500,
+            color: C.textFaint,
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          <StatusIcon status={status} size={12} />
-          {count}
-        </div>
-      ))}
-    </div>
-
-    <Sep />
-    <TopbarBtn icon={<SlidersVertical size={12} color={C.textMuted} />} label="Filter" />
-
-    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 2 }}>
-      <span
-        style={{
-          marginRight: 6,
-          fontSize: MICRO,
-          fontWeight: 500,
-          color: C.textFaint,
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        {countLabel}
-      </span>
-      <Sep />
-      <TopbarBtn icon={<Bookmark size={12} color={C.textMuted} />} label="Views" />
-      <TopbarBtn icon={<ArrowDown size={12} color={C.textMuted} />} label="Priority" />
-      <TopbarBtn icon={<Rows3 size={12} color={C.textMuted} />} label="Lanes" />
-      <div
-        style={{
-          width: 28,
-          height: 28,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <Search size={14} color={C.textMuted} />
-      </div>
-      <div
-        style={{
-          width: 28,
-          height: 28,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <HelpCircle size={14} color={C.textMuted} />
-      </div>
-      <div style={{ margin: "0 6px" }}>
+          {countLabel}
+        </span>
         <Sep />
-      </div>
-      {/* New issue split button */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "stretch",
-          height: 28,
-          borderRadius: 6,
-          overflow: "hidden",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
-        }}
-      >
+        <TopbarBtn
+          icon={<Bookmark size={12} color={C.textMuted} />}
+          label="Views"
+        />
+        <TopbarBtn
+          icon={<ArrowDown size={12} color={C.textMuted} />}
+          label="Priority"
+        />
+        <TopbarBtn
+          icon={<Rows3 size={12} color={C.textMuted} />}
+          label="Lanes"
+        />
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Search size={14} color={C.textMuted} />
+        </div>
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <HelpCircle size={14} color={C.textMuted} />
+        </div>
+        <div style={{ margin: "0 6px" }}>
+          <Sep />
+        </div>
+        {/* New issue split button */}
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "0 8px 0 10px",
-            fontSize: BODY_SM,
-            fontWeight: 500,
-            color: BTN_SUCCESS_TEXT,
-            backgroundColor: BTN_SUCCESS,
+            alignItems: "stretch",
+            height: 28,
+            borderRadius: 6,
+            overflow: "hidden",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
           }}
         >
-          <Plus size={14} color={BTN_SUCCESS_TEXT} />
-          New
-          <span
+          <div
             style={{
-              display: "grid",
-              placeItems: "center",
-              minWidth: 17,
-              height: 17,
-              marginLeft: 2,
-              borderRadius: 4,
-              backgroundColor: "rgba(255,255,255,0.20)",
-              fontFamily: MONO,
-              fontSize: MICRO,
-              lineHeight: 1,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "0 8px 0 10px",
+              fontSize: BODY_SM,
+              fontWeight: 500,
+              color: BTN_SUCCESS_TEXT,
+              backgroundColor: BTN_SUCCESS,
             }}
           >
-            C
-          </span>
-        </div>
-        <div style={{ width: 1, backgroundColor: "rgba(255,255,255,0.25)" }} />
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            padding: "0 6px",
-            color: BTN_SUCCESS_TEXT,
-            backgroundColor: BTN_SUCCESS,
-          }}
-        >
-          <ChevronDown size={14} color={BTN_SUCCESS_TEXT} />
+            <Plus size={14} color={BTN_SUCCESS_TEXT} />
+            New
+            <span
+              style={{
+                display: "grid",
+                placeItems: "center",
+                minWidth: 17,
+                height: 17,
+                marginLeft: 2,
+                borderRadius: 4,
+                backgroundColor: "rgba(255,255,255,0.20)",
+                fontFamily: MONO,
+                fontSize: MICRO,
+                lineHeight: 1,
+              }}
+            >
+              C
+            </span>
+          </div>
+          <div
+            style={{ width: 1, backgroundColor: "rgba(255,255,255,0.25)" }}
+          />
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              padding: "0 6px",
+              color: BTN_SUCCESS_TEXT,
+              backgroundColor: BTN_SUCCESS,
+            }}
+          >
+            <ChevronDown size={14} color={BTN_SUCCESS_TEXT} />
+          </div>
         </div>
       </div>
     </div>
-  </div>
   );
 };
 
@@ -742,7 +765,18 @@ export const Sidebar: React.FC<{ active?: "issues" | "board" }> = ({
 
       {/* Nav */}
       <div style={{ flex: 1, padding: "4px 8px" }}>
-        <div style={{ marginBottom: 4, padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, borderRadius: 6, fontSize: BODY_SM, color: C.textMuted }}>
+        <div
+          style={{
+            marginBottom: 4,
+            padding: "6px 10px",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            borderRadius: 6,
+            fontSize: BODY_SM,
+            color: C.textMuted,
+          }}
+        >
           <Home size={14} color={C.textMuted} />
           Home
         </div>
@@ -884,10 +918,24 @@ export const Sidebar: React.FC<{ active?: "issues" | "board" }> = ({
             </div>
           </div>
         </div>
-        <div style={{ width: 32, height: 32, display: "grid", placeItems: "center" }}>
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
           <Moon size={15} color={C.textMuted} />
         </div>
-        <div style={{ width: 32, height: 32, display: "grid", placeItems: "center" }}>
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
           <HelpCircle size={15} color={C.textMuted} />
         </div>
       </div>
@@ -1010,7 +1058,8 @@ export const LificApp: React.FC<{
               left: 0,
               right: 0,
               height: 24,
-              background: "linear-gradient(to bottom, rgba(0,0,0,0.17), transparent)",
+              background:
+                "linear-gradient(to bottom, rgba(0,0,0,0.17), transparent)",
             }}
           />
           <div
@@ -1021,7 +1070,8 @@ export const LificApp: React.FC<{
               left: 0,
               bottom: 0,
               width: 24,
-              background: "linear-gradient(to right, rgba(0,0,0,0.17), transparent)",
+              background:
+                "linear-gradient(to right, rgba(0,0,0,0.17), transparent)",
             }}
           />
           {/* Scene content (cards, cursor, drop outlines) */}

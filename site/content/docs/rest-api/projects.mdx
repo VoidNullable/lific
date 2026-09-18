@@ -157,7 +157,7 @@ Response: an array of objects with `user_id` (integer), `username` (string), and
 
 Issues, pages, and comments each carry `seq`, a monotonic counter shared across all three and across every project on the instance. A client bootstraps once with `/index`, remembers the cursor it returns, and then asks `/changes` what happened above it.
 
-Rows on both endpoints are *skinny*: no issue `description`, no page `content`, no comment body. Fetch those from the entity's own endpoint when a detail view needs them.
+Rows on both endpoints are _skinny_: no issue `description`, no page `content`, no comment body. Fetch those from the entity's own endpoint when a detail view needs them.
 
 Issue and page rows do carry `preview`, the first non-empty line of the body trimmed and truncated to 200 characters (Unicode scalar values, not bytes), or `""` when there is no body. It is enough to render a list row's summary line without fetching anything.
 

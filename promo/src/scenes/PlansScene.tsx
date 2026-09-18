@@ -45,10 +45,16 @@ const STEPS: { title: string; done: boolean }[] = [
   { title: "Cut over and delete legacy path", done: false },
 ];
 
-const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = ({ at, children }) => {
+const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = ({
+  at,
+  children,
+}) => {
   const frame = useCurrentFrame();
   if (frame < at) return null;
-  const t = interpolate(frame, [at, at + 8], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const t = interpolate(frame, [at, at + 8], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
   return (
     <div
       style={{
@@ -68,16 +74,36 @@ const SessionChip: React.FC<{ at: number; children: React.ReactNode }> = ({ at, 
   );
 };
 
-const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({ at, children }) => {
+const ToolLine: React.FC<{ at: number; children: React.ReactNode }> = ({
+  at,
+  children,
+}) => {
   const frame = useCurrentFrame();
   if (frame < at) return null;
-  const t = interpolate(frame, [at, at + 6], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const okIn = interpolate(frame, [at + 10, at + 16], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const t = interpolate(frame, [at, at + 6], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const okIn = interpolate(frame, [at + 10, at + 16], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
   return (
-    <div style={{ fontFamily: MONO, fontSize: 21, color: TUI.dim, opacity: t, whiteSpace: "pre" }}>
+    <div
+      style={{
+        fontFamily: MONO,
+        fontSize: 21,
+        color: TUI.dim,
+        opacity: t,
+        whiteSpace: "pre",
+      }}
+    >
       <span>⚙ </span>
       {children}
-      <span style={{ color: C.success, opacity: okIn, fontWeight: 600 }}> ✓</span>
+      <span style={{ color: C.success, opacity: okIn, fontWeight: 600 }}>
+        {" "}
+        ✓
+      </span>
     </div>
   );
 };
@@ -93,14 +119,25 @@ export const PlansScene: React.FC = () => {
   });
   const wipeFlash = frame >= WIPE ? Math.max(0, 1 - (frame - WIPE) / 26) : 0;
 
-  const treeIn = spring({ frame: frame - TREE_IN, fps, config: { damping: 16, stiffness: 120 } });
-  const glow = frame >= TREE_GLOW ? Math.max(0, 1 - (frame - TREE_GLOW) / 44) : 0;
+  const treeIn = spring({
+    frame: frame - TREE_IN,
+    fps,
+    config: { damping: 16, stiffness: 120 },
+  });
+  const glow =
+    frame >= TREE_GLOW ? Math.max(0, 1 - (frame - TREE_GLOW) / 44) : 0;
 
   const replyText = "Resuming: step 3, migrate webhook handlers.";
-  const replyChars = frame >= S2_REPLY ? Math.min(replyText.length, Math.floor((frame - S2_REPLY) * 1.4)) : 0;
+  const replyChars =
+    frame >= S2_REPLY
+      ? Math.min(replyText.length, Math.floor((frame - S2_REPLY) * 1.4))
+      : 0;
 
   const cap = (at: number) =>
-    interpolate(frame, [at, at + 14], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+    interpolate(frame, [at, at + 14], [0, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    });
 
   return (
     <Background>
@@ -131,10 +168,26 @@ export const PlansScene: React.FC = () => {
             overflow: "hidden",
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", gap: 14, opacity: s1Dim }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+              opacity: s1Dim,
+            }}
+          >
             <SessionChip at={0}>session 1</SessionChip>
-            <ToolLine at={S1_TOOL}>lific_create_plan [title=Payment refactor, steps=4]</ToolLine>
-            <div style={{ fontFamily: MONO, fontSize: 20, color: TUI.text, opacity: frame >= S1_TOOL + 18 ? 1 : 0 }}>
+            <ToolLine at={S1_TOOL}>
+              lific_create_plan [title=Payment refactor, steps=4]
+            </ToolLine>
+            <div
+              style={{
+                fontFamily: MONO,
+                fontSize: 20,
+                color: TUI.text,
+                opacity: frame >= S1_TOOL + 18 ? 1 : 0,
+              }}
+            >
               Plan LIF-PLAN-7 created. Working through it.
             </div>
           </div>
@@ -146,14 +199,21 @@ export const PlansScene: React.FC = () => {
                 display: "flex",
                 alignItems: "center",
                 gap: 14,
-                opacity: interpolate(frame, [WIPE, WIPE + 10], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }),
+                opacity: interpolate(frame, [WIPE, WIPE + 10], [0, 1], {
+                  extrapolateLeft: "clamp",
+                  extrapolateRight: "clamp",
+                }),
               }}
             >
-              <div style={{ flex: 1, height: 1, backgroundColor: `${C.error}66` }} />
+              <div
+                style={{ flex: 1, height: 1, backgroundColor: `${C.error}66` }}
+              />
               <span style={{ fontFamily: MONO, fontSize: 17, color: C.error }}>
                 context window cleared
               </span>
-              <div style={{ flex: 1, height: 1, backgroundColor: `${C.error}66` }} />
+              <div
+                style={{ flex: 1, height: 1, backgroundColor: `${C.error}66` }}
+              />
             </div>
           ) : null}
 
@@ -163,13 +223,26 @@ export const PlansScene: React.FC = () => {
             <div style={{ fontFamily: MONO, fontSize: 20, color: TUI.text }}>
               {replyText.slice(0, replyChars)}
               {replyChars > 0 && replyChars < replyText.length ? (
-                <span style={{ display: "inline-block", width: 10, height: 20, marginLeft: 2, backgroundColor: "#c8cdd8", verticalAlign: "text-bottom" }} />
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 10,
+                    height: 20,
+                    marginLeft: 2,
+                    backgroundColor: "#c8cdd8",
+                    verticalAlign: "text-bottom",
+                  }}
+                />
               ) : null}
             </div>
           </div>
 
           {wipeFlash > 0 ? (
-            <AbsoluteFill style={{ backgroundColor: `rgba(248,113,113,${wipeFlash * 0.06})` }} />
+            <AbsoluteFill
+              style={{
+                backgroundColor: `rgba(248,113,113,${wipeFlash * 0.06})`,
+              }}
+            />
           ) : null}
         </div>
 
@@ -190,7 +263,14 @@ export const PlansScene: React.FC = () => {
             boxSizing: "border-box",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              paddingBottom: 16,
+            }}
+          >
             <span
               style={{
                 fontFamily: MONO,
@@ -203,17 +283,32 @@ export const PlansScene: React.FC = () => {
             >
               LIF-PLAN-7
             </span>
-            <span style={{ fontFamily: DISPLAY, fontSize: 26, fontWeight: 600, color: C.text }}>
+            <span
+              style={{
+                fontFamily: DISPLAY,
+                fontSize: 26,
+                fontWeight: 600,
+                color: C.text,
+              }}
+            >
               Payment refactor
             </span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {STEPS.map((step, i) => (
-              <div key={step.title} style={{ display: "flex", alignItems: "center", gap: 13 }}>
+              <div
+                key={step.title}
+                style={{ display: "flex", alignItems: "center", gap: 13 }}
+              >
                 {step.done ? (
                   <CircleCheckBig size={20} color={C.success} />
                 ) : (
-                  <Circle size={20} color={i === 2 && frame >= TREE_GLOW ? C.accent : C.textMuted} />
+                  <Circle
+                    size={20}
+                    color={
+                      i === 2 && frame >= TREE_GLOW ? C.accent : C.textMuted
+                    }
+                  />
                 )}
                 <span
                   style={{

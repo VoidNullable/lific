@@ -37,9 +37,15 @@ test("ordinary pastes are left alone", () => {
 });
 
 test("generates a local-time paste-YYYYMMDD-HHMM.txt filename", () => {
-  expect(pasteFilename(new Date(2026, 7, 17, 9, 4))).toBe("paste-20260817-0904.txt");
-  expect(pasteFilename(new Date(2026, 11, 1, 23, 59))).toBe("paste-20261201-2359.txt");
-  expect(pasteFilename(new Date(2026, 0, 5, 0, 0))).toBe("paste-20260105-0000.txt");
+  expect(pasteFilename(new Date(2026, 7, 17, 9, 4))).toBe(
+    "paste-20260817-0904.txt",
+  );
+  expect(pasteFilename(new Date(2026, 11, 1, 23, 59))).toBe(
+    "paste-20261201-2359.txt",
+  );
+  expect(pasteFilename(new Date(2026, 0, 5, 0, 0))).toBe(
+    "paste-20260105-0000.txt",
+  );
 });
 
 test("wraps the pasted text as a text/plain file", async () => {

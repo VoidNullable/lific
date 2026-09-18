@@ -1,7 +1,8 @@
 import { get, writable } from "svelte/store";
 
 export type ThemePreference = "light" | "dark" | "system";
-export type AccentPreset = "indigo" | "teal" | "rose" | "amber" | "green" | "violet";
+export type AccentPreset =
+  "indigo" | "teal" | "rose" | "amber" | "green" | "violet";
 export type Density = "comfortable" | "compact";
 export type FontScale = "sm" | "md" | "lg";
 export type MotionPreference = "system" | "reduced" | "full";
@@ -12,10 +13,20 @@ const DENSITY_KEY = "lific_density";
 const FONT_SCALE_KEY = "lific_font_scale";
 const MOTION_KEY = "lific_motion";
 
-const ACCENTS: readonly AccentPreset[] = ["indigo", "teal", "rose", "amber", "green", "violet"];
+const ACCENTS: readonly AccentPreset[] = [
+  "indigo",
+  "teal",
+  "rose",
+  "amber",
+  "green",
+  "violet",
+];
 
 function readPreference(): ThemePreference {
-  const stored = typeof localStorage === "undefined" ? null : localStorage.getItem(STORAGE_KEY);
+  const stored =
+    typeof localStorage === "undefined"
+      ? null
+      : localStorage.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
   return "system";
 }
@@ -29,7 +40,8 @@ const effectiveTheme = writable<"light" | "dark">(
 export const themePreference = {
   subscribe: preference.subscribe,
   set: setPreference,
-  update: (updater: (value: ThemePreference) => ThemePreference) => setPreference(updater(get(preference))),
+  update: (updater: (value: ThemePreference) => ThemePreference) =>
+    setPreference(updater(get(preference))),
 };
 /** Effective color scheme, including live OS changes while using system. */
 export const resolvedTheme = { subscribe: effectiveTheme.subscribe };
@@ -69,7 +81,9 @@ export function apply(pref: ThemePreference) {
 /** Read stored accent preset, default to indigo. */
 export function getAccent(): AccentPreset {
   const stored = localStorage.getItem(ACCENT_KEY);
-  return ACCENTS.includes(stored as AccentPreset) ? (stored as AccentPreset) : "indigo";
+  return ACCENTS.includes(stored as AccentPreset)
+    ? (stored as AccentPreset)
+    : "indigo";
 }
 
 /** Persist + apply an accent preset. */
@@ -89,7 +103,9 @@ export function applyAccent(preset: AccentPreset) {
 
 /** Read stored density, default to comfortable. */
 export function getDensity(): Density {
-  return localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable";
+  return localStorage.getItem(DENSITY_KEY) === "compact"
+    ? "compact"
+    : "comfortable";
 }
 
 /** Persist + apply density. */
@@ -104,7 +120,10 @@ export function setDensity(density: Density) {
 
 /** Apply density via a `density-compact` class on <html>. */
 export function applyDensity(density: Density) {
-  document.documentElement.classList.toggle("density-compact", density === "compact");
+  document.documentElement.classList.toggle(
+    "density-compact",
+    density === "compact",
+  );
 }
 
 /** Read stored font scale, default to md. */
@@ -153,7 +172,10 @@ export function resolveMotion(pref: MotionPreference): boolean {
 
 /** Apply motion preference via `data-motion` on <html>. */
 export function applyMotion(pref: MotionPreference) {
-  document.documentElement.setAttribute("data-motion", resolveMotion(pref) ? "reduced" : "full");
+  document.documentElement.setAttribute(
+    "data-motion",
+    resolveMotion(pref) ? "reduced" : "full",
+  );
 }
 
 /**

@@ -11,7 +11,14 @@ export const KineticLine: React.FC<{
   color?: string;
   weight?: number;
   stagger?: number;
-}> = ({ text, delay = 0, size = 88, color = C.text, weight = 700, stagger = 4 }) => {
+}> = ({
+  text,
+  delay = 0,
+  size = 88,
+  color = C.text,
+  weight = 700,
+  stagger = 4,
+}) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const words = text.split(" ");

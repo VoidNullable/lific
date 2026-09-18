@@ -30,7 +30,10 @@ export function commentTargetFromHash(hash: string): string | null {
   return id && /^[1-9]\d*$/.test(id) ? `comment-${id}` : null;
 }
 
-export function routeForCommentHash(hash: string, currentRoute: string): string {
+export function routeForCommentHash(
+  hash: string,
+  currentRoute: string,
+): string {
   return hash.startsWith("#/") ? hash.slice(1) || "/" : currentRoute;
 }
 
@@ -40,7 +43,9 @@ export function routeWithCommentTarget(route: string, target: string): string {
 
   const queryStart = route.indexOf("?");
   const path = queryStart < 0 ? route : route.slice(0, queryStart);
-  const query = new URLSearchParams(queryStart < 0 ? "" : route.slice(queryStart + 1));
+  const query = new URLSearchParams(
+    queryStart < 0 ? "" : route.slice(queryStart + 1),
+  );
   query.set("comment", match[1]);
   return `${path}?${query}`;
 }

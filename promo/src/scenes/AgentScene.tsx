@@ -47,15 +47,33 @@ export const AgentScene: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const doneIn = spring({ frame: frame - BOARD_1, fps, config: { damping: 16, stiffness: 140 } });
-  const doneFlash = frame >= BOARD_1 ? Math.max(0, 1 - (frame - BOARD_1) / 40) : 0;
-  const newIn = spring({ frame: frame - BOARD_2, fps, config: { damping: 15, stiffness: 130 } });
-  const newFlash = frame >= BOARD_2 ? Math.max(0, 1 - (frame - BOARD_2) / 40) : 0;
+  const doneIn = spring({
+    frame: frame - BOARD_1,
+    fps,
+    config: { damping: 16, stiffness: 140 },
+  });
+  const doneFlash =
+    frame >= BOARD_1 ? Math.max(0, 1 - (frame - BOARD_1) / 40) : 0;
+  const newIn = spring({
+    frame: frame - BOARD_2,
+    fps,
+    config: { damping: 15, stiffness: 130 },
+  });
+  const newFlash =
+    frame >= BOARD_2 ? Math.max(0, 1 - (frame - BOARD_2) / 40) : 0;
 
   // LIF-226 shifts down when LIF-232 lands on top of Todo.
-  const shift = spring({ frame: frame - BOARD_2, fps, config: { damping: 200, stiffness: 140 } });
+  const shift = spring({
+    frame: frame - BOARD_2,
+    fps,
+    config: { damping: 200, stiffness: 140 },
+  });
   // Existing done cards shift down when LIF-198 lands on top of Done.
-  const doneShift = spring({ frame: frame - BOARD_1, fps, config: { damping: 200, stiffness: 140 } });
+  const doneShift = spring({
+    frame: frame - BOARD_1,
+    fps,
+    config: { damping: 200, stiffness: 140 },
+  });
 
   const captionIn = interpolate(frame, [CAPTION, CAPTION + 16], [0, 1], {
     extrapolateLeft: "clamp",
@@ -142,7 +160,10 @@ export const AgentScene: React.FC = () => {
                   <div
                     style={{
                       borderRadius: 6,
-                      boxShadow: newFlash > 0 ? `0 0 ${18 * newFlash}px ${C.success}66` : undefined,
+                      boxShadow:
+                        newFlash > 0
+                          ? `0 0 ${18 * newFlash}px ${C.success}66`
+                          : undefined,
                     }}
                   >
                     <IssueCard
@@ -203,7 +224,10 @@ export const AgentScene: React.FC = () => {
                   <div
                     style={{
                       borderRadius: 6,
-                      boxShadow: doneFlash > 0 ? `0 0 ${18 * doneFlash}px ${C.success}66` : undefined,
+                      boxShadow:
+                        doneFlash > 0
+                          ? `0 0 ${18 * doneFlash}px ${C.success}66`
+                          : undefined,
                     }}
                   >
                     <IssueCard

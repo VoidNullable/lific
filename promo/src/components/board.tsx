@@ -116,7 +116,14 @@ export const Column: React.FC<{
           padding: "0 4px",
         }}
       >
-        <span style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: dot }} />
+        <span
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 5,
+            backgroundColor: dot,
+          }}
+        />
         <span
           style={{
             fontFamily: DISPLAY,

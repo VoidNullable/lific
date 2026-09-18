@@ -131,7 +131,8 @@ export function uploadCap(): number {
   if (capMemo != null) return capMemo;
   const raw = session()?.getItem(CAP_KEY);
   const parsed = raw ? Number(raw) : NaN;
-  capMemo = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_UPLOAD_CAP_BYTES;
+  capMemo =
+    Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_UPLOAD_CAP_BYTES;
   return capMemo;
 }
 
@@ -185,7 +186,8 @@ export interface UploadControllerOptions {
    *  (detail views). Omitted for not-yet-created entities (the new-issue form,
    *  a new comment) which rely on the server re-scanning the saved body. A
    *  getter so the composer can pass a value that becomes known after mount. */
-  link?: () => { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
+  link?: () =>
+    { entity_type: AttachmentEntity; entity_id: number } | null | undefined;
   /** Insert the finished markdown reference at the caret. */
   onInsert: (snippet: string) => void;
   /**
@@ -233,7 +235,9 @@ interface Transfer {
   handle: UploadHandle | null;
 }
 
-export function createUploadController(opts: UploadControllerOptions): UploadController {
+export function createUploadController(
+  opts: UploadControllerOptions,
+): UploadController {
   let seq = 0;
   const items = $state<PendingUpload[]>([]);
   const queue = createConcurrencyQueue(MAX_IN_FLIGHT);
@@ -461,7 +465,9 @@ export function createUploadController(opts: UploadControllerOptions): UploadCon
       return items;
     },
     get busy() {
-      return items.some((it) => it.status === "queued" || it.status === "uploading");
+      return items.some(
+        (it) => it.status === "queued" || it.status === "uploading",
+      );
     },
     get pending() {
       return items.some((it) => it.status !== "error" && it.status !== "alt");

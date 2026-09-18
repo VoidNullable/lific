@@ -54,7 +54,9 @@ export function scopedRoute(route: string): string {
   const normalized = route.startsWith("/") ? route : `/${route}`;
   // A project's overview is signed-in only; in the public view the project's
   // "home" is its issue list, which is where the project crumb should land.
-  const overview = normalized.match(/^\/([A-Za-z][A-Za-z0-9_-]*)\/(?:overview|settings)$/);
+  const overview = normalized.match(
+    /^\/([A-Za-z][A-Za-z0-9_-]*)\/(?:overview|settings)$/,
+  );
   if (overview) return `/public/${overview[1]}/issues`;
   return `/public${normalized}`;
 }
@@ -87,7 +89,10 @@ export function publicMirror(path: string): string | null {
   if ((m = pathname.match(/^\/projects\/\d+\/(index|changes)$/))) {
     return `${base}/${m[1]}${search ? `?${search}` : ""}`;
   }
-  if (/^\/(modules|labels|folders)$/.test(pathname) && query.has("project_id")) {
+  if (
+    /^\/(modules|labels|folders)$/.test(pathname) &&
+    query.has("project_id")
+  ) {
     return `${base}${pathname}`;
   }
   if ((m = pathname.match(/^\/issues\/resolve\/([A-Za-z0-9_-]+)$/))) {
@@ -99,7 +104,11 @@ export function publicMirror(path: string): string | null {
   if ((m = pathname.match(/^\/pages\/(\d+)(\/comments)?$/))) {
     return `${base}/pages/${m[1]}${m[2] ?? ""}${search ? `?${search}` : ""}`;
   }
-  if (pathname === "/attachments" && query.has("entity_type") && query.has("entity_id")) {
+  if (
+    pathname === "/attachments" &&
+    query.has("entity_type") &&
+    query.has("entity_id")
+  ) {
     return `${base}/attachments?${search}`;
   }
   if ((m = pathname.match(/^\/attachments\/(\d+)(\/thumbnail|\/preview)?$/))) {
@@ -111,20 +120,28 @@ export function publicMirror(path: string): string | null {
 /** Reads the public view answers locally instead of asking the server: the
  *  shape the components expect, with nothing behind it. `undefined` means
  *  "not synthesized here"; the caller then tries `publicMirror`. */
-export function publicSynthetic(path: string): { status: number; body: unknown } | undefined {
+export function publicSynthetic(
+  path: string,
+): { status: number; body: unknown } | undefined {
   const pathname = path.split("?")[0];
   // No account. Components treat a 401 here as "not signed in".
-  if (pathname === "/auth/me") return { status: 401, body: { error: "not signed in" } };
+  if (pathname === "/auth/me")
+    return { status: 401, body: { error: "not signed in" } };
   // A stranger is below Viewer with enforcement on: nothing may be changed
   // and nothing may be said.
   if (/^\/projects\/\d+\/my-role$/.test(pathname)) {
-    return { status: 200, body: { role: null, enforced: true, is_admin: false } };
+    return {
+      status: 200,
+      body: { role: null, enforced: true, is_admin: false },
+    };
   }
   // History is not public. The timeline simply has nothing in it.
   if (/^\/(issues|pages)\/\d+\/activity$/.test(pathname)) {
     return { status: 200, body: { items: [], has_more: false } };
   }
-  if (/^\/projects\/\d+\/mention-candidates$/.test(pathname)) return { status: 200, body: [] };
-  if (/^\/projects\/\d+\/views$/.test(pathname)) return { status: 200, body: [] };
+  if (/^\/projects\/\d+\/mention-candidates$/.test(pathname))
+    return { status: 200, body: [] };
+  if (/^\/projects\/\d+\/views$/.test(pathname))
+    return { status: 200, body: [] };
   return undefined;
 }

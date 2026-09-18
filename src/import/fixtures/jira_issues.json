@@ -10,7 +10,10 @@
           {
             "type": "paragraph",
             "content": [
-              { "type": "text", "text": "We need full-text search across issues." }
+              {
+                "type": "text",
+                "text": "We need full-text search across issues."
+              }
             ]
           }
         ]

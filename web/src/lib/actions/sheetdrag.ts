@@ -101,7 +101,11 @@ export function sheetDrag(node: HTMLElement, options: SheetDragOptions) {
     const method = on ? "addEventListener" : "removeEventListener";
     // Non-passive: onMove calls preventDefault to keep the drag from also
     // scrolling whatever is behind the header.
-    window[method]("pointermove", onMove as EventListener, { passive: false } as never);
+    window[method](
+      "pointermove",
+      onMove as EventListener,
+      { passive: false } as never,
+    );
     window[method]("pointerup", onEnd as EventListener, true as never);
     window[method]("pointercancel", onEnd as EventListener, true as never);
   }
@@ -109,7 +113,8 @@ export function sheetDrag(node: HTMLElement, options: SheetDragOptions) {
   function onPointerDown(e: PointerEvent) {
     if (e.pointerType === "mouse" || !e.isPrimary) return;
     if (!bottomSheetMode()) return;
-    if ((e.target as HTMLElement).closest("button, a, input, textarea, select")) return;
+    if ((e.target as HTMLElement).closest("button, a, input, textarea, select"))
+      return;
     pointerId = e.pointerId;
     startY = e.clientY;
     startTime = e.timeStamp;

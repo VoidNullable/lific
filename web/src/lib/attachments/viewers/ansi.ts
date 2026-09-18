@@ -70,7 +70,8 @@ function color256(index: number): string {
 }
 
 function rgb(r: number, g: number, b: number): string {
-  const hex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
+  const hex = (n: number) =>
+    Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
   return `#${hex(r)}${hex(g)}${hex(b)}`;
 }
 
@@ -81,7 +82,8 @@ function rgb(r: number, g: number, b: number): string {
  *  The `\u001b` may also arrive as the literal two-character sequence some
  *  logs are stored with, which callers normalize before calling in. */
 // eslint-disable-next-line no-control-regex
-const ESCAPE_RE = /\u001b(?:\[([0-9;:?]*)([ -/]*[@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
+const ESCAPE_RE =
+  /\u001b(?:\[([0-9;:?]*)([ -/]*[@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
 
 function applySgr(style: AnsiStyle, params: number[]): AnsiStyle {
   let next: AnsiStyle = { ...style };
@@ -233,6 +235,7 @@ export function ansiStyleToCss(style: AnsiStyle): string {
   const decorations: string[] = [];
   if (style.underline) decorations.push("underline");
   if (style.strike) decorations.push("line-through");
-  if (decorations.length) parts.push(`text-decoration:${decorations.join(" ")}`);
+  if (decorations.length)
+    parts.push(`text-decoration:${decorations.join(" ")}`);
   return parts.join(";");
 }

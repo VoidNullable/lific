@@ -17,9 +17,9 @@ function upload(over: Partial<UploadResponse> = {}): UploadResponse {
 
 test("images embed, everything else links", () => {
   expect(markdownFor(upload())).toBe("![shot.png](/api/attachments/7)");
-  expect(markdownFor(upload({ filename: "trace.log", mime: "text/plain" }))).toBe(
-    "[trace.log](/api/attachments/7)",
-  );
+  expect(
+    markdownFor(upload({ filename: "trace.log", mime: "text/plain" })),
+  ).toBe("[trace.log](/api/attachments/7)");
 });
 
 test("inserting into an empty composer adds no leading break", () => {
@@ -82,6 +82,8 @@ test("consecutive inserts stack one per line", () => {
     first.caret,
     "![b](/api/attachments/2)",
   );
-  expect(second.text).toBe("![a](/api/attachments/1)\n![b](/api/attachments/2)\n");
+  expect(second.text).toBe(
+    "![a](/api/attachments/1)\n![b](/api/attachments/2)\n",
+  );
   expect(second.caret).toBe(second.text.length);
 });

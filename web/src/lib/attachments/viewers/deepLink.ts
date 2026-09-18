@@ -41,7 +41,9 @@ export function formatLineAnchor(
 ): string {
   const lo = end === undefined ? start : Math.min(start, end);
   const hi = end === undefined ? start : Math.max(start, end);
-  return hi > lo ? `att${attachmentId}-L${lo}-${hi}` : `att${attachmentId}-L${lo}`;
+  return hi > lo
+    ? `att${attachmentId}-L${lo}-${hi}`
+    : `att${attachmentId}-L${lo}`;
 }
 
 /** Parse a token, with or without its leading `#`. */
@@ -70,7 +72,9 @@ function splitRoute(route: string): { path: string; query: URLSearchParams } {
   const queryStart = route.indexOf("?");
   return {
     path: queryStart < 0 ? route : route.slice(0, queryStart),
-    query: new URLSearchParams(queryStart < 0 ? "" : route.slice(queryStart + 1)),
+    query: new URLSearchParams(
+      queryStart < 0 ? "" : route.slice(queryStart + 1),
+    ),
   };
 }
 

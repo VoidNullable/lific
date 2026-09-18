@@ -128,7 +128,10 @@ class ToastStore {
     const timer = this.#timers.get(id);
     if (!timer) return;
     clearTimeout(timer.timeoutId);
-    timer.remaining = Math.max(0, timer.remaining - (Date.now() - timer.startedAt));
+    timer.remaining = Math.max(
+      0,
+      timer.remaining - (Date.now() - timer.startedAt),
+    );
     const item = this.toasts.find((t) => t.id === id);
     if (item) item.paused = true;
   }
@@ -145,7 +148,11 @@ class ToastStore {
 
   #schedule(id: number, duration: number): void {
     const timeoutId = setTimeout(() => this.dismiss(id), duration);
-    this.#timers.set(id, { timeoutId, startedAt: Date.now(), remaining: duration });
+    this.#timers.set(id, {
+      timeoutId,
+      startedAt: Date.now(),
+      remaining: duration,
+    });
   }
 
   #clearTimer(id: number): void {

@@ -46,7 +46,8 @@ export function commentWasEdited(comment: Comment): boolean {
  *  skipping or repeating comments. `created_at` has one-second resolution, so
  *  the id half decides ties, which are common rather than exotic. */
 export function compareComments(a: Comment, b: Comment): number {
-  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  if (a.created_at !== b.created_at)
+    return a.created_at < b.created_at ? -1 : 1;
   return a.id - b.id;
 }
 
@@ -65,14 +66,19 @@ export function compareComments(a: Comment, b: Comment): number {
  *  comment is the newest, but a comment that is not in the loaded window
  *  belongs in the middle and appending it would put it visibly out of order
  *  and hand the next cursor the wrong boundary. The input is never mutated. */
-export function upsertComment(comments: Comment[], comment: Comment): Comment[] {
+export function upsertComment(
+  comments: Comment[],
+  comment: Comment,
+): Comment[] {
   const index = comments.findIndex((existing) => existing.id === comment.id);
   if (index >= 0) {
     const next = [...comments];
     next[index] = comment;
     return next;
   }
-  const at = comments.findIndex((existing) => compareComments(comment, existing) < 0);
+  const at = comments.findIndex(
+    (existing) => compareComments(comment, existing) < 0,
+  );
   if (at < 0) return [...comments, comment];
   return [...comments.slice(0, at), comment, ...comments.slice(at)];
 }
@@ -160,7 +166,10 @@ export type CommentPageFetcher = (
  *  The cursor makes overlap impossible in theory. The dedupe is here anyway
  *  because the cost of being wrong is a duplicate keyed `{#each}` row, which
  *  Svelte turns into a hard runtime error rather than a cosmetic glitch. */
-export function prependOlderComments(existing: Comment[], older: Comment[]): Comment[] {
+export function prependOlderComments(
+  existing: Comment[],
+  older: Comment[],
+): Comment[] {
   const seen = new Set(existing.map((comment) => comment.id));
   return [...older.filter((comment) => !seen.has(comment.id)), ...existing];
 }
@@ -230,7 +239,8 @@ export async function loadCommentWindow(
 ): Promise<RequestResult<CommentWindow>> {
   const size = boundedCount(pageSize, COMMENT_PAGE_SIZE);
   const budget = boundedCount(pageBudget, COMMENT_REFRESH_PAGE_BUDGET);
-  const rows = Number.isFinite(minRows) && minRows > 0 ? Math.floor(minRows) : 0;
+  const rows =
+    Number.isFinite(minRows) && minRows > 0 ? Math.floor(minRows) : 0;
   // A request costs `size + 1` rows on the wire, not `size`: the extra row is
   // the lookahead that answers `hasMore`. One page is always allowed, since
   // `size + 1` is at most 51 and cannot breach the limit on its own.
@@ -247,7 +257,8 @@ export async function loadCommentWindow(
     items = prependOlderComments(items, res.data.items);
     hasOlder = res.data.hasMore;
     cursor = res.data.nextCursor;
-    if (!hasOlder || items.length >= target || res.data.items.length === 0) break;
+    if (!hasOlder || items.length >= target || res.data.items.length === 0)
+      break;
   }
   // Pages come in whole, so the last one overshoots whenever `target` is not a
   // multiple of the page size: refreshing a 51-row window would hand back 100
@@ -385,7 +396,8 @@ export function anchorNeedsOlderPage(
 export const ANCHOR_AUTO_PAGE_BUDGET = 5;
 
 /** How far back a deep link searches automatically, in comments. */
-export const ANCHOR_AUTO_SEARCH_LIMIT = ANCHOR_AUTO_PAGE_BUDGET * COMMENT_PAGE_SIZE;
+export const ANCHOR_AUTO_SEARCH_LIMIT =
+  ANCHOR_AUTO_PAGE_BUDGET * COMMENT_PAGE_SIZE;
 
 /** One anchor-driven walk: which thread and comment it is chasing, how many
  *  comments were on screen when the last request went out, and how much of the
@@ -429,9 +441,12 @@ export function nextAnchorAttempt(
   last: AnchorPageAttempt | null,
   budget = ANCHOR_AUTO_PAGE_BUDGET,
 ): AnchorPageAttempt | null {
-  if (!anchorNeedsOlderPage(target, comments, hasOlder, loadingOlder)) return null;
-  const sameWalk = last !== null && last.parent === parent && last.target === target;
-  if (sameWalk && (last.pages >= budget || last.loaded === comments.length)) return null;
+  if (!anchorNeedsOlderPage(target, comments, hasOlder, loadingOlder))
+    return null;
+  const sameWalk =
+    last !== null && last.parent === parent && last.target === target;
+  if (sameWalk && (last.pages >= budget || last.loaded === comments.length))
+    return null;
   return {
     parent,
     target: target as string,

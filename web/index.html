@@ -4,15 +4,26 @@
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover: required for env(safe-area-inset-*) to be
          non-zero on notched iPhones (LIF-279). -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <title>Lific</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <!-- PWA: installable / add-to-homescreen on Android + iOS. -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-title" content="Lific" />
-    <meta name="theme-color" content="#fafcfb" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#1c221f" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="theme-color"
+      content="#fafcfb"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#1c221f"
+      media="(prefers-color-scheme: dark)"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -29,7 +40,8 @@
         var themePref = localStorage.getItem("lific_theme");
         var dark =
           themePref === "dark" ||
-          (!themePref && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          (!themePref &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
         if (dark) html.classList.add("dark");
 
         var accent = localStorage.getItem("lific_accent");

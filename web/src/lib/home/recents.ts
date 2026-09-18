@@ -48,7 +48,10 @@ export function recordRecent(entry: Omit<RecentEntry, "ts">): void {
     const rest = getRecents().filter(
       (e) => !(e.type === entry.type && e.routeId === entry.routeId),
     );
-    const next: RecentEntry[] = [{ ...entry, ts: Date.now() }, ...rest].slice(0, CAP);
+    const next: RecentEntry[] = [{ ...entry, ts: Date.now() }, ...rest].slice(
+      0,
+      CAP,
+    );
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
     // ignore — private mode / quota

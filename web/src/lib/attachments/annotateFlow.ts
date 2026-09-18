@@ -14,12 +14,22 @@ import AnnotateDialog from "./AnnotateDialog.svelte";
  *  does not, because you had every chance to edit it already. */
 export type UploadSource = "paste" | "drop" | "camera" | "picker" | "voice";
 
-const PROMPTED_SOURCES: ReadonlySet<UploadSource> = new Set(["paste", "drop", "camera"]);
+const PROMPTED_SOURCES: ReadonlySet<UploadSource> = new Set([
+  "paste",
+  "drop",
+  "camera",
+]);
 
 /** Raster formats the canvas round-trip is safe for. GIF would lose its
  *  animation and SVG would either taint the canvas or rasterise a vector, so
  *  both pass straight through untouched. */
-const ANNOTATABLE = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/bmp"]);
+const ANNOTATABLE = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/bmp",
+]);
 
 export function isAnnotatable(file: File): boolean {
   return ANNOTATABLE.has(file.type.toLowerCase());
@@ -62,8 +72,12 @@ export function annotate(file: File): Promise<File> {
  * `document`) is returned untouched, so callers can pipe every upload through
  * this without branching.
  */
-export async function maybeAnnotate(files: File[], source: UploadSource): Promise<File[]> {
-  if (typeof document === "undefined" || !PROMPTED_SOURCES.has(source)) return files;
+export async function maybeAnnotate(
+  files: File[],
+  source: UploadSource,
+): Promise<File[]> {
+  if (typeof document === "undefined" || !PROMPTED_SOURCES.has(source))
+    return files;
   const out: File[] = [];
   for (const file of files) {
     out.push(isAnnotatable(file) ? await annotate(file) : file);

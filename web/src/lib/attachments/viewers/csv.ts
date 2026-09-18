@@ -139,7 +139,10 @@ export function compareCells(a: string, b: string): number {
   const ln = Number(left);
   const rn = Number(right);
   if (Number.isFinite(ln) && Number.isFinite(rn)) return ln - rn;
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+  return left.localeCompare(right, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 /** Sort a copy of `rows` by one column. Blank-sinking means a descending sort

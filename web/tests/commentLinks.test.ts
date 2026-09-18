@@ -37,14 +37,11 @@ describe("comment links", () => {
   });
 
   test("keeps plain anchors on the current route and adopts routed hashes", () => {
+    expect(routeForCommentHash("#comment-42", "/LIF/issues/LIF-1")).toBe(
+      "/LIF/issues/LIF-1",
+    );
     expect(
-      routeForCommentHash("#comment-42", "/LIF/issues/LIF-1"),
-    ).toBe("/LIF/issues/LIF-1");
-    expect(
-      routeForCommentHash(
-        "#/LIF/issues/LIF-2?comment=42",
-        "/LIF/issues/LIF-1",
-      ),
+      routeForCommentHash("#/LIF/issues/LIF-2?comment=42", "/LIF/issues/LIF-1"),
     ).toBe("/LIF/issues/LIF-2?comment=42");
   });
 

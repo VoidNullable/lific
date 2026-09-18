@@ -1,6 +1,10 @@
 import React from "react";
 import { Audio, staticFile } from "remotion";
-import { TransitionSeries, linearTiming, springTiming } from "@remotion/transitions";
+import {
+  TransitionSeries,
+  linearTiming,
+  springTiming,
+} from "@remotion/transitions";
 import { fade } from "@remotion/transitions/fade";
 import { slide } from "@remotion/transitions/slide";
 import { SCENES, TRANSITION } from "./timing";

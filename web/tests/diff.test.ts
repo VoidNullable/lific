@@ -40,7 +40,9 @@ describe("unified diff parsing", () => {
 
   test("numbers lines from the hunk header, per side", () => {
     const parsed = parseUnifiedDiff(GIT_DIFF);
-    const body = parsed.files[0].lines.filter((l) => l.kind !== "meta" && l.kind !== "hunk");
+    const body = parsed.files[0].lines.filter(
+      (l) => l.kind !== "meta" && l.kind !== "hunk",
+    );
     expect(body.map((l) => [l.kind, l.oldNo, l.newNo])).toEqual([
       ["context", 10, 10],
       ["del", 11, null],
@@ -57,7 +59,9 @@ describe("unified diff parsing", () => {
   });
 
   test("summarizes with correct pluralization", () => {
-    expect(summarizeDiff(parseUnifiedDiff(GIT_DIFF))).toBe("2 files changed, +2 -2");
+    expect(summarizeDiff(parseUnifiedDiff(GIT_DIFF))).toBe(
+      "2 files changed, +2 -2",
+    );
     const single = parseUnifiedDiff(`--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n`);
     expect(summarizeDiff(single)).toBe("1 file changed, +1 -1");
   });

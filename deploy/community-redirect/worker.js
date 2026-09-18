@@ -33,7 +33,11 @@ export default {
       if (request.method !== "GET" || url.pathname !== "/api/events/ws") {
         return new Response("invalid websocket route", { status: 400 });
       }
-      return fetch(target, { headers, method: request.method, redirect: "manual" });
+      return fetch(target, {
+        headers,
+        method: request.method,
+        redirect: "manual",
+      });
     }
     return fetch(target, {
       method: request.method,

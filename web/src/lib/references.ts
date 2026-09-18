@@ -64,7 +64,11 @@ export function projectCodeOf(identifier: string): string {
  *  would need a network round trip to resolve mid-render — the markdown
  *  pipeline is synchronous, so those link to the project's list view
  *  instead (same tradeoff the pre-LIF-239 code already made for DOC-n). */
-export function routeFor(project: string, kind: RefKind, identifier: string): string {
+export function routeFor(
+  project: string,
+  kind: RefKind,
+  identifier: string,
+): string {
   // LIF-471: inside the public view every generated link stays inside it.
   const route =
     kind === "page"
@@ -109,7 +113,10 @@ const issueInFlight = new Map<string, IssueInFlight>();
 // repopulating a cache which has just been invalidated by realtime.
 let cacheSession: string | null | undefined;
 let cacheGeneration = 0;
-const issueStatusSubscribers = new Map<string, Set<(result: CachedIssue) => void>>();
+const issueStatusSubscribers = new Map<
+  string,
+  Set<(result: CachedIssue) => void>
+>();
 const pendingIssueStatuses = new Set<string>();
 const activeIssueStatuses = new Map<string, AbortController>();
 let issueStatusRevision = 0;
@@ -119,7 +126,10 @@ function clearReferenceCaches(abortDirect: boolean) {
   cacheGeneration += 1;
   issueCache.clear();
   for (const pending of issueInFlight.values()) {
-    if (abortDirect || (!pending.hasPersistentConsumer && pending.directConsumers === 0)) {
+    if (
+      abortDirect ||
+      (!pending.hasPersistentConsumer && pending.directConsumers === 0)
+    ) {
       pending.controller.abort();
     }
   }
@@ -136,9 +146,10 @@ function refreshSubscribedIssueStatuses() {
 }
 
 function ensureCacheSession(): boolean {
-  const token = typeof localStorage === "undefined"
-    ? null
-    : localStorage.getItem("lific_token");
+  const token =
+    typeof localStorage === "undefined"
+      ? null
+      : localStorage.getItem("lific_token");
   // LIF-471: the public view is a different audience with a different data
   // source, so a scope change invalidates exactly like a token change would.
   const audience = getPublicProject();
@@ -157,7 +168,10 @@ function scheduleIssueStatus(key: string) {
 }
 
 function pumpIssueStatuses() {
-  while (activeIssueStatuses.size < ISSUE_STATUS_CONCURRENCY && pendingIssueStatuses.size > 0) {
+  while (
+    activeIssueStatuses.size < ISSUE_STATUS_CONCURRENCY &&
+    pendingIssueStatuses.size > 0
+  ) {
     const key = pendingIssueStatuses.values().next().value as string;
     pendingIssueStatuses.delete(key);
     if (!issueStatusSubscribers.has(key)) continue;
@@ -167,7 +181,8 @@ function pumpIssueStatuses() {
     activeIssueStatuses.set(key, controller);
     void fetchIssueCachedInternal(key, controller.signal)
       .then((result) => {
-        if (controller.signal.aborted || revision !== issueStatusRevision) return;
+        if (controller.signal.aborted || revision !== issueStatusRevision)
+          return;
         for (const subscriber of issueStatusSubscribers.get(key) ?? []) {
           try {
             subscriber(result);
@@ -177,7 +192,8 @@ function pumpIssueStatuses() {
         }
       })
       .finally(() => {
-        if (activeIssueStatuses.get(key) === controller) activeIssueStatuses.delete(key);
+        if (activeIssueStatuses.get(key) === controller)
+          activeIssueStatuses.delete(key);
         if (controller.signal.aborted || revision !== issueStatusRevision) {
           scheduleIssueStatus(key);
         }
@@ -216,7 +232,10 @@ export function subscribeIssueStatus(
     if (disposed) return;
     disposed = true;
     subscribers.delete(subscriber);
-    if (subscribers.size === 0 && issueStatusSubscribers.get(key) === subscribers) {
+    if (
+      subscribers.size === 0 &&
+      issueStatusSubscribers.get(key) === subscribers
+    ) {
       issueStatusSubscribers.delete(key);
       pendingIssueStatuses.delete(key);
       activeIssueStatuses.get(key)?.abort();
@@ -274,26 +293,29 @@ async function fetchIssueCachedInternal(
   const session = cacheSession;
   const controller = new AbortController();
   let entry: IssueInFlight;
-  const promise = issueResolutionQueue.add(async (): Promise<IssueResolution> => {
-    if (cacheSession !== session || controller.signal.aborted) {
-      return { result: { status: "unavailable" }, cacheable: false };
-    }
-    const res = await resolveIssue(key, controller.signal);
-    return res.ok
-      ? { result: { status: "ok", issue: res.data }, cacheable: true }
-      : {
-          result: { status: "unavailable" },
-          cacheable: res.status === 403 || res.status === 404,
-        };
-  })
+  const promise = issueResolutionQueue
+    .add(async (): Promise<IssueResolution> => {
+      if (cacheSession !== session || controller.signal.aborted) {
+        return { result: { status: "unavailable" }, cacheable: false };
+      }
+      const res = await resolveIssue(key, controller.signal);
+      return res.ok
+        ? { result: { status: "ok", issue: res.data }, cacheable: true }
+        : {
+            result: { status: "unavailable" },
+            cacheable: res.status === 403 || res.status === 404,
+          };
+    })
     .then(({ result, cacheable }): CachedIssue => {
       // Cache successful and stable 403/404 results; transient failures stay
       // retryable instead of leaving an issue permanently unavailable.
       if (cacheGeneration === generation && cacheable) {
         issueCache.set(key, result);
       }
-      const hasDirectConsumer = entry.hasPersistentConsumer || entry.directConsumers > 0;
-      return cacheGeneration === generation || (cacheSession === session && hasDirectConsumer)
+      const hasDirectConsumer =
+        entry.hasPersistentConsumer || entry.directConsumers > 0;
+      return cacheGeneration === generation ||
+        (cacheSession === session && hasDirectConsumer)
         ? result
         : { status: "unavailable" };
     })
@@ -308,10 +330,15 @@ async function fetchIssueCachedInternal(
     directConsumers: 0,
   };
   issueInFlight.set(key, entry);
-  return signal ? attachAbortableConsumer(entry, signal, directConsumer) : promise;
+  return signal
+    ? attachAbortableConsumer(entry, signal, directConsumer)
+    : promise;
 }
 
-export function fetchIssueCached(identifier: string, signal?: AbortSignal): Promise<CachedIssue> {
+export function fetchIssueCached(
+  identifier: string,
+  signal?: AbortSignal,
+): Promise<CachedIssue> {
   return fetchIssueCachedInternal(identifier, signal, true);
 }
 
@@ -392,7 +419,10 @@ let projectCatalogAt = 0;
 const CATALOG_TTL = 60_000;
 
 async function ensureProjectCatalog(): Promise<Project[]> {
-  if (Date.now() - projectCatalogAt < CATALOG_TTL && projectCatalog.length > 0) {
+  if (
+    Date.now() - projectCatalogAt < CATALOG_TTL &&
+    projectCatalog.length > 0
+  ) {
     return projectCatalog;
   }
   const res = await listProjects();
@@ -427,7 +457,9 @@ async function issuesForProject(projectId: number): Promise<Issue[]> {
  *  fuzzy.ts's fuzzyMatch (kept to prefix-only hits via matchStart===0,
  *  since digits after the dash are the only thing the trigger grammar
  *  allows the user to type there). */
-export async function searchSuggestions(trigger: TriggerMatch): Promise<SuggestionHit[]> {
+export async function searchSuggestions(
+  trigger: TriggerMatch,
+): Promise<SuggestionHit[]> {
   if (trigger.mode === "hash") {
     const q = trigger.query.trim();
     if (!q) return [];
@@ -436,7 +468,12 @@ export async function searchSuggestions(trigger: TriggerMatch): Promise<Suggesti
     return res.data
       .filter((r) => r.result_type === "issue" && r.identifier)
       .slice(0, 8)
-      .map((r) => ({ id: r.id, identifier: r.identifier as string, title: r.title, status: "" }));
+      .map((r) => ({
+        id: r.id,
+        identifier: r.identifier as string,
+        title: r.title,
+        status: "",
+      }));
   }
 
   const m = trigger.query.match(/^([A-Za-z]{2,5})-([0-9]*)$/);
@@ -452,11 +489,21 @@ export async function searchSuggestions(trigger: TriggerMatch): Promise<Suggesti
   let candidates = issues;
   if (digits) {
     candidates = issues
-      .map((issue) => ({ issue, m: fuzzyMatch(digits, String(issue.sequence)) }))
-      .filter((x): x is { issue: Issue; m: NonNullable<ReturnType<typeof fuzzyMatch>> } =>
-        x.m !== null && x.m.matchStart === 0,
+      .map((issue) => ({
+        issue,
+        m: fuzzyMatch(digits, String(issue.sequence)),
+      }))
+      .filter(
+        (
+          x,
+        ): x is {
+          issue: Issue;
+          m: NonNullable<ReturnType<typeof fuzzyMatch>>;
+        } => x.m !== null && x.m.matchStart === 0,
       )
-      .sort((a, b) => b.m.score - a.m.score || a.issue.sequence - b.issue.sequence)
+      .sort(
+        (a, b) => b.m.score - a.m.score || a.issue.sequence - b.issue.sequence,
+      )
       .map((x) => x.issue);
   }
   return candidates.slice(0, 8).map((issue) => ({
@@ -476,12 +523,34 @@ export async function searchSuggestions(trigger: TriggerMatch): Promise<Suggesti
 // EditableMarkdown doesn't need a new dependency.
 
 const MIRROR_STYLE_PROPS = [
-  "boxSizing", "width", "height", "overflowX", "overflowY",
-  "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
-  "borderStyle", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
-  "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize",
-  "lineHeight", "fontFamily", "textAlign", "textTransform", "textIndent",
-  "textDecoration", "letterSpacing", "wordSpacing", "tabSize",
+  "boxSizing",
+  "width",
+  "height",
+  "overflowX",
+  "overflowY",
+  "borderTopWidth",
+  "borderRightWidth",
+  "borderBottomWidth",
+  "borderLeftWidth",
+  "borderStyle",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "fontStyle",
+  "fontVariant",
+  "fontWeight",
+  "fontStretch",
+  "fontSize",
+  "lineHeight",
+  "fontFamily",
+  "textAlign",
+  "textTransform",
+  "textIndent",
+  "textDecoration",
+  "letterSpacing",
+  "wordSpacing",
+  "tabSize",
 ] as const;
 
 export function getCaretCoordinates(
@@ -517,5 +586,9 @@ export function getCaretCoordinates(
   const lineHeight = parseFloat(computed.lineHeight);
   document.body.removeChild(div);
 
-  return { top, left, height: Number.isFinite(lineHeight) ? lineHeight : span.offsetHeight };
+  return {
+    top,
+    left,
+    height: Number.isFinite(lineHeight) ? lineHeight : span.offsetHeight,
+  };
 }

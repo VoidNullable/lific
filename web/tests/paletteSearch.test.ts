@@ -120,7 +120,10 @@ describe("scoreDoc weighting", () => {
   test("a title hit outranks the same hit in a label or a preview", () => {
     const title = doc({ title: "Palette search" });
     const label = doc({ title: "Something else", labels: ["palette"] });
-    const preview = doc({ title: "Something else", preview: "the palette is warm" });
+    const preview = doc({
+      title: "Something else",
+      preview: "the palette is warm",
+    });
 
     const t = scoreDoc(["palette"], title);
     const l = scoreDoc(["palette"], label);
@@ -132,13 +135,21 @@ describe("scoreDoc weighting", () => {
   });
 
   test("an exact reference scores the reference weight, not the title weight", () => {
-    const d = doc({ id: 445, identifier: "LIF-445", title: "Warm the palette" });
+    const d = doc({
+      id: 445,
+      identifier: "LIF-445",
+      title: "Warm the palette",
+    });
     // ref weight 4 / max weight 5.
     expect(scoreDoc(["lif-445"], d)).toBeCloseTo(4 / 5, 10);
   });
 
   test("a bare number matches the reference's number field", () => {
-    const d = doc({ id: 445, identifier: "LIF-445", title: "Warm the palette" });
+    const d = doc({
+      id: 445,
+      identifier: "LIF-445",
+      title: "Warm the palette",
+    });
     // number weight 4 / max weight 5.
     expect(scoreDoc(["445"], d)).toBeCloseTo(4 / 5, 10);
     expect(scoreDoc(["446"], d)).toBe(0);
@@ -189,7 +200,11 @@ describe("searchLocalDocs", () => {
       doc({ title: "Rebuild the palette" }),
     ];
     const titles = searchLocalDocs("palette", docs).map((h) => h.doc.title);
-    expect(titles).toEqual(["Palette search", "Rebuild the palette", "Unrelated"]);
+    expect(titles).toEqual([
+      "Palette search",
+      "Rebuild the palette",
+      "Unrelated",
+    ]);
   });
 
   test("breaks ties on updated_at, newest first", () => {
@@ -212,10 +227,11 @@ describe("searchLocalDocs", () => {
       doc({ kind: "issue", title: "Palette search" }),
       doc({ kind: "page", identifier: "LIF-DOC-3", title: "Palette design" }),
     ];
-    expect(searchLocalDocs("palette", docs).map((h) => h.doc.kind).sort()).toEqual([
-      "issue",
-      "page",
-    ]);
+    expect(
+      searchLocalDocs("palette", docs)
+        .map((h) => h.doc.kind)
+        .sort(),
+    ).toEqual(["issue", "page"]);
   });
 
   test("honours the limit and returns nothing for an empty query", () => {
@@ -229,7 +245,9 @@ describe("searchLocalDocs", () => {
 describe("score bands", () => {
   test("every local hit outranks every server hit", () => {
     expect(LOCAL_SCORE_FLOOR).toBeGreaterThan(SERVER_SCORE_MAX);
-    expect(localScoreToPaletteScore(Number.MIN_VALUE)).toBeGreaterThan(SERVER_SCORE_MAX);
+    expect(localScoreToPaletteScore(Number.MIN_VALUE)).toBeGreaterThan(
+      SERVER_SCORE_MAX,
+    );
   });
 
   test("no local hit reaches the identifier fast path or an exact project", () => {
@@ -239,7 +257,9 @@ describe("score bands", () => {
   });
 
   test("the mapping is monotonic and clamped", () => {
-    expect(localScoreToPaletteScore(0.5)).toBeGreaterThan(localScoreToPaletteScore(0.25));
+    expect(localScoreToPaletteScore(0.5)).toBeGreaterThan(
+      localScoreToPaletteScore(0.25),
+    );
     expect(localScoreToPaletteScore(-1)).toBe(LOCAL_SCORE_FLOOR);
     expect(localScoreToPaletteScore(4)).toBe(LOCAL_SCORE_CEIL);
   });
@@ -259,9 +279,9 @@ describe("dedupeByIdentifier", () => {
       { identifier: "LIF-1", title: "one" },
       { identifier: "LIF-2", title: "two" },
     ];
-    expect(dedupeByIdentifier(server, ["LIF-1"]).map((h) => h.identifier)).toEqual([
-      "LIF-2",
-    ]);
+    expect(
+      dedupeByIdentifier(server, ["LIF-1"]).map((h) => h.identifier),
+    ).toEqual(["LIF-2"]);
   });
 
   test("compares identifiers case-insensitively", () => {
@@ -288,10 +308,9 @@ describe("dedupeByIdentifier", () => {
       { identifier: "LIF-3", title: "three" },
       { identifier: "LIF-7", title: "seven" },
     ];
-    expect(dedupeByIdentifier(server, ["LIF-3"]).map((h) => h.identifier)).toEqual([
-      "LIF-9",
-      "LIF-7",
-    ]);
+    expect(
+      dedupeByIdentifier(server, ["LIF-3"]).map((h) => h.identifier),
+    ).toEqual(["LIF-9", "LIF-7"]);
   });
 });
 
@@ -374,10 +393,34 @@ describe("merged result set", () => {
       exactRef,
       localSameIssue,
       serverSameIssue,
-      { kind: "issue", title: "Other", identifier: "LIF-1", route: "/LIF/issues/LIF-1", score: 2 },
-      { kind: "page", title: "Design", identifier: "LIF-DOC-3", route: "/LIF/pages/3", score: 2.4 },
-      { kind: "page", title: "Design", identifier: "LIF-DOC-3", route: "/LIF/pages/3", score: 0.9 },
-      { kind: "project", title: "Lific", identifier: "LIF", route: "/LIF/overview", score: 2.6 },
+      {
+        kind: "issue",
+        title: "Other",
+        identifier: "LIF-1",
+        route: "/LIF/issues/LIF-1",
+        score: 2,
+      },
+      {
+        kind: "page",
+        title: "Design",
+        identifier: "LIF-DOC-3",
+        route: "/LIF/pages/3",
+        score: 2.4,
+      },
+      {
+        kind: "page",
+        title: "Design",
+        identifier: "LIF-DOC-3",
+        route: "/LIF/pages/3",
+        score: 0.9,
+      },
+      {
+        kind: "project",
+        title: "Lific",
+        identifier: "LIF",
+        route: "/LIF/overview",
+        score: 2.6,
+      },
     ];
     const out = publish(merged);
     expect(new Set(out.map(rowKey)).size).toBe(out.length);
@@ -399,7 +442,10 @@ describe("merged result set", () => {
       route: "/LIF/issues/LIF-3",
       score: SERVER_SCORE_MAX,
     };
-    expect(publish([server, local]).map((r) => r.title)).toEqual(["Local", "Server"]);
+    expect(publish([server, local]).map((r) => r.title)).toEqual([
+      "Local",
+      "Server",
+    ]);
   });
 });
 
@@ -415,8 +461,11 @@ describe("searchLocalDocsPerKind", () => {
     });
 
     // The old shared budget: pages never even get looked at.
-    expect(searchLocalDocs("palette", [...issues, page], 8).some((h) => h.doc.kind === "page"))
-      .toBe(false);
+    expect(
+      searchLocalDocs("palette", [...issues, page], 8).some(
+        (h) => h.doc.kind === "page",
+      ),
+    ).toBe(false);
 
     const perKind = searchLocalDocsPerKind("palette", [...issues, page], 8);
     expect(perKind.some((h) => h.doc.id === page.id)).toBe(true);
@@ -424,8 +473,12 @@ describe("searchLocalDocsPerKind", () => {
 
   test("caps each kind independently", () => {
     const docs = [
-      ...Array.from({ length: 20 }, () => doc({ kind: "issue", title: "Palette" })),
-      ...Array.from({ length: 20 }, () => doc({ kind: "page", title: "Palette" })),
+      ...Array.from({ length: 20 }, () =>
+        doc({ kind: "issue", title: "Palette" }),
+      ),
+      ...Array.from({ length: 20 }, () =>
+        doc({ kind: "page", title: "Palette" }),
+      ),
     ];
     const hits = searchLocalDocsPerKind("palette", docs, 8);
     expect(hits.filter((h) => h.doc.kind === "issue")).toHaveLength(8);
@@ -441,7 +494,9 @@ describe("searchLocalDocsPerKind", () => {
   });
 
   test("an empty query yields nothing", () => {
-    expect(searchLocalDocsPerKind("  ", [doc({ title: "Palette" })])).toEqual([]);
+    expect(searchLocalDocsPerKind("  ", [doc({ title: "Palette" })])).toEqual(
+      [],
+    );
   });
 });
 
@@ -462,9 +517,12 @@ describe("isStaleSearch", () => {
 
   test("leaving a project entirely invalidates it", () => {
     expect(isStaleSearch(issued, { gen: 7, projectIdent: null })).toBe(true);
-    expect(isStaleSearch({ gen: 7, projectIdent: null }, { gen: 7, projectIdent: "LIF" })).toBe(
-      true,
-    );
+    expect(
+      isStaleSearch(
+        { gen: 7, projectIdent: null },
+        { gen: 7, projectIdent: "LIF" },
+      ),
+    ).toBe(true);
   });
 
   test("two responses racing: only the last one issued may land", () => {

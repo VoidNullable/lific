@@ -65,7 +65,11 @@ export function isValidHex(s: string): boolean {
 /** Normalize user hex input to a "#rrggbb" string. Assumes isValidHex. */
 export function normalizeHex(s: string): string {
   let h = s.trim().replace(/^#/, "");
-  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
   return "#" + h.toLowerCase();
 }
 
@@ -73,11 +77,18 @@ export function normalizeHex(s: string): string {
  *  (WCAG relative-luminance threshold). For solid swatches/chips. */
 export function readableTextColor(hex: string): string {
   const h = hex.replace(/^#/, "");
-  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const full =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
   const r = parseInt(full.slice(0, 2), 16) / 255;
   const g = parseInt(full.slice(2, 4), 16) / 255;
   const b = parseInt(full.slice(4, 6), 16) / 255;
-  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const lin = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
   return L > 0.45 ? "#111827" : "#ffffff";
 }

@@ -3115,7 +3115,7 @@ mod tests {
         );
         assert!(
             !root
-                .join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME))
+                .join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash"))
                 .exists(),
             "nothing may be stranded under the pre-restore name"
         );
@@ -3131,7 +3131,7 @@ mod tests {
         let (dir_tmp, db_path, staging, _sha) = seed_install_fixture("install_db_clash");
         let root = dir_tmp.path();
         fs::write(
-            root.join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME)),
+            root.join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash")),
             b"someone else's file",
         )
         .unwrap();
@@ -3150,7 +3150,7 @@ mod tests {
             .unwrap();
         assert_eq!(live, 1);
         assert_eq!(
-            fs::read(root.join(format!("{}.pre-restore-clash", ARCHIVE_DB_NAME))).unwrap(),
+            fs::read(root.join(format!("{ARCHIVE_DB_NAME}.pre-restore-clash"))).unwrap(),
             b"someone else's file",
             "an unrelated file at the backup path is never clobbered"
         );

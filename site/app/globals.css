@@ -117,10 +117,10 @@
   --color-btn-success-text: var(--btn-success-text);
 
   /* Product font roles — web/src/app.css @theme */
-  --font-display: var(--font-space-grotesk), "DM Sans", -apple-system,
-    sans-serif;
-  --font-body: var(--font-dm-sans), -apple-system, BlinkMacSystemFont,
-    sans-serif;
+  --font-display:
+    var(--font-space-grotesk), "DM Sans", -apple-system, sans-serif;
+  --font-body:
+    var(--font-dm-sans), -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
 
   /* Role-based type scale (LIF-DOC-14 §2) — same eight steps, plus the
@@ -144,7 +144,10 @@
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-dm-sans), -apple-system, sans-serif;
+  font-family:
+    var(--font-dm-sans),
+    -apple-system,
+    sans-serif;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

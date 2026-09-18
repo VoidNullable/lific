@@ -333,9 +333,7 @@ export const IssueListPage: React.FC<{
                 key={g.status}
                 style={{
                   borderBottom:
-                    gi === groups.length - 1
-                      ? "none"
-                      : `1px solid ${C.border}`,
+                    gi === groups.length - 1 ? "none" : `1px solid ${C.border}`,
                 }}
               >
                 <GroupHeader status={g.status} count={g.issues.length} />

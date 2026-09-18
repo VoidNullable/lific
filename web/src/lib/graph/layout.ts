@@ -76,7 +76,9 @@ function components(nodeIds: number[], edges: LayoutEdge[]): Component[] {
     }
     out.push({
       nodes: [...members],
-      edges: edges.filter((e) => members.has(e.source) && members.has(e.target)),
+      edges: edges.filter(
+        (e) => members.has(e.source) && members.has(e.target),
+      ),
     });
   }
   // Biggest chains first — the interesting structure lands at the top.
@@ -90,7 +92,9 @@ function findBackEdges(nodes: number[], edges: LayoutEdge[]): Set<LayoutEdge> {
   for (const n of nodes) out.set(n, []);
   for (const e of edges) out.get(e.source)?.push(e);
 
-  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const WHITE = 0,
+    GRAY = 1,
+    BLACK = 2;
   const color = new Map<number, number>(nodes.map((n) => [n, WHITE]));
   const back = new Set<LayoutEdge>();
 
@@ -123,7 +127,10 @@ function findBackEdges(nodes: number[], edges: LayoutEdge[]): Set<LayoutEdge> {
 }
 
 /** Longest-path layering over the acyclic edge subset. */
-function assignLayers(nodes: number[], edges: LayoutEdge[]): Map<number, number> {
+function assignLayers(
+  nodes: number[],
+  edges: LayoutEdge[],
+): Map<number, number> {
   const preds = new Map<number, number[]>();
   const succs = new Map<number, number[]>();
   const indegree = new Map<number, number>();
@@ -190,7 +197,8 @@ function orderLayers(
         bary.set(
           n,
           neigh.length
-            ? neigh.reduce((sum, m) => sum + (position.get(m) ?? 0), 0) / neigh.length
+            ? neigh.reduce((sum, m) => sum + (position.get(m) ?? 0), 0) /
+                neigh.length
             : (position.get(n) ?? 0),
         );
       }
@@ -207,10 +215,7 @@ function orderLayers(
 }
 
 /** Lay out one component; coordinates are component-local from (0,0). */
-function layoutComponent(
-  comp: Component,
-  opts: LayoutOptions,
-): GraphLayout {
+function layoutComponent(comp: Component, opts: LayoutOptions): GraphLayout {
   const back = findBackEdges(comp.nodes, comp.edges);
   const acyclic = comp.edges.filter((e) => !back.has(e));
   const layerOf = assignLayers(comp.nodes, acyclic);
@@ -224,7 +229,8 @@ function layoutComponent(
   let width = 0;
   for (const l of layerIndices) {
     const row = layers.get(l)!;
-    const rowHeight = row.length * opts.nodeHeight + (row.length - 1) * opts.gapY;
+    const rowHeight =
+      row.length * opts.nodeHeight + (row.length - 1) * opts.gapY;
     const yOffset = (fullHeight - rowHeight) / 2; // center shorter layers
     row.forEach((n, i) => {
       const x = l * (opts.nodeWidth + opts.gapX);
@@ -263,7 +269,10 @@ export function layoutGraph(
     const layerEdges = edges.filter(
       (e) => idSetPerComp[i].has(e.source) && idSetPerComp[i].has(e.target),
     );
-    const laid = layoutComponent({ nodes: comps[i].nodes, edges: layerEdges }, opts);
+    const laid = layoutComponent(
+      { nodes: comps[i].nodes, edges: layerEdges },
+      opts,
+    );
     for (const p of laid.positions.values()) {
       positions.set(p.id, { id: p.id, x: p.x, y: p.y + y });
     }
@@ -299,7 +308,8 @@ export function layoutGrid(
   const rows = Math.ceil(nodeIds.length / cols);
   return {
     positions,
-    width: Math.min(nodeIds.length, cols) * (opts.nodeWidth + opts.gapX) - opts.gapX,
+    width:
+      Math.min(nodeIds.length, cols) * (opts.nodeWidth + opts.gapX) - opts.gapX,
     height: rows * (opts.nodeHeight + opts.gapY) - opts.gapY,
   };
 }

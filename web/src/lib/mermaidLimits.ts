@@ -15,7 +15,9 @@ const XY_AXIS_RANGE = new RegExp(
 function mermaidStatements(source: string): string[] {
   const statements: string[] = [];
   let statement = "";
-  for (const token of source.match(/"[^"]*"|%%[^\r\n]*|[;\r\n]|[^";%\r\n]+|["%]/g) ?? []) {
+  for (const token of source.match(
+    /"[^"]*"|%%[^\r\n]*|[;\r\n]|[^";%\r\n]+|["%]/g,
+  ) ?? []) {
     if (token.startsWith("%%")) continue;
     if (/^[;\r\n]$/.test(token)) {
       if (statement.trim()) statements.push(statement.trim());
@@ -62,7 +64,9 @@ export function mermaidIsTooComplex(source: string): boolean {
 
   return (
     directives.some((statement) => /^architecture-beta\b/i.test(statement)) &&
-    directives.some((statement) => /^group\s+(?:__proto__|prototype|constructor)\b/i.test(statement))
+    directives.some((statement) =>
+      /^group\s+(?:__proto__|prototype|constructor)\b/i.test(statement),
+    )
   );
 }
 

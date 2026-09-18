@@ -23,7 +23,11 @@ const WIN1_LINES: TermLine[] = [
   { at: 34, text: "    Updating crates.io index", kind: "out" },
   { at: 42, text: "   Compiling lific v2.0.0", kind: "out" },
   { at: 56, text: "    Finished `release` profile [optimized]", kind: "out" },
-  { at: 63, text: "   Installed package `lific v2.0.0` (executable `lific`)", kind: "ok" },
+  {
+    at: 63,
+    text: "   Installed package `lific v2.0.0` (executable `lific`)",
+    kind: "ok",
+  },
   { at: 78, text: "lific start", kind: "cmd", fpc: 1.2 },
   { at: 98, text: "INFO database ready path=lific.db", kind: "out" },
   { at: 106, text: "INFO API key auth enabled active_keys=1", kind: "out" },
@@ -47,7 +51,12 @@ const WIN2_AT = 144;
 // Output format is verbatim from src/cli/connect/mod.rs:
 // "  [{display}] {action}: {path}" + restart hint.
 const WIN2_LINES: TermLine[] = [
-  { at: WIN2_AT + 8, text: "lific connect --client opencode --yes", kind: "cmd", fpc: 0.9 },
+  {
+    at: WIN2_AT + 8,
+    text: "lific connect --client opencode --yes",
+    kind: "cmd",
+    fpc: 0.9,
+  },
   {
     at: WIN2_AT + 50,
     text: "  [OpenCode] created: /home/lizzy/.config/opencode/opencode.json",
@@ -98,7 +107,12 @@ export const TerminalScene: React.FC = () => {
               transform: `translate(${win2In * -36}px, ${win2In * -26}px) scale(${1 - win2In * 0.03})`,
             }}
           >
-            <Terminal lines={WIN1_LINES} width={1460} height={620} fontSize={30} />
+            <Terminal
+              lines={WIN1_LINES}
+              width={1460}
+              height={620}
+              fontSize={30}
+            />
           </div>
 
           {/* Window 2: a fresh shell for `lific connect` */}

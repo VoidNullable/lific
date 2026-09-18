@@ -36,7 +36,13 @@ export const Terminal: React.FC<{
   height?: number;
   fontSize?: number;
   title?: string;
-}> = ({ lines, width = 1240, height = 640, fontSize = 26, title = "fish — ~" }) => {
+}> = ({
+  lines,
+  width = 1240,
+  height = 640,
+  fontSize = 26,
+  title = "fish — ~",
+}) => {
   const frame = useCurrentFrame();
 
   const visible = lines.filter((l) => frame >= l.at);
@@ -73,7 +79,12 @@ export const Terminal: React.FC<{
         {["#f87171", "#fbbf24", "#4ade80"].map((c) => (
           <div
             key={c}
-            style={{ width: 13, height: 13, borderRadius: 7, backgroundColor: c }}
+            style={{
+              width: 13,
+              height: 13,
+              borderRadius: 7,
+              backgroundColor: c,
+            }}
           />
         ))}
         <div

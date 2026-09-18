@@ -48,7 +48,10 @@ export function disposePatch<P extends object>(
 ): PatchDisposition<P> {
   if (context.replaying) return { action: "send" };
   if (context.hold || parked !== null) {
-    return { action: "park", patch: parked === null ? next : mergePendingPatch(parked, next) };
+    return {
+      action: "park",
+      patch: parked === null ? next : mergePendingPatch(parked, next),
+    };
   }
   return { action: "send" };
 }
@@ -60,7 +63,9 @@ export function disposePatch<P extends object>(
  * being folded into one already on the wire, or being lost when the drain
  * finishes.
  */
-export function takePending<P extends object>(parked: P | null): {
+export function takePending<P extends object>(
+  parked: P | null,
+): {
   taken: P | null;
   remaining: null;
 } {
@@ -81,9 +86,14 @@ export type DrainStep<P> =
   /** Did not land. Whatever is parked stays parked for the caller to show. */
   | { next: "stop" };
 
-export function drainStep<P extends object>(landed: boolean, parked: P | null): DrainStep<P> {
+export function drainStep<P extends object>(
+  landed: boolean,
+  parked: P | null,
+): DrainStep<P> {
   if (!landed) return { next: "stop" };
-  return parked === null ? { next: "done" } : { next: "continue", patch: parked };
+  return parked === null
+    ? { next: "done" }
+    : { next: "continue", patch: parked };
 }
 
 /** Note for the caller: because a parked patch accumulates every field that

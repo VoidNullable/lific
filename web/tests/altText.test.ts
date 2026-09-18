@@ -52,7 +52,8 @@ describe("applyAltText", () => {
   });
 
   test("rewrites the reference at the offset, not an earlier one", () => {
-    const body = "![first.png](/api/attachments/1)\n![second.png](/api/attachments/2)";
+    const body =
+      "![first.png](/api/attachments/1)\n![second.png](/api/attachments/2)";
     const offset = body.indexOf("![second");
     expect(applyAltText(body, offset, "Second shot")).toBe(
       "![first.png](/api/attachments/1)\n![Second shot](/api/attachments/2)",
@@ -71,7 +72,9 @@ describe("applyAltText", () => {
   });
 
   test("leaves the document alone when the reference is gone", () => {
-    expect(applyAltText("nothing to see", 4, "Anything")).toBe("nothing to see");
+    expect(applyAltText("nothing to see", 4, "Anything")).toBe(
+      "nothing to see",
+    );
   });
 
   test("sanitizes on the way in so the reference cannot be broken", () => {

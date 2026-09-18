@@ -1318,8 +1318,7 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
     }
     let custom_option = if is_custom { " selected" } else { "" };
     options.push_str(&format!(
-        "<option value=\"{}\"{custom_option}>Custom tool&hellip;</option>",
-        CUSTOM_TOOL_OPTION
+        "<option value=\"{CUSTOM_TOOL_OPTION}\"{custom_option}>Custom tool&hellip;</option>"
     ));
 
     // The placeholder is only the selected placeholder when there's no remembered
@@ -1345,10 +1344,9 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
         var tool = document.getElementById('tool');
         var custom = document.getElementById('custom_tool');
         tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '{custom_option_value}' ? 'block' : 'none';
+            custom.style.display = tool.value === '{CUSTOM_TOOL_OPTION}' ? 'block' : 'none';
         }});
         </script>",
-        custom_option_value = CUSTOM_TOOL_OPTION,
     )
 }
 

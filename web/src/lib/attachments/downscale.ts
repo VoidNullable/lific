@@ -72,7 +72,11 @@ export function outputMimeFor(mime: string): string | null {
 }
 
 /** Fit `width`x`height` inside a square of `edge` px, preserving aspect. */
-export function scaledDimensions(width: number, height: number, edge: number): Dimensions {
+export function scaledDimensions(
+  width: number,
+  height: number,
+  edge: number,
+): Dimensions {
   const long = Math.max(width, height);
   if (long <= 0 || long <= edge) return { width, height };
   const ratio = edge / long;
@@ -85,7 +89,10 @@ export function scaledDimensions(width: number, height: number, edge: number): D
 /** Rough byte estimate for the resized copy. Encoded size tracks pixel count
  *  closely enough for a "~size" hint; lossy formats get a small extra discount
  *  for the re-encode at DOWNSCALE_QUALITY. */
-export function estimateDownscaledBytes(facts: ImageFacts, target: Dimensions): number {
+export function estimateDownscaledBytes(
+  facts: ImageFacts,
+  target: Dimensions,
+): number {
   const srcPixels = facts.width * facts.height;
   const dstPixels = target.width * target.height;
   if (srcPixels <= 0) return facts.bytes;
@@ -147,12 +154,18 @@ export async function readImageFacts(file: File): Promise<ImageFacts | null> {
   try {
     const size = await new Promise<Dimensions | null>((resolve) => {
       const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onload = () =>
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
       img.onerror = () => resolve(null);
       img.src = url;
     });
     if (!size) return null;
-    return { width: size.width, height: size.height, bytes: file.size, mime: file.type };
+    return {
+      width: size.width,
+      height: size.height,
+      bytes: file.size,
+      mime: file.type,
+    };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -161,7 +174,10 @@ export async function readImageFacts(file: File): Promise<ImageFacts | null> {
 /** Draw `file` into a canvas at the offer's dimensions and re-encode. Returns
  *  the original file untouched if anything fails, so a browser quirk can never
  *  block an upload. */
-export async function downscaleImage(file: File, offer: DownscaleOffer): Promise<File> {
+export async function downscaleImage(
+  file: File,
+  offer: DownscaleOffer,
+): Promise<File> {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement | null>((resolve) => {
@@ -185,7 +201,10 @@ export async function downscaleImage(file: File, offer: DownscaleOffer): Promise
     // A resize that ends up bigger than the original (small PNGs re-encode
     // badly) is a regression, so keep whichever is smaller.
     if (!blob || blob.size >= file.size) return file;
-    return new File([blob], file.name, { type: offer.outputMime, lastModified: Date.now() });
+    return new File([blob], file.name, {
+      type: offer.outputMime,
+      lastModified: Date.now(),
+    });
   } catch {
     return file;
   } finally {

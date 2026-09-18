@@ -63,8 +63,7 @@ export interface ApiError {
 }
 
 export type RequestResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: string; status: number | null };
+  { ok: true; data: T } | { ok: false; error: string; status: number | null };
 
 /** A successful response's headers, for the few endpoints whose answer is not
  *  entirely in the body (comment paging, LIF-421). */
@@ -74,14 +73,18 @@ export type HeadedResult<T> =
 
 async function requestWithHeaders<T>(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
 ): Promise<HeadedResult<T>> {
   const resolved = resolveRequest(path);
   if (resolved.kind === "refused") return REFUSED;
   if (resolved.kind === "synthetic") {
     if (resolved.status >= 400) {
       const body = resolved.body as { error?: string };
-      return { ok: false, error: body?.error ?? `HTTP ${resolved.status}`, status: resolved.status };
+      return {
+        ok: false,
+        error: body?.error ?? `HTTP ${resolved.status}`,
+        status: resolved.status,
+      };
     }
     return { ok: true, data: resolved.body as T, headers: new Headers() };
   }
@@ -105,10 +108,15 @@ async function requestWithHeaders<T>(
     let body = await res.json();
     // `/projects` mirrors onto the one published project; the callers expect
     // the list shape.
-    if (resolved.kind === "public" && path === "/projects" && res.ok) body = [body];
+    if (resolved.kind === "public" && path === "/projects" && res.ok)
+      body = [body];
 
     if (!res.ok) {
-      return { ok: false, error: body.error || `HTTP ${res.status}`, status: res.status };
+      return {
+        ok: false,
+        error: body.error || `HTTP ${res.status}`,
+        status: res.status,
+      };
     }
 
     return { ok: true, data: body as T, headers: res.headers };
@@ -123,7 +131,7 @@ async function requestWithHeaders<T>(
 
 async function request<T>(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
 ): Promise<RequestResult<T>> {
   const res = await requestWithHeaders<T>(path, options);
   return res.ok ? { ok: true, data: res.data } : res;
@@ -161,9 +169,7 @@ export async function download(path: string, filename?: string) {
   a.href = url;
   a.download =
     filename ||
-    res.headers
-      .get("content-disposition")
-      ?.match(/filename="([^"]+)"/)?.[1] ||
+    res.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ||
     "download";
   document.body.appendChild(a);
   a.click();
@@ -195,34 +201,57 @@ export interface ArchiveImportResult {
   };
 }
 
-export const getArchiveCapabilities = () => request<ArchiveCapabilities>("/project-archives");
+export const getArchiveCapabilities = () =>
+  request<ArchiveCapabilities>("/project-archives");
 
-export async function downloadProjectArchive(identifier: string, signal: AbortSignal) {
+export async function downloadProjectArchive(
+  identifier: string,
+  signal: AbortSignal,
+) {
   try {
     const token = localStorage.getItem("lific_token");
-    const response = await fetch(`${BASE}/project-archives/${encodeURIComponent(identifier)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}, signal, cache: "no-store",
-    });
+    const response = await fetch(
+      `${BASE}/project-archives/${encodeURIComponent(identifier)}`,
+      {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal,
+        cache: "no-store",
+      },
+    );
     if (!response.ok) {
       const body = await response.json();
-      return { ok: false as const, error: body.error || `HTTP ${response.status}` };
+      return {
+        ok: false as const,
+        error: body.error || `HTTP ${response.status}`,
+      };
     }
-    return { ok: true as const, blob: await response.blob(), filename: `${identifier}.lific.tar.gz` };
+    return {
+      ok: true as const,
+      blob: await response.blob(),
+      filename: `${identifier}.lific.tar.gz`,
+    };
   } catch {
-    return { ok: false as const, error: "The archive download stopped. Check your connection and download it again." };
+    return {
+      ok: false as const,
+      error:
+        "The archive download stopped. Check your connection and download it again.",
+    };
   }
 }
 
 export function saveArchiveDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = url; anchor.download = filename;
+  anchor.href = url;
+  anchor.download = filename;
   document.body.appendChild(anchor);
-  anchor.click(); anchor.remove();
+  anchor.click();
+  anchor.remove();
   URL.revokeObjectURL(url);
 }
 
-export const ARCHIVE_UNKNOWN = "The import may have completed. Check the project list before uploading this archive again.";
+export const ARCHIVE_UNKNOWN =
+  "The import may have completed. Check the project list before uploading this archive again.";
 
 // No retry or cancellation: a disconnected request can still commit.
 export function importProjectArchive(
@@ -235,10 +264,15 @@ export function importProjectArchive(
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/project-archives`);
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    xhr.upload.onprogress = (event) => onProgress(event.lengthComputable
-      ? Math.min(100, Math.round(event.loaded / event.total * 100)) : null);
+    xhr.upload.onprogress = (event) =>
+      onProgress(
+        event.lengthComputable
+          ? Math.min(100, Math.round((event.loaded / event.total) * 100))
+          : null,
+      );
     xhr.upload.onload = onProcessing;
-    const unknown = () => resolve({ ok: false, error: ARCHIVE_UNKNOWN, status: null });
+    const unknown = () =>
+      resolve({ ok: false, error: ARCHIVE_UNKNOWN, status: null });
     xhr.onerror = unknown;
     xhr.ontimeout = unknown;
     xhr.onabort = unknown;
@@ -247,14 +281,24 @@ export function importProjectArchive(
         const body = JSON.parse(xhr.responseText);
         if (xhr.status === 201 && body.project && body.report) {
           resolve({ ok: true, data: body });
-        } else if (xhr.status >= 400 && xhr.status < 500 && typeof body.error === "string") {
+        } else if (
+          xhr.status >= 400 &&
+          xhr.status < 500 &&
+          typeof body.error === "string"
+        ) {
           resolve({ ok: false, error: body.error, status: xhr.status });
         } else unknown();
-      } catch { unknown(); }
+      } catch {
+        unknown();
+      }
     };
     const form = new FormData();
     form.append("archive", file, file.name);
-    try { xhr.send(form); } catch { unknown(); }
+    try {
+      xhr.send(form);
+    } catch {
+      unknown();
+    }
   });
 }
 
@@ -318,7 +362,7 @@ export async function updateInstanceSettings(patch: InstanceSettingsPatch) {
 export async function signup(
   username: string,
   email: string,
-  password: string
+  password: string,
 ) {
   return request<AuthResponse>("/auth/signup", {
     method: "POST",
@@ -373,7 +417,10 @@ export async function me() {
 }
 
 // LIF-190: account settings.
-export async function updateProfile(input: { display_name?: string; email?: string }) {
+export async function updateProfile(input: {
+  display_name?: string;
+  email?: string;
+}) {
   return request<AuthUser>("/auth/me", {
     method: "PATCH",
     body: JSON.stringify(input),
@@ -398,7 +445,10 @@ export interface ChangePasswordResponse {
  *  Saving it is not optional. This helper used to ignore the field, which left
  *  the tab holding a token the server had just killed: every later request
  *  401'd and the UI looked like the password change had broken the account. */
-export async function changePassword(input: { current_password: string; new_password: string }) {
+export async function changePassword(input: {
+  current_password: string;
+  new_password: string;
+}) {
   const result = await request<ChangePasswordResponse>("/auth/me/password", {
     method: "POST",
     body: JSON.stringify(input),
@@ -416,7 +466,9 @@ export async function changePassword(input: { current_password: string; new_pass
  *  a failed request (a network drop, a 500) would log the tab out of a session
  *  that is still perfectly valid, and leave nothing to retry with. */
 export async function revokeAllSessions() {
-  const result = await request<{ revoked: boolean }>("/auth/me/sessions", { method: "DELETE" });
+  const result = await request<{ revoked: boolean }>("/auth/me/sessions", {
+    method: "DELETE",
+  });
   if (result.ok) {
     clearSession();
   }
@@ -625,9 +677,12 @@ export async function changeProjectMemberRole(
 }
 
 export async function removeProjectMember(projectId: number, userId: number) {
-  return request<{ deleted: boolean }>(`/projects/${projectId}/members/${userId}`, {
-    method: "DELETE",
-  });
+  return request<{ deleted: boolean }>(
+    `/projects/${projectId}/members/${userId}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 // ── My effective role (LIF-234) ─────────────────────────────
@@ -665,7 +720,9 @@ export interface MentionCandidate {
 }
 
 export async function listMentionCandidates(projectId: number) {
-  return request<MentionCandidate[]>(`/projects/${projectId}/mention-candidates`);
+  return request<MentionCandidate[]>(
+    `/projects/${projectId}/mention-candidates`,
+  );
 }
 
 // ── Projects ────────────────────────────────────────────────
@@ -790,7 +847,10 @@ export async function deleteProjectGroup(id: number) {
 }
 
 /** Move a project into a group, or out of every group with `groupId: null`. */
-export async function assignProjectGroup(projectId: number, groupId: number | null) {
+export async function assignProjectGroup(
+  projectId: number,
+  groupId: number | null,
+) {
   return request<{ ok: boolean }>("/project-groups/assign", {
     method: "PUT",
     body: JSON.stringify({ project_id: projectId, group_id: groupId }),
@@ -825,7 +885,10 @@ export interface ImportSummary {
   skipped_other: number;
 }
 
-export async function importGithub(projectId: number, input: GithubImportRequest) {
+export async function importGithub(
+  projectId: number,
+  input: GithubImportRequest,
+) {
   return request<ImportSummary>(`/projects/${projectId}/import/github`, {
     method: "POST",
     body: JSON.stringify(input),
@@ -1169,7 +1232,11 @@ export async function listPlanActivity(planId: number, limit = 100) {
   return request<ActivityFeed>(`/plans/${planId}/activity?limit=${limit}`);
 }
 
-export async function listProjectActivity(projectId: number, limit = 50, offset = 0) {
+export async function listProjectActivity(
+  projectId: number,
+  limit = 50,
+  offset = 0,
+) {
   return request<ActivityFeed>(
     `/projects/${projectId}/activity?limit=${limit}&offset=${offset}`,
   );
@@ -1248,7 +1315,10 @@ async function commentPage(
   pageSize: number,
 ): Promise<RequestResult<CommentPage>> {
   const size = Math.max(1, Math.min(pageSize, COMMENT_MAX_LIMIT - 1));
-  const params = new URLSearchParams({ order: "desc", limit: String(size + 1) });
+  const params = new URLSearchParams({
+    order: "desc",
+    limit: String(size + 1),
+  });
   if (before) {
     params.set("before_created_at", before.created_at);
     params.set("before_id", String(before.id));
@@ -1258,7 +1328,9 @@ async function commentPage(
   const overFetched = res.data.length > size;
   const hasMore =
     overFetched || res.headers?.get(COMMENT_HAS_MORE_HEADER) === "true";
-  const items = (overFetched ? res.data.slice(0, size) : res.data).slice().reverse();
+  const items = (overFetched ? res.data.slice(0, size) : res.data)
+    .slice()
+    .reverse();
   return {
     ok: true,
     data: {
@@ -1420,7 +1492,12 @@ export function uploadAttachmentWithProgress(
   // even the session cookie travels.
   if (inPublicScope()) {
     return {
-      result: Promise.resolve({ ok: false, error: REFUSED.error, status: 403, canceled: false }),
+      result: Promise.resolve({
+        ok: false,
+        error: REFUSED.error,
+        status: 403,
+        canceled: false,
+      }),
       abort: () => {},
     };
   }
@@ -1482,14 +1559,25 @@ export function uploadAttachmentWithProgress(
     xhr.onerror = () =>
       finish({
         ok: false,
-        error: "Couldn't reach the server. Check your connection and try again.",
+        error:
+          "Couldn't reach the server. Check your connection and try again.",
         status: null,
         canceled: false,
       });
     xhr.ontimeout = () =>
-      finish({ ok: false, error: "Upload timed out.", status: null, canceled: false });
+      finish({
+        ok: false,
+        error: "Upload timed out.",
+        status: null,
+        canceled: false,
+      });
     xhr.onabort = () =>
-      finish({ ok: false, error: "Upload canceled.", status: null, canceled: true });
+      finish({
+        ok: false,
+        error: "Upload canceled.",
+        status: null,
+        canceled: true,
+      });
 
     xhr.send(form);
   });
@@ -1542,13 +1630,7 @@ export interface LinkedEntity {
 /** Coarse bucket the server assigns to a MIME type. Drives the filter chips
  *  and the row icons, so both always agree with what the filter matched. */
 export type MimeClass =
-  | "image"
-  | "video"
-  | "audio"
-  | "text"
-  | "pdf"
-  | "archive"
-  | "other";
+  "image" | "video" | "audio" | "text" | "pdf" | "archive" | "other";
 
 export interface ProjectAttachment {
   id: number;
@@ -1620,7 +1702,9 @@ export interface PendingOrphanList {
 }
 
 export async function listProjectOrphans(projectId: number) {
-  return request<PendingOrphanList>(`/projects/${projectId}/attachments/orphans`);
+  return request<PendingOrphanList>(
+    `/projects/${projectId}/attachments/orphans`,
+  );
 }
 
 /** Where-used for one attachment: every entity that references it, plus other
@@ -1784,7 +1868,8 @@ export async function listPages(
   if (options?.order_by) params.set("order_by", options.order_by);
   if (options?.order) params.set("order", options.order);
   if (options?.limit !== undefined) params.set("limit", String(options.limit));
-  if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  if (options?.offset !== undefined)
+    params.set("offset", String(options.offset));
   return request<Page[]>(`/pages?${params}`);
 }
 
@@ -1843,7 +1928,11 @@ export async function listFolders(projectId: number) {
   return request<Folder[]>(`/folders?project_id=${projectId}`);
 }
 
-export async function createFolder(input: { project_id: number; name: string; parent_id?: number }) {
+export async function createFolder(input: {
+  project_id: number;
+  name: string;
+  parent_id?: number;
+}) {
   return request<Folder>("/folders", {
     method: "POST",
     body: JSON.stringify(input),
@@ -1877,10 +1966,10 @@ export async function search(query: string, projectId?: number) {
 
 export async function getBoard(
   projectId: number,
-  groupBy: "status" | "priority" | "module" = "status"
+  groupBy: "status" | "priority" | "module" = "status",
 ) {
   return request<Record<string, Issue[]>>(
-    `/projects/${projectId}/board?group_by=${groupBy}`
+    `/projects/${projectId}/board?group_by=${groupBy}`,
   );
 }
 
@@ -1939,7 +2028,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     description: "Anomaly's open-source agentic coding CLI",
     configPath: home(
       "~/.config/opencode/opencode.json",
-      "%USERPROFILE%\\.config\\opencode\\opencode.json"
+      "%USERPROFILE%\\.config\\opencode\\opencode.json",
     ),
     configNote: [{ text: 'Add this to the "mcp" section of your config.' }],
     generateConfig: (_url, key) =>
@@ -1952,7 +2041,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
@@ -1961,7 +2050,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     description: "AI-first code editor by Anysphere",
     configPath: home(
       "~/.cursor/mcp.json (global) · .cursor/mcp.json (project)",
-      "%USERPROFILE%\\.cursor\\mcp.json (global) · .cursor\\mcp.json (project)"
+      "%USERPROFILE%\\.cursor\\mcp.json (global) · .cursor\\mcp.json (project)",
     ),
     configNote: [
       { text: 'Add this to the "mcpServers" section, then reload Cursor.' },
@@ -1975,14 +2064,17 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
     id: "claude-code",
     name: "Claude Code",
     description: "Anthropic's CLI coding agent",
-    configPath: home("~/.claude.json (user scope)", "%USERPROFILE%\\.claude.json (user scope)"),
+    configPath: home(
+      "~/.claude.json (user scope)",
+      "%USERPROFILE%\\.claude.json (user scope)",
+    ),
     configNote: [
       { text: "Easiest: run this command (it writes the config for you):" },
       {
@@ -2000,7 +2092,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
@@ -2017,7 +2109,9 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     },
     configNote: [
       { text: "Requires mcp-remote (installed automatically by npx)." },
-      { text: 'Add the block below to the "mcpServers" section, then fully restart Claude Desktop.' },
+      {
+        text: 'Add the block below to the "mcpServers" section, then fully restart Claude Desktop.',
+      },
     ],
     generateConfig: (_url, key) =>
       JSON.stringify(
@@ -2029,17 +2123,22 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
     id: "codex",
     name: "Codex",
     description: "OpenAI's CLI coding agent",
-    configPath: home("~/.codex/config.toml", "%USERPROFILE%\\.codex\\config.toml"),
+    configPath: home(
+      "~/.codex/config.toml",
+      "%USERPROFILE%\\.codex\\config.toml",
+    ),
     configNote: [
       { text: "Add the block below under [mcp_servers] in config.toml." },
-      { text: "The key is read from the LIFIC_API_KEY env var (set it in step 3)." },
+      {
+        text: "The key is read from the LIFIC_API_KEY env var (set it in step 3).",
+      },
     ],
     usesEnvKey: true,
     envVar: "LIFIC_API_KEY",
@@ -2050,11 +2149,16 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     id: "pi",
     name: "Pi",
     description: "Pi coding agent (via pi-mcp-adapter)",
-    configPath: home("~/.pi/agent/mcp.json", "%USERPROFILE%\\.pi\\agent\\mcp.json"),
+    configPath: home(
+      "~/.pi/agent/mcp.json",
+      "%USERPROFILE%\\.pi\\agent\\mcp.json",
+    ),
     configNote: [
       { text: "First install the adapter, then restart Pi:" },
       { command: "pi install npm:pi-mcp-adapter" },
-      { text: 'Add the block below to the "mcpServers" section. The key is read from the LIFIC_API_KEY env var (set it in step 3).' },
+      {
+        text: 'Add the block below to the "mcpServers" section. The key is read from the LIFIC_API_KEY env var (set it in step 3).',
+      },
     ],
     usesEnvKey: true,
     envVar: "LIFIC_API_KEY",
@@ -2069,7 +2173,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
@@ -2078,10 +2182,12 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     description: "GitHub Copilot agent mode in VS Code",
     configPath: home(
       "~/.config/Code/User/mcp.json (user) · .vscode/mcp.json (workspace)",
-      "%APPDATA%\\Code\\User\\mcp.json (user) · .vscode\\mcp.json (workspace)"
+      "%APPDATA%\\Code\\User\\mcp.json (user) · .vscode\\mcp.json (workspace)",
     ),
     configNote: [
-      { text: 'Add this to the "servers" section. Or run the command palette action:' },
+      {
+        text: 'Add this to the "servers" section. Or run the command palette action:',
+      },
       { command: "MCP: Open User Configuration" },
       { text: "VS Code 1.101+ with GitHub Copilot is required." },
     ],
@@ -2097,7 +2203,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
   {
@@ -2106,10 +2212,12 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
     description: "High-performance Rust-based editor",
     configPath: home(
       "~/.config/zed/settings.json",
-      "%APPDATA%\\Zed\\settings.json"
+      "%APPDATA%\\Zed\\settings.json",
     ),
     configNote: [
-      { text: 'Add this to the "context_servers" section of your Zed settings (Command Palette: zed: open settings).' },
+      {
+        text: 'Add this to the "context_servers" section of your Zed settings (Command Palette: zed: open settings).',
+      },
     ],
     generateConfig: (_url, key) =>
       JSON.stringify(
@@ -2122,7 +2230,7 @@ export const TOOL_TEMPLATES: ToolTemplate[] = [
           },
         },
         null,
-        2
+        2,
       ),
   },
 ];
@@ -2187,7 +2295,8 @@ export async function listPlans(
   if (limit !== undefined) params.set("limit", String(limit));
   if (offset !== undefined) params.set("offset", String(offset));
   if (options?.order_by) params.set("order_by", options.order_by);
-  if (options?.before_id !== undefined) params.set("before_id", String(options.before_id));
+  if (options?.before_id !== undefined)
+    params.set("before_id", String(options.before_id));
   return request<Plan[]>(`/plans?${params}`);
 }
 
@@ -2215,7 +2324,10 @@ export interface CreatePlanInput {
 }
 
 export async function createPlan(input: CreatePlanInput) {
-  return request<Plan>("/plans", { method: "POST", body: JSON.stringify(input) });
+  return request<Plan>("/plans", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export interface UpdatePlanInput {
@@ -2225,7 +2337,10 @@ export interface UpdatePlanInput {
 }
 
 export async function updatePlan(id: number, input: UpdatePlanInput) {
-  return request<Plan>(`/plans/${id}`, { method: "PUT", body: JSON.stringify(input) });
+  return request<Plan>(`/plans/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function deletePlan(id: number) {
@@ -2273,7 +2388,9 @@ export async function updatePlanStep(
 }
 
 export async function deletePlanStep(planId: number, stepId: number) {
-  return request<Plan>(`/plans/${planId}/steps/${stepId}`, { method: "DELETE" });
+  return request<Plan>(`/plans/${planId}/steps/${stepId}`, {
+    method: "DELETE",
+  });
 }
 
 // ── Home (LIF-237) ───────────────────────────────────────────
@@ -2338,7 +2455,9 @@ export interface InsightsPayload {
 }
 
 export async function getInsights(projectId: number, weeks: number) {
-  return request<InsightsPayload>(`/projects/${projectId}/insights?weeks=${weeks}`);
+  return request<InsightsPayload>(
+    `/projects/${projectId}/insights?weeks=${weeks}`,
+  );
 }
 
 // ── Saved views (LIF-242) ─────────────────────────────────────
@@ -2377,7 +2496,10 @@ export async function listSavedViews(projectId: number) {
   return request<SavedView[]>(`/projects/${projectId}/views`);
 }
 
-export async function createSavedView(projectId: number, input: CreateSavedViewInput) {
+export async function createSavedView(
+  projectId: number,
+  input: CreateSavedViewInput,
+) {
   return request<SavedView>(`/projects/${projectId}/views`, {
     method: "POST",
     body: JSON.stringify(input),
@@ -2396,9 +2518,12 @@ export async function updateSavedView(
 }
 
 export async function deleteSavedView(projectId: number, viewId: number) {
-  return request<{ deleted: boolean }>(`/projects/${projectId}/views/${viewId}`, {
-    method: "DELETE",
-  });
+  return request<{ deleted: boolean }>(
+    `/projects/${projectId}/views/${viewId}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 // ── Delta sync (LIF-439 server, LIF-442 client) ─────────────

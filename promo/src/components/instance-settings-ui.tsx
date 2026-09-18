@@ -193,9 +193,27 @@ const Sidebar: React.FC = () => {
       }}
     >
       {/* Brand header */}
-      <div style={{ padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 10, padding: "4px 4px" }}>
-          <Img src={staticFile("logo.webp")} style={{ width: 26, height: 26, borderRadius: 6 }} />
+      <div
+        style={{
+          padding: "12px 12px 8px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flex: 1,
+            alignItems: "center",
+            gap: 10,
+            padding: "4px 4px",
+          }}
+        >
+          <Img
+            src={staticFile("logo.webp")}
+            style={{ width: 26, height: 26, borderRadius: 6 }}
+          />
           <span
             style={{
               fontFamily: DISPLAY,
@@ -359,7 +377,9 @@ const Sidebar: React.FC = () => {
       </div>
 
       {/* Footer — Settings active */}
-      <div style={{ padding: 8, display: "flex", alignItems: "center", gap: 4 }}>
+      <div
+        style={{ padding: 8, display: "flex", alignItems: "center", gap: 4 }}
+      >
         <div
           style={{
             flex: 1,
@@ -389,7 +409,9 @@ const Sidebar: React.FC = () => {
             L
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: BODY_SM, color: C.text, lineHeight: 1.25 }}>Lizzy</div>
+            <div style={{ fontSize: BODY_SM, color: C.text, lineHeight: 1.25 }}>
+              Lizzy
+            </div>
             <div
               style={{
                 fontSize: MICRO,
@@ -405,10 +427,24 @@ const Sidebar: React.FC = () => {
             </div>
           </div>
         </div>
-        <div style={{ width: 32, height: 32, display: "grid", placeItems: "center" }}>
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
           <Moon size={15} color={C.textMuted} />
         </div>
-        <div style={{ width: 32, height: 32, display: "grid", placeItems: "center" }}>
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
           <HelpCircle size={15} color={C.textMuted} />
         </div>
       </div>
@@ -431,16 +467,18 @@ const SettingsTopbar: React.FC = () => (
       fontFamily: BODY,
     }}
   >
-    <span style={{ fontSize: BODY_SM, fontWeight: 500, color: C.text }}>Settings</span>
+    <span style={{ fontSize: BODY_SM, fontWeight: 500, color: C.text }}>
+      Settings
+    </span>
   </div>
 );
 
 // ── Field label (block micro uppercase) ──────────────────────
 
-const FieldLabel: React.FC<{ children: React.ReactNode; icon?: React.ReactNode }> = ({
-  children,
-  icon,
-}) => (
+const FieldLabel: React.FC<{
+  children: React.ReactNode;
+  icon?: React.ReactNode;
+}> = ({ children, icon }) => (
   <span
     style={{
       display: "flex",
@@ -541,12 +579,16 @@ export const SegmentedToggle: React.FC<{
 const toneStyle = (tone: SegSide["tone"]) => {
   if (tone === "success")
     return { bg: SUCCESS_BG, color: C.success, ring: SUCCESS_RING };
-  if (tone === "warn") return { bg: WARN_FILL_15, color: WARN_TEXT, ring: WARN_RING };
+  if (tone === "warn")
+    return { bg: WARN_FILL_15, color: WARN_TEXT, ring: WARN_RING };
   // neutral active = surface fill + border ring
   return { bg: C.surface, color: C.text, ring: C.border };
 };
 
-const SegButton: React.FC<{ side: SegSide; active: number }> = ({ side, active }) => {
+const SegButton: React.FC<{ side: SegSide; active: number }> = ({
+  side,
+  active,
+}) => {
   const a = Math.max(0, Math.min(1, active));
   const ts = toneStyle(side.tone);
   // Blend inactive (muted, transparent) -> active (tinted fill + ring).
@@ -579,8 +621,18 @@ const SegButton: React.FC<{ side: SegSide; active: number }> = ({ side, active }
           opacity: a,
         }}
       />
-      <span style={{ position: "relative", display: "flex", alignItems: "center", gap: 8 }}>
-        {React.cloneElement(side.icon as React.ReactElement<{ color: string }>, { color })}
+      <span
+        style={{
+          position: "relative",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        {React.cloneElement(
+          side.icon as React.ReactElement<{ color: string }>,
+          { color },
+        )}
         {side.label}
       </span>
     </div>
@@ -654,7 +706,14 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
       }}
     >
       <Sidebar />
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
         <SettingsTopbar />
         {/* Recessed content panel */}
         <div
@@ -687,7 +746,14 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
                 marginBottom: 32,
               }}
             >
-              <div style={{ padding: "4px 2px 10px", fontSize: BODY_TEXT, fontWeight: 500, color: C.textMuted }}>
+              <div
+                style={{
+                  padding: "4px 2px 10px",
+                  fontSize: BODY_TEXT,
+                  fontWeight: 500,
+                  color: C.textMuted,
+                }}
+              >
                 Account
               </div>
               <div
@@ -719,10 +785,17 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
               >
                 Instance
               </h1>
-              <p style={{ margin: "8px 0 0", fontSize: BODY_TEXT, color: C.textMuted, lineHeight: 1.6 }}>
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: BODY_TEXT,
+                  color: C.textMuted,
+                  lineHeight: 1.6,
+                }}
+              >
                 Settings for the Lific instance at{" "}
-                <span style={{ fontFamily: MONO, color: C.text }}>{host}</span>. Changes apply
-                immediately.
+                <span style={{ fontFamily: MONO, color: C.text }}>{host}</span>.
+                Changes apply immediately.
               </p>
             </div>
 
@@ -735,9 +808,25 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
                 padding: 20,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 20,
+                }}
+              >
                 <SlidersHorizontal size={15} color={C.textMuted} />
-                <h2 style={{ margin: 0, fontSize: BODY_LG, fontWeight: 600, color: C.text }}>Settings</h2>
+                <h2
+                  style={{
+                    margin: 0,
+                    fontSize: BODY_LG,
+                    fontWeight: 600,
+                    color: C.text,
+                  }}
+                >
+                  Settings
+                </h2>
                 <span
                   style={{
                     fontFamily: MONO,
@@ -752,20 +841,37 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
                 </span>
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 560 }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 24,
+                  maxWidth: 560,
+                }}
+              >
                 {/* Instance name */}
                 <div>
                   <FieldLabel>Instance name</FieldLabel>
                   <TextInput value="Lific" placeholder={host} />
-                  <HelpText>Shown on the sign-in screen. Leave blank to use the host.</HelpText>
+                  <HelpText>
+                    Shown on the sign-in screen. Leave blank to use the host.
+                  </HelpText>
                 </div>
 
                 {/* Sign-ups — SCRIPTED FLIP #1 */}
                 <div>
                   <FieldLabel>Sign-ups</FieldLabel>
                   <SegmentedToggle
-                    left={{ icon: <DoorOpen size={16} color={C.textMuted} />, label: "Open", tone: "success" }}
-                    right={{ icon: <DoorClosed size={16} color={C.textMuted} />, label: "Closed", tone: "warn" }}
+                    left={{
+                      icon: <DoorOpen size={16} color={C.textMuted} />,
+                      label: "Open",
+                      tone: "success",
+                    }}
+                    right={{
+                      icon: <DoorClosed size={16} color={C.textMuted} />,
+                      label: "Closed",
+                      tone: "warn",
+                    }}
                     activeProgress={1 - signupsProgress}
                   />
                   <HelpText marginTop={8}>
@@ -779,53 +885,118 @@ export const InstanceSettingsPage: React.FC<InstanceSettingsProps> = ({
                 <div>
                   <FieldLabel>Allowed signup domains</FieldLabel>
                   <TextInput placeholder="snake.com, sub.snake.com" mono />
-                  <HelpText>Comma-separated. Leave blank to allow any email domain.</HelpText>
+                  <HelpText>
+                    Comma-separated. Leave blank to allow any email domain.
+                  </HelpText>
                 </div>
 
                 {/* Session lifetime */}
                 <div>
                   <FieldLabel>Session lifetime</FieldLabel>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  >
                     <TextInput value="30" width={96} />
-                    <span style={{ fontSize: BODY_TEXT, color: C.text }}>days</span>
+                    <span style={{ fontSize: BODY_TEXT, color: C.text }}>
+                      days
+                    </span>
                   </div>
-                  <HelpText>How long a sign-in stays valid before re-authenticating (1 to 365).</HelpText>
+                  <HelpText>
+                    How long a sign-in stays valid before re-authenticating (1
+                    to 365).
+                  </HelpText>
                 </div>
 
                 {/* Project permissions — SCRIPTED FLIP #2 (divider above) */}
-                <div style={{ paddingTop: 24, marginTop: 4, borderTop: `1px solid ${C.border}` }}>
-                  <FieldLabel icon={<Users size={12} color={C.text} />}>Project permissions</FieldLabel>
+                <div
+                  style={{
+                    paddingTop: 24,
+                    marginTop: 4,
+                    borderTop: `1px solid ${C.border}`,
+                  }}
+                >
+                  <FieldLabel icon={<Users size={12} color={C.text} />}>
+                    Project permissions
+                  </FieldLabel>
                   <SegmentedToggle
-                    left={{ icon: <DoorOpen size={16} color={C.textMuted} />, label: "Off", tone: "neutral" }}
-                    right={{ icon: <DoorClosed size={16} color={C.textMuted} />, label: "Enforced", tone: "warn" }}
+                    left={{
+                      icon: <DoorOpen size={16} color={C.textMuted} />,
+                      label: "Off",
+                      tone: "neutral",
+                    }}
+                    right={{
+                      icon: <DoorClosed size={16} color={C.textMuted} />,
+                      label: "Enforced",
+                      tone: "warn",
+                    }}
                     activeProgress={authzProgress}
                   />
                   <HelpText marginTop={8}>
-                    When on, only project members can see or edit a project. Add yourself as lead to
-                    your projects before enabling.
+                    When on, only project members can see or edit a project. Add
+                    yourself as lead to your projects before enabling.
                   </HelpText>
                   {authzEnforced ? (
-                    <WarnBox opacity={Math.max(0, Math.min(1, (authzProgress - 0.5) * 2))}>
-                      Anyone not added as a project member (via that project's Settings → Members)
-                      loses access to it immediately, including you if you aren't a lead yet.
+                    <WarnBox
+                      opacity={Math.max(
+                        0,
+                        Math.min(1, (authzProgress - 0.5) * 2),
+                      )}
+                    >
+                      Anyone not added as a project member (via that project's
+                      Settings → Members) loses access to it immediately,
+                      including you if you aren't a lead yet.
                     </WarnBox>
                   ) : null}
                 </div>
               </div>
 
               {/* Autosave status */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 20, height: 20, fontSize: BODY_SM }}>
-                <span style={{ color: C.textMuted }}>Changes save automatically.</span>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginTop: 20,
+                  height: 20,
+                  fontSize: BODY_SM,
+                }}
+              >
+                <span style={{ color: C.textMuted }}>
+                  Changes save automatically.
+                </span>
               </div>
             </div>
 
             {/* Members section header (visible below the card) */}
             <div style={{ marginTop: 40 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 4,
+                }}
+              >
                 <ShieldCheck size={16} color={C.textMuted} />
-                <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: C.text }}>Members</h2>
+                <h2
+                  style={{
+                    margin: 0,
+                    fontSize: 16,
+                    fontWeight: 600,
+                    color: C.text,
+                  }}
+                >
+                  Members
+                </h2>
               </div>
-              <p style={{ margin: 0, fontSize: BODY_TEXT, color: C.textMuted, lineHeight: 1.6 }}>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: BODY_TEXT,
+                  color: C.textMuted,
+                  lineHeight: 1.6,
+                }}
+              >
                 3 people on this instance · 1 admin.
               </p>
             </div>

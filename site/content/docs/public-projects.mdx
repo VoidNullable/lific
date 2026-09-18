@@ -95,7 +95,7 @@ already displayed, cancel bytes already sent, or control copies a reader keeps.
 It cannot recall what has already been downloaded. Files someone saved and
 pages a crawler indexed remain outside your control.
 
-Republishing later restores the *same* address. The URL is derived from the
+Republishing later restores the _same_ address. The URL is derived from the
 identifier rather than minted, so old links start working again.
 
 ## The public HTTP surface
@@ -107,20 +107,20 @@ mutation methods are refused, and unknown paths under `/public/api` return
 fields listed above) and, for comments, the same paging headers, which is what
 lets the web app run its ordinary components against it.
 
-| Public | Mirrors | Answers |
-| --- | --- | --- |
-| `/public/api/projects/{PROJ}` | `GET /api/projects/{id}` | the project (`lead_user_id` is `null`) |
-| `…/index` | `GET /api/projects/{id}/index` | every live issue and page, skinny rows, plus a resume cursor |
-| `…/changes?since=&limit=` | `GET /api/projects/{id}/changes` | rows above the cursor; comment rows are omitted |
-| `…/modules`, `…/labels`, `…/folders` | `GET /api/modules?project_id=` etc. | the project's structure |
-| `…/issues/resolve/{PROJ-42}` | `GET /api/issues/resolve/{ident}` | one issue with its body and in-project relations |
-| `…/issues/{id}` | `GET /api/issues/{id}` | the same, by row id |
-| `…/issues/{id}/comments` | `GET /api/issues/{id}/comments` | comments, with the `x-comment-*` paging headers |
-| `…/pages/{id}` | `GET /api/pages/{id}` | one page with its content |
-| `…/pages/{id}/comments` | `GET /api/pages/{id}/comments` | comments on it |
-| `…/attachments?entity_type=&entity_id=` | `GET /api/attachments?…` | attachment metadata for a live issue, page or comment |
-| `…/attachments/{id}` | `GET /api/attachments/{id}` | the file's bytes, streamed |
-| `…/attachments/{id}/thumbnail`, `…/preview` | the same routes under `/api` | a webp preview; a structured archive/database preview |
+| Public                                      | Mirrors                             | Answers                                                      |
+| ------------------------------------------- | ----------------------------------- | ------------------------------------------------------------ |
+| `/public/api/projects/{PROJ}`               | `GET /api/projects/{id}`            | the project (`lead_user_id` is `null`)                       |
+| `…/index`                                   | `GET /api/projects/{id}/index`      | every live issue and page, skinny rows, plus a resume cursor |
+| `…/changes?since=&limit=`                   | `GET /api/projects/{id}/changes`    | rows above the cursor; comment rows are omitted              |
+| `…/modules`, `…/labels`, `…/folders`        | `GET /api/modules?project_id=` etc. | the project's structure                                      |
+| `…/issues/resolve/{PROJ-42}`                | `GET /api/issues/resolve/{ident}`   | one issue with its body and in-project relations             |
+| `…/issues/{id}`                             | `GET /api/issues/{id}`              | the same, by row id                                          |
+| `…/issues/{id}/comments`                    | `GET /api/issues/{id}/comments`     | comments, with the `x-comment-*` paging headers              |
+| `…/pages/{id}`                              | `GET /api/pages/{id}`               | one page with its content                                    |
+| `…/pages/{id}/comments`                     | `GET /api/pages/{id}/comments`      | comments on it                                               |
+| `…/attachments?entity_type=&entity_id=`     | `GET /api/attachments?…`            | attachment metadata for a live issue, page or comment        |
+| `…/attachments/{id}`                        | `GET /api/attachments/{id}`         | the file's bytes, streamed                                   |
+| `…/attachments/{id}/thumbnail`, `…/preview` | the same routes under `/api`        | a webp preview; a structured archive/database preview        |
 
 The sync cursor in `/index` is the highest sequence number among the project's
 own rows, not the instance-wide counter the private route returns. Changes in
@@ -145,7 +145,7 @@ Five properties worth knowing if you are building against these:
 - **The project is part of every path, including the attachment one.** An
   issue identifier that names a different project (`/public/api/projects/DEMO/issues/resolve/PRIV-1`)
   is rejected before anything is read, and an attachment id that is not
-  reachable from a live issue, page or comment in *this* published project is a
+  reachable from a live issue, page or comment in _this_ published project is a
   `404` even if the id exists.
 - **Responses carry `Cache-Control: no-store`**, plus `nosniff`,
   `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and
@@ -180,7 +180,7 @@ load.
 
 ## How the public page renders content
 
-The public page is the signed-in app in a *public scope*: every request the
+The public page is the signed-in app in a _public scope_: every request the
 ordinary components make is rewritten onto the mirror above and sent with no
 credential (no bearer token, no cookie), so a signed-in maintainer who opens a
 public link sees exactly what a stranger sees. A request with no public mirror

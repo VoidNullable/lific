@@ -106,7 +106,8 @@ export function parseConfig(raw: string): ViewConfig | null {
   }
   if (!parsed || typeof parsed !== "object") return null;
   const p = parsed as Record<string, unknown>;
-  const str = (v: unknown, fallback: string) => (typeof v === "string" ? v : fallback);
+  const str = (v: unknown, fallback: string) =>
+    typeof v === "string" ? v : fallback;
   return {
     version: 1,
     layout: p.layout === "board" ? "board" : "list",
@@ -115,15 +116,20 @@ export function parseConfig(raw: string): ViewConfig | null {
     filterLabel: str(p.filterLabel, ""),
     filterModule: str(p.filterModule, ""),
     searchQuery: str(p.searchQuery, ""),
-    sortField: (["priority", "age", "number", "updated"] as const).includes(p.sortField as SortField)
+    sortField: (["priority", "age", "number", "updated"] as const).includes(
+      p.sortField as SortField,
+    )
       ? (p.sortField as SortField)
       : "priority",
     sortDir: p.sortDir === "desc" ? "desc" : "asc",
-    groupBy: (["status", "priority", "module", "none"] as const).includes(p.groupBy as GroupBy)
+    groupBy: (["status", "priority", "module", "none"] as const).includes(
+      p.groupBy as GroupBy,
+    )
       ? (p.groupBy as GroupBy)
       : "status",
     density: p.density === "comfortable" ? "comfortable" : "compact",
-    laneBy: p.laneBy === "module" || p.laneBy === "priority" ? p.laneBy : "none",
+    laneBy:
+      p.laneBy === "module" || p.laneBy === "priority" ? p.laneBy : "none",
     hiddenStatuses: Array.isArray(p.hiddenStatuses)
       ? p.hiddenStatuses.filter((s): s is string => typeof s === "string")
       : [],
@@ -223,11 +229,13 @@ export type { SavedView };
 // (project, tab session): remounting Topbar (e.g. toggling list <-> board
 // within the same project) never re-triggers it, so manual changes made
 // later in the same session survive a later remount within that project.
-const sessionCheckedKey = (projectId: string) => `lific:views:session-checked:${projectId}`;
+const sessionCheckedKey = (projectId: string) =>
+  `lific:views:session-checked:${projectId}`;
 
 export function shouldAutoApplyDefault(projectIdentifier: string): boolean {
   try {
-    if (sessionStorage.getItem(sessionCheckedKey(projectIdentifier))) return false;
+    if (sessionStorage.getItem(sessionCheckedKey(projectIdentifier)))
+      return false;
     sessionStorage.setItem(sessionCheckedKey(projectIdentifier), "1");
     return true;
   } catch {
@@ -253,7 +261,10 @@ export function getActiveViewId(projectIdentifier: string): number | null {
   }
 }
 
-export function setActiveViewId(projectIdentifier: string, id: number | null): void {
+export function setActiveViewId(
+  projectIdentifier: string,
+  id: number | null,
+): void {
   try {
     if (id == null) sessionStorage.removeItem(activeViewKey(projectIdentifier));
     else sessionStorage.setItem(activeViewKey(projectIdentifier), String(id));

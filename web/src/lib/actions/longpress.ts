@@ -66,9 +66,21 @@ export function longpress(node: HTMLElement, options: LongPressOptions) {
 
   function trackWindow(on: boolean) {
     const method = on ? "addEventListener" : "removeEventListener";
-    window[method]("pointermove", onWindowMove as EventListener, { capture: true } as never);
-    window[method]("pointerup", onWindowEnd as EventListener, { capture: true } as never);
-    window[method]("pointercancel", onWindowEnd as EventListener, { capture: true } as never);
+    window[method](
+      "pointermove",
+      onWindowMove as EventListener,
+      { capture: true } as never,
+    );
+    window[method](
+      "pointerup",
+      onWindowEnd as EventListener,
+      { capture: true } as never,
+    );
+    window[method](
+      "pointercancel",
+      onWindowEnd as EventListener,
+      { capture: true } as never,
+    );
   }
 
   function cancel() {

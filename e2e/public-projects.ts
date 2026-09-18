@@ -76,7 +76,7 @@ const HOSTILE_BODY = [
   "",
   "## media and embeds the regex never saw",
   '<video src="https://tracker.invalid/v.mp4" poster="https://tracker.invalid/p.png"></video>',
-  "<audio><source src=\"https://tracker.invalid/a.mp3\"></audio>",
+  '<audio><source src="https://tracker.invalid/a.mp3"></audio>',
   '<picture><source srcset="https://tracker.invalid/s.png"><img src="https://tracker.invalid/f.png"></picture>',
   '<input type="image" src="https://tracker.invalid/i.png">',
   '<object data="https://tracker.invalid/o.swf"></object>',
@@ -179,8 +179,13 @@ function isPrivateRequest(url: string, base: string): boolean {
   const path = url.slice(base.length);
   if (path.startsWith("/public/")) return false;
   if (path.startsWith("/assets/")) return false;
-  if (path === "/" || path === "/favicon.ico" || path.endsWith(".png")) return false;
-  return path.startsWith("/api") || path.startsWith("/oauth") || path.startsWith("/mcp");
+  if (path === "/" || path === "/favicon.ico" || path.endsWith(".png"))
+    return false;
+  return (
+    path.startsWith("/api") ||
+    path.startsWith("/oauth") ||
+    path.startsWith("/mcp")
+  );
 }
 
 /** Open a page that records every request it makes and every error it logs. */
@@ -214,7 +219,14 @@ async function watchedPage(context: BrowserContext, base: string) {
     }
     if (isPrivateRequest(url, base)) privateRequests.push(url);
   });
-  return { page, consoleErrors, pageErrors, privateRequests, offOrigin, requests };
+  return {
+    page,
+    consoleErrors,
+    pageErrors,
+    privateRequests,
+    offOrigin,
+    requests,
+  };
 }
 
 /** The rendered issue/page body: EditableMarkdown's read pane wrapping the
@@ -224,11 +236,15 @@ const BODY_SELECTOR = ".em-rendered .prose";
 
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
-    console.error(`no binary at ${BIN}: run \`cargo build\` first (or set LIFIC_BIN)`);
+    console.error(
+      `no binary at ${BIN}: run \`cargo build\` first (or set LIFIC_BIN)`,
+    );
     return 1;
   }
   if (!existsSync(join(ROOT, "web", "dist", "index.html"))) {
-    console.error("web/dist/index.html missing: run `bun run build` in web/ first");
+    console.error(
+      "web/dist/index.html missing: run `bun run build` in web/ first",
+    );
     return 1;
   }
 
@@ -245,43 +261,104 @@ async function main(): Promise<number> {
   try {
     // ---- seed ----------------------------------------------------------
     cli(config, db, [
-      "init", "--no-service", "--json",
-      "--name", "Public Operator",
-      "--auth-mode", "passwords",
-      "--password", PASSWORD,
-    ]);
-    cli(config, db, ["project", "create", "--name", "Demo", "--identifier", "DEMO", "--json"]);
-    cli(config, db, ["project", "create", "--name", "Secret", "--identifier", "PRIV", "--json"]);
-    cli(config, db, [
-      "issue", "create", "--project", "DEMO",
-      "--title", "Public issue one",
-      "--description", "A body **anyone** may read.",
+      "init",
+      "--no-service",
       "--json",
+      "--name",
+      "Public Operator",
+      "--auth-mode",
+      "passwords",
+      "--password",
+      PASSWORD,
     ]);
-    cli(config, db, ["issue", "create", "--project", "DEMO", "--title", "Public issue two", "--json"]);
     cli(config, db, [
-      "issue", "create", "--project", "DEMO",
-      "--title", "Hostile issue",
-      "--description", HOSTILE_BODY,
-      "--json",
-    ]);
-    cli(config, db, [
-      "issue", "create", "--project", "DEMO",
-      "--title", "Friendly issue",
-      "--description", FRIENDLY_BODY,
-      "--json",
-    ]);
-    cli(config, db, ["comment", "add", "DEMO-1", "--content", "A public comment body", "--json"]);
-    cli(config, db, [
-      "page", "create", "--project", "DEMO",
-      "--title", "Public page",
-      "--content", "Page body text",
+      "project",
+      "create",
+      "--name",
+      "Demo",
+      "--identifier",
+      "DEMO",
       "--json",
     ]);
     cli(config, db, [
-      "issue", "create", "--project", "PRIV",
-      "--title", "Classified issue",
-      "--description", "classified-marker-string",
+      "project",
+      "create",
+      "--name",
+      "Secret",
+      "--identifier",
+      "PRIV",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Public issue one",
+      "--description",
+      "A body **anyone** may read.",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Public issue two",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Hostile issue",
+      "--description",
+      HOSTILE_BODY,
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Friendly issue",
+      "--description",
+      FRIENDLY_BODY,
+      "--json",
+    ]);
+    cli(config, db, [
+      "comment",
+      "add",
+      "DEMO-1",
+      "--content",
+      "A public comment body",
+      "--json",
+    ]);
+    cli(config, db, [
+      "page",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Public page",
+      "--content",
+      "Page body text",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "PRIV",
+      "--title",
+      "Classified issue",
+      "--description",
+      "classified-marker-string",
       "--json",
     ]);
 
@@ -296,7 +373,17 @@ async function main(): Promise<number> {
     const base = `http://127.0.0.1:${port}`;
     server = spawn(
       BIN,
-      ["--config", config, "--db", db, "start", "--port", String(port), "--host", "127.0.0.1"],
+      [
+        "--config",
+        config,
+        "--db",
+        db,
+        "start",
+        "--port",
+        String(port),
+        "--host",
+        "127.0.0.1",
+      ],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     server.stdout?.on("data", (d: Buffer) => (serverLog += d.toString()));
@@ -309,11 +396,18 @@ async function main(): Promise<number> {
     {
       const scenario = "public list (desktop)";
       // A brand-new context: no cookie, no localStorage, nothing signed in.
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+      });
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page.goto(`${base}/public/DEMO`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
 
         if (w.page.url().includes("/login")) {
@@ -321,19 +415,33 @@ async function main(): Promise<number> {
         }
         // LIF-471: the bare project route canonicalizes onto the issue list.
         if (!w.page.url().includes("#/public/DEMO/issues")) {
-          fail(scenario, `/public/DEMO did not redirect to its issue list (${w.page.url()})`);
+          fail(
+            scenario,
+            `/public/DEMO did not redirect to its issue list (${w.page.url()})`,
+          );
         }
         // The shell: one project, its two sections, the public tag, a way in.
         for (const expected of [
-          "Public issue one", "Public issue two", "Issues", "Pages", "public", "Sign in",
+          "Public issue one",
+          "Public issue two",
+          "Issues",
+          "Pages",
+          "public",
+          "Sign in",
         ]) {
           if (!body.includes(expected)) {
-            fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
+            fail(
+              scenario,
+              `expected visible text ${JSON.stringify(expected)} not found`,
+            );
           }
         }
         // The LIF-465 banner is gone; the shell says "public" instead.
         if (body.includes("Public read-only view")) {
-          fail(scenario, "the retired 'Public read-only view' banner is still rendered");
+          fail(
+            scenario,
+            "the retired 'Public read-only view' banner is still rendered",
+          );
         }
         if (body.includes("Something went wrong")) {
           fail(scenario, "rendered the error boundary fallback");
@@ -342,32 +450,47 @@ async function main(): Promise<number> {
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
         }
-        const token = await w.page.evaluate(() => localStorage.getItem("lific_token"));
+        const token = await w.page.evaluate(() =>
+          localStorage.getItem("lific_token"),
+        );
         if (token) {
           fail(scenario, "a session token was minted for an anonymous visitor");
         }
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 2. desktop: an issue, its body and its comment ----------------
     {
       const scenario = "public issue detail (desktop)";
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+      });
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         await w.page.getByText("Public issue one").first().click();
         await w.page
-          .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
-            timeout: 10_000,
-          })
+          .waitForFunction(
+            () => document.body.innerText.includes("A public comment body"),
+            undefined,
+            {
+              timeout: 10_000,
+            },
+          )
           .catch(() => {});
         if (!w.page.url().includes("#/public/DEMO/issues/DEMO-1")) {
           fail(scenario, `clicking the row landed on ${w.page.url()}`);
@@ -383,7 +506,10 @@ async function main(): Promise<number> {
           "Read-only",
         ]) {
           if (!body.includes(expected)) {
-            fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
+            fail(
+              scenario,
+              `expected visible text ${JSON.stringify(expected)} not found`,
+            );
           }
         }
         // Nothing to write with: no comment composer, no body editor.
@@ -391,20 +517,26 @@ async function main(): Promise<number> {
           fail(scenario, "a text input was offered on a read-only public page");
         }
         // And no export, which is a signed-in affordance.
-        if ((await w.page.getByRole("button", { name: "Export" }).count()) > 0) {
+        if (
+          (await w.page.getByRole("button", { name: "Export" }).count()) > 0
+        ) {
           fail(scenario, "the export button was offered on a public page");
         }
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
         }
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 3. mobile ------------------------------------------------------
@@ -429,26 +561,37 @@ async function main(): Promise<number> {
           waitUntil: "load",
           timeout: 15_000,
         });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (!body.includes("Public issue one")) {
           fail(scenario, "the issue title did not render at phone width");
         }
         // Nothing may overflow the viewport horizontally on a phone.
         const overflow = await w.page.evaluate(
-          () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          () =>
+            document.documentElement.scrollWidth -
+            document.documentElement.clientWidth,
         );
         if (overflow > 1) {
-          fail(scenario, `the page scrolls horizontally by ${overflow}px at 390px wide`);
+          fail(
+            scenario,
+            `the page scrolls horizontally by ${overflow}px at 390px wide`,
+          );
         }
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 4. hostile markdown -------------------------------------------
@@ -457,9 +600,17 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-3`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.locator(BODY_SELECTOR).first().waitFor({ timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-3`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .locator(BODY_SELECTOR)
+          .first()
+          .waitFor({ timeout: 15_000 });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
 
         const pwned = await w.page.evaluate(
           () => (window as unknown as { __pwned?: boolean }).__pwned === true,
@@ -470,7 +621,8 @@ async function main(): Promise<number> {
           const el = document.querySelector(sel);
           return el ? el.innerHTML : "";
         }, BODY_SELECTOR);
-        if (markup === "") fail(scenario, "the issue body did not render at all");
+        if (markup === "")
+          fail(scenario, "the issue body did not render at all");
 
         // Every attribute of every surviving element, and every tag name.
         // Asserting over these rather than over `innerHTML` is the difference
@@ -498,7 +650,8 @@ async function main(): Promise<number> {
             if (el.closest(".attachment-view-host")) continue;
             const tag = el.tagName.toLowerCase();
             tags.push(tag);
-            const appStyled = tag === "img" && el.hasAttribute("data-attachment-decorated");
+            const appStyled =
+              tag === "img" && el.hasAttribute("data-attachment-decorated");
             for (const a of Array.from(el.attributes)) {
               if (appStyled && a.name.toLowerCase() === "style") continue;
               attrs.push({ name: a.name.toLowerCase(), value: a.value, tag });
@@ -513,14 +666,21 @@ async function main(): Promise<number> {
           [/onload/i, "an onload handler"],
           [/<script/i, "a <script> tag"],
         ] as const) {
-          if (needle.test(markup)) fail(scenario, `${what} survived sanitization`);
+          if (needle.test(markup))
+            fail(scenario, `${what} survived sanitization`);
         }
         for (const attr of dom.attrs) {
           if (/^\s*javascript:/i.test(attr.value)) {
-            fail(scenario, `a javascript: URL survived in <${attr.tag} ${attr.name}>`);
+            fail(
+              scenario,
+              `a javascript: URL survived in <${attr.tag} ${attr.name}>`,
+            );
           }
           if (/^on/i.test(attr.name)) {
-            fail(scenario, `an event handler survived: <${attr.tag} ${attr.name}>`);
+            fail(
+              scenario,
+              `an event handler survived: <${attr.tag} ${attr.name}>`,
+            );
           }
         }
 
@@ -529,8 +689,21 @@ async function main(): Promise<number> {
         //    one of these tags was invisible to it.
         //    The list is exactly `PUBLIC_FORBID_TAGS` in web/src/lib/Markdown.svelte.
         for (const tag of [
-          "video", "audio", "source", "track", "picture", "iframe", "object",
-          "embed", "style", "link", "form", "svg", "image", "use", "math",
+          "video",
+          "audio",
+          "source",
+          "track",
+          "picture",
+          "iframe",
+          "object",
+          "embed",
+          "style",
+          "link",
+          "form",
+          "svg",
+          "image",
+          "use",
+          "math",
         ]) {
           if (dom.tags.includes(tag)) {
             fail(scenario, `a <${tag}> element survived into the public body`);
@@ -541,8 +714,15 @@ async function main(): Promise<number> {
         //    on. `style` is on this list because `background:url()` is a
         //    fetch instruction wearing different clothes.
         for (const attr of dom.attrs) {
-          if (["style", "srcset", "poster", "background", "ping"].includes(attr.name)) {
-            fail(scenario, `a ${attr.name}= attribute survived on <${attr.tag}>`);
+          if (
+            ["style", "srcset", "poster", "background", "ping"].includes(
+              attr.name,
+            )
+          ) {
+            fail(
+              scenario,
+              `a ${attr.name}= attribute survived on <${attr.tag}>`,
+            );
           }
         }
 
@@ -560,14 +740,20 @@ async function main(): Promise<number> {
         //    relative hrefs now and survive on purpose.
         for (const attr of dom.attrs) {
           if (/tracker\.invalid/i.test(attr.value)) {
-            fail(scenario, `a remote resource URL survived in <${attr.tag} ${attr.name}>`);
+            fail(
+              scenario,
+              `a remote resource URL survived in <${attr.tag} ${attr.name}>`,
+            );
           }
         }
 
         // 5. The things that SHOULD survive, so the test is not passing by
         //    stripping everything.
         if (!/example\.com\/docs/.test(markup)) {
-          fail(scenario, "an ordinary outbound link was stripped; only unsafe ones should be");
+          fail(
+            scenario,
+            "an ordinary outbound link was stripped; only unsafe ones should be",
+          );
         }
         // The single-quoted anchor the old regex could not see: parsed
         // correctly now, and kept because it is an ordinary https link.
@@ -583,7 +769,8 @@ async function main(): Promise<number> {
         //    request reached the credentialed `/api/attachments/...` route
         //    for the two attachment ids this reader is not entitled to; the
         //    404s all land on the anonymous mirror.
-        for (const url of w.offOrigin) fail(scenario, `fetched an off-origin resource: ${url}`);
+        for (const url of w.offOrigin)
+          fail(scenario, `fetched an off-origin resource: ${url}`);
         for (const url of w.privateRequests) {
           fail(scenario, `made a private-API request: ${url}`);
         }
@@ -592,7 +779,8 @@ async function main(): Promise<number> {
             fail(scenario, `probed a private attachment route: ${url}`);
           }
         }
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
         // The two unauthorized attachment ids 404 on the public mirror (the
         // thumbnail first, then the full asset the error handler falls back
         // to). That is the correct outcome and the browser logs it; nothing
@@ -606,7 +794,9 @@ async function main(): Promise<number> {
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 4b. the friendly body keeps everything it should ---------------
@@ -617,9 +807,17 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-4`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.locator(BODY_SELECTOR).first().waitFor({ timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page.goto(`${base}/#/public/DEMO/issues/DEMO-4`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .locator(BODY_SELECTOR)
+          .first()
+          .waitFor({ timeout: 15_000 });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         const markup = await w.page.evaluate((sel: string) => {
           const el = document.querySelector(sel);
           return el ? el.innerHTML : "";
@@ -639,34 +837,50 @@ async function main(): Promise<number> {
         // LIF-471: the generated links (auto-linked identifiers) are the ones
         // the renderer owns, and they must stay inside the public view. An
         // authored relative link is the author's, and is left alone.
-        const autoLink = w.page.locator(`${BODY_SELECTOR} a.identifier-link`).first();
+        const autoLink = w.page
+          .locator(`${BODY_SELECTOR} a.identifier-link`)
+          .first();
         if ((await autoLink.count()) === 0) {
           fail(scenario, "a bare identifier in prose was not auto-linked");
         } else {
           const href = (await autoLink.getAttribute("href")) ?? "";
           if (!href.startsWith("#/public/DEMO/issues/")) {
-            fail(scenario, `an auto-linked identifier escaped the public view: ${href}`);
+            fail(
+              scenario,
+              `an auto-linked identifier escaped the public view: ${href}`,
+            );
           }
           // And it must actually work, without leaving /public.
           await autoLink.click();
           await w.page
-            .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
-              timeout: 10_000,
-            })
-            .catch(() => fail(scenario, "the auto-linked identifier did not navigate"));
+            .waitForFunction(
+              () => document.body.innerText.includes("A public comment body"),
+              undefined,
+              {
+                timeout: 10_000,
+              },
+            )
+            .catch(() =>
+              fail(scenario, "the auto-linked identifier did not navigate"),
+            );
           if (!w.page.url().includes("#/public/DEMO/issues/DEMO-1")) {
             fail(scenario, `navigation left the public view: ${w.page.url()}`);
           }
         }
-        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
+        for (const url of w.privateRequests)
+          fail(scenario, `private-API request: ${url}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 4c. pages are the public view's other half ---------------------
@@ -674,21 +888,36 @@ async function main(): Promise<number> {
     // components. A published project's pages are readable the same way.
     {
       const scenario = "public pages";
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+      });
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/pages`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/pages`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         await w.page
-          .waitForFunction(() => document.body.innerText.includes("Public page"), undefined, {
-            timeout: 15_000,
-          })
-          .catch(() => fail(scenario, "the page tree did not list the published page"));
+          .waitForFunction(
+            () => document.body.innerText.includes("Public page"),
+            undefined,
+            {
+              timeout: 15_000,
+            },
+          )
+          .catch(() =>
+            fail(scenario, "the page tree did not list the published page"),
+          );
 
         await w.page.getByText("Public page").first().click();
         await w.page
-          .waitForFunction(() => document.body.innerText.includes("Page body text"), undefined, {
-            timeout: 10_000,
-          })
+          .waitForFunction(
+            () => document.body.innerText.includes("Page body text"),
+            undefined,
+            {
+              timeout: 10_000,
+            },
+          )
           .catch(() => fail(scenario, "the page body never rendered"));
 
         if (!/\/public\/DEMO\/pages\/\d+/.test(w.page.url())) {
@@ -697,18 +926,26 @@ async function main(): Promise<number> {
         const body = (await w.page.locator("body").innerText()) ?? "";
         for (const expected of ["Public page", "Page body text", "Read-only"]) {
           if (!body.includes(expected)) {
-            fail(scenario, `expected visible text ${JSON.stringify(expected)} not found`);
+            fail(
+              scenario,
+              `expected visible text ${JSON.stringify(expected)} not found`,
+            );
           }
         }
-        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const url of w.privateRequests)
+          fail(scenario, `private-API request: ${url}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 4d. the whole project arrives in one list ----------------------
@@ -718,7 +955,9 @@ async function main(): Promise<number> {
     // renders end to end".
     {
       const scenario = "whole issue list arrives";
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+      });
       const w = await watchedPage(context, base);
       try {
         // Comfortably past the retired 100-row page size.
@@ -727,7 +966,9 @@ async function main(): Promise<number> {
           .query("SELECT id FROM projects WHERE identifier = 'DEMO'")
           .get() as { id: number };
         const next = bulk
-          .query("SELECT COALESCE(MAX(sequence), 0) AS s FROM issues WHERE project_id = ?")
+          .query(
+            "SELECT COALESCE(MAX(sequence), 0) AS s FROM issues WHERE project_id = ?",
+          )
           .get(projectId.id) as { s: number };
         for (let i = 1; i <= 120; i += 1) {
           bulk.run(
@@ -737,7 +978,10 @@ async function main(): Promise<number> {
         }
         bulk.close();
 
-        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
+        await w.page.goto(`${base}/public/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         // Default grouping is by status, and every seeded row is `backlog`,
         // so they all live in one group.
         for (const title of ["Bulk issue 1", "Bulk issue 120"]) {
@@ -758,21 +1002,32 @@ async function main(): Promise<number> {
             ).length,
         );
         if (rows < 100) {
-          fail(scenario, `only ${rows} issue rows rendered; expected at least 100`);
+          fail(
+            scenario,
+            `only ${rows} issue rows rendered; expected at least 100`,
+          );
         }
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (!body.includes("Public issue one")) {
-          fail(scenario, "the originally seeded issues are missing from the list");
+          fail(
+            scenario,
+            "the originally seeded issues are missing from the list",
+          );
         }
-        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
-        for (const err of w.consoleErrors) fail(scenario, `console error: ${err}`);
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const url of w.privateRequests)
+          fail(scenario, `private-API request: ${url}`);
+        for (const err of w.consoleErrors)
+          fail(scenario, `console error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // The LIF-465 "comment paging" and "load-more navigation race" scenarios
@@ -787,8 +1042,13 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page.goto(`${base}/public/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         // Bounce between two issues fast enough that responses for an
         // abandoned one land after the next has rendered.
         for (let i = 0; i < 6; i += 1) {
@@ -803,9 +1063,13 @@ async function main(): Promise<number> {
           window.location.hash = "#/public/DEMO/issues/DEMO-1";
         });
         const settled = await w.page
-          .waitForFunction(() => document.body.innerText.includes("A public comment body"), undefined, {
-            timeout: 10_000,
-          })
+          .waitForFunction(
+            () => document.body.innerText.includes("A public comment body"),
+            undefined,
+            {
+              timeout: 10_000,
+            },
+          )
           .then(() => true)
           .catch(() => false);
         if (!settled) fail(scenario, "the final route never rendered");
@@ -813,13 +1077,16 @@ async function main(): Promise<number> {
         if (body.includes("Hostile body")) {
           fail(scenario, "a stale route's content overwrote the current one");
         }
-        for (const err of w.pageErrors) fail(scenario, `uncaught page error: ${err}`);
+        for (const err of w.pageErrors)
+          fail(scenario, `uncaught page error: ${err}`);
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 5. a private project is not reachable --------------------------
@@ -828,29 +1095,46 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/PRIV/issues`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page.goto(`${base}/public/PRIV/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
-        if (body.includes("classified-marker-string") || body.includes("Classified issue")) {
+        if (
+          body.includes("classified-marker-string") ||
+          body.includes("Classified issue")
+        ) {
           fail(scenario, "an unpublished project's content rendered");
         }
         if (!body.includes("This project isn't public")) {
-          fail(scenario, `expected the "isn't public" message, got: ${body.slice(0, 200)}`);
+          fail(
+            scenario,
+            `expected the "isn't public" message, got: ${body.slice(0, 200)}`,
+          );
         }
         // Refusing must not have gone looking on the credentialed surface.
-        for (const url of w.privateRequests) fail(scenario, `private-API request: ${url}`);
+        for (const url of w.privateRequests)
+          fail(scenario, `private-API request: ${url}`);
 
         // A private project and a nonexistent one are the same answer, byte
         // for byte: the surface is not an oracle for what the instance holds.
         const [priv, nope] = await w.page.evaluate(async (b: string) => {
           const read = async (p: string) => {
-            const r = await fetch(`${b}/public/api/projects/${p}/index`, { credentials: "omit" });
+            const r = await fetch(`${b}/public/api/projects/${p}/index`, {
+              credentials: "omit",
+            });
             return { status: r.status, body: await r.text() };
           };
           return [await read("PRIV"), await read("NOPE")];
         }, base);
         if (priv.status !== 404) {
-          fail(scenario, `an unpublished project's index answered ${priv.status}, not 404`);
+          fail(
+            scenario,
+            `an unpublished project's index answered ${priv.status}, not 404`,
+          );
         }
         if (priv.status !== nope.status || priv.body !== nope.body) {
           fail(
@@ -864,7 +1148,9 @@ async function main(): Promise<number> {
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 6. unpublishing closes a page that is already open -------------
@@ -873,9 +1159,18 @@ async function main(): Promise<number> {
       const context = await browser.newContext();
       const w = await watchedPage(context, base);
       try {
-        await w.page.goto(`${base}/public/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
-        if (!(await w.page.locator("body").innerText()).includes("Public issue one")) {
+        await w.page.goto(`${base}/public/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
+        if (
+          !(await w.page.locator("body").innerText()).includes(
+            "Public issue one",
+          )
+        ) {
           fail(scenario, "the list did not render before unpublishing");
         }
 
@@ -892,17 +1187,28 @@ async function main(): Promise<number> {
           return r.status;
         }, base);
         if (status !== 404) {
-          fail(scenario, `the index endpoint answered ${status} after unpublishing, not 404`);
+          fail(
+            scenario,
+            `the index endpoint answered ${status} after unpublishing, not 404`,
+          );
         }
 
         await w.page.reload({ waitUntil: "load", timeout: 15_000 });
-        await w.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await w.page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         const body = (await w.page.locator("body").innerText()) ?? "";
         if (body.includes("Public issue one")) {
-          fail(scenario, "the issue still rendered after publication was turned off");
+          fail(
+            scenario,
+            "the issue still rendered after publication was turned off",
+          );
         }
         if (!body.includes("This project isn't public")) {
-          fail(scenario, `expected the "isn't public" message, got: ${body.slice(0, 200)}`);
+          fail(
+            scenario,
+            `expected the "isn't public" message, got: ${body.slice(0, 200)}`,
+          );
         }
 
         // Republishing restores the same address, no new link.
@@ -911,9 +1217,13 @@ async function main(): Promise<number> {
         back.close();
         await w.page.reload({ waitUntil: "load", timeout: 15_000 });
         await w.page
-          .waitForFunction(() => document.body.innerText.includes("Public issue one"), undefined, {
-            timeout: 10_000,
-          })
+          .waitForFunction(
+            () => document.body.innerText.includes("Public issue one"),
+            undefined,
+            {
+              timeout: 10_000,
+            },
+          )
           .catch(() =>
             fail(scenario, "republishing did not restore the original address"),
           );
@@ -922,7 +1232,9 @@ async function main(): Promise<number> {
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
 
     // ---- 7. the signed-in app still works -------------------------------
@@ -930,35 +1242,60 @@ async function main(): Promise<number> {
     // that does need a login.
     {
       const scenario = "signed-in app is unaffected";
-      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+      });
       const page = await context.newPage();
       try {
-        await page.goto(`${base}/DEMO/issues`, { waitUntil: "load", timeout: 15_000 });
-        await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await page.goto(`${base}/DEMO/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         if (!page.url().includes("/login")) {
-          fail(scenario, `an anonymous visitor reached ${page.url()} instead of the login page`);
+          fail(
+            scenario,
+            `an anonymous visitor reached ${page.url()} instead of the login page`,
+          );
         }
 
         // Sign in the way a person does, then confirm the private view still
         // works: the public routes must not have loosened or broken it.
-        await page.goto(`${base}/login`, { waitUntil: "load", timeout: 15_000 });
+        await page.goto(`${base}/login`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         await page.fill("#login-identity", "public-operator");
         await page.fill("#login-password", PASSWORD);
         await page.click("button[type=submit]");
         await page.waitForURL(`${base}/`, { timeout: 15_000 }).catch(() => {});
         if (page.url().includes("/login")) {
-          const text = await page.locator("body").innerText().catch(() => "");
-          fail(scenario, `login did not land on the app: ${text.slice(0, 200)}`);
+          const text = await page
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          fail(
+            scenario,
+            `login did not land on the app: ${text.slice(0, 200)}`,
+          );
         }
 
         await page.evaluate(() => {
           window.location.hash = "#/DEMO/issues";
         });
         await page
-          .waitForFunction(() => document.body.innerText.includes("Public issue one"), undefined, {
-            timeout: 15_000,
-          })
-          .catch(() => fail(scenario, "the signed-in issue list did not render"));
+          .waitForFunction(
+            () => document.body.innerText.includes("Public issue one"),
+            undefined,
+            {
+              timeout: 15_000,
+            },
+          )
+          .catch(() =>
+            fail(scenario, "the signed-in issue list did not render"),
+          );
         if ((await page.getByLabel("More create options").count()) === 0) {
           fail(scenario, "the signed-in list lost its create control");
         }
@@ -975,38 +1312,63 @@ async function main(): Promise<number> {
         let watching = true;
         const seen: { url: string; auth: string | undefined }[] = [];
         publicPage.on("request", (req) => {
-          if (watching) seen.push({ url: req.url(), auth: req.headers()["authorization"] });
+          if (watching)
+            seen.push({ url: req.url(), auth: req.headers()["authorization"] });
         });
         await publicPage.goto(`${base}/#/public/DEMO/issues`, {
           waitUntil: "load",
           timeout: 15_000,
         });
         await publicPage
-          .waitForFunction(() => document.body.innerText.includes("Public issue one"), undefined, {
-            timeout: 15_000,
-          })
-          .catch(() => fail(scenario, "the public route did not render for a signed-in reader"));
-        await publicPage.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+          .waitForFunction(
+            () => document.body.innerText.includes("Public issue one"),
+            undefined,
+            {
+              timeout: 15_000,
+            },
+          )
+          .catch(() =>
+            fail(
+              scenario,
+              "the public route did not render for a signed-in reader",
+            ),
+          );
+        await publicPage
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         watching = false;
 
-        if ((await publicPage.evaluate(() => localStorage.getItem("lific_token"))) === null) {
+        if (
+          (await publicPage.evaluate(() =>
+            localStorage.getItem("lific_token"),
+          )) === null
+        ) {
           fail(scenario, "the context under test was not actually signed in");
         }
         for (const req of seen) {
-          if (req.url.startsWith(`${base}/public/api`) && req.auth !== undefined) {
+          if (
+            req.url.startsWith(`${base}/public/api`) &&
+            req.auth !== undefined
+          ) {
             fail(scenario, `a public request carried a credential: ${req.url}`);
           }
           // Same-origin only: index.html loads the app's webfonts from
           // Google on every route, signed-in or not, which is app-wide and
           // predates this feature (see `watchedPage`).
           if (req.url.startsWith(base) && isPrivateRequest(req.url, base)) {
-            fail(scenario, `the public view reached the private API: ${req.url}`);
+            fail(
+              scenario,
+              `the public view reached the private API: ${req.url}`,
+            );
           }
         }
 
         // And nothing to create with, even though this reader could.
         if ((await publicPage.getByLabel("More create options").count()) > 0) {
-          fail(scenario, "the public view offered a create control to a signed-in reader");
+          fail(
+            scenario,
+            "the public view offered a create control to a signed-in reader",
+          );
         }
 
         // Leaving again restores the signed-in affordances: the read-only
@@ -1022,17 +1384,24 @@ async function main(): Promise<number> {
           .then(() => true)
           .catch(() => false);
         if (!restored) {
-          fail(scenario, "the create control did not come back after leaving the public view");
+          fail(
+            scenario,
+            "the create control did not come back after leaving the public view",
+          );
         }
       } catch (e) {
         fail(scenario, String(e));
       } finally {
         await context.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(scenario)) ? "FAIL" : "ok  "} ${scenario}`,
+      );
     }
   } catch (e) {
-    failures.push(`harness error: ${e instanceof Error ? (e.stack ?? e.message) : e}`);
+    failures.push(
+      `harness error: ${e instanceof Error ? (e.stack ?? e.message) : e}`,
+    );
   } finally {
     if (browser) await browser.close().catch(() => {});
     if (server && !server.killed) {

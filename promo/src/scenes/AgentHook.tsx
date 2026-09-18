@@ -10,7 +10,14 @@ import { C } from "../theme";
 import { BODY, MONO } from "../fonts";
 import { Background } from "../components/Background";
 import { OpenCodeTUI } from "../components/opencode-ui";
-import { ColumnHeader, IssueCard, Label, CARD_W, CARD_PAD, COL_W } from "../components/lific-ui";
+import {
+  ColumnHeader,
+  IssueCard,
+  Label,
+  CARD_W,
+  CARD_PAD,
+  COL_W,
+} from "../components/lific-ui";
 
 /*
  * Ad B cold open: the product IS the hook. No title card, no problem
@@ -35,15 +42,39 @@ export const AgentHook: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const doneIn = spring({ frame: frame - BOARD_1, fps, config: { damping: 16, stiffness: 140 } });
-  const doneFlash = frame >= BOARD_1 ? Math.max(0, 1 - (frame - BOARD_1) / 40) : 0;
-  const newIn = spring({ frame: frame - BOARD_2, fps, config: { damping: 15, stiffness: 130 } });
-  const newFlash = frame >= BOARD_2 ? Math.max(0, 1 - (frame - BOARD_2) / 40) : 0;
-  const shift = spring({ frame: frame - BOARD_2, fps, config: { damping: 200, stiffness: 140 } });
-  const doneShift = spring({ frame: frame - BOARD_1, fps, config: { damping: 200, stiffness: 140 } });
+  const doneIn = spring({
+    frame: frame - BOARD_1,
+    fps,
+    config: { damping: 16, stiffness: 140 },
+  });
+  const doneFlash =
+    frame >= BOARD_1 ? Math.max(0, 1 - (frame - BOARD_1) / 40) : 0;
+  const newIn = spring({
+    frame: frame - BOARD_2,
+    fps,
+    config: { damping: 15, stiffness: 130 },
+  });
+  const newFlash =
+    frame >= BOARD_2 ? Math.max(0, 1 - (frame - BOARD_2) / 40) : 0;
+  const shift = spring({
+    frame: frame - BOARD_2,
+    fps,
+    config: { damping: 200, stiffness: 140 },
+  });
+  const doneShift = spring({
+    frame: frame - BOARD_1,
+    fps,
+    config: { damping: 200, stiffness: 140 },
+  });
 
-  const cap1 = interpolate(frame, [22, 36], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const cap2 = interpolate(frame, [116, 130], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const cap1 = interpolate(frame, [22, 36], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const cap2 = interpolate(frame, [116, 130], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
   const doneCount = frame >= BOARD_1 ? 3 : 2;
   const todoCount = frame >= BOARD_2 ? 2 : 1;
@@ -70,7 +101,7 @@ export const AgentHook: React.FC = () => {
           thinkAt={4}
           tool1="lific_update_issue [identifier=LIF-198, status=done]"
           tool1At={TOOL_1}
-          tool2='lific_create_issue [title=Rate-limit login endpoint]'
+          tool2="lific_create_issue [title=Rate-limit login endpoint]"
           tool2At={TOOL_2}
           reply="Done. LIF-198 closed, follow-up filed as LIF-232."
           replyAt={REPLY}
@@ -91,7 +122,15 @@ export const AgentHook: React.FC = () => {
             display: "flex",
           }}
         >
-          <div style={{ width: COL_W, flexShrink: 0, borderRight: `1px solid ${C.border}`, boxSizing: "border-box", position: "relative" }}>
+          <div
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              borderRight: `1px solid ${C.border}`,
+              boxSizing: "border-box",
+              position: "relative",
+            }}
+          >
             <ColumnHeader status="todo" count={todoCount} />
             {frame >= BOARD_2 ? (
               <div
@@ -103,22 +142,55 @@ export const AgentHook: React.FC = () => {
                   transform: `scale(${0.92 + newIn * 0.08}) translateY(${(1 - newIn) * -14}px)`,
                 }}
               >
-                <div style={{ borderRadius: 6, boxShadow: newFlash > 0 ? `0 0 ${18 * newFlash}px ${C.success}66` : undefined }}>
+                <div
+                  style={{
+                    borderRadius: 6,
+                    boxShadow:
+                      newFlash > 0
+                        ? `0 0 ${18 * newFlash}px ${C.success}66`
+                        : undefined,
+                  }}
+                >
                   <IssueCard
-                    issue={{ identifier: "LIF-232", title: "Rate-limit login endpoint", priority: "high", labels: [L.auth], updated: "just now" }}
+                    issue={{
+                      identifier: "LIF-232",
+                      title: "Rate-limit login endpoint",
+                      priority: "high",
+                      labels: [L.auth],
+                      updated: "just now",
+                    }}
                     width={CARD_W}
                   />
                 </div>
               </div>
             ) : null}
-            <div style={{ position: "absolute", left: CARD_PAD, top: 48 + (frame >= BOARD_2 ? shift * 95 : 0) }}>
+            <div
+              style={{
+                position: "absolute",
+                left: CARD_PAD,
+                top: 48 + (frame >= BOARD_2 ? shift * 95 : 0),
+              }}
+            >
               <IssueCard
-                issue={{ identifier: "LIF-226", title: "MCP: recurring plan templates", priority: "medium", labels: [L.mcp], updated: "2h ago" }}
+                issue={{
+                  identifier: "LIF-226",
+                  title: "MCP: recurring plan templates",
+                  priority: "medium",
+                  labels: [L.mcp],
+                  updated: "2h ago",
+                }}
                 width={CARD_W}
               />
             </div>
           </div>
-          <div style={{ width: COL_W, flexShrink: 0, boxSizing: "border-box", position: "relative" }}>
+          <div
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              boxSizing: "border-box",
+              position: "relative",
+            }}
+          >
             <ColumnHeader status="done" count={doneCount} />
             {frame >= BOARD_1 ? (
               <div
@@ -130,9 +202,24 @@ export const AgentHook: React.FC = () => {
                   transform: `scale(${0.92 + doneIn * 0.08})`,
                 }}
               >
-                <div style={{ borderRadius: 6, boxShadow: doneFlash > 0 ? `0 0 ${18 * doneFlash}px ${C.success}66` : undefined }}>
+                <div
+                  style={{
+                    borderRadius: 6,
+                    boxShadow:
+                      doneFlash > 0
+                        ? `0 0 ${18 * doneFlash}px ${C.success}66`
+                        : undefined,
+                  }}
+                >
                   <IssueCard
-                    issue={{ identifier: "LIF-198", title: "Fix WAL checkpoint race on shutdown", priority: "high", labels: [L.core, L.bug], updated: "just now", status: "done" }}
+                    issue={{
+                      identifier: "LIF-198",
+                      title: "Fix WAL checkpoint race on shutdown",
+                      priority: "high",
+                      labels: [L.core, L.bug],
+                      updated: "just now",
+                      status: "done",
+                    }}
                     width={CARD_W}
                   />
                 </div>
@@ -149,11 +236,23 @@ export const AgentHook: React.FC = () => {
               }}
             >
               <IssueCard
-                issue={{ identifier: "LIF-183", title: "OAuth device flow for CLI login", labels: [L.auth], updated: "5h ago", status: "done" }}
+                issue={{
+                  identifier: "LIF-183",
+                  title: "OAuth device flow for CLI login",
+                  labels: [L.auth],
+                  updated: "5h ago",
+                  status: "done",
+                }}
                 width={CARD_W}
               />
               <IssueCard
-                issue={{ identifier: "LIF-171", title: "Backup retention config", labels: [L.core], updated: "1d ago", status: "done" }}
+                issue={{
+                  identifier: "LIF-171",
+                  title: "Backup retention config",
+                  labels: [L.core],
+                  updated: "1d ago",
+                  status: "done",
+                }}
                 width={CARD_W}
               />
             </div>

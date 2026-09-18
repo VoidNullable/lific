@@ -68,7 +68,9 @@ export function deriveCanManage(i: RoleInputs): boolean {
  * refuses. `isLead` is separate because a project whose lead predates LIF-195
  * can have `lead_user_id` set without a `project_members` row.
  */
-export function deriveCanPublish(i: RoleInputs & { isLead?: boolean }): boolean {
+export function deriveCanPublish(
+  i: RoleInputs & { isLead?: boolean },
+): boolean {
   return i.isAdmin || i.role === "lead" || i.isLead === true;
 }
 
@@ -119,7 +121,8 @@ class ProjectRoleState {
    *  enforcement is on, exactly as the server enforces; fully open while
    *  enforcement is off or before we've learned the flags (fail-open). */
   get canEditWorkspacePage(): boolean {
-    if (this.globalEnforced === false || this.globalEnforced === null) return true;
+    if (this.globalEnforced === false || this.globalEnforced === null)
+      return true;
     return this.meIsAdmin === true;
   }
 

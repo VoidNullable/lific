@@ -120,9 +120,7 @@ function commitViaKeepalive(batch: PendingBatch): void {
 }
 
 function label(issues: Issue[]): string {
-  return issues.length === 1
-    ? issues[0].identifier
-    : `${issues.length} issues`;
+  return issues.length === 1 ? issues[0].identifier : `${issues.length} issues`;
 }
 
 export interface ScheduleOptions {

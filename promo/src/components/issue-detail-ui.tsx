@@ -1,7 +1,13 @@
 import React from "react";
 import { C } from "../theme";
 import { BODY, DISPLAY, MONO } from "../fonts";
-import { Sidebar, StatusIcon, PriorityIcon, IssueData, Label } from "./lific-ui";
+import {
+  Sidebar,
+  StatusIcon,
+  PriorityIcon,
+  IssueData,
+  Label,
+} from "./lific-ui";
 import { ChevronRight, History, Plus } from "./icons";
 
 /*
@@ -481,7 +487,9 @@ const ActivityTimeline: React.FC<{ items: ActivityLine[] }> = ({ items }) => (
       </span>
     </div>
 
-    <ol style={{ margin: 0, padding: 0, listStyle: "none", position: "relative" }}>
+    <ol
+      style={{ margin: 0, padding: 0, listStyle: "none", position: "relative" }}
+    >
       {/* Gutter rail. */}
       <div
         style={{

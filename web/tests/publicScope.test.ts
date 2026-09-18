@@ -56,7 +56,9 @@ describe("the mirror rule", () => {
     expect(publicMirror("/modules?project_id=3")).toBe(`${base}/modules`);
     expect(publicMirror("/labels?project_id=3")).toBe(`${base}/labels`);
     expect(publicMirror("/folders?project_id=3")).toBe(`${base}/folders`);
-    expect(publicMirror("/issues/resolve/LIF-42")).toBe(`${base}/issues/resolve/LIF-42`);
+    expect(publicMirror("/issues/resolve/LIF-42")).toBe(
+      `${base}/issues/resolve/LIF-42`,
+    );
     expect(publicMirror("/issues/9")).toBe(`${base}/issues/9`);
     expect(publicMirror("/issues/9/comments?order=desc&limit=50")).toBe(
       `${base}/issues/9/comments?order=desc&limit=50`,
@@ -67,8 +69,12 @@ describe("the mirror rule", () => {
       `${base}/attachments?entity_type=issue&entity_id=9`,
     );
     expect(publicMirror("/attachments/5")).toBe(`${base}/attachments/5`);
-    expect(publicMirror("/attachments/5/thumbnail")).toBe(`${base}/attachments/5/thumbnail`);
-    expect(publicMirror("/attachments/5/preview")).toBe(`${base}/attachments/5/preview`);
+    expect(publicMirror("/attachments/5/thumbnail")).toBe(
+      `${base}/attachments/5/thumbnail`,
+    );
+    expect(publicMirror("/attachments/5/preview")).toBe(
+      `${base}/attachments/5/preview`,
+    );
   });
 
   test("refuses everything that has no public twin", () => {
@@ -115,8 +121,14 @@ describe("the mirror rule", () => {
       body: { items: [], has_more: false },
     });
     expect(publicSynthetic("/pages/7/activity")?.status).toBe(200);
-    expect(publicSynthetic("/projects/3/mention-candidates")).toEqual({ status: 200, body: [] });
-    expect(publicSynthetic("/projects/3/views")).toEqual({ status: 200, body: [] });
+    expect(publicSynthetic("/projects/3/mention-candidates")).toEqual({
+      status: 200,
+      body: [],
+    });
+    expect(publicSynthetic("/projects/3/views")).toEqual({
+      status: 200,
+      body: [],
+    });
     expect(publicSynthetic("/issues/9")).toBeUndefined();
   });
 

@@ -42,11 +42,7 @@ export type InlineMarker = "**" | "*" | "_" | "`";
 
 /** Line-prefix kinds we support toggling. */
 export type LinePrefixKind =
-  | "heading"
-  | "bullet"
-  | "numbered"
-  | "checklist"
-  | "quote";
+  "heading" | "bullet" | "numbered" | "checklist" | "quote";
 
 // ── Inline wrap toggle ────────────────────────────────────
 
@@ -81,7 +77,8 @@ export function toggleInlineWrap(
   const before = text.slice(Math.max(0, start - mLen), start);
   const after = text.slice(end, end + mLen);
   if (before === m && after === m) {
-    const next = text.slice(0, start - mLen) + selected + text.slice(end + mLen);
+    const next =
+      text.slice(0, start - mLen) + selected + text.slice(end + mLen);
     return {
       text: next,
       selectionStart: start - mLen,

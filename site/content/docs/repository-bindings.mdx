@@ -77,10 +77,10 @@ For several servers behind one stdio connection, use
 
 Lific asks git for up to two aliases:
 
-| Kind | Identity |
-| --- | --- |
-| `remote` | The normalized `origin` URL, prefixed with `v1:`. |
-| `root` | The root commit of HEAD's first-parent history, prefixed with `v1:`. |
+| Kind     | Identity                                                             |
+| -------- | -------------------------------------------------------------------- |
+| `remote` | The normalized `origin` URL, prefixed with `v1:`.                    |
+| `root`   | The root commit of HEAD's first-parent history, prefixed with `v1:`. |
 
 Remote normalization removes transport syntax, credentials and a trailing
 `.git`, and lowercases the host. Repository path case and explicit ports remain
@@ -112,10 +112,10 @@ changing a binding. The initialization instructions report whether the session
 has a bound project. A missing or conflicting binding does not choose a project
 for you; pass explicit projects while diagnosing it.
 
-| Tool | When an omitted `project` uses the binding |
-| --- | --- |
-| `list_issues`, `create_issue`, `get_board`, `create_plan` | Whenever the session has a bound project. |
-| `list_resources` | Only for `resource_type` values `issue`, `plan`, `module`, `label` and `folder`. |
+| Tool                                                      | When an omitted `project` uses the binding                                       |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `list_issues`, `create_issue`, `get_board`, `create_plan` | Whenever the session has a bound project.                                        |
+| `list_resources`                                          | Only for `resource_type` values `issue`, `plan`, `module`, `label` and `folder`. |
 
 An explicit project always wins. These defaults do not narrow `search`, make
 `create_page` stop creating workspace pages, or narrow `list_resources` for
@@ -137,13 +137,13 @@ If aliases point to different bindings, the CLI refuses to reassign them
 silently. Inspect the REST binding records, then delete an incorrect binding or
 merge them deliberately:
 
-| Route | Purpose |
-| --- | --- |
-| `POST /api/repos/resolve` | Resolve an `aliases` array of objects with `kind` and `value`. Visible matches include binding IDs. |
-| `POST /api/repos/bind` | Bind a `project` identifier and an `aliases` array. Existing aliases on another binding are refused. |
-| `GET /api/projects/{id}/bindings` | List a project's bindings and their identities, with project read access. |
-| `DELETE /api/repos/bindings/{id}` | Remove a binding with lead or admin authority on its project. |
-| `POST /api/repos/merge` | Move aliases from binding ID `from` into binding ID `into`, with lead or admin authority on both projects. |
+| Route                             | Purpose                                                                                                    |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `POST /api/repos/resolve`         | Resolve an `aliases` array of objects with `kind` and `value`. Visible matches include binding IDs.        |
+| `POST /api/repos/bind`            | Bind a `project` identifier and an `aliases` array. Existing aliases on another binding are refused.       |
+| `GET /api/projects/{id}/bindings` | List a project's bindings and their identities, with project read access.                                  |
+| `DELETE /api/repos/bindings/{id}` | Remove a binding with lead or admin authority on its project.                                              |
+| `POST /api/repos/merge`           | Move aliases from binding ID `from` into binding ID `into`, with lead or admin authority on both projects. |
 
 `from` and `into` are numeric binding IDs, not project IDs. Merging bindings does
 not merge project contents. The destination binding survives; the source binding

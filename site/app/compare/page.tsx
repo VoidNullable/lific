@@ -197,9 +197,7 @@ function Mark({ yes, note }: { yes: boolean; note?: number }) {
       <span
         role="img"
         aria-label={yes ? "Yes" : "No"}
-        className={
-          yes ? "font-semibold text-success" : "text-text-faint/70"
-        }
+        className={yes ? "font-semibold text-success" : "text-text-faint/70"}
       >
         {yes ? "\u2713" : "\u2717"}
       </span>
@@ -225,13 +223,37 @@ const TRACKERS = ["Lific", "beads", "Vikunja", "Gitea", "Plane", "Linear"];
 type GlanceCell = boolean | [boolean, number];
 const GLANCE_ROWS: [string, ...GlanceCell[]][] = [
   ["First-party MCP server", true, true, [false, 1], true, true, true],
-  ["Tracker and MCP server are one process", true, false, false, false, false, false],
+  [
+    "Tracker and MCP server are one process",
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+  ],
   ["Built for coding agents first", true, true, false, false, false, false],
-  ["Ready-work query (unblocked issues, one call)", true, true, false, false, false, false],
+  [
+    "Ready-work query (unblocked issues, one call)",
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+  ],
   ["Web UI for humans included", true, false, true, true, true, true],
   ["Self-host with a single binary", true, [true, 2], true, true, false, false],
   ["Free and open source", true, true, true, true, true, false],
-  ["Repo-local mode (tracker lives in your repo)", false, true, false, false, false, false],
+  [
+    "Repo-local mode (tracker lives in your repo)",
+    false,
+    true,
+    false,
+    false,
+    false,
+    false,
+  ],
   ["Hosted cloud option", false, false, true, true, true, true],
 ];
 
@@ -424,8 +446,8 @@ export default function Compare() {
           </p>
           <Body>
             If you want your coding agent to work against a real issue tracker
-            over the Model Context Protocol, these are the options worth
-            knowing about: <Ext href={GITHUB}>Lific</Ext>,{" "}
+            over the Model Context Protocol, these are the options worth knowing
+            about: <Ext href={GITHUB}>Lific</Ext>,{" "}
             <Ext href="https://github.com/steveyegge/beads">beads</Ext>,{" "}
             <Ext href="https://vikunja.io">Vikunja</Ext>,{" "}
             <Ext href="https://about.gitea.com">Gitea</Ext>,{" "}
@@ -435,11 +457,10 @@ export default function Compare() {
           <Body>
             Every cell below is checkable against the linked primary sources,
             the products we compare against are good at what they do, and
-            Lific&apos;s flaws get a section of their own. No cell pretends
-            they don&apos;t exist.
+            Lific&apos;s flaws get a section of their own. No cell pretends they
+            don&apos;t exist.
           </Body>
         </section>
-
 
         {/* At a glance: the boolean matrix. This is the row-level truth of
             the prose tables below, compressed to yes/no so the shape of the
@@ -496,8 +517,8 @@ export default function Compare() {
                   <>
                     15 tools: dependency-aware issue graph, ready-work
                     detection, persistent agent memory. beads&apos; own docs
-                    recommend the CLI over MCP when the agent has a shell,
-                    since it costs fewer tokens.
+                    recommend the CLI over MCP when the agent has a shell, since
+                    it costs fewer tokens.
                   </>,
                 ],
               },
@@ -505,8 +526,8 @@ export default function Compare() {
                 name: "Vikunja",
                 cells: [
                   <>
-                    None first-party. Several community servers of varying
-                    scope and upkeep.
+                    None first-party. Several community servers of varying scope
+                    and upkeep.
                   </>,
                   <>Varies by server (stdio or HTTP)</>,
                   <>
@@ -528,9 +549,9 @@ export default function Compare() {
                   </>,
                   <>stdio, HTTP, SSE</>,
                   <>
-                    53 forge-level tools. Issues get CRUD, comments, and
-                    edits; most of the surface is repositories, files, and
-                    pull requests.
+                    53 forge-level tools. Issues get CRUD, comments, and edits;
+                    most of the surface is repositories, files, and pull
+                    requests.
                   </>,
                 ],
               },
@@ -578,29 +599,31 @@ export default function Compare() {
             anchored to the MCP project's published budget guidance so the
             numbers have a yardstick, not just vibes. */}
         <section className="mt-[clamp(4.5rem,10vh,7rem)]">
-          <H2 id="context-bill">The context bill: tool counts and token costs</H2>
+          <H2 id="context-bill">
+            The context bill: tool counts and token costs
+          </H2>
           <Body>
-            Tool definitions are not free. Every MCP server an agent connects
-            to injects its full tool schemas into the context window before
-            any work happens. The MCP project&apos;s own{" "}
+            Tool definitions are not free. Every MCP server an agent connects to
+            injects its full tool schemas into the context window before any
+            work happens. The MCP project&apos;s own{" "}
             <Ext href="https://modelcontextprotocol.io/docs/develop/clients/client-best-practices">
               client guidance
             </Ext>{" "}
             is blunt about it: loading every tool definition up front
             &quot;wastes tokens, increases latency, and degrades model
             performance&quot;, and it suggests budgeting tool definitions to
-            roughly 1 to 5 percent of the context window. On a 200k-token
-            model, that is 2k to 10k tokens.{" "}
+            roughly 1 to 5 percent of the context window. On a 200k-token model,
+            that is 2k to 10k tokens.{" "}
             <Ext href="https://www.anthropic.com/engineering/writing-tools-for-agents">
               Anthropic&apos;s guidance
             </Ext>{" "}
-            for tool authors is shorter: &quot;More tools don&apos;t always
-            lead to better outcomes.&quot;
+            for tool authors is shorter: &quot;More tools don&apos;t always lead
+            to better outcomes.&quot;
           </Body>
           <Body>
-            So we measured, on {STAMP}: each server launched over stdio,
-            asked for its tool list, schemas tokenized. Numbers below are what
-            an agent pays before it reads a single line of your code. Lific&apos;s
+            So we measured, on {STAMP}: each server launched over stdio, asked
+            for its tool list, schemas tokenized. Numbers below are what an
+            agent pays before it reads a single line of your code. Lific&apos;s
             own row was measured again the same way on August 22, 2026, against
             v2.7.0; the other rows are the {STAMP} figures.
           </Body>
@@ -701,37 +724,35 @@ export default function Compare() {
             Four of the five measurable servers fit the budget. beads deserves
             specific credit for the smallest bill: its server hides most
             commands behind a <Cmd>discover_tools</Cmd> call instead of
-            declaring everything up front. (That same design means its
-            measured number understates the eventual cost, since full schemas
-            load on demand.) Plane is the outlier. 139 tools and thirty
-            thousand tokens is 15 percent of a 200k context spent before any
-            work starts, and it exceeds{" "}
+            declaring everything up front. (That same design means its measured
+            number understates the eventual cost, since full schemas load on
+            demand.) Plane is the outlier. 139 tools and thirty thousand tokens
+            is 15 percent of a 200k context spent before any work starts, and it
+            exceeds{" "}
             <Ext href="https://code.visualstudio.com/docs/chat/chat-tools">
               VS Code&apos;s 128-tools-per-request cap
             </Ext>{" "}
-            on its own. The count is not padding, it is philosophy: in our
-            dump, five of every six Plane tools are create, read, update, or
-            delete variants spread across about two dozen entity types, from
-            work items down to estimate points and property options. That is
-            an API mirror, and agents pay for the whole mirror up front.
-            Linear&apos;s hosted server sits behind a workspace login, so we
-            cite the published count instead of measuring it ourselves;
-            Linear also revises its tool set regularly.
+            on its own. The count is not padding, it is philosophy: in our dump,
+            five of every six Plane tools are create, read, update, or delete
+            variants spread across about two dozen entity types, from work items
+            down to estimate points and property options. That is an API mirror,
+            and agents pay for the whole mirror up front. Linear&apos;s hosted
+            server sits behind a workspace login, so we cite the published count
+            instead of measuring it ourselves; Linear also revises its tool set
+            regularly.
           </Body>
           <Body>
             Lific&apos;s own 5.75k fits the budget, but not gracefully: per
-            tool, its schemas are the second wordiest on this page, after
-            Plane.
+            tool, its schemas are the second wordiest on this page, after Plane.
           </Body>
           <p className="mt-4 max-w-[75ch] text-caption leading-relaxed text-text-faint">
             Methodology: each server was launched over stdio (the others on{" "}
-            {STAMP}, Lific again on August 15, 2026),
-            sent <Cmd>initialize</Cmd> and <Cmd>tools/list</Cmd> via the
-            official MCP Python SDK, and the returned tool definitions (name,
-            description, input schema) were serialized as compact JSON and
-            tokenized with tiktoken&apos;s o200k_base. Clients serialize
-            schemas differently, so treat small deltas as noise; the order of
-            magnitude is the point.
+            {STAMP}, Lific again on August 15, 2026), sent <Cmd>initialize</Cmd>{" "}
+            and <Cmd>tools/list</Cmd> via the official MCP Python SDK, and the
+            returned tool definitions (name, description, input schema) were
+            serialized as compact JSON and tokenized with tiktoken&apos;s
+            o200k_base. Clients serialize schemas differently, so treat small
+            deltas as noise; the order of magnitude is the point.
           </p>
         </section>
 
@@ -750,8 +771,8 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    One Rust binary: <Cmd>cargo install lific</Cmd>, or
-                    prebuilt binaries for Linux, macOS, and Windows.
+                    One Rust binary: <Cmd>cargo install lific</Cmd>, or prebuilt
+                    binaries for Linux, macOS, and Windows.
                   </>,
                   <>SQLite</>,
                   <>None; self-host only</>,
@@ -762,8 +783,8 @@ export default function Compare() {
                 name: "beads",
                 cells: [
                   <>
-                    A CLI with an embedded Dolt database inside your repo
-                    (<Cmd>.beads/</Cmd>). No server process.
+                    A CLI with an embedded Dolt database inside your repo (
+                    <Cmd>.beads/</Cmd>). No server process.
                   </>,
                   <>Dolt (versioned SQL)</>,
                   <>None; local by design</>,
@@ -783,8 +804,8 @@ export default function Compare() {
                 name: "Gitea",
                 cells: [
                   <>
-                    Single Go binary, or Docker. A whole code forge, not just
-                    a tracker.
+                    Single Go binary, or Docker. A whole code forge, not just a
+                    tracker.
                   </>,
                   <>SQLite, MySQL, or PostgreSQL</>,
                   <>Gitea Cloud</>,
@@ -837,10 +858,10 @@ export default function Compare() {
                 body: (
                   <>
                     <Cmd>workable</Cmd> returns issues with no unresolved
-                    blockers in one call. <Cmd>edit_issue</Cmd> patches by
-                    exact string replacement instead of resending whole
-                    descriptions. Plans are nestable step trees that mirror
-                    issues and survive across sessions and context compaction.
+                    blockers in one call. <Cmd>edit_issue</Cmd> patches by exact
+                    string replacement instead of resending whole descriptions.
+                    Plans are nestable step trees that mirror issues and survive
+                    across sessions and context compaction.
                   </>
                 ),
               },
@@ -848,9 +869,9 @@ export default function Compare() {
                 head: "A small context bill.",
                 body: (
                   <>
-                    About 6.3k tokens for the full 30-tool surface, roughly
-                    one long file read, so connecting the tracker doesn&apos;t
-                    crowd out the actual work.
+                    About 6.3k tokens for the full 30-tool surface, roughly one
+                    long file read, so connecting the tracker doesn&apos;t crowd
+                    out the actual work.
                   </>
                 ),
               },
@@ -868,9 +889,9 @@ export default function Compare() {
                 head: "An audit trail that names the door.",
                 body: (
                   <>
-                    Every change records who made it and whether it came
-                    through the web UI, MCP, the REST API, or the CLI. When an
-                    agent goes off script, you can see exactly what it did.
+                    Every change records who made it and whether it came through
+                    the web UI, MCP, the REST API, or the CLI. When an agent
+                    goes off script, you can see exactly what it did.
                   </>
                 ),
               },
@@ -920,12 +941,12 @@ export default function Compare() {
                     >
                       works natively
                     </a>{" "}
-                    and every release ships{" "}
-                    <Cmd>lific-windows-x86_64.exe</Cmd> alongside the Linux and
-                    macOS binaries, but <Cmd>lific init</Cmd> only installs a
-                    background service on Linux (systemd user session) and
-                    macOS (launchd). On Windows, keeping the server running is
-                    on you (Task Scheduler or a terminal).
+                    and every release ships <Cmd>lific-windows-x86_64.exe</Cmd>{" "}
+                    alongside the Linux and macOS binaries, but{" "}
+                    <Cmd>lific init</Cmd> only installs a background service on
+                    Linux (systemd user session) and macOS (launchd). On
+                    Windows, keeping the server running is on you (Task
+                    Scheduler or a terminal).
                   </>
                 ),
               },
@@ -933,10 +954,15 @@ export default function Compare() {
                 head: "No repo-local mode.",
                 body: (
                   <>
-                    Issues live in a server database, not in your repository.
-                    If you want the tracker versioned with the code (branching
-                    with it, merging with it, readable offline in the
-                    checkout), <a href="#beads" className="text-text underline decoration-border underline-offset-4 hover:text-accent hover:decoration-accent">beads does exactly that</a>{" "}
+                    Issues live in a server database, not in your repository. If
+                    you want the tracker versioned with the code (branching with
+                    it, merging with it, readable offline in the checkout),{" "}
+                    <a
+                      href="#beads"
+                      className="text-text underline decoration-border underline-offset-4 hover:text-accent hover:decoration-accent"
+                    >
+                      beads does exactly that
+                    </a>{" "}
                     and Lific does not.
                   </>
                 ),
@@ -945,15 +971,20 @@ export default function Compare() {
                 head: "A server is required.",
                 body: (
                   <>
-                    Lific is an always-on service. If the process is down, so
-                    is the tracker. beads needs no server at all; Linear runs
+                    Lific is an always-on service. If the process is down, so is
+                    the tracker. beads needs no server at all; Linear runs
                     someone else&apos;s.
                   </>
                 ),
               },
               {
                 head: "Single maintainer.",
-                body: <>The bus factor is one. That is a real risk and you should price it in.</>,
+                body: (
+                  <>
+                    The bus factor is one. That is a real risk and you should
+                    price it in.
+                  </>
+                ),
               },
               {
                 head: "Young.",
@@ -969,16 +1000,20 @@ export default function Compare() {
                 head: "Sized for solo developers and small teams.",
                 body: (
                   <>
-                    SQLite on one box, project-scoped roles, and that&apos;s
-                    the ceiling. If you need SSO, org hierarchies, or
-                    enterprise scale, Plane and Linear are built for that and
-                    Lific is not.
+                    SQLite on one box, project-scoped roles, and that&apos;s the
+                    ceiling. If you need SSO, org hierarchies, or enterprise
+                    scale, Plane and Linear are built for that and Lific is not.
                   </>
                 ),
               },
               {
                 head: "No hosted option.",
-                body: <>There is no cloud to sign up for. You run it, or it doesn&apos;t exist.</>,
+                body: (
+                  <>
+                    There is no cloud to sign up for. You run it, or it
+                    doesn&apos;t exist.
+                  </>
+                ),
               },
             ]}
           />
@@ -988,8 +1023,8 @@ export default function Compare() {
         <section className="band min-w-0 mt-[clamp(4.5rem,10vh,7rem)] py-[clamp(3rem,7vh,4.5rem)]">
           <H2 id="something-else">When to use something else</H2>
           <Body className="mb-8">
-            These are honest defaults, not straw men. If one of these fits,
-            use it. An issue tracker you resent is one you stop updating.
+            These are honest defaults, not straw men. If one of these fits, use
+            it. An issue tracker you resent is one you stop updating.
           </Body>
 
           <AltSection
@@ -1001,14 +1036,14 @@ export default function Compare() {
               </>
             }
           >
-            beads keeps a dependency-aware issue graph in a Dolt database
-            inside your repository: it branches when you branch, merges
-            without collisions, works offline, and needs no server process at
-            all. If &quot;the tracker travels with the checkout&quot; is your
-            requirement, beads is the purpose-built answer and Lific
-            isn&apos;t. Lific&apos;s bet is the opposite one: a single tracker
-            on your own server, spanning every project you have, shared by
-            humans and agents through one URL.
+            beads keeps a dependency-aware issue graph in a Dolt database inside
+            your repository: it branches when you branch, merges without
+            collisions, works offline, and needs no server process at all. If
+            &quot;the tracker travels with the checkout&quot; is your
+            requirement, beads is the purpose-built answer and Lific isn&apos;t.
+            Lific&apos;s bet is the opposite one: a single tracker on your own
+            server, spanning every project you have, shared by humans and agents
+            through one URL.
           </AltSection>
 
           <AltSection
@@ -1022,10 +1057,10 @@ export default function Compare() {
           >
             If you already run Gitea, or want repos, pull requests, CI, and
             issues in one self-hosted instance, its first-party{" "}
-            <Ext href="https://gitea.com/gitea/gitea-mcp">gitea-mcp</Ext>{" "}
-            gives agents the whole forge, not just the tracker. The issue
-            tools are simpler than a dedicated tracker&apos;s, but they come
-            welded to the place your code already lives.
+            <Ext href="https://gitea.com/gitea/gitea-mcp">gitea-mcp</Ext> gives
+            agents the whole forge, not just the tracker. The issue tools are
+            simpler than a dedicated tracker&apos;s, but they come welded to the
+            place your code already lives.
           </AltSection>
 
           <AltSection
@@ -1037,12 +1072,12 @@ export default function Compare() {
               </>
             }
           >
-            Vikunja is a mature, polished to-do and project app (lists,
-            kanban, Gantt, calendars) that happens to self-host beautifully.
-            If you&apos;re organizing life and work rather than pointing
-            coding agents at a backlog, it&apos;s the better tool. MCP access
-            is community-maintained rather than first-party, so vet the server
-            you pick.
+            Vikunja is a mature, polished to-do and project app (lists, kanban,
+            Gantt, calendars) that happens to self-host beautifully. If
+            you&apos;re organizing life and work rather than pointing coding
+            agents at a backlog, it&apos;s the better tool. MCP access is
+            community-maintained rather than first-party, so vet the server you
+            pick.
           </AltSection>
 
           <AltSection
@@ -1071,10 +1106,9 @@ export default function Compare() {
             }
           >
             Linear is the best-run commercial tracker in the business, and its
-            hosted MCP server is genuinely zero-setup: add a URL, OAuth in
-            your browser, done. If you don&apos;t need self-hosting or your
-            data on your own disk, it&apos;s the lowest-friction option on
-            this page.
+            hosted MCP server is genuinely zero-setup: add a URL, OAuth in your
+            browser, done. If you don&apos;t need self-hosting or your data on
+            your own disk, it&apos;s the lowest-friction option on this page.
           </AltSection>
         </section>
 
@@ -1124,13 +1158,22 @@ export default function Compare() {
             © 2026{"\u00a0·\u00a0"}Apache-2.0{"\u00a0·\u00a0"}no telemetry
           </span>
           <div className="flex w-full flex-wrap items-center gap-x-5 gap-y-1 sm:w-auto sm:gap-y-0">
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={GITHUB}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={GITHUB}
+            >
               github
             </a>
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={CRATE}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={CRATE}
+            >
               crates.io
             </a>
-            <a className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0" href={DISCORD}>
+            <a
+              className="-mx-1 px-1 py-3 transition-colors hover:text-text sm:mx-0 sm:px-0 sm:py-0"
+              href={DISCORD}
+            >
               discord
             </a>
           </div>

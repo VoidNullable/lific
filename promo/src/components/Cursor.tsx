@@ -13,16 +13,26 @@ export const cursorPos = (
 ): { x: number; y: number } => {
   if (points.length === 0) return { x: 0, y: 0 };
   const frames = points.map((p) => p.at);
-  const x = interpolate(frame, frames, points.map((p) => p.x), {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
-  const y = interpolate(frame, frames, points.map((p) => p.y), {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
+  const x = interpolate(
+    frame,
+    frames,
+    points.map((p) => p.x),
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
+  const y = interpolate(
+    frame,
+    frames,
+    points.map((p) => p.y),
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
   return { x, y };
 };
 

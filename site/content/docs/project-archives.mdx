@@ -103,16 +103,16 @@ Limits apply to both export and import, and depend on the interface. The CLI
 runs as the local operator, who already holds the database file. An HTTP caller
 runs on shared server resources and gets a much smaller budget.
 
-| Limit | CLI | Web |
-| --- | --- | --- |
-| Compressed archive | 2 GiB | 128 MiB |
-| Decompressed archive | 2 GiB plus framing | 256 MiB |
-| Manifest JSON | 64 MiB | 16 MiB |
-| Total rows | 200,000 | 50,000 |
-| Distinct blobs | 10,000 | 2,000 |
-| One blob | 256 MiB | 64 MiB |
-| Combined blob bytes | 2 GiB | 192 MiB |
-| Folder or step nesting | 128 levels | 128 levels |
+| Limit                  | CLI                | Web        |
+| ---------------------- | ------------------ | ---------- |
+| Compressed archive     | 2 GiB              | 128 MiB    |
+| Decompressed archive   | 2 GiB plus framing | 256 MiB    |
+| Manifest JSON          | 64 MiB             | 16 MiB     |
+| Total rows             | 200,000            | 50,000     |
+| Distinct blobs         | 10,000             | 2,000      |
+| One blob               | 256 MiB            | 64 MiB     |
+| Combined blob bytes    | 2 GiB              | 192 MiB    |
+| Folder or step nesting | 128 levels         | 128 levels |
 
 `GET /api/project-archives` returns the web numbers as `max_upload_bytes`,
 `max_expanded_bytes`, `max_metadata_bytes`, `max_blob_bytes`,
@@ -166,11 +166,11 @@ Three routes, all under a single instance-wide slot: one archive export or
 import runs at a time, and a request that arrives while one is running is
 refused with 429 before its body is read.
 
-| Route | Who |
-| --- | --- |
-| `GET /api/project-archives` | Any signed-in person. Returns the limits above and `can_import`. |
-| `GET /api/project-archives/{identifier}` | The project's lead, or an instance admin. |
-| `POST /api/project-archives` | An instance admin, whether or not authorization enforcement is on. |
+| Route                                    | Who                                                                |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| `GET /api/project-archives`              | Any signed-in person. Returns the limits above and `can_import`.   |
+| `GET /api/project-archives/{identifier}` | The project's lead, or an instance admin.                          |
+| `POST /api/project-archives`             | An instance admin, whether or not authorization enforcement is on. |
 
 **Only a browser session reaches these routes.** An API key, an unbound
 operator key, an OAuth connector token, a bot, and the first-admin identity an

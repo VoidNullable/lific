@@ -49,7 +49,10 @@ describe("save queue", () => {
     io.finish(0);
     expect(await first).toBe(true);
 
-    expect(io.sent).toEqual([{ allow_signup: true }, { instance_name: "Lific" }]);
+    expect(io.sent).toEqual([
+      { allow_signup: true },
+      { instance_name: "Lific" },
+    ]);
     io.finish(1);
     expect(await second).toBe(true);
   });
@@ -63,11 +66,17 @@ describe("save queue", () => {
     queue.push({ web_auto_login: true });
     queue.push({ web_auto_login: false });
     const last = queue.push({ instance_name: "Lific" });
-    expect(queue.pending).toEqual({ web_auto_login: false, instance_name: "Lific" });
+    expect(queue.pending).toEqual({
+      web_auto_login: false,
+      instance_name: "Lific",
+    });
 
     io.finish(0);
     await first;
-    expect(io.sent[1]).toEqual({ web_auto_login: false, instance_name: "Lific" });
+    expect(io.sent[1]).toEqual({
+      web_auto_login: false,
+      instance_name: "Lific",
+    });
     io.finish(1);
     await last;
 

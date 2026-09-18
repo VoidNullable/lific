@@ -31,7 +31,10 @@ import {
   ListGroup,
   GROUP_HEADER_H,
 } from "../components/issue-list-ui";
-import { IssueDetailPage, IssueDetailData } from "../components/issue-detail-ui";
+import {
+  IssueDetailPage,
+  IssueDetailData,
+} from "../components/issue-detail-ui";
 import { Cursor, Waypoint } from "../components/Cursor";
 
 /*
@@ -59,21 +62,104 @@ type BoardCard = { issue: IssueData; col: number; slot: number };
 
 // col: 0 todo, 1 active, 2 done — the board layout from UIScene.
 const CARDS: BoardCard[] = [
-  { col: 0, slot: 0, issue: { identifier: "LIF-231", title: "Board column virtualization", priority: "medium", labels: [L.webui], updated: "2d ago", status: "todo" } },
-  { col: 0, slot: 1, issue: { identifier: "LIF-214", title: "Bulk-edit issues from the list", priority: "high", labels: [L.webui], updated: "4h ago", status: "todo" } },
-  { col: 0, slot: 2, issue: { identifier: "LIF-207", title: "Saved filters per project", priority: "low", updated: "1d ago", status: "todo" } },
-  { col: 1, slot: 0, issue: { identifier: "LIF-198", title: "Fix WAL checkpoint race", priority: "high", labels: [L.core, L.bug], updated: "26m ago", status: "active" } },
-  { col: 1, slot: 1, issue: { identifier: "LIF-226", title: "MCP: recurring plan templates", priority: "medium", labels: [L.mcp], updated: "2h ago", status: "active" } },
-  { col: 2, slot: 0, issue: { identifier: "LIF-183", title: "OAuth device flow for CLI", labels: [L.auth], updated: "5h ago", status: "done" } },
-  { col: 2, slot: 1, issue: { identifier: "LIF-171", title: "Backup retention config", labels: [L.core], updated: "1d ago", status: "done" } },
+  {
+    col: 0,
+    slot: 0,
+    issue: {
+      identifier: "LIF-231",
+      title: "Board column virtualization",
+      priority: "medium",
+      labels: [L.webui],
+      updated: "2d ago",
+      status: "todo",
+    },
+  },
+  {
+    col: 0,
+    slot: 1,
+    issue: {
+      identifier: "LIF-214",
+      title: "Bulk-edit issues from the list",
+      priority: "high",
+      labels: [L.webui],
+      updated: "4h ago",
+      status: "todo",
+    },
+  },
+  {
+    col: 0,
+    slot: 2,
+    issue: {
+      identifier: "LIF-207",
+      title: "Saved filters per project",
+      priority: "low",
+      updated: "1d ago",
+      status: "todo",
+    },
+  },
+  {
+    col: 1,
+    slot: 0,
+    issue: {
+      identifier: "LIF-198",
+      title: "Fix WAL checkpoint race",
+      priority: "high",
+      labels: [L.core, L.bug],
+      updated: "26m ago",
+      status: "active",
+    },
+  },
+  {
+    col: 1,
+    slot: 1,
+    issue: {
+      identifier: "LIF-226",
+      title: "MCP: recurring plan templates",
+      priority: "medium",
+      labels: [L.mcp],
+      updated: "2h ago",
+      status: "active",
+    },
+  },
+  {
+    col: 2,
+    slot: 0,
+    issue: {
+      identifier: "LIF-183",
+      title: "OAuth device flow for CLI",
+      labels: [L.auth],
+      updated: "5h ago",
+      status: "done",
+    },
+  },
+  {
+    col: 2,
+    slot: 1,
+    issue: {
+      identifier: "LIF-171",
+      title: "Backup retention config",
+      labels: [L.core],
+      updated: "1d ago",
+      status: "done",
+    },
+  },
 ];
 
 // The ISSUES LIST groups: the same seven issues bucketed by status, in
 // canonical group order (grouping.ts STATUSES: ...todo, active, done...).
 const LIST_GROUPS: ListGroup[] = [
-  { status: "todo", issues: CARDS.filter((c) => c.col === 0).map((c) => c.issue) },
-  { status: "active", issues: CARDS.filter((c) => c.col === 1).map((c) => c.issue) },
-  { status: "done", issues: CARDS.filter((c) => c.col === 2).map((c) => c.issue) },
+  {
+    status: "todo",
+    issues: CARDS.filter((c) => c.col === 0).map((c) => c.issue),
+  },
+  {
+    status: "active",
+    issues: CARDS.filter((c) => c.col === 1).map((c) => c.issue),
+  },
+  {
+    status: "done",
+    issues: CARDS.filter((c) => c.col === 2).map((c) => c.issue),
+  },
 ];
 const TOTAL_ROWS = LIST_GROUPS.reduce((n, g) => n + g.issues.length, 0);
 
@@ -105,11 +191,10 @@ const DETAIL: IssueDetailData = {
   description: (
     <>
       <p style={{ margin: "0 0 0.75em" }}>
-        Under sustained write load the 30-minute backup job can fire while a
-        WAL checkpoint is mid-flight, so the copied <code style={INLINE_CODE}>
-          .db
-        </code>{" "}
-        trails its <code style={INLINE_CODE}>-wal</code> by a few frames.
+        Under sustained write load the 30-minute backup job can fire while a WAL
+        checkpoint is mid-flight, so the copied{" "}
+        <code style={INLINE_CODE}>.db</code> trails its{" "}
+        <code style={INLINE_CODE}>-wal</code> by a few frames.
       </p>
       <p style={{ margin: "0 0 0.5em" }}>Repro: hammer writes, then</p>
       <ul style={{ margin: "0 0 0.75em", paddingLeft: "1.5em" }}>
@@ -130,8 +215,7 @@ const DETAIL: IssueDetailData = {
       bot: true,
       text: (
         <>
-          changed status{" "}
-          <span style={{ color: C.textFaint }}>todo</span>{" "}
+          changed status <span style={{ color: C.textFaint }}>todo</span>{" "}
           <span style={{ color: C.textFaint }}>&rarr;</span>{" "}
           <span style={{ color: C.text }}>active</span>
         </>
@@ -224,7 +308,11 @@ export const WebUIScene: React.FC = () => {
   const { fps } = useVideoConfig();
 
   // Whole-frame spring-in.
-  const frameIn = spring({ frame, fps, config: { damping: 200, stiffness: 90 } });
+  const frameIn = spring({
+    frame,
+    fps,
+    config: { damping: 200, stiffness: 90 },
+  });
 
   // ── Detail round-trip: open (list->detail) then close (detail->list) ──
   // detailT is 0 on the list, 1 on the detail view. It rises on the row
@@ -443,33 +531,35 @@ export const WebUIScene: React.FC = () => {
                     ) : null}
 
                     {/* Static cards. */}
-                    {CARDS.filter((c) => c.issue.identifier !== MOVED).map((card) => {
-                      // Only LIF-207 reflows (todo slot 2 -> 1) when the drag lifts.
-                      let y = slotYAt(card.slot);
-                      if (card.issue.identifier === "LIF-207") {
-                        const s = spring({
-                          frame: frame - (DRAG_START + 4),
-                          fps,
-                          config: { damping: 200, stiffness: 140 },
-                        });
-                        y =
-                          frame < DRAG_START + 4
-                            ? slotYAt(2)
-                            : slotYAt(2) + (slotYAt(1) - slotYAt(2)) * s;
-                      }
-                      return (
-                        <div
-                          key={card.issue.identifier}
-                          style={{
-                            position: "absolute",
-                            left: colX(card.col) + CARD_PAD,
-                            top: y,
-                          }}
-                        >
-                          <IssueCard issue={card.issue} width={CARD_W} />
-                        </div>
-                      );
-                    })}
+                    {CARDS.filter((c) => c.issue.identifier !== MOVED).map(
+                      (card) => {
+                        // Only LIF-207 reflows (todo slot 2 -> 1) when the drag lifts.
+                        let y = slotYAt(card.slot);
+                        if (card.issue.identifier === "LIF-207") {
+                          const s = spring({
+                            frame: frame - (DRAG_START + 4),
+                            fps,
+                            config: { damping: 200, stiffness: 140 },
+                          });
+                          y =
+                            frame < DRAG_START + 4
+                              ? slotYAt(2)
+                              : slotYAt(2) + (slotYAt(1) - slotYAt(2)) * s;
+                        }
+                        return (
+                          <div
+                            key={card.issue.identifier}
+                            style={{
+                              position: "absolute",
+                              left: colX(card.col) + CARD_PAD,
+                              top: y,
+                            }}
+                          >
+                            <IssueCard issue={card.issue} width={CARD_W} />
+                          </div>
+                        );
+                      },
+                    )}
 
                     {/* The dragged card. */}
                     <div
@@ -489,7 +579,9 @@ export const WebUIScene: React.FC = () => {
                       }}
                     >
                       <IssueCard
-                        issue={CARDS.find((c) => c.issue.identifier === MOVED)!.issue}
+                        issue={
+                          CARDS.find((c) => c.issue.identifier === MOVED)!.issue
+                        }
                         width={CARD_W}
                       />
                     </div>
@@ -527,10 +619,24 @@ export const WebUIScene: React.FC = () => {
             textShadow: "0 4px 30px rgba(0,0,0,0.9)",
           }}
         >
-          <div style={{ fontSize: 44, fontWeight: 600, color: C.text, lineHeight: 1.1 }}>
+          <div
+            style={{
+              fontSize: 44,
+              fontWeight: 600,
+              color: C.text,
+              lineHeight: 1.1,
+            }}
+          >
             A real web UI. Everything you&rsquo;d expect.
           </div>
-          <div style={{ fontSize: 30, color: C.textMuted, marginTop: 6, lineHeight: 1.2 }}>
+          <div
+            style={{
+              fontSize: 30,
+              color: C.textMuted,
+              marginTop: 6,
+              lineHeight: 1.2,
+            }}
+          >
             Issues, kanban, docs, plans, insights. All in the one binary.
           </div>
         </div>

@@ -30,13 +30,82 @@ const L: Record<string, Label> = {
 };
 
 const CARDS: { issue: IssueData; col: number; slot: number }[] = [
-  { col: 0, slot: 0, issue: { identifier: "LIF-231", title: "Board column virtualization", priority: "medium", labels: [L.webui], updated: "2d ago" } },
-  { col: 0, slot: 1, issue: { identifier: "LIF-214", title: "Bulk-edit issues from the list", priority: "high", labels: [L.webui], updated: "4h ago" } },
-  { col: 0, slot: 2, issue: { identifier: "LIF-207", title: "Saved filters per project", priority: "low", updated: "1d ago" } },
-  { col: 1, slot: 0, issue: { identifier: "LIF-198", title: "Fix WAL checkpoint race", priority: "high", labels: [L.core, L.bug], updated: "26m ago" } },
-  { col: 1, slot: 1, issue: { identifier: "LIF-226", title: "MCP: recurring plan templates", priority: "medium", labels: [L.mcp], updated: "2h ago" } },
-  { col: 2, slot: 0, issue: { identifier: "LIF-183", title: "OAuth device flow for CLI", labels: [L.auth], updated: "5h ago", status: "done" } },
-  { col: 2, slot: 1, issue: { identifier: "LIF-171", title: "Backup retention config", labels: [L.core], updated: "1d ago", status: "done" } },
+  {
+    col: 0,
+    slot: 0,
+    issue: {
+      identifier: "LIF-231",
+      title: "Board column virtualization",
+      priority: "medium",
+      labels: [L.webui],
+      updated: "2d ago",
+    },
+  },
+  {
+    col: 0,
+    slot: 1,
+    issue: {
+      identifier: "LIF-214",
+      title: "Bulk-edit issues from the list",
+      priority: "high",
+      labels: [L.webui],
+      updated: "4h ago",
+    },
+  },
+  {
+    col: 0,
+    slot: 2,
+    issue: {
+      identifier: "LIF-207",
+      title: "Saved filters per project",
+      priority: "low",
+      updated: "1d ago",
+    },
+  },
+  {
+    col: 1,
+    slot: 0,
+    issue: {
+      identifier: "LIF-198",
+      title: "Fix WAL checkpoint race",
+      priority: "high",
+      labels: [L.core, L.bug],
+      updated: "26m ago",
+    },
+  },
+  {
+    col: 1,
+    slot: 1,
+    issue: {
+      identifier: "LIF-226",
+      title: "MCP: recurring plan templates",
+      priority: "medium",
+      labels: [L.mcp],
+      updated: "2h ago",
+    },
+  },
+  {
+    col: 2,
+    slot: 0,
+    issue: {
+      identifier: "LIF-183",
+      title: "OAuth device flow for CLI",
+      labels: [L.auth],
+      updated: "5h ago",
+      status: "done",
+    },
+  },
+  {
+    col: 2,
+    slot: 1,
+    issue: {
+      identifier: "LIF-171",
+      title: "Backup retention config",
+      labels: [L.core],
+      updated: "1d ago",
+      status: "done",
+    },
+  },
 ];
 
 const APP_W = 1500;

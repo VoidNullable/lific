@@ -12,18 +12,25 @@ test("the Worker replaces spoofable identity headers with an authenticated clien
   };
 
   try {
-    const request = new Request("https://community.lific.dev/public/api/projects/LIF", {
-      headers: {
-        "cf-connecting-ip": "203.0.113.7",
-        "x-forwarded-for": "192.0.2.1",
-        "x-real-ip": "192.0.2.2",
-        "x-lific-client-ip": "192.0.2.3",
-        "x-lific-proxy-secret": "attacker-secret",
+    const request = new Request(
+      "https://community.lific.dev/public/api/projects/LIF",
+      {
+        headers: {
+          "cf-connecting-ip": "203.0.113.7",
+          "x-forwarded-for": "192.0.2.1",
+          "x-real-ip": "192.0.2.2",
+          "x-lific-client-ip": "192.0.2.3",
+          "x-lific-proxy-secret": "attacker-secret",
+        },
       },
-    });
+    );
 
     assert.equal(
-      (await worker.fetch(request, { LIFIC_TRUSTED_PROXY_SECRET: "correct-secret" })).status,
+      (
+        await worker.fetch(request, {
+          LIFIC_TRUSTED_PROXY_SECRET: "correct-secret",
+        })
+      ).status,
       204,
     );
     assert.equal(forwarded.get("x-lific-client-ip"), "203.0.113.7");
@@ -65,7 +72,11 @@ test("the Worker fails closed when Cloudflare's client identity is missing", asy
   try {
     const request = new Request("https://community.lific.dev/");
     assert.equal(
-      (await worker.fetch(request, { LIFIC_TRUSTED_PROXY_SECRET: "correct-secret" })).status,
+      (
+        await worker.fetch(request, {
+          LIFIC_TRUSTED_PROXY_SECRET: "correct-secret",
+        })
+      ).status,
       503,
     );
     assert.equal(fetched, false);
@@ -86,19 +97,36 @@ test("HTTP requests retain their body and return redirects without forwarding cr
   };
 
   try {
-    const request = new Request("https://community.lific.dev/api/auth/login?next=issues", {
-      method: "POST",
-      headers: { "cf-connecting-ip": "203.0.113.7", "content-type": "application/json" },
-      body: '{"username":"example"}',
+    const request = new Request(
+      "https://community.lific.dev/api/auth/login?next=issues",
+      {
+        method: "POST",
+        headers: {
+          "cf-connecting-ip": "203.0.113.7",
+          "content-type": "application/json",
+        },
+        body: '{"username":"example"}',
+      },
+    );
+    const response = await worker.fetch(request, {
+      LIFIC_TRUSTED_PROXY_SECRET: "correct-secret",
     });
-    const response = await worker.fetch(request, { LIFIC_TRUSTED_PROXY_SECRET: "correct-secret" });
     assert.equal(response.status, 307);
-    assert.equal(response.headers.get("location"), "https://elsewhere.example/");
+    assert.equal(
+      response.headers.get("location"),
+      "https://elsewhere.example/",
+    );
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].target, "https://lific-community.fly.dev/api/auth/login?next=issues");
+    assert.equal(
+      calls[0].target,
+      "https://lific-community.fly.dev/api/auth/login?next=issues",
+    );
     assert.equal(calls[0].init.method, "POST");
     assert.equal(calls[0].init.redirect, "manual");
-    assert.equal(await new Response(calls[0].init.body).text(), '{"username":"example"}');
+    assert.equal(
+      await new Response(calls[0].init.body).text(),
+      '{"username":"example"}',
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -118,16 +146,24 @@ test("WebSockets are limited to the event route and never follow redirects", asy
       upgrade: "websocket",
     };
     const env = { LIFIC_TRUSTED_PROXY_SECRET: "correct-secret" };
-    const websocket = new Request("https://community.lific.dev/api/events/ws", { headers });
+    const websocket = new Request("https://community.lific.dev/api/events/ws", {
+      headers,
+    });
     assert.equal((await worker.fetch(websocket, env)).status, 204);
     assert.equal(calls[0].redirect, "manual");
 
-    const wrongRoute = new Request("https://community.lific.dev/oauth/register", { headers });
+    const wrongRoute = new Request(
+      "https://community.lific.dev/oauth/register",
+      { headers },
+    );
     assert.equal((await worker.fetch(wrongRoute, env)).status, 400);
-    const wrongMethod = new Request("https://community.lific.dev/api/events/ws", {
-      headers,
-      method: "POST",
-    });
+    const wrongMethod = new Request(
+      "https://community.lific.dev/api/events/ws",
+      {
+        headers,
+        method: "POST",
+      },
+    );
     assert.equal((await worker.fetch(wrongMethod, env)).status, 400);
     assert.equal(calls.length, 1);
   } finally {

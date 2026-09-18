@@ -21,7 +21,8 @@ import { shortcutHelpState } from "./shortcutHelpState.svelte";
 import { contextMenuState } from "./contextMenuState.svelte"; // LIF-248
 import { mobileNavState } from "./mobileNavState.svelte";
 
-export type ShortcutScope = "global" | "list" | "board" | "peek" | "palette" | "editor";
+export type ShortcutScope =
+  "global" | "list" | "board" | "peek" | "palette" | "editor";
 
 export interface ShortcutEntry {
   /** Display form. Space-separated tokens render as separate <kbd> chips,
@@ -31,7 +32,14 @@ export interface ShortcutEntry {
   scope: ShortcutScope;
 }
 
-export const SCOPE_ORDER: ShortcutScope[] = ["global", "list", "board", "peek", "palette", "editor"];
+export const SCOPE_ORDER: ShortcutScope[] = [
+  "global",
+  "list",
+  "board",
+  "peek",
+  "palette",
+  "editor",
+];
 
 export const SCOPE_LABEL: Record<ShortcutScope, string> = {
   global: "Global",
@@ -67,7 +75,11 @@ export const SHORTCUTS: ShortcutEntry[] = [
   { keys: "M", label: "Open the module picker", scope: "list" },
   { keys: "C", label: "New issue", scope: "list" },
   { keys: "/", label: "Focus search", scope: "list" },
-  { keys: "Esc", label: "Clear focus / selection / close a popover", scope: "list" },
+  {
+    keys: "Esc",
+    label: "Clear focus / selection / close a popover",
+    scope: "list",
+  },
 
   // ── Board (IssueList.svelte, layout="board") ─────────────
   { keys: "Click", label: "Open card", scope: "board" },
@@ -95,7 +107,9 @@ export const SHORTCUTS: ShortcutEntry[] = [
 /** True when focus is in something that owns its own text input — a
  *  shortcut must not hijack a keystroke meant for the field. Shared by
  *  every keydown handler in the app (previously duplicated per-route). */
-export function isTypingContext(el: Element | null = document.activeElement): boolean {
+export function isTypingContext(
+  el: Element | null = document.activeElement,
+): boolean {
   if (!el) return false;
   const tag = el.tagName;
   return (

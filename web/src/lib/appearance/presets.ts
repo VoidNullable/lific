@@ -10,7 +10,11 @@ import type { AccentPreset } from "../theme";
  * blocks in app.css — this is presentation-only metadata, not the
  * source of truth for the actual CSS variable values.
  */
-export const ACCENT_PRESETS: { id: AccentPreset; label: string; swatch: string }[] = [
+export const ACCENT_PRESETS: {
+  id: AccentPreset;
+  label: string;
+  swatch: string;
+}[] = [
   { id: "indigo", label: "Indigo", swatch: "#9287d7" },
   { id: "teal", label: "Teal", swatch: "#4dd9c7" },
   { id: "rose", label: "Rose", swatch: "#f27a9c" },

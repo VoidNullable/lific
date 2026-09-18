@@ -75,7 +75,14 @@ describe("activity rate", () => {
 
   test("accepts only non-negative safe-integer baselines", () => {
     expect(parseActivityBaseline(4)).toEqual({ dayCount: 4 });
-    for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, "4", null]) {
+    for (const invalid of [
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Infinity,
+      "4",
+      null,
+    ]) {
       expect(parseActivityBaseline(invalid)).toBeNull();
     }
   });

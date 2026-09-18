@@ -41,11 +41,11 @@ token_env = "LIFIC_COMMUNITY_TOKEN"
 
 ### Keys
 
-| Key | Where | Meaning |
-| --- | --- | --- |
-| `default` | top level | Alias used when an **allowlisted read-only tool** omits `instance`. Optional. Must name a configured alias. |
-| `instances.<alias>.url` | per instance | Base URL of that server. `http://` or `https://`, no `user:password@`, no `?query`, no `#fragment`. |
-| `instances.<alias>.token_env` | per instance | Name of an environment variable holding that instance's bearer token. |
+| Key                            | Where        | Meaning                                                                                                                 |
+| ------------------------------ | ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `default`                      | top level    | Alias used when an **allowlisted read-only tool** omits `instance`. Optional. Must name a configured alias.             |
+| `instances.<alias>.url`        | per instance | Base URL of that server. `http://` or `https://`, no `user:password@`, no `?query`, no `#fragment`.                     |
+| `instances.<alias>.token_env`  | per instance | Name of an environment variable holding that instance's bearer token.                                                   |
 | `instances.<alias>.credential` | per instance | `"login"` to use the token `lific login` stored for that URL, or `"none"` for an instance that takes no authentication. |
 
 Exactly one of `token_env` or `credential` is required per instance. There is no
@@ -133,8 +133,8 @@ Every tool gains one argument:
   "arguments": {
     "instance": "community",
     "project": "WEB",
-    "title": "Correct the login redirect"
-  }
+    "title": "Correct the login redirect",
+  },
 }
 ```
 
@@ -214,14 +214,14 @@ One local MCP entry replaces the two you would otherwise need. Add to
         "lific",
         "mcp",
         "--instances",
-        "/home/you/.config/lific/instances.toml"
+        "/home/you/.config/lific/instances.toml",
       ],
       "environment": {
         "LIFIC_PRIVATE_TOKEN": "lific_...",
-        "LIFIC_COMMUNITY_TOKEN": "lific_..."
-      }
-    }
-  }
+        "LIFIC_COMMUNITY_TOKEN": "lific_...",
+      },
+    },
+  },
 }
 ```
 
@@ -258,19 +258,19 @@ cut short.
 Fixed in the binary, all of them bounding something a backend or a client
 controls:
 
-| Limit | Value |
-| --- | --- |
-| Response body per call | 4 MiB |
-| Repository binding lookup body | 4 MiB |
-| Request line on stdin | 1 MiB |
-| Config file | Regular file, at most 256 KiB |
-| Instances per config | 16 |
-| `tools/list` pages per instance | 50 |
-| Tools per instance | 512 |
-| Combined serialized tool definitions per instance, across all pages | 4 MiB |
-| Call timeout / connect timeout | 120 s / 10 s |
-| Startup HTTP request timeout | 20 s |
-| Total discovery and binding deadline, across all instances | 60 s |
+| Limit                                                               | Value                         |
+| ------------------------------------------------------------------- | ----------------------------- |
+| Response body per call                                              | 4 MiB                         |
+| Repository binding lookup body                                      | 4 MiB                         |
+| Request line on stdin                                               | 1 MiB                         |
+| Config file                                                         | Regular file, at most 256 KiB |
+| Instances per config                                                | 16                            |
+| `tools/list` pages per instance                                     | 50                            |
+| Tools per instance                                                  | 512                           |
+| Combined serialized tool definitions per instance, across all pages | 4 MiB                         |
+| Call timeout / connect timeout                                      | 120 s / 10 s                  |
+| Startup HTTP request timeout                                        | 20 s                          |
+| Total discovery and binding deadline, across all instances          | 60 s                          |
 
 An over-limit request line is counted and discarded as it arrives rather than
 buffered, and the next line is still served.

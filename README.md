@@ -203,36 +203,36 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 All 30, in 6,335 tokens:
 
-| Family | Tools |
-|--------|-------|
-| Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
-| Relations | `link_issues` · `unlink_issues` |
-| Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
-| Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
-| Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
-| Attachments | `upload_attachment` · `get_attachment` · `list_attachments` |
-| Search & history | `search` · `get_activity` |
-| Structure | `list_resources` · `manage_resource` · `delete` |
-| Export | `export` (issue, page, or whole project by ID) |
+| Family           | Tools                                                                                                      |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| Issues           | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
+| Relations        | `link_issues` · `unlink_issues`                                                                            |
+| Pages            | `get_page` · `create_page` · `update_page` · `edit_page`                                                   |
+| Plans            | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step`                                         |
+| Comments         | `add_comment` · `list_comments` · `edit_comment` · `delete_comment`                                        |
+| Attachments      | `upload_attachment` · `get_attachment` · `list_attachments`                                                |
+| Search & history | `search` · `get_activity`                                                                                  |
+| Structure        | `list_resources` · `manage_resource` · `delete`                                                            |
+| Export           | `export` (issue, page, or whole project by ID)                                                             |
 
 Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`). The behaviors worth knowing about are covered in "What your agent can now do" above; for exact schemas, connect a client and read `tools/list`.
 
 ## Features
 
-| Category | What you get |
-|----------|-------------|
-| **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
-| **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
-| **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 30 tools, human-readable identifiers, compact schema, session instructions |
-| **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
-| **REST API** | Resource endpoints, search, board view, and relationship/planning operations |
-| **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
-| **User accounts** | Individual auth, per-tool bot identities, project membership and roles |
-| **Auth** | OAuth 2.1 (PKCE, dynamic client registration, RFC 9728 discovery), RFC 8628 device flow, API keys, token revocation |
-| **Backups** | `lific dump` / `lific restore` single-archive backups, plus automatic interval archives with retention |
-| **CLI** | Scriptable issue/project/page/plan commands, TTY-aware JSON output, works with no server running |
-| **Single binary** | No runtime dependencies, embedded SQLite, ~25 MB |
+| Category           | What you get                                                                                                                                       |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity                               |
+| **Plans**          | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync                                            |
+| **Documentation**  | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams                               |
+| **MCP interface**  | 30 tools, human-readable identifiers, compact schema, session instructions                                                                         |
+| **Onboarding**     | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
+| **REST API**       | Resource endpoints, search, board view, and relationship/planning operations                                                                       |
+| **Web UI**         | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme                                                   |
+| **User accounts**  | Individual auth, per-tool bot identities, project membership and roles                                                                             |
+| **Auth**           | OAuth 2.1 (PKCE, dynamic client registration, RFC 9728 discovery), RFC 8628 device flow, API keys, token revocation                                |
+| **Backups**        | `lific dump` / `lific restore` single-archive backups, plus automatic interval archives with retention                                             |
+| **CLI**            | Scriptable issue/project/page/plan commands, TTY-aware JSON output, works with no server running                                                   |
+| **Single binary**  | No runtime dependencies, embedded SQLite, ~25 MB                                                                                                   |
 
 ## When Lific is the wrong tool
 
@@ -270,7 +270,7 @@ lific user set-password --username sam
 
 **Auth can be turned off entirely for a private, local instance** with `required = false` under `[auth]` in `lific.toml`. Credential-less requests then get admin-equivalent access; a presented-but-invalid token still fails loudly. The web UI signs you in automatically as the first admin (the single-user auto-login flow) instead of showing a login form - if no account exists yet, the signup screen still appears so there's an identity to attribute work to. This is a config-file key on purpose (flipping it requires shell access, like minting an operator key), and it comes with guard rails: the server refuses to start if `server.public_url` points anywhere but localhost, and logs a prominent warning otherwise - the default bind is `0.0.0.0`, so keep an auth-less instance loopback-only or firewalled.
 
-**Unbound API keys bypass authorization by design.** A key with no user binding - the one `lific start` auto-mints on a keyless DB, and the ones `lific key create` and `connect`'s fresh-install path produce - is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That's what keeps the zero-user `init → start → connect` flow working with enforcement on. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
+**Unbound API keys bypass authorization by design.** A key with no user binding - the one `lific start` auto-mints on a keyless DB, and the ones `lific key create` and `connect`'s fresh-install path produce - is _operator-trusted_: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That's what keeps the zero-user `init → start → connect` flow working with enforcement on. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
 
 ```bash
 lific key list

@@ -36,7 +36,8 @@ const collapsedKey = (id: string) => `lific:list:collapsed:${id}`;
 const hiddenStatusesKey = (id: string) => `lific:board:hidden-statuses:${id}`;
 const laneByKey = (id: string) => `lific:board:lanes:${id}`;
 const collapsedLanesKey = (id: string) => `lific:board:collapsed-lanes:${id}`;
-const collapsedColumnsKey = (id: string) => `lific:board:collapsed-columns:${id}`;
+const collapsedColumnsKey = (id: string) =>
+  `lific:board:collapsed-columns:${id}`;
 
 // ── View state (filters / search / sort / group / density) ──
 
@@ -177,7 +178,10 @@ export function loadCollapsedColumns(id: string): Set<string> {
 
 export function saveCollapsedColumns(id: string, statuses: Set<string>): void {
   try {
-    localStorage.setItem(collapsedColumnsKey(id), JSON.stringify([...statuses]));
+    localStorage.setItem(
+      collapsedColumnsKey(id),
+      JSON.stringify([...statuses]),
+    );
   } catch {
     // ignore
   }

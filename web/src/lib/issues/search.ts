@@ -32,7 +32,10 @@ export interface SearchResult {
 /** Score `issues` against `query` and return the ranked, capped subset plus
  *  a per-issue score+snippet map. An empty/blank query short-circuits to the
  *  unfiltered input with no scores, so the caller can use one code path. */
-export function computeSearchResult(query: string, issues: Issue[]): SearchResult {
+export function computeSearchResult(
+  query: string,
+  issues: Issue[],
+): SearchResult {
   const q = query.trim();
   if (!q) return { issues, scores: new Map() };
 

@@ -33,7 +33,10 @@ export async function renderMermaidBlock(
   }
 
   if (mermaidIsTooComplex(source)) {
-    showMermaidMessage(block, "Mermaid diagram skipped: source is too complex.");
+    showMermaidMessage(
+      block,
+      "Mermaid diagram skipped: source is too complex.",
+    );
     return;
   }
 
@@ -59,6 +62,7 @@ export async function renderMermaidBlock(
       block.dataset.rendered = "true";
     }
   } catch (error) {
-    if (!cancelled()) showMermaidMessage(block, `Mermaid error: ${String(error)}`);
+    if (!cancelled())
+      showMermaidMessage(block, `Mermaid error: ${String(error)}`);
   }
 }

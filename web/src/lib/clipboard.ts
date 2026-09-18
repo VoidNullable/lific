@@ -30,7 +30,8 @@ export async function copyToClipboard(
     typeof opts === "string" ? { label: opts } : (opts ?? {});
   const ok = await write(text);
   if (ok) {
-    if (!silentSuccess) toast(`Copied ${label ?? text}`, { kind: "info", duration: 2500 });
+    if (!silentSuccess)
+      toast(`Copied ${label ?? text}`, { kind: "info", duration: 2500 });
   } else {
     toast("Couldn't copy to clipboard", { kind: "error" });
   }

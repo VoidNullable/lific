@@ -38,7 +38,9 @@ beforeEach(() => {
   globalThis.fetch = (async (url: string, options: RequestInit = {}) => {
     calls.push(url);
     bodies.push(options.body as string | undefined);
-    const queued = [...replies.entries()].find(([path]) => url.endsWith(path))?.[1];
+    const queued = [...replies.entries()].find(([path]) =>
+      url.endsWith(path),
+    )?.[1];
     const next = queued && queued.length > 1 ? queued.shift()! : queued?.[0];
     const chosen = next ?? { status: 200, body: {} };
     return {
@@ -57,26 +59,45 @@ async function mod() {
   return await import("../src/lib/reauth");
 }
 
-const STALE = { status: 403, body: { error: "recent authentication required" } };
+const STALE = {
+  status: 403,
+  body: { error: "recent authentication required" },
+};
 const session = (id: number, token: string) => ({
   status: 200,
-  body: { user: { id, username: "blake" }, token, expires_at: "2099-01-01T00:00:00Z" },
+  body: {
+    user: { id, username: "blake" },
+    token,
+    expires_at: "2099-01-01T00:00:00Z",
+  },
 });
 
 describe("needsReauth", () => {
   test("matches only the staleness refusal, not other 403s", async () => {
     const { needsReauth } = await mod();
     expect(
-      needsReauth({ ok: false, error: "recent authentication required", status: 403 }),
+      needsReauth({
+        ok: false,
+        error: "recent authentication required",
+        status: 403,
+      }),
     ).toBe(true);
-    expect(needsReauth({ ok: false, error: "only an admin can do this", status: 403 })).toBe(
-      false,
-    );
-    expect(needsReauth({ ok: false, error: "authentication required", status: 403 })).toBe(
-      false,
-    );
     expect(
-      needsReauth({ ok: false, error: "recent authentication required", status: 401 }),
+      needsReauth({
+        ok: false,
+        error: "only an admin can do this",
+        status: 403,
+      }),
+    ).toBe(false);
+    expect(
+      needsReauth({ ok: false, error: "authentication required", status: 403 }),
+    ).toBe(false);
+    expect(
+      needsReauth({
+        ok: false,
+        error: "recent authentication required",
+        status: 401,
+      }),
     ).toBe(false);
   });
 });
@@ -96,7 +117,10 @@ describe("password re-authentication", () => {
   test("a wrong password leaves the existing session in place", async () => {
     const { reauthenticateWithPassword } = await mod();
     storage.setItem("lific_token", "lific_sess_stale");
-    reply("/auth/me/refresh", { status: 401, body: { error: "invalid credentials" } });
+    reply("/auth/me/refresh", {
+      status: 401,
+      body: { error: "invalid credentials" },
+    });
 
     const outcome = await reauthenticateWithPassword("wrong", 7);
 
@@ -195,7 +219,11 @@ describe("retryOnceAfterReauth", () => {
       async () => {
         attempts += 1;
         if (attempts === 1) {
-          return { ok: false as const, error: "recent authentication required", status: 403 };
+          return {
+            ok: false as const,
+            error: "recent authentication required",
+            status: 403,
+          };
         }
         return { ok: true as const, data: "minted" };
       },
@@ -219,7 +247,11 @@ describe("retryOnceAfterReauth", () => {
     const result = await retryOnceAfterReauth(
       async () => {
         attempts += 1;
-        return { ok: false as const, error: "recent authentication required", status: 403 };
+        return {
+          ok: false as const,
+          error: "recent authentication required",
+          status: 403,
+        };
       },
       async () => {
         reauths += 1;
@@ -239,12 +271,20 @@ describe("retryOnceAfterReauth", () => {
     const result = await retryOnceAfterReauth(
       async () => {
         attempts += 1;
-        return { ok: false as const, error: "recent authentication required", status: 403 };
+        return {
+          ok: false as const,
+          error: "recent authentication required",
+          status: 403,
+        };
       },
       async () => ({ ok: false as const, error: "invalid credentials" }),
     );
 
-    expect(result).toEqual({ ok: false, error: "invalid credentials", status: 403 });
+    expect(result).toEqual({
+      ok: false,
+      error: "invalid credentials",
+      status: 403,
+    });
     expect(attempts).toBe(1);
   });
 
@@ -253,14 +293,22 @@ describe("retryOnceAfterReauth", () => {
     let reauths = 0;
 
     const result = await retryOnceAfterReauth(
-      async () => ({ ok: false as const, error: "only an admin can do this", status: 403 }),
+      async () => ({
+        ok: false as const,
+        error: "only an admin can do this",
+        status: 403,
+      }),
       async () => {
         reauths += 1;
         return { ok: true as const };
       },
     );
 
-    expect(result).toEqual({ ok: false, error: "only an admin can do this", status: 403 });
+    expect(result).toEqual({
+      ok: false,
+      error: "only an admin can do this",
+      status: 403,
+    });
     expect(reauths).toBe(0);
   });
 });
@@ -269,7 +317,10 @@ describe("passwordless failure falls back to the password prompt", () => {
   test("a refused passwordless refresh is recoverable so callers can prompt", async () => {
     const { reauthenticateWithoutPassword } = await mod();
     storage.setItem("lific_token", "lific_sess_stale");
-    reply("/auth/me/refresh", { status: 400, body: { error: "your password is required to confirm this" } });
+    reply("/auth/me/refresh", {
+      status: 400,
+      body: { error: "your password is required to confirm this" },
+    });
 
     const outcome = await reauthenticateWithoutPassword(7);
 
@@ -300,7 +351,11 @@ describe("passwordless failure falls back to the password prompt", () => {
     const { retryOnceAfterReauth, needsReauth } = await mod();
 
     const result = await retryOnceAfterReauth(
-      async () => ({ ok: false as const, error: "recent authentication required", status: 403 }),
+      async () => ({
+        ok: false as const,
+        error: "recent authentication required",
+        status: 403,
+      }),
       async () => ({
         ok: false as const,
         error: "your password is required to confirm this",
@@ -316,11 +371,23 @@ describe("passwordless failure falls back to the password prompt", () => {
     const { retryOnceAfterReauth, needsReauth } = await mod();
 
     const result = await retryOnceAfterReauth(
-      async () => ({ ok: false as const, error: "recent authentication required", status: 403 }),
-      async () => ({ ok: false as const, error: "invalid credentials", recoverable: false }),
+      async () => ({
+        ok: false as const,
+        error: "recent authentication required",
+        status: 403,
+      }),
+      async () => ({
+        ok: false as const,
+        error: "invalid credentials",
+        recoverable: false,
+      }),
     );
 
-    expect(result).toEqual({ ok: false, error: "invalid credentials", status: 403 });
+    expect(result).toEqual({
+      ok: false,
+      error: "invalid credentials",
+      status: 403,
+    });
     expect(result.ok === false && needsReauth(result)).toBe(false);
   });
 
@@ -328,13 +395,19 @@ describe("passwordless failure falls back to the password prompt", () => {
    *  instance wants a password after all), the human types one, and the
    *  pending operation runs exactly once more. */
   test("a refused passwordless refresh then a successful password path retries once", async () => {
-    const { reauthenticateWithoutPassword, reauthenticateWithPassword, retryOnceAfterReauth } =
-      await mod();
+    const {
+      reauthenticateWithoutPassword,
+      reauthenticateWithPassword,
+      retryOnceAfterReauth,
+    } = await mod();
     storage.setItem("lific_token", "lific_sess_stale");
     // First call to the refresh endpoint is refused, the second succeeds.
     reply(
       "/auth/me/refresh",
-      { status: 400, body: { error: "your password is required to confirm this" } },
+      {
+        status: 400,
+        body: { error: "your password is required to confirm this" },
+      },
       session(7, "lific_sess_mine"),
     );
 
@@ -343,11 +416,17 @@ describe("passwordless failure falls back to the password prompt", () => {
       attempts += 1;
       return storage.getItem("lific_token") === "lific_sess_mine"
         ? { ok: true as const, data: "granted" }
-        : { ok: false as const, error: "recent authentication required", status: 403 };
+        : {
+            ok: false as const,
+            error: "recent authentication required",
+            status: 403,
+          };
     };
 
     // Passwordless route first: refused, token untouched, caller must prompt.
-    const auto = await retryOnceAfterReauth(pending, () => reauthenticateWithoutPassword(7));
+    const auto = await retryOnceAfterReauth(pending, () =>
+      reauthenticateWithoutPassword(7),
+    );
     expect(auto.ok).toBe(false);
     expect(storage.getItem("lific_token")).toBe("lific_sess_stale");
     expect(attempts).toBe(1);
@@ -365,13 +444,17 @@ describe("passwordless failure falls back to the password prompt", () => {
   /** Both routes must hit the same-user refresh endpoint, never `/auth/login`
    *  or `/auth/auto-login`, which can sign in as somebody else. */
   test("both routes call the same-user refresh endpoint", async () => {
-    const { reauthenticateWithoutPassword, reauthenticateWithPassword } = await mod();
+    const { reauthenticateWithoutPassword, reauthenticateWithPassword } =
+      await mod();
     reply("/auth/me/refresh", session(7, "lific_sess_fresh"));
 
     await reauthenticateWithoutPassword(7);
     await reauthenticateWithPassword("hunter2", 7);
 
     expect(calls).toEqual(["/api/auth/me/refresh", "/api/auth/me/refresh"]);
-    expect(bodies).toEqual([JSON.stringify({}), JSON.stringify({ password: "hunter2" })]);
+    expect(bodies).toEqual([
+      JSON.stringify({}),
+      JSON.stringify({ password: "hunter2" }),
+    ]);
   });
 });

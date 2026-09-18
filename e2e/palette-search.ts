@@ -38,19 +38,29 @@ async function seed(page: Page, base: string): Promise<Seeded> {
   return page.evaluate(
     async ({ warmupCount, token, mixed }) => {
       const auth = localStorage.getItem("lific_token");
-      if (!auth) throw new Error("no lific_token in localStorage — not signed in");
+      if (!auth)
+        throw new Error("no lific_token in localStorage — not signed in");
       const post = async (path: string, body: unknown) => {
         const res = await fetch(`/api${path}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth}` },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${auth}`,
+          },
           body: JSON.stringify(body),
         });
         const json = await res.json();
-        if (!res.ok) throw new Error(`POST ${path} -> ${res.status} ${JSON.stringify(json)}`);
+        if (!res.ok)
+          throw new Error(
+            `POST ${path} -> ${res.status} ${JSON.stringify(json)}`,
+          );
         return json as { id: number };
       };
 
-      const project = await post("/projects", { name: "Palette", identifier: "PAL" });
+      const project = await post("/projects", {
+        name: "Palette",
+        identifier: "PAL",
+      });
       for (let i = 1; i <= warmupCount; i++) {
         await post("/issues", {
           project_id: project.id,
@@ -71,7 +81,8 @@ async function seed(page: Page, base: string): Promise<Seeded> {
       await post("/pages", {
         project_id: project.id,
         title: "Palette warmup handbook",
-        content: "# Palette warmup handbook\n\nHow the warm read model is searched.",
+        content:
+          "# Palette warmup handbook\n\nHow the warm read model is searched.",
       });
 
       // The mixed-source trio: two rows the read model can see (an issue and
@@ -116,7 +127,10 @@ async function openPalette(page: Page) {
   return input;
 }
 
-export async function checkPaletteSearch(context: BrowserContext, base: string) {
+export async function checkPaletteSearch(
+  context: BrowserContext,
+  base: string,
+) {
   const page = await context.newPage();
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -137,13 +151,18 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
 
     // Warm the read model: the list route bootstraps it, and the rows
     // rendering is the observable proof that status === "ready".
-    await page.goto(`${base}/PAL/issues`, { waitUntil: "load", timeout: 15_000 });
+    await page.goto(`${base}/PAL/issues`, {
+      waitUntil: "load",
+      timeout: 15_000,
+    });
     await page.waitForFunction(
       (n) => document.querySelectorAll("[data-issue-index]").length >= n,
       WARMUP_ISSUES,
       { timeout: 15_000 },
     );
-    await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+    await page
+      .waitForLoadState("networkidle", { timeout: 10_000 })
+      .catch(() => {});
 
     // ── 1. Local hits render with no network round trip ───────────────
     {
@@ -175,12 +194,21 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
       );
 
       const visible = await rows(page);
-      const pageHits = visible.filter((r) => r.includes("Palette warmup handbook")).length;
+      const pageHits = visible.filter((r) =>
+        r.includes("Palette warmup handbook"),
+      ).length;
       const issueHits = visible.filter(
         (r) => /Palette warmup \d/.test(r) && r.includes("PAL-"),
       ).length;
-      assert(issueHits >= 6, `expected >= 6 local issue hits, got ${issueHits}`);
-      assert.equal(pageHits, 1, "the page must survive a flood of matching issues");
+      assert(
+        issueHits >= 6,
+        `expected >= 6 local issue hits, got ${issueHits}`,
+      );
+      assert.equal(
+        pageHits,
+        1,
+        "the page must survive a flood of matching issues",
+      );
       console.log(
         `ok   palette local search: ${issueHits} issues + ${pageHits} page in ${renderedMs}ms, 0 /api/search`,
       );
@@ -208,11 +236,16 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
       );
       await page.keyboard.press("Enter");
       await page.waitForURL(/#\/PAL\/issues\/PAL-3$/, { timeout: 10_000 });
-      console.log("ok   palette exact reference: single row, navigates to PAL-3");
+      console.log(
+        "ok   palette exact reference: single row, navigates to PAL-3",
+      );
     }
 
     // ── 3. A body-only token still reaches the server ─────────────────
-    await page.goto(`${base}/PAL/issues`, { waitUntil: "load", timeout: 15_000 });
+    await page.goto(`${base}/PAL/issues`, {
+      waitUntil: "load",
+      timeout: 15_000,
+    });
     await page.waitForFunction(
       (n) => document.querySelectorAll("[data-issue-index]").length >= n,
       WARMUP_ISSUES,
@@ -233,8 +266,13 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
         { timeout: 10_000 },
       );
       const fired = searchRequests - before;
-      assert(fired >= 1, "an unmatchable-locally query must fall through to the server");
-      console.log(`ok   palette server fallback: body-only token found via ${fired} /api/search`);
+      assert(
+        fired >= 1,
+        "an unmatchable-locally query must fall through to the server",
+      );
+      console.log(
+        `ok   palette server fallback: body-only token found via ${fired} /api/search`,
+      );
       await page.keyboard.press("Escape");
     }
 
@@ -259,21 +297,27 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
       // so the "(server)" boundary itself can be located.
       const sequence = await page.evaluate(() => {
         const first = document.querySelector("[data-flat-idx]");
-        if (!first?.parentElement) return [] as { row: boolean; text: string }[];
+        if (!first?.parentElement)
+          return [] as { row: boolean; text: string }[];
         return [...first.parentElement.children].map((el) => ({
           row: el.hasAttribute("data-flat-idx"),
           text: (el as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
         }));
       });
-      const at = (needle: string) => sequence.findIndex((s) => s.text.includes(needle));
+      const at = (needle: string) =>
+        sequence.findIndex((s) => s.text.includes(needle));
 
       const localIssue = at("local issue");
       const localPage = at("local page");
       const serverIssue = at("Buried reference note");
       // The group label is uppercased by CSS, and `innerText` reflects that,
       // so match it case-insensitively.
-      const serverHeader = sequence.findIndex((s) => !s.row && /\(server\)/i.test(s.text));
-      const dump = JSON.stringify(sequence.map((s) => `${s.row ? "" : "# "}${s.text.slice(0, 48)}`));
+      const serverHeader = sequence.findIndex(
+        (s) => !s.row && /\(server\)/i.test(s.text),
+      );
+      const dump = JSON.stringify(
+        sequence.map((s) => `${s.row ? "" : "# "}${s.text.slice(0, 48)}`),
+      );
 
       assert(localIssue >= 0, `local issue row missing: ${dump}`);
       assert(localPage >= 0, `local page row missing: ${dump}`);
@@ -295,7 +339,11 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
       const strays = sequence
         .slice(serverHeader)
         .filter((s) => s.row && /local (issue|page)/.test(s.text));
-      assert.equal(strays.length, 0, `local rows leaked into the server section: ${dump}`);
+      assert.equal(
+        strays.length,
+        0,
+        `local rows leaked into the server section: ${dump}`,
+      );
 
       console.log(
         `ok   palette source order: local issue+page above server issue (server header at ${serverHeader})`,
@@ -328,7 +376,9 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
           "the current query's local results were dropped",
         );
         await page.keyboard.press("Escape");
-        console.log("ok   palette stale guard: query change discards the in-flight response");
+        console.log(
+          "ok   palette stale guard: query change discards the in-flight response",
+        );
       }
 
       // 4b. Project changes under an open palette. The palette's server
@@ -362,12 +412,17 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
           `duplicate rows after a project change: ${JSON.stringify(visible)}`,
         );
         await page.keyboard.press("Escape");
-        console.log("ok   palette stale guard: project change re-runs without double-rendering");
+        console.log(
+          "ok   palette stale guard: project change re-runs without double-rendering",
+        );
       }
 
       // 4c. Close and reopen while the response is in flight.
       {
-        await page.goto(`${base}/PAL/issues`, { waitUntil: "load", timeout: 15_000 });
+        await page.goto(`${base}/PAL/issues`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         await page.waitForFunction(
           (n) => document.querySelectorAll("[data-issue-index]").length >= n,
           WARMUP_ISSUES,
@@ -377,7 +432,9 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
         await input.fill(BODY_ONLY_TOKEN);
         await page.waitForTimeout(300);
         await page.keyboard.press("Escape");
-        await page.getByPlaceholder(PLACEHOLDER).waitFor({ state: "detached", timeout: 5_000 });
+        await page
+          .getByPlaceholder(PLACEHOLDER)
+          .waitFor({ state: "detached", timeout: 5_000 });
         await page.waitForTimeout(1_800); // the held response lands while closed
         await openPalette(page);
         await page.waitForTimeout(300);
@@ -387,7 +444,9 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
           `a response from the previous session repainted the reopened palette: ${JSON.stringify(visible)}`,
         );
         await page.keyboard.press("Escape");
-        console.log("ok   palette stale guard: close/reopen discards the in-flight response");
+        console.log(
+          "ok   palette stale guard: close/reopen discards the in-flight response",
+        );
       }
     } finally {
       await page.unroute("**/api/search*");
@@ -398,7 +457,10 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
     // close button, so the local pass is worth re-running there.
     {
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.goto(`${base}/PAL/issues`, { waitUntil: "load", timeout: 15_000 });
+      await page.goto(`${base}/PAL/issues`, {
+        waitUntil: "load",
+        timeout: 15_000,
+      });
       await page.waitForFunction(
         (n) => document.querySelectorAll("[data-issue-index]").length >= n,
         WARMUP_ISSUES,
@@ -416,20 +478,36 @@ export async function checkPaletteSearch(context: BrowserContext, base: string) 
         { timeout: 2_000 },
       );
       await page.waitForTimeout(700);
-      assert.equal(searchRequests - before, 0, "FTS must be skipped on mobile too");
       assert.equal(
-        await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+        searchRequests - before,
+        0,
+        "FTS must be skipped on mobile too",
+      );
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth > innerWidth,
+        ),
         false,
         "palette overflows horizontally at 390px",
       );
       await page.getByRole("button", { name: "Close search" }).click();
-      await page.getByPlaceholder(PLACEHOLDER).waitFor({ state: "detached", timeout: 5_000 });
+      await page
+        .getByPlaceholder(PLACEHOLDER)
+        .waitFor({ state: "detached", timeout: 5_000 });
       console.log("ok   palette local search on 390px, close button dismisses");
       await page.setViewportSize({ width: 1440, height: 900 });
     }
 
-    assert.equal(pageErrors.length, 0, `uncaught page errors:\n${pageErrors.join("\n")}`);
-    assert.equal(consoleErrors.length, 0, `console errors:\n${consoleErrors.join("\n")}`);
+    assert.equal(
+      pageErrors.length,
+      0,
+      `uncaught page errors:\n${pageErrors.join("\n")}`,
+    );
+    assert.equal(
+      consoleErrors.length,
+      0,
+      `console errors:\n${consoleErrors.join("\n")}`,
+    );
   } finally {
     await page.close();
   }

@@ -18,8 +18,13 @@ Object.assign(globalThis, {
 
 // Both modules read `window` at import time, so they load after the stub
 // above rather than through a hoisted static import.
-const { COMMENT_PAGE_SIZE, deleteComment, listComments, listPageComments, updateComment } =
-  await import("../src/lib/api");
+const {
+  COMMENT_PAGE_SIZE,
+  deleteComment,
+  listComments,
+  listPageComments,
+  updateComment,
+} = await import("../src/lib/api");
 const {
   ANCHOR_AUTO_PAGE_BUDGET,
   COMMENT_REFRESH_PAGE_BUDGET,
@@ -55,12 +60,18 @@ beforeAll(async () => {
     appType: "custom",
     resolve: {
       alias: {
-        dompurify: fileURLToPath(new URL("./dompurify.ssr.ts", import.meta.url)),
+        dompurify: fileURLToPath(
+          new URL("./dompurify.ssr.ts", import.meta.url),
+        ),
       },
     },
   });
-  ({ default: Comments } = await vite.ssrLoadModule("/src/lib/Comments.svelte"));
-  ({ default: ColorPicker } = await vite.ssrLoadModule("/src/lib/ColorPicker.svelte"));
+  ({ default: Comments } = await vite.ssrLoadModule(
+    "/src/lib/Comments.svelte",
+  ));
+  ({ default: ColorPicker } = await vite.ssrLoadModule(
+    "/src/lib/ColorPicker.svelte",
+  ));
   ({ render: renderComponent } = await vite.ssrLoadModule("svelte/server"));
 }, 60_000);
 
@@ -111,8 +122,12 @@ test("renders mutation actions only for the comment author", () => {
     onDelete: async () => false,
   };
 
-  const owner = renderComponent(Comments, { props: { ...props, currentUser: { id: 3 } } }).body;
-  const otherUser = renderComponent(Comments, { props: { ...props, currentUser: { id: 9 } } }).body;
+  const owner = renderComponent(Comments, {
+    props: { ...props, currentUser: { id: 3 } },
+  }).body;
+  const otherUser = renderComponent(Comments, {
+    props: { ...props, currentUser: { id: 9 } },
+  }).body;
 
   expect(owner).toContain("Comment 42 actions");
   expect(otherUser).not.toContain("Comment 42 actions");
@@ -139,16 +154,25 @@ test("renders unsafe stored label colors through the component fallback", () => 
 
 test("the thread revision changes for every way the rendered thread can change", () => {
   const first = comment({ id: 1, content: "one" });
-  const second = comment({ id: 2, content: "two", created_at: "2026-08-13 10:00:01" });
+  const second = comment({
+    id: 2,
+    content: "two",
+    created_at: "2026-08-13 10:00:01",
+  });
   const thread = [first, second];
   const base = commentThreadRevision(thread);
 
   // Same thread, rebuilt objects: same key, so an unrelated rerender does not
   // churn every body on screen.
-  expect(commentThreadRevision([comment({ id: 1, content: "one" }), { ...second }])).toBe(base);
+  expect(
+    commentThreadRevision([comment({ id: 1, content: "one" }), { ...second }]),
+  ).toBe(base);
 
   // Posted.
-  const posted = upsertComment(thread, comment({ id: 3, created_at: "2026-08-13 10:00:02" }));
+  const posted = upsertComment(
+    thread,
+    comment({ id: 3, created_at: "2026-08-13 10:00:02" }),
+  );
   expect(commentThreadRevision(posted)).not.toBe(base);
 
   // Paginated: an older page prepended.
@@ -159,15 +183,19 @@ test("the thread revision changes for every way the rendered thread can change",
 
   // Edited, including an edit that lands in the same second as its create, so
   // updated_at alone would not have moved.
-  const edited = upsertComment(thread, comment({ id: 1, content: "one, revised" }));
+  const edited = upsertComment(
+    thread,
+    comment({ id: 1, content: "one, revised" }),
+  );
   expect(commentThreadRevision(edited)).not.toBe(base);
 
   // Deleted.
   expect(commentThreadRevision(removeComment(thread, 2))).not.toBe(base);
 
   // Cheap to hold: a digest, not a second copy of the thread.
-  expect(commentThreadRevision([comment({ content: "x".repeat(50_000) })]).length)
-    .toBeLessThan(80);
+  expect(
+    commentThreadRevision([comment({ content: "x".repeat(50_000) })]).length,
+  ).toBeLessThan(80);
 });
 
 test("the thread revision tracks the mention roster the bodies render with", () => {
@@ -188,7 +216,10 @@ test("the thread revision tracks the mention roster the bodies render with", () 
   ).not.toBe(withRoster);
   // So does an added one.
   expect(
-    commentThreadRevision(thread, [...roster, { user_id: 4, username: "ada", display_name: "Ada" }]),
+    commentThreadRevision(thread, [
+      ...roster,
+      { user_id: 4, username: "ada", display_name: "Ada" },
+    ]),
   ).not.toBe(withRoster);
 
   // One revision for the whole thread, not one per comment: the roster and a
@@ -208,7 +239,11 @@ test("every comment body renders its diagrams inside the thread", () => {
     props: {
       comments: [
         comment({ id: 1, content: diagram("A-->B") }),
-        comment({ id: 2, content: diagram("C-->D"), created_at: "2026-08-13 10:00:01" }),
+        comment({
+          id: 2,
+          content: diagram("C-->D"),
+          created_at: "2026-08-13 10:00:01",
+        }),
       ],
       onSubmit: async () => null,
     },
@@ -221,7 +256,9 @@ test("every comment body renders its diagrams inside the thread", () => {
 
 test("marks comments edited only when the update timestamp changes", () => {
   expect(commentWasEdited(comment())).toBe(false);
-  expect(commentWasEdited(comment({ updated_at: "2026-08-13 10:05:00" }))).toBe(true);
+  expect(commentWasEdited(comment({ updated_at: "2026-08-13 10:05:00" }))).toBe(
+    true,
+  );
 });
 
 test("renders the original time and exact edited timestamp", () => {
@@ -258,9 +295,13 @@ test("folding a comment in by id is idempotent and keeps thread order", () => {
   // created_at has one-second resolution, so ties are ordinary. The id half
   // of the key decides them, exactly as the cursor does.
   const tie = comment({ id: 2, created_at: third.created_at });
-  expect(upsertComment([first, third], tie).map((c) => c.id)).toEqual([1, 2, 3]);
+  expect(upsertComment([first, third], tie).map((c) => c.id)).toEqual([
+    1, 2, 3,
+  ]);
   const laterTie = comment({ id: 9, created_at: third.created_at });
-  expect(upsertComment([first, third], laterTie).map((c) => c.id)).toEqual([1, 3, 9]);
+  expect(upsertComment([first, third], laterTie).map((c) => c.id)).toEqual([
+    1, 3, 9,
+  ]);
 
   // Applying the same result twice cannot duplicate a keyed row or move it,
   // which is how a mutation and a refresh carrying the same comment collide.
@@ -296,7 +337,9 @@ test("updates a comment through its typed API call", async () => {
   let call: { url: string; init?: RequestInit } | undefined;
   globalThis.fetch = (async (url, init) => {
     call = { url: String(url), init };
-    return new Response(JSON.stringify({ id: 42, content: "Revised" }), { status: 200 });
+    return new Response(JSON.stringify({ id: 42, content: "Revised" }), {
+      status: 200,
+    });
   }) as typeof fetch;
 
   const result = await updateComment(42, "Revised");
@@ -329,8 +372,9 @@ function stubThread(count: number) {
     // Ids descend from `count`; every row shares a timestamp, which is the
     // realistic case and the reason the cursor carries an id at all.
     const highest = beforeId === null ? count : Number(beforeId) - 1;
-    const rows = Array.from({ length: Math.max(0, Math.min(highest, limit)) }, (_, i) =>
-      comment({ id: highest - i, content: `comment ${highest - i}` }),
+    const rows = Array.from(
+      { length: Math.max(0, Math.min(highest, limit)) },
+      (_, i) => comment({ id: highest - i, content: `comment ${highest - i}` }),
     );
     return new Response(JSON.stringify(rows), { status: 200 });
   }) as typeof fetch;
@@ -352,7 +396,10 @@ test("requests the newest bounded comment page and shows it chronologically", as
     "comment 3",
   ]);
   expect(res.data.hasMore).toBe(false);
-  expect(res.data.nextCursor).toEqual({ created_at: "2026-08-13 10:00:00", id: 1 });
+  expect(res.data.nextCursor).toEqual({
+    created_at: "2026-08-13 10:00:00",
+    id: 1,
+  });
 });
 
 test("infers hasMore from the over-fetched row without ever showing it", async () => {
@@ -367,7 +414,9 @@ test("infers hasMore from the over-fetched row without ever showing it", async (
   // The newest comment is the last one rendered, never dropped for an
   // over-fetch row.
   expect(res.data.items.at(-1)?.content).toBe("comment 1000");
-  expect(res.data.items[0].content).toBe(`comment ${1000 - COMMENT_PAGE_SIZE + 1}`);
+  expect(res.data.items[0].content).toBe(
+    `comment ${1000 - COMMENT_PAGE_SIZE + 1}`,
+  );
   expect(res.data.nextCursor?.id).toBe(1000 - COMMENT_PAGE_SIZE + 1);
 });
 
@@ -379,7 +428,9 @@ test("trusts the server about what lies past a page the byte budget cut short", 
   const calls: string[] = [];
   globalThis.fetch = (async (url) => {
     calls.push(String(url));
-    const rows = [3, 2, 1].map((id) => comment({ id, content: `comment ${id}` }));
+    const rows = [3, 2, 1].map((id) =>
+      comment({ id, content: `comment ${id}` }),
+    );
     return new Response(JSON.stringify(rows), {
       status: 200,
       headers: {
@@ -398,7 +449,10 @@ test("trusts the server about what lies past a page the byte budget cut short", 
   expect(res.data.hasMore).toBe(true);
   // The next page is asked for by cursor, from the oldest row actually shown,
   // so nothing between the pages is skipped.
-  expect(res.data.nextCursor).toEqual({ created_at: "2026-08-13 10:00:00", id: 1 });
+  expect(res.data.nextCursor).toEqual({
+    created_at: "2026-08-13 10:00:00",
+    id: 1,
+  });
 });
 
 test("the cursor the client pages by is the row the server named", async () => {
@@ -509,7 +563,11 @@ test("sends the keyset cursor pair for older pages and never exceeds the cap", a
   const calls = stubThread(1000);
 
   await listComments(7, { created_at: "2026-08-13 10:00:00", id: 951 });
-  await listPageComments(9, { created_at: "2026-08-13 10:00:00", id: 400 }, 499);
+  await listPageComments(
+    9,
+    { created_at: "2026-08-13 10:00:00", id: 400 },
+    499,
+  );
 
   expect(calls).toEqual([
     "/api/issues/7/comments?order=desc&limit=51&before_created_at=2026-08-13+10%3A00%3A00&before_id=951",
@@ -535,8 +593,9 @@ test("pages back through a thread that is being written to, without duplicates",
     const limit = Number(params.get("limit"));
     const beforeId = params.get("before_id");
     const highest = beforeId === null ? total : Number(beforeId) - 1;
-    const rows = Array.from({ length: Math.max(0, Math.min(highest, limit)) }, (_, i) =>
-      comment({ id: highest - i, content: `comment ${highest - i}` }),
+    const rows = Array.from(
+      { length: Math.max(0, Math.min(highest, limit)) },
+      (_, i) => comment({ id: highest - i, content: `comment ${highest - i}` }),
     );
     // Someone posts a new comment between every request.
     total += 1;
@@ -557,7 +616,11 @@ test("pages back through a thread that is being written to, without duplicates",
 
 test("dedupes defensively when two pages overlap", () => {
   const onScreen = [comment({ id: 5 }), comment({ id: 6 })];
-  const overlapping = [comment({ id: 3 }), comment({ id: 4 }), comment({ id: 5 })];
+  const overlapping = [
+    comment({ id: 3 }),
+    comment({ id: 4 }),
+    comment({ id: 5 }),
+  ];
 
   const merged = prependOlderComments(onScreen, overlapping);
 
@@ -565,8 +628,12 @@ test("dedupes defensively when two pages overlap", () => {
   expect(new Set(merged.map((c) => c.id)).size).toBe(merged.length);
   // The copy already on screen wins, so an in-place edit is not undone by a
   // stale row arriving from an older page.
-  expect(prependOlderComments([comment({ id: 5, content: "edited" })], [comment({ id: 5 })])[0]
-    .content).toBe("edited");
+  expect(
+    prependOlderComments(
+      [comment({ id: 5, content: "edited" })],
+      [comment({ id: 5 })],
+    )[0].content,
+  ).toBe("edited");
 });
 
 test("olderCursor names the oldest loaded comment, or nothing when empty", () => {
@@ -590,9 +657,10 @@ function windowFetcher(rows: Comment[]) {
   const newestFirst = [...rows].sort((a, b) => b.id - a.id);
   const fetchPage = async (before: { id: number } | null, size: number) => {
     calls.push({ before: before?.id ?? null, size });
-    const eligible = before === null
-      ? newestFirst
-      : newestFirst.filter((row) => row.id < before.id);
+    const eligible =
+      before === null
+        ? newestFirst
+        : newestFirst.filter((row) => row.id < before.id);
     const transferred = eligible.slice(0, size + 1);
     const hasMore = transferred.length > size;
     const items = transferred.slice(0, size).slice().reverse();
@@ -601,14 +669,16 @@ function windowFetcher(rows: Comment[]) {
       data: {
         items,
         hasMore,
-        nextCursor: items.length > 0
-          ? { created_at: items[0].created_at, id: items[0].id }
-          : before,
+        nextCursor:
+          items.length > 0
+            ? { created_at: items[0].created_at, id: items[0].id }
+            : before,
       },
     };
   };
   const cursors = () => calls.map((call) => call.before);
-  const transferred = () => calls.reduce((total, call) => total + call.size + 1, 0);
+  const transferred = () =>
+    calls.reduce((total, call) => total + call.size + 1, 0);
   return { fetchPage, calls, cursors, transferred };
 }
 
@@ -625,7 +695,9 @@ test("a refresh reconciles every loaded page, not just the newest", async () => 
   expect(res.ok).toBe(true);
   if (!res.ok) return;
   expect(res.data.items.map((c) => c.id)).toEqual([1, 2, 4, 5, 6]);
-  expect(res.data.items.find((c) => c.id === 4)?.content).toBe("edited elsewhere");
+  expect(res.data.items.find((c) => c.id === 4)?.content).toBe(
+    "edited elsewhere",
+  );
   expect(res.data.hasOlder).toBe(false);
   // Walked back with cursors, never an offset, and stopped at the start.
   expect(cursors()).toEqual([null, 5, 2]);
@@ -758,8 +830,12 @@ test("refresh bounds are enforced against any caller argument", async () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.data.items.length).toBeGreaterThanOrEqual(1);
-    expect(res.data.items.length).toBeLessThanOrEqual(COMMENT_REFRESH_TRANSFER_LIMIT);
-    expect(res.data.items.length).toBeLessThanOrEqual(calls.length * COMMENT_PAGE_SIZE);
+    expect(res.data.items.length).toBeLessThanOrEqual(
+      COMMENT_REFRESH_TRANSFER_LIMIT,
+    );
+    expect(res.data.items.length).toBeLessThanOrEqual(
+      calls.length * COMMENT_PAGE_SIZE,
+    );
   }
 });
 
@@ -788,7 +864,10 @@ test("a capped refresh keeps the older rows the reader loaded by hand", () => {
   };
   const refreshed = {
     items: Array.from({ length: 500 }, (_, i) =>
-      comment({ id: 301 + i, content: 301 + i === 400 ? "edited elsewhere" : "body" }),
+      comment({
+        id: 301 + i,
+        content: 301 + i === 400 ? "edited elsewhere" : "body",
+      }),
     ),
     hasOlder: true,
   };
@@ -804,13 +883,18 @@ test("a capped refresh keeps the older rows the reader loaded by hand", () => {
     Array.from({ length: 800 }, (_, i) => i + 1),
   );
   // Inside the refreshed window the server's copy wins.
-  expect(merged.items.find((c) => c.id === 400)?.content).toBe("edited elsewhere");
+  expect(merged.items.find((c) => c.id === 400)?.content).toBe(
+    "edited elsewhere",
+  );
   // The oldest loaded row did not move, so what lies below it did not either.
   expect(merged.hasOlder).toBe(true);
 });
 
 test("reconciliation replaces the window when nothing older was preserved", () => {
-  const onScreen = { items: [comment({ id: 9 }), comment({ id: 10 })], hasOlder: true };
+  const onScreen = {
+    items: [comment({ id: 9 }), comment({ id: 10 })],
+    hasOlder: true,
+  };
 
   // The refresh reaches further back than anything on screen: it is the whole
   // truth, including its own hasOlder.
@@ -821,11 +905,18 @@ test("reconciliation replaces the window when nothing older was preserved", () =
   expect(reconcileCommentWindow(onScreen, deeper)).toEqual(deeper);
 
   // A comment deleted inside the refreshed window is gone, not resurrected.
-  const withoutNine = { items: [comment({ id: 8 }), comment({ id: 10 })], hasOlder: false };
-  expect(reconcileCommentWindow(onScreen, withoutNine).items.map((c) => c.id)).toEqual([8, 10]);
+  const withoutNine = {
+    items: [comment({ id: 8 }), comment({ id: 10 })],
+    hasOlder: false,
+  };
+  expect(
+    reconcileCommentWindow(onScreen, withoutNine).items.map((c) => c.id),
+  ).toEqual([8, 10]);
 
   // An empty refresh means an empty thread.
-  expect(reconcileCommentWindow(onScreen, { items: [], hasOlder: false })).toEqual({
+  expect(
+    reconcileCommentWindow(onScreen, { items: [], hasOlder: false }),
+  ).toEqual({
     items: [],
     hasOlder: false,
   });
@@ -838,7 +929,10 @@ test("reconciliation orders preserved rows by the same key the cursor uses", () 
     items: [comment({ id: 5 }), comment({ id: 6 }), comment({ id: 7 })],
     hasOlder: true,
   };
-  const refreshed = { items: [comment({ id: 6 }), comment({ id: 7 })], hasOlder: true };
+  const refreshed = {
+    items: [comment({ id: 6 }), comment({ id: 7 })],
+    hasOlder: true,
+  };
 
   const merged = reconcileCommentWindow(onScreen, refreshed);
 
@@ -862,21 +956,31 @@ test("only the newest comment-window operation may write", () => {
 
 test("a replacement window applies, re-reads, or stands down", () => {
   // Nothing moved: this read is still the newest truth about the thread.
-  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 4, 1)).toBe("apply");
+  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 4, 1)).toBe(
+    "apply",
+  );
 
   // A mutation landed while the read was in flight. Applying it would undo an
   // edit the user watched succeed; discarding it would leave the thread as
   // just that edit, which is the navigate-away-and-back-with-a-pending-write
   // case. Read again against the epoch the mutation established.
-  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 4, 2)).toBe("retry");
+  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 4, 2)).toBe(
+    "retry",
+  );
 
   // A newer window operation owns the list and is already producing a better
   // answer, so this one must not touch anything, epoch notwithstanding.
-  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 5, 1)).toBe("abandon");
-  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 5, 2)).toBe("abandon");
+  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 5, 1)).toBe(
+    "abandon",
+  );
+  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 2, 5, 2)).toBe(
+    "abandon",
+  );
 
   // The reader navigated. Route identity outranks everything else.
-  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 3, 4, 1)).toBe("abandon");
+  expect(commentWindowOutcome({ route: 2, op: 4, epoch: 1 }, 3, 4, 1)).toBe(
+    "abandon",
+  );
 
   // The re-read loop is bounded, so sustained churn stops rather than storms.
   expect(COMMENT_WINDOW_RETRY_LIMIT).toBeGreaterThanOrEqual(1);
@@ -884,7 +988,11 @@ test("a replacement window applies, re-reads, or stands down", () => {
 });
 
 test("a failed page aborts the refresh instead of showing a half window", async () => {
-  const failure = async () => ({ ok: false as const, error: "offline", status: null });
+  const failure = async () => ({
+    ok: false as const,
+    error: "offline",
+    status: null,
+  });
 
   const res = await loadCommentWindow(failure, 30, 10);
 
@@ -911,21 +1019,34 @@ test("a deep link to an unloaded comment asks for the previous page", () => {
   // Not loaded, older pages exist, nothing in flight: fetch.
   expect(anchorNeedsOlderPage("comment-812", onScreen, true, false)).toBe(true);
   // Already on screen: nothing to do.
-  expect(anchorNeedsOlderPage("comment-900", onScreen, true, false)).toBe(false);
+  expect(anchorNeedsOlderPage("comment-900", onScreen, true, false)).toBe(
+    false,
+  );
   // A request is already in flight, so do not stack a second one.
   expect(anchorNeedsOlderPage("comment-812", onScreen, true, true)).toBe(false);
   // The thread has no older pages, so the comment is simply gone. Stop.
-  expect(anchorNeedsOlderPage("comment-812", onScreen, false, false)).toBe(false);
+  expect(anchorNeedsOlderPage("comment-812", onScreen, false, false)).toBe(
+    false,
+  );
   // No target, or one that is not a comment anchor.
   expect(anchorNeedsOlderPage(null, onScreen, true, false)).toBe(false);
-  expect(anchorNeedsOlderPage("comment-abc", onScreen, true, false)).toBe(false);
+  expect(anchorNeedsOlderPage("comment-abc", onScreen, true, false)).toBe(
+    false,
+  );
   expect(anchorNeedsOlderPage("comment-0", onScreen, true, false)).toBe(false);
 });
 
 test("a failing anchor fetch is not retried until more comments arrive", () => {
   const onScreen = [comment({ id: 900 }), comment({ id: 901 })];
 
-  const first = nextAnchorAttempt("issue:LIF-9", "comment-812", onScreen, true, false, null);
+  const first = nextAnchorAttempt(
+    "issue:LIF-9",
+    "comment-812",
+    onScreen,
+    true,
+    false,
+    null,
+  );
   expect(first).toEqual({
     parent: "issue:LIF-9",
     target: "comment-812",
@@ -935,11 +1056,22 @@ test("a failing anchor fetch is not retried until more comments arrive", () => {
 
   // The request failed: same target, same thread length, so stop rather than
   // hammer the endpoint.
-  expect(nextAnchorAttempt("issue:LIF-9", "comment-812", onScreen, true, false, first)).toBeNull();
+  expect(
+    nextAnchorAttempt(
+      "issue:LIF-9",
+      "comment-812",
+      onScreen,
+      true,
+      false,
+      first,
+    ),
+  ).toBeNull();
 
   // A page landed, so there is new state to act on and the walk continues.
   const grown = [comment({ id: 850 }), ...onScreen];
-  expect(nextAnchorAttempt("issue:LIF-9", "comment-812", grown, true, false, first)).toEqual({
+  expect(
+    nextAnchorAttempt("issue:LIF-9", "comment-812", grown, true, false, first),
+  ).toEqual({
     parent: "issue:LIF-9",
     target: "comment-812",
     loaded: 3,
@@ -947,7 +1079,16 @@ test("a failing anchor fetch is not retried until more comments arrive", () => {
   });
 
   // A different deep link is a fresh walk even at the same length.
-  expect(nextAnchorAttempt("issue:LIF-9", "comment-700", onScreen, true, false, first)).toEqual({
+  expect(
+    nextAnchorAttempt(
+      "issue:LIF-9",
+      "comment-700",
+      onScreen,
+      true,
+      false,
+      first,
+    ),
+  ).toEqual({
     parent: "issue:LIF-9",
     target: "comment-700",
     loaded: 2,
@@ -971,53 +1112,107 @@ test("the automatic anchor walk stops after its page budget", () => {
   // A link to a comment that was deleted, or that lives thousands of rows
   // back, must not walk the whole thread a page at a time on page load.
   let loaded: Comment[] = [comment({ id: 900 })];
-  let attempt = nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, null);
+  let attempt = nextAnchorAttempt(
+    "issue:LIF-9",
+    "comment-1",
+    loaded,
+    true,
+    false,
+    null,
+  );
 
   for (let page = 1; page <= ANCHOR_AUTO_PAGE_BUDGET; page += 1) {
     expect(attempt?.pages).toBe(page);
     // The page lands, the comment is still not there, and the walk continues.
     loaded = [comment({ id: 900 - page }), ...loaded];
-    attempt = nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, attempt);
+    attempt = nextAnchorAttempt(
+      "issue:LIF-9",
+      "comment-1",
+      loaded,
+      true,
+      false,
+      attempt,
+    );
   }
 
   // Budget spent. Automatic loading stops even though older pages exist.
   expect(attempt).toBeNull();
-  expect(ANCHOR_AUTO_SEARCH_LIMIT).toBe(ANCHOR_AUTO_PAGE_BUDGET * COMMENT_PAGE_SIZE);
+  expect(ANCHOR_AUTO_SEARCH_LIMIT).toBe(
+    ANCHOR_AUTO_PAGE_BUDGET * COMMENT_PAGE_SIZE,
+  );
 });
 
 test("a manual load older does not hand the automatic walk a fresh budget", () => {
   let loaded: Comment[] = [comment({ id: 900 })];
-  let attempt = nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, null);
+  let attempt = nextAnchorAttempt(
+    "issue:LIF-9",
+    "comment-1",
+    loaded,
+    true,
+    false,
+    null,
+  );
   for (let page = 1; page <= ANCHOR_AUTO_PAGE_BUDGET; page += 1) {
     loaded = [comment({ id: 900 - page }), ...loaded];
-    attempt = nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, attempt);
+    attempt = nextAnchorAttempt(
+      "issue:LIF-9",
+      "comment-1",
+      loaded,
+      true,
+      false,
+      attempt,
+    );
   }
   expect(attempt).toBeNull();
 
   // The reader presses Load older by hand. The thread grows, which is exactly
   // the condition that used to release another request, but the budget for
   // this walk is spent and stays spent.
-  const spent = { parent: "issue:LIF-9", target: "comment-1", loaded: loaded.length, pages: ANCHOR_AUTO_PAGE_BUDGET };
+  const spent = {
+    parent: "issue:LIF-9",
+    target: "comment-1",
+    loaded: loaded.length,
+    pages: ANCHOR_AUTO_PAGE_BUDGET,
+  };
   for (let manual = 1; manual <= 3; manual += 1) {
     loaded = [comment({ id: 800 - manual }), ...loaded];
-    expect(nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, spent)).toBeNull();
+    expect(
+      nextAnchorAttempt("issue:LIF-9", "comment-1", loaded, true, false, spent),
+    ).toBeNull();
   }
 });
 
 test("navigating to another thread starts the anchor walk over", () => {
-  const spent = { parent: "issue:LIF-9", target: "comment-1", loaded: 2, pages: ANCHOR_AUTO_PAGE_BUDGET };
+  const spent = {
+    parent: "issue:LIF-9",
+    target: "comment-1",
+    loaded: 2,
+    pages: ANCHOR_AUTO_PAGE_BUDGET,
+  };
   // A different issue that happens to hold the same number of comments must
   // not inherit the abandoned walk's exhausted budget.
   const onScreen = [comment({ id: 900 }), comment({ id: 901 })];
 
-  expect(nextAnchorAttempt("issue:LIF-10", "comment-1", onScreen, true, false, spent)).toEqual({
+  expect(
+    nextAnchorAttempt(
+      "issue:LIF-10",
+      "comment-1",
+      onScreen,
+      true,
+      false,
+      spent,
+    ),
+  ).toEqual({
     parent: "issue:LIF-10",
     target: "comment-1",
     loaded: 2,
     pages: 1,
   });
   // And the page routes are keyed the same way.
-  expect(nextAnchorAttempt("page:17", "comment-1", onScreen, true, false, spent)?.pages).toBe(1);
+  expect(
+    nextAnchorAttempt("page:17", "comment-1", onScreen, true, false, spent)
+      ?.pages,
+  ).toBe(1);
 });
 
 test("deletes a comment through its typed API call", async () => {
@@ -1030,5 +1225,8 @@ test("deletes a comment through its typed API call", async () => {
   const result = await deleteComment(42);
 
   expect(result).toEqual({ ok: true, data: { deleted: true } });
-  expect(call).toMatchObject({ url: "/api/comments/42", init: { method: "DELETE" } });
+  expect(call).toMatchObject({
+    url: "/api/comments/42",
+    init: { method: "DELETE" },
+  });
 });

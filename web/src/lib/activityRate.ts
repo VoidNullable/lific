@@ -16,8 +16,12 @@ export type ActivityBaseline = {
   dayCount: number;
 };
 
-export function parseActivityBaseline(dayCount: unknown): ActivityBaseline | null {
-  return typeof dayCount === "number" && Number.isSafeInteger(dayCount) && dayCount >= 0
+export function parseActivityBaseline(
+  dayCount: unknown,
+): ActivityBaseline | null {
+  return typeof dayCount === "number" &&
+    Number.isSafeInteger(dayCount) &&
+    dayCount >= 0
     ? { dayCount }
     : null;
 }
@@ -97,8 +101,9 @@ export function createActivityRateCounter() {
       perMinute: sumSince(secondBuckets, now, 60_000),
       perHour: sumSince(minuteBuckets, now, 3_600_000),
       perDay:
-        (baselineAt !== null && now - baselineAt < DAY_MS ? baselineDayCount : 0) +
-        sumSince(minuteBuckets, now, DAY_MS),
+        (baselineAt !== null && now - baselineAt < DAY_MS
+          ? baselineDayCount
+          : 0) + sumSince(minuteBuckets, now, DAY_MS),
     };
   }
 
@@ -115,8 +120,10 @@ export function createActivityRateCounter() {
 export function selectActivityRate(counts: ActivityCounts): ActivityRate {
   // Two or more events select the shortest meaningful window; otherwise the
   // trailing day remains the conservative fallback.
-  if (counts.perSecond >= 2) return { value: counts.perSecond, unit: "updates/s" };
-  if (counts.perMinute >= 2) return { value: counts.perMinute, unit: "updates/min" };
+  if (counts.perSecond >= 2)
+    return { value: counts.perSecond, unit: "updates/s" };
+  if (counts.perMinute >= 2)
+    return { value: counts.perMinute, unit: "updates/min" };
   if (counts.perHour >= 2) return { value: counts.perHour, unit: "updates/hr" };
   return { value: counts.perDay, unit: "updates/day" };
 }

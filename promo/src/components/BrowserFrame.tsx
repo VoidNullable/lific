@@ -36,7 +36,12 @@ export const BrowserFrame: React.FC<{
         {["#f87171", "#fbbf24", "#4ade80"].map((c) => (
           <div
             key={c}
-            style={{ width: 13, height: 13, borderRadius: 7, backgroundColor: c }}
+            style={{
+              width: 13,
+              height: 13,
+              borderRadius: 7,
+              backgroundColor: c,
+            }}
           />
         ))}
         <div

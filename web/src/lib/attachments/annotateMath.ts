@@ -47,7 +47,12 @@ export function clampRect(rect: Rect, bounds: Size): Rect {
   const top = clamp(rect.y, 0, bounds.h);
   const right = clamp(rect.x + rect.w, 0, bounds.w);
   const bottom = clamp(rect.y + rect.h, 0, bounds.h);
-  return { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bottom - top) };
+  return {
+    x: left,
+    y: top,
+    w: Math.max(0, right - left),
+    h: Math.max(0, bottom - top),
+  };
 }
 
 /**
@@ -133,12 +138,21 @@ export function resizeCrop(
   const px = clamp(point.x, 0, bounds.w);
   const py = clamp(point.y, 0, bounds.h);
 
-  if (handle.includes("w")) left = clamp(Math.min(px, right - min), 0, bounds.w);
-  if (handle.includes("e")) right = clamp(Math.max(px, left + min), 0, bounds.w);
-  if (handle.includes("n")) top = clamp(Math.min(py, bottom - min), 0, bounds.h);
-  if (handle.includes("s")) bottom = clamp(Math.max(py, top + min), 0, bounds.h);
+  if (handle.includes("w"))
+    left = clamp(Math.min(px, right - min), 0, bounds.w);
+  if (handle.includes("e"))
+    right = clamp(Math.max(px, left + min), 0, bounds.w);
+  if (handle.includes("n"))
+    top = clamp(Math.min(py, bottom - min), 0, bounds.h);
+  if (handle.includes("s"))
+    bottom = clamp(Math.max(py, top + min), 0, bounds.h);
 
-  return { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bottom - top) };
+  return {
+    x: left,
+    y: top,
+    w: Math.max(0, right - left),
+    h: Math.max(0, bottom - top),
+  };
 }
 
 export interface UndoStack<T> {
@@ -185,7 +199,9 @@ export function createUndoStack<T>(limit = 60): UndoStack<T> {
 /** JPEG survives as JPEG (re-encoding a photo to PNG bloats it); everything
  *  else flattens to PNG, which is what a screenshot wants anyway. */
 export function outputMime(sourceMime: string): "image/jpeg" | "image/png" {
-  return sourceMime === "image/jpeg" || sourceMime === "image/jpg" ? "image/jpeg" : "image/png";
+  return sourceMime === "image/jpeg" || sourceMime === "image/jpg"
+    ? "image/jpeg"
+    : "image/png";
 }
 
 /** Rename the annotated result so the original and the marked-up copy are

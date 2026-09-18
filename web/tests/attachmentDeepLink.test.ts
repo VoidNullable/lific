@@ -8,7 +8,10 @@ import {
   routeWithLineTarget,
   routeWithoutLineTarget,
 } from "../src/lib/attachments/viewers/deepLink";
-import { viewerKindFor, extensionOf } from "../src/lib/attachments/viewers/kind";
+import {
+  viewerKindFor,
+  extensionOf,
+} from "../src/lib/attachments/viewers/kind";
 
 describe("line anchors", () => {
   test("formats single lines and ranges", () => {
@@ -149,19 +152,39 @@ describe("viewer dispatch", () => {
   });
 
   test("mime wins for media and images", () => {
-    expect(viewerKindFor({ filename: "clip.webm", mime: "video/webm" })).toBe("video");
-    expect(viewerKindFor({ filename: "clip.webm", mime: "audio/webm" })).toBe("audio");
-    expect(viewerKindFor({ filename: "shot.png", mime: "image/png" })).toBe("image");
-    expect(viewerKindFor({ filename: "voice.mp3", mime: "audio/mpeg" })).toBe("audio");
+    expect(viewerKindFor({ filename: "clip.webm", mime: "video/webm" })).toBe(
+      "video",
+    );
+    expect(viewerKindFor({ filename: "clip.webm", mime: "audio/webm" })).toBe(
+      "audio",
+    );
+    expect(viewerKindFor({ filename: "shot.png", mime: "image/png" })).toBe(
+      "image",
+    );
+    expect(viewerKindFor({ filename: "voice.mp3", mime: "audio/mpeg" })).toBe(
+      "audio",
+    );
   });
 
   test("extension decides what kind of text a text/plain file is", () => {
-    expect(viewerKindFor({ filename: "fix.patch", mime: "text/plain" })).toBe("diff");
-    expect(viewerKindFor({ filename: "fix.diff", mime: "text/plain" })).toBe("diff");
-    expect(viewerKindFor({ filename: "rows.csv", mime: "text/plain" })).toBe("csv");
-    expect(viewerKindFor({ filename: "rows.tsv", mime: "text/plain" })).toBe("csv");
-    expect(viewerKindFor({ filename: "payload.json", mime: "text/plain" })).toBe("json");
-    expect(viewerKindFor({ filename: "notes.txt", mime: "text/plain" })).toBe("text");
+    expect(viewerKindFor({ filename: "fix.patch", mime: "text/plain" })).toBe(
+      "diff",
+    );
+    expect(viewerKindFor({ filename: "fix.diff", mime: "text/plain" })).toBe(
+      "diff",
+    );
+    expect(viewerKindFor({ filename: "rows.csv", mime: "text/plain" })).toBe(
+      "csv",
+    );
+    expect(viewerKindFor({ filename: "rows.tsv", mime: "text/plain" })).toBe(
+      "csv",
+    );
+    expect(
+      viewerKindFor({ filename: "payload.json", mime: "text/plain" }),
+    ).toBe("json");
+    expect(viewerKindFor({ filename: "notes.txt", mime: "text/plain" })).toBe(
+      "text",
+    );
   });
 
   test("works with no mime at all, as markdown links do", () => {
@@ -176,7 +199,9 @@ describe("viewer dispatch", () => {
   });
 
   test("unknown types fall back to the download chip", () => {
-    expect(viewerKindFor({ filename: "report.pdf", mime: "application/pdf" })).toBe("file");
+    expect(
+      viewerKindFor({ filename: "report.pdf", mime: "application/pdf" }),
+    ).toBe("file");
     expect(viewerKindFor({ filename: "binary.bin" })).toBe("file");
     expect(viewerKindFor({ filename: "" })).toBe("file");
   });

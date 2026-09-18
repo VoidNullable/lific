@@ -17,14 +17,14 @@ New comment bodies are capped at 256 KiB after escaped-newline and tab normaliza
 
 Interactive reads return at most 500 comments within a 2 MiB budget. Byte limits can shorten any page, so follow continuation instructions rather than assuming a short page ends the thread. Exports use a separate exhaustive query with their own limits. Each surface has its own default:
 
-| Surface | Default page | Default order |
-| --- | --- | --- |
-| `GET /api/issues/{id}/comments`, `GET /api/pages/{id}/comments` | 50 | `asc` (oldest first) |
-| `list_comments` MCP tool | 50 | `desc` (newest first) |
-| `lific comment list` | 50 | `desc` (newest first) |
-| Web UI issue and page detail | 50 | newest page, shown oldest first |
+| Surface                                                         | Default page | Default order                   |
+| --------------------------------------------------------------- | ------------ | ------------------------------- |
+| `GET /api/issues/{id}/comments`, `GET /api/pages/{id}/comments` | 50           | `asc` (oldest first)            |
+| `list_comments` MCP tool                                        | 50           | `desc` (newest first)           |
+| `lific comment list`                                            | 50           | `desc` (newest first)           |
+| Web UI issue and page detail                                    | 50           | newest page, shown oldest first |
 
-The REST default is `asc` for compatibility, so the default REST page of a long thread is its *oldest* 50 comments and says nothing about the newest one. Ask for `order=desc` to read the current end of a conversation. The MCP tool, the CLI, and the web UI all default to newest first for exactly that reason.
+The REST default is `asc` for compatibility, so the default REST page of a long thread is its _oldest_ 50 comments and says nothing about the newest one. Ask for `order=desc` to read the current end of a conversation. The MCP tool, the CLI, and the web UI all default to newest first for exactly that reason.
 
 Page with `offset`. The MCP tool and the CLI print the offset of the next page when one exists; the web UI offers a "Load older comments" control.
 

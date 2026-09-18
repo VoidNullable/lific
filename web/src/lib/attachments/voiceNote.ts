@@ -56,7 +56,10 @@ function pad(n: number): string {
  * inside the same minute collide by name; the server assigns ids, so that is
  * cosmetic.
  */
-export function voiceNoteFilename(now: Date, mime = "audio/webm;codecs=opus"): string {
+export function voiceNoteFilename(
+  now: Date,
+  mime = "audio/webm;codecs=opus",
+): string {
   const stamp =
     `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
     `-${pad(now.getHours())}${pad(now.getMinutes())}`;

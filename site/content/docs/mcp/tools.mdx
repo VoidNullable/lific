@@ -13,32 +13,32 @@ When MCP is reached over HTTP and its origin is known, issue, project, page, pla
 
 Lists issues in a project with filters and paging.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `status` | `string` | No | Filter by status: backlog, todo, active, done, cancelled |
-| `priority` | `string` | No | Filter by priority: urgent, high, medium, low, none |
-| `module` | `string` | No | Filter by module name |
-| `label` | `string` | No | Filter by label name |
-| `workable` | `boolean` | No | Only return issues with no unresolved blockers |
-| `blocked` | `boolean` | No | Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7. |
-| `created_since` | `string` | No | Only issues created at/after this ISO date or datetime (e.g. 2026-06-01) |
-| `created_until` | `string` | No | Only issues created before this ISO date or datetime (exclusive) |
-| `updated_since` | `string` | No | Only issues updated at/after this ISO date or datetime. Handy for "what changed recently". |
-| `updated_until` | `string` | No | Only issues updated before this ISO date or datetime (exclusive) |
-| `order_by` | `string` | No | Sort column: sort_order (default), sequence, created, updated, or priority |
-| `order` | `string` | No | Sort direction: asc (default) or desc |
-| `limit` | `integer` | No | Max results (default 50) |
-| `offset` | `integer` | No | Zero-indexed offset for paging. The output appends a hint like "has_more: use offset=N" when more results exist. |
+| Name            | Type      | Required | Description                                                                                                                              |
+| --------------- | --------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `project`       | `string`  | Yes      | Project identifier (e.g. LIF)                                                                                                            |
+| `status`        | `string`  | No       | Filter by status: backlog, todo, active, done, cancelled                                                                                 |
+| `priority`      | `string`  | No       | Filter by priority: urgent, high, medium, low, none                                                                                      |
+| `module`        | `string`  | No       | Filter by module name                                                                                                                    |
+| `label`         | `string`  | No       | Filter by label name                                                                                                                     |
+| `workable`      | `boolean` | No       | Only return issues with no unresolved blockers                                                                                           |
+| `blocked`       | `boolean` | No       | Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7. |
+| `created_since` | `string`  | No       | Only issues created at/after this ISO date or datetime (e.g. 2026-06-01)                                                                 |
+| `created_until` | `string`  | No       | Only issues created before this ISO date or datetime (exclusive)                                                                         |
+| `updated_since` | `string`  | No       | Only issues updated at/after this ISO date or datetime. Handy for "what changed recently".                                               |
+| `updated_until` | `string`  | No       | Only issues updated before this ISO date or datetime (exclusive)                                                                         |
+| `order_by`      | `string`  | No       | Sort column: sort_order (default), sequence, created, updated, or priority                                                               |
+| `order`         | `string`  | No       | Sort direction: asc (default) or desc                                                                                                    |
+| `limit`         | `integer` | No       | Max results (default 50)                                                                                                                 |
+| `offset`        | `integer` | No       | Zero-indexed offset for paging. The output appends a hint like "has_more: use offset=N" when more results exist.                         |
 
 ### `get_issue`
 
 Gets an issue and its details.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier like PRO-42 or ADA-7 |
-| `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all` (most recent 500), or `none` (count only). |
+| Name               | Type     | Required | Description                                                                                 |
+| ------------------ | -------- | -------- | ------------------------------------------------------------------------------------------- |
+| `identifier`       | `string` | Yes      | Issue identifier like PRO-42 or ADA-7                                                       |
+| `include_comments` | `string` | No       | Comment trail: `recent` (default, last 3), `all` (most recent 500), or `none` (count only). |
 
 Relation lines include the related issue's current status, for example `Blocked by: LIF-42 (done)`.
 
@@ -48,41 +48,41 @@ The comment trail is bounded in every mode, and each mode reads only the rows it
 
 Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return the markdown content; projects return the exported file paths.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO) |
+| Name         | Type     | Required | Description                                                      |
+| ------------ | -------- | -------- | ---------------------------------------------------------------- |
+| `identifier` | `string` | Yes      | Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO) |
 
 ### `create_issue`
 
 Creates an issue in a project.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `title` | `string` | Yes | Issue title |
-| `description` | `string` | No | Markdown description |
-| `status` | `string` | No | Status: backlog, todo, active, done, cancelled (default: backlog) |
-| `priority` | `string` | No | Priority: urgent, high, medium, low, none (default: none) |
-| `module` | `string` | No | Module name to assign to |
-| `labels` | `string[]` | No | Label names to attach |
-| `start_date` | `string` | No | Start date (ISO 8601 date, e.g. 2026-06-01) |
-| `target_date` | `string` | No | Target/due date (ISO 8601 date, e.g. 2026-06-15) |
+| Name          | Type       | Required | Description                                                       |
+| ------------- | ---------- | -------- | ----------------------------------------------------------------- |
+| `project`     | `string`   | Yes      | Project identifier (e.g. LIF)                                     |
+| `title`       | `string`   | Yes      | Issue title                                                       |
+| `description` | `string`   | No       | Markdown description                                              |
+| `status`      | `string`   | No       | Status: backlog, todo, active, done, cancelled (default: backlog) |
+| `priority`    | `string`   | No       | Priority: urgent, high, medium, low, none (default: none)         |
+| `module`      | `string`   | No       | Module name to assign to                                          |
+| `labels`      | `string[]` | No       | Label names to attach                                             |
+| `start_date`  | `string`   | No       | Start date (ISO 8601 date, e.g. 2026-06-01)                       |
+| `target_date` | `string`   | No       | Target/due date (ISO 8601 date, e.g. 2026-06-15)                  |
 
 ### `update_issue`
 
 Updates the provided fields of an issue.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier like PRO-42 |
-| `title` | `string` | No | New title |
-| `description` | `string` | No | New description (markdown) |
-| `status` | `string` | No | New status: backlog, todo, active, done, cancelled |
-| `priority` | `string` | No | New priority: urgent, high, medium, low, none |
-| `module` | `string` | No | New module name. Omit to leave unchanged. Pass an empty string `""` to unassign the issue from its module. |
-| `labels` | `string[]` | No | Replace labels |
-| `start_date` | `string` | No | New start date (ISO 8601 date, e.g. 2026-06-01) |
-| `target_date` | `string` | No | New target/due date (ISO 8601 date, e.g. 2026-06-15) |
+| Name          | Type       | Required | Description                                                                                                |
+| ------------- | ---------- | -------- | ---------------------------------------------------------------------------------------------------------- |
+| `identifier`  | `string`   | Yes      | Issue identifier like PRO-42                                                                               |
+| `title`       | `string`   | No       | New title                                                                                                  |
+| `description` | `string`   | No       | New description (markdown)                                                                                 |
+| `status`      | `string`   | No       | New status: backlog, todo, active, done, cancelled                                                         |
+| `priority`    | `string`   | No       | New priority: urgent, high, medium, low, none                                                              |
+| `module`      | `string`   | No       | New module name. Omit to leave unchanged. Pass an empty string `""` to unassign the issue from its module. |
+| `labels`      | `string[]` | No       | Replace labels                                                                                             |
+| `start_date`  | `string`   | No       | New start date (ISO 8601 date, e.g. 2026-06-01)                                                            |
+| `target_date` | `string`   | No       | New target/due date (ISO 8601 date, e.g. 2026-06-15)                                                       |
 
 When a status change automatically completes or reopens linked plan steps, the response reports those step side effects.
 
@@ -90,28 +90,28 @@ When a status change automatically completes or reopens linked plan steps, the r
 
 Updates fields on matching issues in a project. At most 500 matching issues are selected; use narrower filters when more issues match.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `filter_status` | `string` | No | Only affect issues with this status: backlog, todo, active, done, cancelled |
-| `filter_priority` | `string` | No | Only affect issues with this priority: urgent, high, medium, low, none |
-| `filter_module` | `string` | No | Only affect issues in this module (by name) |
-| `filter_label` | `string` | No | Only affect issues carrying this label (by name) |
-| `set_status` | `string` | No | New status to set: backlog, todo, active, done, cancelled |
-| `set_priority` | `string` | No | New priority to set: urgent, high, medium, low, none |
-| `set_module` | `string` | No | New module (by name) to set |
+| Name              | Type     | Required | Description                                                                 |
+| ----------------- | -------- | -------- | --------------------------------------------------------------------------- |
+| `project`         | `string` | Yes      | Project identifier (e.g. LIF)                                               |
+| `filter_status`   | `string` | No       | Only affect issues with this status: backlog, todo, active, done, cancelled |
+| `filter_priority` | `string` | No       | Only affect issues with this priority: urgent, high, medium, low, none      |
+| `filter_module`   | `string` | No       | Only affect issues in this module (by name)                                 |
+| `filter_label`    | `string` | No       | Only affect issues carrying this label (by name)                            |
+| `set_status`      | `string` | No       | New status to set: backlog, todo, active, done, cancelled                   |
+| `set_priority`    | `string` | No       | New priority to set: urgent, high, medium, low, none                        |
+| `set_module`      | `string` | No       | New module (by name) to set                                                 |
 
 ### `edit_issue`
 
 Replaces an exact string in an issue title or description.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier like PRO-42 |
-| `old_string` | `string` | Yes | Exact string to find. Must be unique unless replace_all is true. |
-| `new_string` | `string` | Yes | Replacement string (must differ from old_string) |
-| `field` | `string` | No | Field to edit: `description` (default) or `title` |
-| `replace_all` | `boolean` | No | Replace all occurrences (default false) |
+| Name          | Type      | Required | Description                                                      |
+| ------------- | --------- | -------- | ---------------------------------------------------------------- |
+| `identifier`  | `string`  | Yes      | Issue identifier like PRO-42                                     |
+| `old_string`  | `string`  | Yes      | Exact string to find. Must be unique unless replace_all is true. |
+| `new_string`  | `string`  | Yes      | Replacement string (must differ from old_string)                 |
+| `field`       | `string`  | No       | Field to edit: `description` (default) or `title`                |
+| `replace_all` | `boolean` | No       | Replace all occurrences (default false)                          |
 
 When a description edit comes from a client that double-escapes JSON, literal `\n` and `\t` sequences in `old_string` and `new_string` become a real newline or tab before the exact string is matched.
 
@@ -119,31 +119,31 @@ When a description edit comes from a client that double-escapes JSON, literal `\
 
 Gets a board view of issues in a project.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `group_by` | `string` | No | Group by: status, priority, or module (default: status) |
-| `include_closed` | `boolean` | No | Include done and cancelled issues (default false). By default closed columns appear as count-only stubs. |
-| `max_per_column` | `integer` | No | Cap issues rendered per column. A `... +N more (use list_issues)` tail shows the remainder. |
+| Name             | Type      | Required | Description                                                                                              |
+| ---------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `project`        | `string`  | Yes      | Project identifier (e.g. LIF)                                                                            |
+| `group_by`       | `string`  | No       | Group by: status, priority, or module (default: status)                                                  |
+| `include_closed` | `boolean` | No       | Include done and cancelled issues (default false). By default closed columns appear as count-only stubs. |
+| `max_per_column` | `integer` | No       | Cap issues rendered per column. A `... +N more (use list_issues)` tail shows the remainder.              |
 
 ### `link_issues`
 
 Links two issues with a relation.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `source` | `string` | Yes | Source issue identifier (e.g. PRO-1) |
-| `target` | `string` | Yes | Target issue identifier (e.g. PRO-2) |
-| `relation_type` | `string` | Yes | Relation type: blocks, relates_to, or duplicate |
+| Name            | Type     | Required | Description                                     |
+| --------------- | -------- | -------- | ----------------------------------------------- |
+| `source`        | `string` | Yes      | Source issue identifier (e.g. PRO-1)            |
+| `target`        | `string` | Yes      | Target issue identifier (e.g. PRO-2)            |
+| `relation_type` | `string` | Yes      | Relation type: blocks, relates_to, or duplicate |
 
 ### `unlink_issues`
 
 Removes a relation between two issues.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `source` | `string` | Yes | First issue identifier |
-| `target` | `string` | Yes | Second issue identifier |
+| Name     | Type     | Required | Description             |
+| -------- | -------- | -------- | ----------------------- |
+| `source` | `string` | Yes      | First issue identifier  |
+| `target` | `string` | Yes      | Second issue identifier |
 
 ## Projects and resources
 
@@ -151,17 +151,17 @@ Removes a relation between two issues.
 
 Lists resources of a selected type.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `resource_type` | `string` | Yes | Resource type: project, module, label, folder, page, issue, or plan |
-| `project` | `string` | No | Project identifier (required for issues, plans, modules, labels, and folders; optional for pages and projects) |
-| `folder` | `string` | No | Folder name (for page filtering) |
-| `label` | `string` | No | Label name (for issue or page filtering) |
-| `status` | `string` | No | Status filter for pages (`draft`, `active`, `complete`, `archived`) or plans |
-| `order_by` | `string` | No | Sort column (for page lists): sort_order (default), title, status, created, or updated |
-| `order` | `string` | No | Sort direction (for page lists): asc (default) or desc |
-| `limit` | `integer` | No | Max results. Plans default to 50 and cap at 500; issues and pages default to 100. |
-| `offset` | `integer` | No | Zero-indexed offset for issue, page, or plan paging. Output appends a hint when more results exist. |
+| Name            | Type      | Required | Description                                                                                                    |
+| --------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `resource_type` | `string`  | Yes      | Resource type: project, module, label, folder, page, issue, or plan                                            |
+| `project`       | `string`  | No       | Project identifier (required for issues, plans, modules, labels, and folders; optional for pages and projects) |
+| `folder`        | `string`  | No       | Folder name (for page filtering)                                                                               |
+| `label`         | `string`  | No       | Label name (for issue or page filtering)                                                                       |
+| `status`        | `string`  | No       | Status filter for pages (`draft`, `active`, `complete`, `archived`) or plans                                   |
+| `order_by`      | `string`  | No       | Sort column (for page lists): sort_order (default), title, status, created, or updated                         |
+| `order`         | `string`  | No       | Sort direction (for page lists): asc (default) or desc                                                         |
+| `limit`         | `integer` | No       | Max results. Plans default to 50 and cap at 500; issues and pages default to 100.                              |
+| `offset`        | `integer` | No       | Zero-indexed offset for issue, page, or plan paging. Output appends a hint when more results exist.            |
 
 For `resource_type=project`, results include workable-issue count, active-plan count, and last-activity age, and are sorted by recent activity.
 
@@ -169,37 +169,37 @@ For `resource_type=project`, results include workable-issue count, active-plan c
 
 Creates or updates a project, module, label, or folder. Required fields depend on the action and resource type.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `resource_type` | `string` | Yes | Resource type: project, module, label, or folder |
-| `action` | `string` | Yes | Action: create or update |
-| `current_name` | `string` | Conditional | Required for module, label, or folder updates; not used for project updates. |
-| `project` | `string` | Conditional | Required for module/label/folder operations and for project updates; identifies the project (e.g. LIF). |
-| `name` | `string` | Conditional | Required when creating a project, module, label, or folder. |
-| `identifier` | `string` | Conditional | Required when creating a project (e.g. PRO). |
-| `description` | `string` | No | Description |
-| `status` | `string` | No | Status (for module: backlog, planned, active, paused, done, cancelled) |
-| `color` | `string` | No | Color hex (for label, e.g. #EF4444) |
-| `emoji` | `string` | No | Icon for project or module: `lucide:<Name>` or a literal emoji. Omit to leave unchanged. Pass an empty string `""` to clear it back to none. |
+| Name            | Type     | Required    | Description                                                                                                                                  |
+| --------------- | -------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resource_type` | `string` | Yes         | Resource type: project, module, label, or folder                                                                                             |
+| `action`        | `string` | Yes         | Action: create or update                                                                                                                     |
+| `current_name`  | `string` | Conditional | Required for module, label, or folder updates; not used for project updates.                                                                 |
+| `project`       | `string` | Conditional | Required for module/label/folder operations and for project updates; identifies the project (e.g. LIF).                                      |
+| `name`          | `string` | Conditional | Required when creating a project, module, label, or folder.                                                                                  |
+| `identifier`    | `string` | Conditional | Required when creating a project (e.g. PRO).                                                                                                 |
+| `description`   | `string` | No          | Description                                                                                                                                  |
+| `status`        | `string` | No          | Status (for module: backlog, planned, active, paused, done, cancelled)                                                                       |
+| `color`         | `string` | No          | Color hex (for label, e.g. #EF4444)                                                                                                          |
+| `emoji`         | `string` | No          | Icon for project or module: `lucide:<Name>` or a literal emoji. Omit to leave unchanged. Pass an empty string `""` to clear it back to none. |
 
 Required-field matrix:
 
-| Resource/action | Required fields | Notes |
-| --- | --- | --- |
-| project/create | `name`, `identifier` | `description` and `emoji` are optional. |
-| project/update | `project` | Supply only the fields to change; do not use `current_name`. |
-| module/label/folder/create | `project`, `name` | Resource-specific optional fields are applied when supplied. |
+| Resource/action            | Required fields           | Notes                                                                                        |
+| -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------- |
+| project/create             | `name`, `identifier`      | `description` and `emoji` are optional.                                                      |
+| project/update             | `project`                 | Supply only the fields to change; do not use `current_name`.                                 |
+| module/label/folder/create | `project`, `name`         | Resource-specific optional fields are applied when supplied.                                 |
 | module/label/folder/update | `project`, `current_name` | `name`, `description`, `status`, `color`, or `emoji` are applied according to resource type. |
 
 ### `delete`
 
 Deletes a resource selected by type and identifier.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `resource_type` | `string` | Yes | Type of thing to delete: issue, page, plan, project, module, label, or folder |
-| `identifier` | `string` | Yes | Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF-PLAN-2, LIF for projects, or name for modules/labels/folders) |
-| `project` | `string` | No | Project identifier (required for deleting module/label/folder by name) |
+| Name            | Type     | Required | Description                                                                                                  |
+| --------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `resource_type` | `string` | Yes      | Type of thing to delete: issue, page, plan, project, module, label, or folder                                |
+| `identifier`    | `string` | Yes      | Identifier or name (e.g. LIF-1, LIF-DOC-1, LIF-PLAN-2, LIF for projects, or name for modules/labels/folders) |
+| `project`       | `string` | No       | Project identifier (required for deleting module/label/folder by name)                                       |
 
 ## Pages
 
@@ -207,48 +207,48 @@ Deletes a resource selected by type and identifier.
 
 Gets a page and its content.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Page identifier like LIF-DOC-1 |
+| Name         | Type     | Required | Description                    |
+| ------------ | -------- | -------- | ------------------------------ |
+| `identifier` | `string` | Yes      | Page identifier like LIF-DOC-1 |
 
 ### `create_page`
 
 Creates a page in a project or at workspace level.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | No | Project identifier (e.g. LIF). Omit for workspace-level page. |
-| `title` | `string` | Yes | Page title |
-| `content` | `string` | No | Markdown content |
-| `folder` | `string` | No | Folder name to place page in |
-| `status` | `string` | No | Status: draft, active, complete, archived |
-| `labels` | `string[]` | No | Label names to attach. Labels are project-scoped, so this is ignored on workspace pages. |
+| Name      | Type       | Required | Description                                                                              |
+| --------- | ---------- | -------- | ---------------------------------------------------------------------------------------- |
+| `project` | `string`   | No       | Project identifier (e.g. LIF). Omit for workspace-level page.                            |
+| `title`   | `string`   | Yes      | Page title                                                                               |
+| `content` | `string`   | No       | Markdown content                                                                         |
+| `folder`  | `string`   | No       | Folder name to place page in                                                             |
+| `status`  | `string`   | No       | Status: draft, active, complete, archived                                                |
+| `labels`  | `string[]` | No       | Label names to attach. Labels are project-scoped, so this is ignored on workspace pages. |
 
 ### `update_page`
 
 Updates the provided fields of a page.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Page identifier like LIF-DOC-1 |
-| `title` | `string` | No | New title |
-| `content` | `string` | No | New markdown content |
-| `folder` | `string` | No | Move to folder name. Omit to leave unchanged. Pass an empty string `""` to move the page back to the project root. |
-| `status` | `string` | No | Status: draft, active, complete, archived |
-| `pinned` | `boolean` | No | Pin (true) or unpin (false) the page to the top of the page list. |
-| `labels` | `string[]` | No | Replace labels. Pass [] to clear all. Labels are project-scoped. |
+| Name         | Type       | Required | Description                                                                                                        |
+| ------------ | ---------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `identifier` | `string`   | Yes      | Page identifier like LIF-DOC-1                                                                                     |
+| `title`      | `string`   | No       | New title                                                                                                          |
+| `content`    | `string`   | No       | New markdown content                                                                                               |
+| `folder`     | `string`   | No       | Move to folder name. Omit to leave unchanged. Pass an empty string `""` to move the page back to the project root. |
+| `status`     | `string`   | No       | Status: draft, active, complete, archived                                                                          |
+| `pinned`     | `boolean`  | No       | Pin (true) or unpin (false) the page to the top of the page list.                                                  |
+| `labels`     | `string[]` | No       | Replace labels. Pass [] to clear all. Labels are project-scoped.                                                   |
 
 ### `edit_page`
 
 Replaces an exact string in a page title or content.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Page identifier like LIF-DOC-1 |
-| `old_string` | `string` | Yes | Exact string to find. Must be unique unless replace_all is true. |
-| `new_string` | `string` | Yes | Replacement string (must differ from old_string) |
-| `field` | `string` | No | Field to edit: `content` (default) or `title` |
-| `replace_all` | `boolean` | No | Replace all occurrences (default false) |
+| Name          | Type      | Required | Description                                                      |
+| ------------- | --------- | -------- | ---------------------------------------------------------------- |
+| `identifier`  | `string`  | Yes      | Page identifier like LIF-DOC-1                                   |
+| `old_string`  | `string`  | Yes      | Exact string to find. Must be unique unless replace_all is true. |
+| `new_string`  | `string`  | Yes      | Replacement string (must differ from old_string)                 |
+| `field`       | `string`  | No       | Field to edit: `content` (default) or `title`                    |
+| `replace_all` | `boolean` | No       | Replace all occurrences (default false)                          |
 
 ## Plans
 
@@ -256,67 +256,67 @@ Replaces an exact string in a page title or content.
 
 Creates a plan with an optional nested step tree.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `title` | `string` | Yes | Plan title, what this plan accomplishes |
-| `anchor_issue` | `string` | No | Optional anchor issue this plan decomposes (e.g. LIF-42). Closing it auto-archives the plan. |
-| `steps` | `PlanStep[]` | No | The full nested step tree, authored in one call. Each step: `{title, description?, issue?, done?, steps?[]}`. |
+| Name           | Type         | Required | Description                                                                                                   |
+| -------------- | ------------ | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `project`      | `string`     | Yes      | Project identifier (e.g. LIF)                                                                                 |
+| `title`        | `string`     | Yes      | Plan title, what this plan accomplishes                                                                       |
+| `anchor_issue` | `string`     | No       | Optional anchor issue this plan decomposes (e.g. LIF-42). Closing it auto-archives the plan.                  |
+| `steps`        | `PlanStep[]` | No       | The full nested step tree, authored in one call. Each step: `{title, description?, issue?, done?, steps?[]}`. |
 
 Each `PlanStep` object accepts the following fields.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `title` | `string` | Yes | Step title, short and imperative |
-| `description` | `string` | No | Optional longer notes/description for this step |
-| `issue` | `string` | No | Issue identifier this step mirrors (e.g. LIF-42). When set, the step auto-completes when the issue is closed, and marking the step done closes the issue. |
-| `done` | `boolean` | No | Pre-mark this step done (default false) |
-| `steps` | `PlanStep[]` | No | Nested child steps (any depth) |
+| Name          | Type         | Required | Description                                                                                                                                               |
+| ------------- | ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`       | `string`     | Yes      | Step title, short and imperative                                                                                                                          |
+| `description` | `string`     | No       | Optional longer notes/description for this step                                                                                                           |
+| `issue`       | `string`     | No       | Issue identifier this step mirrors (e.g. LIF-42). When set, the step auto-completes when the issue is closed, and marking the step done closes the issue. |
+| `done`        | `boolean`    | No       | Pre-mark this step done (default false)                                                                                                                   |
+| `steps`       | `PlanStep[]` | No       | Nested child steps (any depth)                                                                                                                            |
 
 ### `get_plan`
 
 Gets a plan and its full nested step tree.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `plan` | `string` | Yes | Plan identifier like LIF-PLAN-3 |
+| Name   | Type     | Required | Description                     |
+| ------ | -------- | -------- | ------------------------------- |
+| `plan` | `string` | Yes      | Plan identifier like LIF-PLAN-3 |
 
 ### `edit_plan_step`
 
 Replaces an exact string in a plan step title or description.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `plan` | `string` | Yes | Plan identifier like LIF-PLAN-3 |
-| `step_id` | `integer` | Yes | Numeric step id (the #N shown by get_plan) |
-| `old_string` | `string` | Yes | Exact string to find. Must be unique unless replace_all is true. |
-| `new_string` | `string` | Yes | Replacement string |
-| `field` | `string` | No | Field to edit: `description` (default) or `title` |
-| `replace_all` | `boolean` | No | Replace all occurrences (default false) |
+| Name          | Type      | Required | Description                                                      |
+| ------------- | --------- | -------- | ---------------------------------------------------------------- |
+| `plan`        | `string`  | Yes      | Plan identifier like LIF-PLAN-3                                  |
+| `step_id`     | `integer` | Yes      | Numeric step id (the #N shown by get_plan)                       |
+| `old_string`  | `string`  | Yes      | Exact string to find. Must be unique unless replace_all is true. |
+| `new_string`  | `string`  | Yes      | Replacement string                                               |
+| `field`       | `string`  | No       | Field to edit: `description` (default) or `title`                |
+| `replace_all` | `boolean` | No       | Replace all occurrences (default false)                          |
 
 ### `update_plan_step`
 
 Updates a plan or one of its steps.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `plan` | `string` | Yes | Plan identifier like LIF-PLAN-3 |
-| `step_id` | `integer` | No | Numeric step id to operate on (the #N from get_plan). Omit to operate on the plan itself (status/title/anchor). |
-| `title` | `string` | No | New title for the targeted step or plan |
-| `status` | `string` | No | Plan status: active, done, or archived (plan-level; omit step_id) |
-| `anchor_issue` | `string` | No | Set the plan's anchor issue (plan-level; omit step_id) |
-| `clear_anchor` | `boolean` | No | Clear the plan's anchor issue (plan-level; omit step_id) |
-| `done` | `boolean` | No | Mark the step done/undone. Marking done also closes a linked issue. The result text reports the side effect. |
-| `attach_issue` | `string` | No | Attach an issue (e.g. LIF-42) to the step |
-| `detach_issue` | `boolean` | No | Detach the step's issue reference |
-| `add_child_title` | `string` | No | Add a child step with this title under the targeted step |
-| `add_child_description` | `string` | No | Description for the added child step |
-| `add_child_issue` | `string` | No | Issue identifier for the added child step |
-| `move_parent_step_id` | `integer` | No | Reparent the step under this step id |
-| `move_to_root` | `boolean` | No | Reparent the step to the plan root |
-| `move_position` | `integer` | No | New position among siblings (0-based) |
-| `delete` | `boolean` | No | Delete the step and its whole subtree |
-| `echo_tree` | `boolean` | No | Echo the full re-rendered plan tree after the mutation (default false). Mutations return a compact receipt. Use get_plan to rehydrate. |
+| Name                    | Type      | Required | Description                                                                                                                            |
+| ----------------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `plan`                  | `string`  | Yes      | Plan identifier like LIF-PLAN-3                                                                                                        |
+| `step_id`               | `integer` | No       | Numeric step id to operate on (the #N from get_plan). Omit to operate on the plan itself (status/title/anchor).                        |
+| `title`                 | `string`  | No       | New title for the targeted step or plan                                                                                                |
+| `status`                | `string`  | No       | Plan status: active, done, or archived (plan-level; omit step_id)                                                                      |
+| `anchor_issue`          | `string`  | No       | Set the plan's anchor issue (plan-level; omit step_id)                                                                                 |
+| `clear_anchor`          | `boolean` | No       | Clear the plan's anchor issue (plan-level; omit step_id)                                                                               |
+| `done`                  | `boolean` | No       | Mark the step done/undone. Marking done also closes a linked issue. The result text reports the side effect.                           |
+| `attach_issue`          | `string`  | No       | Attach an issue (e.g. LIF-42) to the step                                                                                              |
+| `detach_issue`          | `boolean` | No       | Detach the step's issue reference                                                                                                      |
+| `add_child_title`       | `string`  | No       | Add a child step with this title under the targeted step                                                                               |
+| `add_child_description` | `string`  | No       | Description for the added child step                                                                                                   |
+| `add_child_issue`       | `string`  | No       | Issue identifier for the added child step                                                                                              |
+| `move_parent_step_id`   | `integer` | No       | Reparent the step under this step id                                                                                                   |
+| `move_to_root`          | `boolean` | No       | Reparent the step to the plan root                                                                                                     |
+| `move_position`         | `integer` | No       | New position among siblings (0-based)                                                                                                  |
+| `delete`                | `boolean` | No       | Delete the step and its whole subtree                                                                                                  |
+| `echo_tree`             | `boolean` | No       | Echo the full re-rendered plan tree after the mutation (default false). Mutations return a compact receipt. Use get_plan to rehydrate. |
 
 ## Comments
 
@@ -324,22 +324,22 @@ Updates a plan or one of its steps.
 
 Adds a comment to an issue, project page, or workspace page.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
-| `content` | `string` | Yes | Comment content (markdown). Rejected over 262144 bytes after normalization. |
+| Name         | Type     | Required | Description                                                                                                        |
+| ------------ | -------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `identifier` | `string` | Yes      | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
+| `content`    | `string` | Yes      | Comment content (markdown). Rejected over 262144 bytes after normalization.                                        |
 
 ### `list_comments`
 
 Lists one page of comments on an issue, project page, or workspace page. The defaults are chosen for an agent's context window: the 50 newest comments, not the whole thread.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1) |
-| `author` | `string` | No | Filter to comments by this author username |
-| `order` | `string` | No | Sort direction by creation time: desc (default, newest first) or asc (oldest first) |
-| `limit` | `integer` | No | Maximum comments to return (default 50, cap 500) |
-| `offset` | `integer` | No | Zero-indexed offset for paging in the requested order. The output appends a paging hint with the next offset when more comments exist. |
+| Name         | Type      | Required | Description                                                                                                                            |
+| ------------ | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `identifier` | `string`  | Yes      | Issue identifier (e.g. LIF-1), project page identifier (e.g. LIF-DOC-1), or workspace page identifier (e.g. DOC-1)                     |
+| `author`     | `string`  | No       | Filter to comments by this author username                                                                                             |
+| `order`      | `string`  | No       | Sort direction by creation time: desc (default, newest first) or asc (oldest first)                                                    |
+| `limit`      | `integer` | No       | Maximum comments to return (default 50, cap 500)                                                                                       |
+| `offset`     | `integer` | No       | Zero-indexed offset for paging in the requested order. The output appends a paging hint with the next offset when more comments exist. |
 
 When the page is smaller than the thread, the first line says how many of the total it is showing, and the last line gives the exact `offset` for the next call.
 
@@ -347,18 +347,18 @@ When the page is smaller than the thread, the first line says how many of the to
 
 Updates the content of a comment by its numeric identifier.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `comment_id` | `integer` | Yes | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
-| `content` | `string` | Yes | New comment content (markdown). Rejected over 262144 bytes after normalization, leaving the stored comment unchanged. |
+| Name         | Type      | Required | Description                                                                                                           |
+| ------------ | --------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `comment_id` | `integer` | Yes      | Comment id (the numeric handle returned by add_comment / shown by list_comments)                                      |
+| `content`    | `string`  | Yes      | New comment content (markdown). Rejected over 262144 bytes after normalization, leaving the stored comment unchanged. |
 
 ### `delete_comment`
 
 Deletes a comment by its numeric identifier.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `comment_id` | `integer` | Yes | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
+| Name         | Type      | Required | Description                                                                      |
+| ------------ | --------- | -------- | -------------------------------------------------------------------------------- |
+| `comment_id` | `integer` | Yes      | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
 
 ## Search and activity
 
@@ -366,25 +366,25 @@ Deletes a comment by its numeric identifier.
 
 Searches issues, pages, and comments by text.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `query` | `string` | Yes | Text to search for across issues, pages, and comments |
-| `project` | `string` | No | Filter to a specific project (e.g. LIF) |
-| `result_type` | `string` | No | Restrict results to one type: issue, page, or comment |
-| `sort` | `string` | No | Sort mode: relevance (default, best match first) or recent (most recently updated first) |
-| `mode` | `string` | No | Match mode: `fts` (default, tokenized full-text with prefix matching) or `literal` (case-insensitive substring, for punctuation-heavy needles like core:sodom, [RequiredSpecs], or --trace-plans that FTS tokenizes away). |
-| `limit` | `integer` | No | Max results (default 20) |
-| `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more results exist. |
+| Name          | Type      | Required | Description                                                                                                                                                                                                                |
+| ------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query`       | `string`  | Yes      | Text to search for across issues, pages, and comments                                                                                                                                                                      |
+| `project`     | `string`  | No       | Filter to a specific project (e.g. LIF)                                                                                                                                                                                    |
+| `result_type` | `string`  | No       | Restrict results to one type: issue, page, or comment                                                                                                                                                                      |
+| `sort`        | `string`  | No       | Sort mode: relevance (default, best match first) or recent (most recently updated first)                                                                                                                                   |
+| `mode`        | `string`  | No       | Match mode: `fts` (default, tokenized full-text with prefix matching) or `literal` (case-insensitive substring, for punctuation-heavy needles like core:sodom, [RequiredSpecs], or --trace-plans that FTS tokenizes away). |
+| `limit`       | `integer` | No       | Max results (default 20)                                                                                                                                                                                                   |
+| `offset`      | `integer` | No       | Zero-indexed offset for paging. Output appends a hint when more results exist.                                                                                                                                             |
 
 ### `get_activity`
 
 Reads audit history for an issue, page, or project.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `identifier` | `string` | Yes | What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed |
-| `limit` | `integer` | No | Max entries (default 30, cap 200) |
-| `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
+| Name         | Type      | Required | Description                                                                                                                                                     |
+| ------------ | --------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `identifier` | `string`  | Yes      | What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed |
+| `limit`      | `integer` | No       | Max entries (default 30, cap 200)                                                                                                                               |
+| `offset`     | `integer` | No       | Zero-indexed offset for paging. Output appends a hint when more entries exist.                                                                                  |
 
 Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).
 
@@ -396,12 +396,12 @@ Uploads share the REST limits exactly: 10 MiB per file, and a magic-byte allowli
 
 Uploads base64 file content and returns the attachment id plus a markdown snippet ready to embed (`![name](/api/attachments/12)` for images, `[name](/api/attachments/12)` otherwise). Pass at most one link target. An upload with no target stays unlinked and the orphan sweep collects it after 24 hours, so embed the snippet in an issue, page, or comment body before then.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `filename` | `string` | Yes | File name, e.g. crash-log.txt or screenshot.png |
-| `content_base64` | `string` | Yes | File bytes, base64 encoded (max 10 MiB decoded) |
-| `entity` | `string` | No | Link the upload to this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
-| `comment_id` | `integer` | No | Link the upload to this comment id instead of an issue or page |
+| Name             | Type      | Required | Description                                                                           |
+| ---------------- | --------- | -------- | ------------------------------------------------------------------------------------- |
+| `filename`       | `string`  | Yes      | File name, e.g. crash-log.txt or screenshot.png                                       |
+| `content_base64` | `string`  | Yes      | File bytes, base64 encoded (max 10 MiB decoded)                                       |
+| `entity`         | `string`  | No       | Link the upload to this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
+| `comment_id`     | `integer` | No       | Link the upload to this comment id instead of an issue or page                        |
 
 Linking to an issue or page requires Maintainer on its project, the same role editing it directly requires; linking to a comment requires Viewer. Uploading without a link target is open to any authenticated caller.
 
@@ -409,11 +409,11 @@ Linking to an issue or page requires Maintainer on its project, the same role ed
 
 Reads one attachment. Text is returned sliced by line with a header and a paging hint; PNG, JPEG, GIF and WebP come back as MCP image content a multimodal agent can look at; every other type returns a metadata summary and its download path rather than bytes.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `attachment_id` | `integer` | Yes | Attachment id, e.g. 12 for /api/attachments/12 |
-| `offset` | `integer` | No | Text only: zero-indexed first line to return |
-| `limit` | `integer` | No | Text only: max lines to return (default 200, cap 500) |
+| Name            | Type      | Required | Description                                           |
+| --------------- | --------- | -------- | ----------------------------------------------------- |
+| `attachment_id` | `integer` | Yes      | Attachment id, e.g. 12 for /api/attachments/12        |
+| `offset`        | `integer` | No       | Text only: zero-indexed first line to return          |
+| `limit`         | `integer` | No       | Text only: max lines to return (default 200, cap 500) |
 
 Reading requires Viewer on any project the attachment is linked into. An attachment that is not linked anywhere yet has no project to gate on, so only its uploader or an admin can read it.
 
@@ -421,9 +421,9 @@ Reading requires Viewer on any project the attachment is linked into. An attachm
 
 Lists attachments on one entity, or across a whole project. Each row carries the id, filename, type, size, uploader, creation time, and the entities it is linked to. Links in projects the caller cannot see are omitted.
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `entity` | `string` | No | List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
-| `project` | `string` | No | List every attachment in this project (e.g. LIF) instead |
+| Name      | Type     | Required | Description                                                                            |
+| --------- | -------- | -------- | -------------------------------------------------------------------------------------- |
+| `entity`  | `string` | No       | List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages) |
+| `project` | `string` | No       | List every attachment in this project (e.g. LIF) instead                               |
 
 Pass exactly one of `entity` or `project`. Either scope requires Viewer on the project involved.

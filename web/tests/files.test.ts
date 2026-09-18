@@ -21,7 +21,9 @@ function entity(partial: Partial<LinkedEntity> = {}): LinkedEntity {
   };
 }
 
-function attachment(partial: Partial<ProjectAttachment> = {}): ProjectAttachment {
+function attachment(
+  partial: Partial<ProjectAttachment> = {},
+): ProjectAttachment {
   return {
     id: 1,
     filename: "shot.png",
@@ -99,9 +101,9 @@ describe("linked entity chips", () => {
   });
 
   test("a comment lands on the entity its thread lives on", () => {
-    expect(entityHref("LIF", entity({ entity_type: "comment", entity_id: 5 }))).toBe(
-      "/LIF/issues/LIF-1",
-    );
+    expect(
+      entityHref("LIF", entity({ entity_type: "comment", entity_id: 5 })),
+    ).toBe("/LIF/issues/LIF-1");
     expect(
       entityHref(
         "LIF",

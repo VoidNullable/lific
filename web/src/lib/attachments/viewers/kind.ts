@@ -29,22 +29,99 @@ export function extensionOf(filename: string): string {
  *  mime is unhelpful (or absent). Source code, config, and logs: things a
  *  reader wants to skim inline rather than download. */
 const TEXT_EXTENSIONS = new Set([
-  "txt", "text", "log", "out", "err", "md", "markdown", "rst", "adoc",
-  "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "svelte", "vue",
-  "py", "rb", "go", "java", "kt", "kts", "swift", "c", "h", "cc", "cpp",
-  "hpp", "cs", "php", "pl", "lua", "r", "scala", "clj", "ex", "exs", "erl",
-  "hs", "ml", "zig", "nim", "dart", "sql", "graphql", "gql", "proto",
-  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
-  "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "properties",
-  "html", "htm", "xml", "svg", "css", "scss", "sass", "less",
-  "lock", "gitignore", "dockerfile", "makefile", "cmake", "gradle",
+  "txt",
+  "text",
+  "log",
+  "out",
+  "err",
+  "md",
+  "markdown",
+  "rst",
+  "adoc",
+  "rs",
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "svelte",
+  "vue",
+  "py",
+  "rb",
+  "go",
+  "java",
+  "kt",
+  "kts",
+  "swift",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "hpp",
+  "cs",
+  "php",
+  "pl",
+  "lua",
+  "r",
+  "scala",
+  "clj",
+  "ex",
+  "exs",
+  "erl",
+  "hs",
+  "ml",
+  "zig",
+  "nim",
+  "dart",
+  "sql",
+  "graphql",
+  "gql",
+  "proto",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "ps1",
+  "bat",
+  "cmd",
+  "yaml",
+  "yml",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+  "env",
+  "properties",
+  "html",
+  "htm",
+  "xml",
+  "svg",
+  "css",
+  "scss",
+  "sass",
+  "less",
+  "lock",
+  "gitignore",
+  "dockerfile",
+  "makefile",
+  "cmake",
+  "gradle",
 ]);
 
 /** Checked before the text list, which also claims `svg`: a link to an SVG is
  *  worth showing as a picture, and `<img src>` never executes script (see the
  *  is_inline_safe_mime note in src/storage.rs). */
 const IMAGE_EXTENSIONS = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "avif",
+  "bmp",
+  "ico",
+  "svg",
 ]);
 
 const DIFF_EXTENSIONS = new Set(["patch", "diff"]);
@@ -89,7 +166,12 @@ export function viewerKindFor(attachment: AttachmentLike): ViewerKind {
   if (mime.startsWith("text/")) return "text";
   if (TEXT_EXTENSIONS.has(ext)) return "text";
   // Extensionless conventional filenames (Makefile, Dockerfile, LICENSE).
-  if (ext === "" && /^(makefile|dockerfile|license|readme|changelog)$/i.test(attachment.filename ?? "")) {
+  if (
+    ext === "" &&
+    /^(makefile|dockerfile|license|readme|changelog)$/i.test(
+      attachment.filename ?? "",
+    )
+  ) {
     return "text";
   }
 

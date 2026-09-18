@@ -45,7 +45,8 @@ export function loadSeen(projectId: string): SeenMap | null {
     const raw = localStorage.getItem(seenKey(projectId));
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return null;
     const out: SeenMap = {};
     for (const [id, at] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof at === "string") out[id] = at;
@@ -93,7 +94,10 @@ export function withSeen(seen: SeenMap, issue: SeenIssue): SeenMap {
 /** Drop entries for issues the project no longer has, so a long-lived
  *  project's map can't grow without bound as issues are deleted. Returns
  *  the same reference when nothing is stale. */
-export function pruneSeen(seen: SeenMap, issues: readonly SeenIssue[]): SeenMap {
+export function pruneSeen(
+  seen: SeenMap,
+  issues: readonly SeenIssue[],
+): SeenMap {
   const live = new Set(issues.map((issue) => String(issue.id)));
   const keys = Object.keys(seen);
   if (keys.every((id) => live.has(id))) return seen;

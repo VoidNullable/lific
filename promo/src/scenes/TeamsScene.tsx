@@ -28,7 +28,8 @@ import { Cursor, Waypoint } from "../components/Cursor";
 // Winning copy from the adversarial writer/judge round (see LIF-260) —
 // visible for the entire scene.
 const COPY_HEADLINE = "Team-ready. Still yours alone.";
-const COPY_SUB = "Open signups, scope projects to members. Or stay solo on the same binary.";
+const COPY_SUB =
+  "Open signups, scope projects to members. Or stay solo on the same binary.";
 
 // ── App geometry (native CSS px), zoomed for phone legibility ─
 const APP_W = 1180;
@@ -100,7 +101,11 @@ const ConfirmPill: React.FC<{
 }> = ({ at, x, y, color, children, fadeAt }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const s = spring({ frame: frame - at, fps, config: { damping: 14, stiffness: 160, mass: 0.6 } });
+  const s = spring({
+    frame: frame - at,
+    fps,
+    config: { damping: 14, stiffness: 160, mass: 0.6 },
+  });
   const fade =
     fadeAt === undefined
       ? 1
@@ -143,7 +148,11 @@ export const TeamsScene: React.FC = () => {
   const { fps } = useVideoConfig();
 
   // Page springs in.
-  const frameIn = spring({ frame, fps, config: { damping: 200, stiffness: 90 } });
+  const frameIn = spring({
+    frame,
+    fps,
+    config: { damping: 200, stiffness: 90 },
+  });
 
   // ── Flip progress (0..1), springs kicked at each click ──────
   const signupsProgress = spring({
@@ -159,11 +168,16 @@ export const TeamsScene: React.FC = () => {
 
   // ── Camera: ONE zoom-in on the first click, held forever, with a
   // slow cinematic push-in afterwards. No zoom-out, no second punch. ──
-  const zoomIn = interpolate(frame, [SIGNUPS_CLICK, SIGNUPS_CLICK + 18], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
+  const zoomIn = interpolate(
+    frame,
+    [SIGNUPS_CLICK, SIGNUPS_CLICK + 18],
+    [0, 1],
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
   const drift = interpolate(frame, [SIGNUPS_CLICK + 18, 261], [0, 0.03], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
@@ -171,37 +185,62 @@ export const TeamsScene: React.FC = () => {
   const zoom = 1 + zoomIn * 0.16 + drift;
 
   // Page scroll between the two gestures (while zoomed).
-  const scrollY = interpolate(frame, [SCROLL_START, SCROLL_END], [0, SCROLL_MAX], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
+  const scrollY = interpolate(
+    frame,
+    [SCROLL_START, SCROLL_END],
+    [0, SCROLL_MAX],
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
 
   // Focal point pans from the first control to the second during the scroll.
-  const focalX = interpolate(frame, [SCROLL_START, SCROLL_END], [SIGNUPS_OPEN.x, AUTHZ_ENFORCED.x], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
-  const focalY = interpolate(frame, [SCROLL_START, SCROLL_END], [SIGNUPS_OPEN.y, AUTHZ_ENFORCED.y], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: ease,
-  });
+  const focalX = interpolate(
+    frame,
+    [SCROLL_START, SCROLL_END],
+    [SIGNUPS_OPEN.x, AUTHZ_ENFORCED.x],
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
+  const focalY = interpolate(
+    frame,
+    [SCROLL_START, SCROLL_END],
+    [SIGNUPS_OPEN.y, AUTHZ_ENFORCED.y],
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: ease,
+    },
+  );
 
   const focalDx = (APP_W / 2 - focalX) * (zoom - 1);
   const focalDy = (APP_H / 2 - focalY) * (zoom - 1);
 
   // Brief white flash on each click (4% overlay, 6 frames).
   const flash = Math.max(
-    interpolate(frame, [SIGNUPS_CLICK, SIGNUPS_CLICK + 3, SIGNUPS_CLICK + 8], [0, 0.05, 0], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    }),
-    interpolate(frame, [AUTHZ_CLICK, AUTHZ_CLICK + 3, AUTHZ_CLICK + 8], [0, 0.05, 0], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    }),
+    interpolate(
+      frame,
+      [SIGNUPS_CLICK, SIGNUPS_CLICK + 3, SIGNUPS_CLICK + 8],
+      [0, 0.05, 0],
+      {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      },
+    ),
+    interpolate(
+      frame,
+      [AUTHZ_CLICK, AUTHZ_CLICK + 3, AUTHZ_CLICK + 8],
+      [0, 0.05, 0],
+      {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      },
+    ),
   );
 
   // ── Cursor script: click "Open", then "Enforced" ────────────
@@ -233,7 +272,11 @@ export const TeamsScene: React.FC = () => {
             marginTop: -46,
           }}
         >
-          <BrowserFrame url="localhost:3456/#/settings/instance" width={APP_W} height={APP_H + 52}>
+          <BrowserFrame
+            url="localhost:3456/#/settings/instance"
+            width={APP_W}
+            height={APP_H + 52}
+          >
             <div style={{ position: "relative" }}>
               <InstanceSettingsPage
                 width={APP_W}
@@ -283,7 +326,9 @@ export const TeamsScene: React.FC = () => {
 
         {/* Click flash */}
         {flash > 0 ? (
-          <AbsoluteFill style={{ backgroundColor: `rgba(255,255,255,${flash})` }} />
+          <AbsoluteFill
+            style={{ backgroundColor: `rgba(255,255,255,${flash})` }}
+          />
         ) : null}
 
         {/* Scrim so the caption never fights the app frame's bottom edge */}
@@ -310,10 +355,24 @@ export const TeamsScene: React.FC = () => {
             textShadow: "0 4px 30px rgba(0,0,0,0.9)",
           }}
         >
-          <div style={{ fontSize: 44, fontWeight: 600, color: C.text, lineHeight: 1.1 }}>
+          <div
+            style={{
+              fontSize: 44,
+              fontWeight: 600,
+              color: C.text,
+              lineHeight: 1.1,
+            }}
+          >
             {COPY_HEADLINE}
           </div>
-          <div style={{ fontSize: 30, color: C.textMuted, marginTop: 6, lineHeight: 1.2 }}>
+          <div
+            style={{
+              fontSize: 30,
+              color: C.textMuted,
+              marginTop: 6,
+              lineHeight: 1.2,
+            }}
+          >
             {COPY_SUB}
           </div>
         </div>

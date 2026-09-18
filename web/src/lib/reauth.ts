@@ -13,7 +13,12 @@
  *  interceptor, no retry loop. Callers own their own UI and call these two
  *  functions.
  */
-import { refreshSession, saveSession, type AuthUser, type RequestResult } from "./api";
+import {
+  refreshSession,
+  saveSession,
+  type AuthUser,
+  type RequestResult,
+} from "./api";
 
 /** The exact server refusal this module answers. */
 export const RECENT_AUTH_ERROR = "recent authentication required";
@@ -23,7 +28,11 @@ export const RECENT_AUTH_ERROR = "recent authentication required";
  *  Matched on status *and* message. A 403 alone is not enough: these endpoints
  *  also answer 403 for "you are not an admin" and "authentication required",
  *  and prompting for a password would be nonsense for either. */
-export function needsReauth(result: { ok: false; error: string; status: number | null }): boolean {
+export function needsReauth(result: {
+  ok: false;
+  error: string;
+  status: number | null;
+}): boolean {
   return result.status === 403 && result.error === RECENT_AUTH_ERROR;
 }
 

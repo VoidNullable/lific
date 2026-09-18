@@ -47,7 +47,10 @@ const ROUTES: { path: string; expect?: string[] }[] = [
   { path: "/DEMO/issues", expect: ["Smoke issue"] },
   // Issue detail and page detail carry the comment-window logic that broke
   // in LIF-428; the comment body must actually render.
-  { path: "/DEMO/issues/DEMO-1", expect: ["Smoke issue", "First smoke comment"] },
+  {
+    path: "/DEMO/issues/DEMO-1",
+    expect: ["Smoke issue", "First smoke comment"],
+  },
   { path: "/DEMO/pages/1", expect: ["Smoke page"] },
   { path: "/DEMO/board", expect: ["Smoke issue"] },
   { path: "/DEMO/graph" },
@@ -93,11 +96,15 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
 
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
-    console.error(`no binary at ${BIN} — run \`cargo build\` first (or set LIFIC_BIN)`);
+    console.error(
+      `no binary at ${BIN} — run \`cargo build\` first (or set LIFIC_BIN)`,
+    );
     return 1;
   }
   if (!existsSync(join(ROOT, "web", "dist", "index.html"))) {
-    console.error("web/dist/index.html missing — run `bun run build` in web/ first");
+    console.error(
+      "web/dist/index.html missing — run `bun run build` in web/ first",
+    );
     return 1;
   }
 
@@ -112,41 +119,115 @@ async function main(): Promise<number> {
   try {
     // ---- seed ----------------------------------------------------------
     cli(config, db, [
-      "init", "--no-service", "--json",
-      "--name", "Smoke Operator",
-      "--auth-mode", "passwords",
-      "--password", PASSWORD,
+      "init",
+      "--no-service",
+      "--json",
+      "--name",
+      "Smoke Operator",
+      "--auth-mode",
+      "passwords",
+      "--password",
+      PASSWORD,
     ]);
-    cli(config, db, ["project", "create", "--name", "Demo", "--identifier", "DEMO", "--json"]);
-    const seedDb = new Database(db);
-    seedDb.run("UPDATE projects SET emoji = ? WHERE identifier = 'DEMO'", ["Lucide:Terminal"]);
-    seedDb.close();
     cli(config, db, [
-      "issue", "create", "--project", "DEMO",
-      "--title", "Smoke issue",
-      "--description", "Seeded by the smoke test",
+      "project",
+      "create",
+      "--name",
+      "Demo",
+      "--identifier",
+      "DEMO",
       "--json",
     ]);
-    cli(config, db, ["issue", "update", "DEMO-1", "--status", "active", "--json"]);
-    cli(config, db, ["issue", "create", "--project", "DEMO", "--title", "Second smoke issue", "--status", "active", "--json"]);
-    cli(config, db, ["issue", "create", "--project", "DEMO", "--title", "Excluded smoke issue", "--status", "backlog", "--json"]);
-    cli(config, db, ["comment", "add", "DEMO-1", "--content", "First smoke comment", "--json"]);
+    const seedDb = new Database(db);
+    seedDb.run("UPDATE projects SET emoji = ? WHERE identifier = 'DEMO'", [
+      "Lucide:Terminal",
+    ]);
+    seedDb.close();
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Smoke issue",
+      "--description",
+      "Seeded by the smoke test",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "update",
+      "DEMO-1",
+      "--status",
+      "active",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Second smoke issue",
+      "--status",
+      "active",
+      "--json",
+    ]);
+    cli(config, db, [
+      "issue",
+      "create",
+      "--project",
+      "DEMO",
+      "--title",
+      "Excluded smoke issue",
+      "--status",
+      "backlog",
+      "--json",
+    ]);
+    cli(config, db, [
+      "comment",
+      "add",
+      "DEMO-1",
+      "--content",
+      "First smoke comment",
+      "--json",
+    ]);
     const pageOut = JSON.parse(
       cli(config, db, [
-        "page", "create", "--project", "DEMO",
-        "--title", "Smoke page",
-        "--content", "# Smoke page\n\nSeeded body with a [link](https://example.com).",
+        "page",
+        "create",
+        "--project",
+        "DEMO",
+        "--title",
+        "Smoke page",
+        "--content",
+        "# Smoke page\n\nSeeded body with a [link](https://example.com).",
         "--json",
       ]),
     );
-    if (pageOut.id !== 1) throw new Error(`expected seeded page id 1, got ${pageOut.id}`);
+    if (pageOut.id !== 1)
+      throw new Error(`expected seeded page id 1, got ${pageOut.id}`);
 
     // ---- server --------------------------------------------------------
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
-    server = spawn(BIN, ["--config", config, "--db", db, "start", "--port", String(port), "--host", "127.0.0.1"], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    server = spawn(
+      BIN,
+      [
+        "--config",
+        config,
+        "--db",
+        db,
+        "start",
+        "--port",
+        String(port),
+        "--host",
+        "127.0.0.1",
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     server.stdout?.on("data", (d: Buffer) => (serverLog += d.toString()));
     server.stderr?.on("data", (d: Buffer) => (serverLog += d.toString()));
     await waitForServer(`${base}/`, 30_000);
@@ -168,7 +249,10 @@ async function main(): Promise<number> {
       await page.click("button[type=submit]");
       await page.waitForURL(`${base}/`, { timeout: 15_000 }).catch(() => {});
       if (!page.url().endsWith("/") || page.url().includes("/login")) {
-        const body = await page.locator("body").innerText().catch(() => "");
+        const body = await page
+          .locator("body")
+          .innerText()
+          .catch(() => "");
         throw new Error(
           `login did not land on the app (still at ${page.url()}). ` +
             `Page said: ${body.slice(0, 300)}${loginErrors.length ? ` | errors: ${loginErrors.join("; ")}` : ""}`,
@@ -187,10 +271,15 @@ async function main(): Promise<number> {
       page.on("pageerror", (err) => pageErrors.push(String(err)));
 
       try {
-        await page.goto(`${base}${route.path}`, { waitUntil: "load", timeout: 15_000 });
+        await page.goto(`${base}${route.path}`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
         // Let the SPA fetch and render; fall through on busy pages rather
         // than failing the route for a slow network-idle.
-        await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
 
         const bodyText = (await page.locator("body").innerText()) ?? "";
 
@@ -204,7 +293,9 @@ async function main(): Promise<number> {
         }
         for (const expected of route.expect ?? []) {
           if (!bodyText.includes(expected)) {
-            failures.push(`${route.path}: expected visible text ${JSON.stringify(expected)} not found`);
+            failures.push(
+              `${route.path}: expected visible text ${JSON.stringify(expected)} not found`,
+            );
           }
         }
         // The boundary's onerror logs "[lific] route render failed:" — but
@@ -220,7 +311,9 @@ async function main(): Promise<number> {
       } finally {
         await page.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(`${route.path}:`)) ? "FAIL" : "ok  "} ${route.path}`);
+      console.log(
+        `${failures.some((f) => f.startsWith(`${route.path}:`)) ? "FAIL" : "ok  "} ${route.path}`,
+      );
     }
 
     await checkDiscordFeedback(context, base);
@@ -239,14 +332,21 @@ async function main(): Promise<number> {
       const scenario = "deep-link back";
       const page = await context.newPage();
       try {
-        await page.goto(`${base}/DEMO/issues/DEMO-1`, { waitUntil: "load", timeout: 15_000 });
-        await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+        await page.goto(`${base}/DEMO/issues/DEMO-1`, {
+          waitUntil: "load",
+          timeout: 15_000,
+        });
+        await page
+          .waitForLoadState("networkidle", { timeout: 10_000 })
+          .catch(() => {});
         // goBack() resolves null for same-document (hash) navigations, so
         // the URL, not the response, is the assertion. The parent is the
         // issue list or the board, whichever layout localStorage last saw
         // (the board route above persisted "board" for this context).
         await page.goBack({ timeout: 5_000 }).catch(() => null);
-        await page.waitForURL(/#\/DEMO\/(issues|board)$/, { timeout: 5_000 }).catch(() => {});
+        await page
+          .waitForURL(/#\/DEMO\/(issues|board)$/, { timeout: 5_000 })
+          .catch(() => {});
         if (!/#\/DEMO\/(issues|board)$/.test(page.url())) {
           failures.push(
             `${scenario}: back from deep-linked issue landed on ${page.url()}, ` +
@@ -256,13 +356,19 @@ async function main(): Promise<number> {
           // The list still has to fetch after the hash flips; wait for the
           // seeded issue to actually render rather than sampling the body.
           const rendered = await page
-            .waitForFunction(() => document.body.innerText.includes("Smoke issue"), undefined, {
-              timeout: 10_000,
-            })
+            .waitForFunction(
+              () => document.body.innerText.includes("Smoke issue"),
+              undefined,
+              {
+                timeout: 10_000,
+              },
+            )
             .then(() => true)
             .catch(() => false);
           if (!rendered) {
-            failures.push(`${scenario}: issue list after back did not render the seeded issue`);
+            failures.push(
+              `${scenario}: issue list after back did not render the seeded issue`,
+            );
           }
         }
       } catch (e) {
@@ -270,10 +376,14 @@ async function main(): Promise<number> {
       } finally {
         await page.close();
       }
-      console.log(`${failures.some((f) => f.startsWith(`${scenario}:`)) ? "FAIL" : "ok  "} ${scenario} (LIF-434)`);
+      console.log(
+        `${failures.some((f) => f.startsWith(`${scenario}:`)) ? "FAIL" : "ok  "} ${scenario} (LIF-434)`,
+      );
     }
   } catch (e) {
-    failures.push(`harness error: ${e instanceof Error ? (e.stack ?? e.message) : e}`);
+    failures.push(
+      `harness error: ${e instanceof Error ? (e.stack ?? e.message) : e}`,
+    );
   } finally {
     if (browser) await browser.close().catch(() => {});
     if (server && !server.killed) {
@@ -286,7 +396,9 @@ async function main(): Promise<number> {
   }
 
   if (failures.length > 0) {
-    console.error(`\nsmoke test FAILED (${failures.length} problem${failures.length === 1 ? "" : "s"}):`);
+    console.error(
+      `\nsmoke test FAILED (${failures.length} problem${failures.length === 1 ? "" : "s"}):`,
+    );
     for (const f of failures) console.error(`  - ${f}`);
     if (serverLog.trim()) {
       console.error("\nlast server output:");

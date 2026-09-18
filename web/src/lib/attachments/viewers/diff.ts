@@ -51,7 +51,8 @@ function cleanPath(raw: string): string {
 function displayFor(oldPath: string, newPath: string): string {
   if (oldPath === "/dev/null") return newPath;
   if (newPath === "/dev/null") return oldPath;
-  if (oldPath && newPath && oldPath !== newPath) return `${oldPath} -> ${newPath}`;
+  if (oldPath && newPath && oldPath !== newPath)
+    return `${oldPath} -> ${newPath}`;
   return newPath || oldPath || "(unknown file)";
 }
 
@@ -127,7 +128,12 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
       file.newPath = cleanPath(lines[i + 1].slice(4));
       file.display = displayFor(file.oldPath, file.newPath);
       file.lines.push({ kind: "meta", text: line, oldNo: null, newNo: null });
-      file.lines.push({ kind: "meta", text: lines[i + 1], oldNo: null, newNo: null });
+      file.lines.push({
+        kind: "meta",
+        text: lines[i + 1],
+        oldNo: null,
+        newNo: null,
+      });
       i += 1;
       continue;
     }
@@ -147,8 +153,15 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
       continue;
     }
 
-    if (/^(index |old mode |new mode |new file mode |deleted file mode |similarity index |rename |copy |GIT binary patch|Binary files )/.test(line)) {
-      if (line.startsWith("GIT binary patch") || line.startsWith("Binary files")) {
+    if (
+      /^(index |old mode |new mode |new file mode |deleted file mode |similarity index |rename |copy |GIT binary patch|Binary files )/.test(
+        line,
+      )
+    ) {
+      if (
+        line.startsWith("GIT binary patch") ||
+        line.startsWith("Binary files")
+      ) {
         file.binary = true;
       }
       file.lines.push({ kind: "meta", text: line, oldNo: null, newNo: null });

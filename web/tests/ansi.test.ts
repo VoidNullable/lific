@@ -33,11 +33,21 @@ describe("ansi to spans", () => {
   });
 
   test("reads bright, 256-color and truecolor forms", () => {
-    expect(ansiLineToSpans(`${ESC}[91mx`).spans[0].style.fg).toBe("var(--ansi-bright-red)");
-    expect(ansiLineToSpans(`${ESC}[38;5;33mx`).spans[0].style.fg).toBe("#0087ff");
-    expect(ansiLineToSpans(`${ESC}[38;5;250mx`).spans[0].style.fg).toBe("#bcbcbc");
-    expect(ansiLineToSpans(`${ESC}[38;2;18;52;86mx`).spans[0].style.fg).toBe("#123456");
-    expect(ansiLineToSpans(`${ESC}[48;5;1mx`).spans[0].style.bg).toBe("var(--ansi-red)");
+    expect(ansiLineToSpans(`${ESC}[91mx`).spans[0].style.fg).toBe(
+      "var(--ansi-bright-red)",
+    );
+    expect(ansiLineToSpans(`${ESC}[38;5;33mx`).spans[0].style.fg).toBe(
+      "#0087ff",
+    );
+    expect(ansiLineToSpans(`${ESC}[38;5;250mx`).spans[0].style.fg).toBe(
+      "#bcbcbc",
+    );
+    expect(ansiLineToSpans(`${ESC}[38;2;18;52;86mx`).spans[0].style.fg).toBe(
+      "#123456",
+    );
+    expect(ansiLineToSpans(`${ESC}[48;5;1mx`).spans[0].style.bg).toBe(
+      "var(--ansi-red)",
+    );
   });
 
   test("an empty parameter list is a reset", () => {
@@ -83,9 +93,9 @@ describe("ansi helpers", () => {
     expect(ansiStyleToCss({ fg: "#ff0000", bold: true })).toBe(
       "color:#ff0000;font-weight:600",
     );
-    expect(ansiStyleToCss({ fg: "#ff0000", bg: "#000000", inverse: true })).toBe(
-      "color:#000000;background:#ff0000",
-    );
+    expect(
+      ansiStyleToCss({ fg: "#ff0000", bg: "#000000", inverse: true }),
+    ).toBe("color:#000000;background:#ff0000");
     expect(ansiStyleToCss({ underline: true, strike: true })).toBe(
       "text-decoration:underline line-through",
     );

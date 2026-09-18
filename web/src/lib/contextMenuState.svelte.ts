@@ -37,15 +37,21 @@ let returnTarget: HTMLElement | null = null;
 let fallbackTarget: HTMLElement | null = null;
 
 function restoreFocus(target: HTMLElement | null): boolean {
-  if (!target?.isConnected || target.closest('[inert]')) return false;
-  const temporaryTabindex = !target.hasAttribute('tabindex') && target.tabIndex < 0;
-  if (temporaryTabindex) target.setAttribute('tabindex', '-1');
+  if (!target?.isConnected || target.closest("[inert]")) return false;
+  const temporaryTabindex =
+    !target.hasAttribute("tabindex") && target.tabIndex < 0;
+  if (temporaryTabindex) target.setAttribute("tabindex", "-1");
   target.focus({ preventScroll: true });
   const focused = document.activeElement === target;
   if (temporaryTabindex) {
     // Removing tabindex while a generic row is focused blurs it in Chromium.
-    if (focused) target.addEventListener('blur', () => target.removeAttribute('tabindex'), { once: true });
-    else target.removeAttribute('tabindex');
+    if (focused)
+      target.addEventListener(
+        "blur",
+        () => target.removeAttribute("tabindex"),
+        { once: true },
+      );
+    else target.removeAttribute("tabindex");
   }
   return focused;
 }
@@ -57,10 +63,18 @@ function restoreFocus(target: HTMLElement | null): boolean {
  *  outside-right-click-closes listener, which lives on `window`, doesn't
  *  immediately close the menu this call just opened — see that
  *  component's contextmenu listener for the full reasoning). */
-export function openContextMenu(x: number, y: number, items: ContextMenuItem[], trigger?: HTMLElement | null): void {
-  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+export function openContextMenu(
+  x: number,
+  y: number,
+  items: ContextMenuItem[],
+  trigger?: HTMLElement | null,
+): void {
+  const active =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
   // Reopening from within the menu must not save an item that is about to disappear.
-  if (!active?.closest('[data-context-menu]')) fallbackTarget = active;
+  if (!active?.closest("[data-context-menu]")) fallbackTarget = active;
   returnTarget = trigger ?? fallbackTarget;
   contextMenuState.x = x;
   contextMenuState.y = y;
