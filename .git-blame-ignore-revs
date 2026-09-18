@@ -1,2 +1,5 @@
 # Repository-wide rustfmt pass from PR #44.
 c3723aff8b6b690b6888634ecc5776bbe6b48c28
+
+# Repository-wide formatter and Clippy baseline.
+b465d04f9850a0f736ebea7a159ca6bd5b5b942b
