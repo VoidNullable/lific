@@ -186,24 +186,12 @@ in
   # invocations are reproducible without relying on shell entry.
   profiles = {
     docs.module = {
+      # Documentation needs Bun, not the Rust toolchain or source hooks.
+      languages.rust.enable = lib.mkForce false;
+      treefmt.enable = lib.mkForce false;
+      git-hooks.hooks.clippy.enable = lib.mkForce false;
+      git-hooks.hooks.treefmt.enable = lib.mkForce false;
       languages.javascript.directory = "${repoRoot}/site";
-      tasks = {
-        "lific:install:site" = {
-          cwd = "${repoRoot}/site";
-          exec = lockedBunInstall "site";
-          before = [ "devenv:enterShell" ];
-        };
-        "lific:docs:build" = {
-          cwd = "${repoRoot}/site";
-          exec = "bun run build";
-          after = [ "lific:install:site" ];
-        };
-        "lific:docs:check" = {
-          cwd = repoRoot;
-          exec = "bun scripts/check-docs.mjs";
-          after = [ "lific:docs:build" ];
-        };
-      };
     };
     e2e.module = {
       languages.javascript.directory = "${repoRoot}/e2e";
@@ -216,20 +204,35 @@ in
           exec = lockedBunInstall "e2e";
           before = [ "devenv:enterShell" ];
         };
-        "lific:e2e" = {
+        # Backend suites share the debug binary; component suites only need
+        # Vite and Chromium. Keeping those groups separate lets the task graph
+        # run them concurrently without changing the test scripts.
+        "lific:e2e:app" = {
           cwd = "${repoRoot}/e2e";
           exec = ''
             bun run smoke
             bun run archives
             bun run public
-            bun run sidebar
-            bun run mobile-nav
-            bun run context-menu
           '';
           after = [
             "lific:debug-build"
             "lific:install:e2e"
           ];
+        };
+        "lific:e2e:components" = {
+          cwd = "${repoRoot}/e2e";
+          exec = ''
+            bun run sidebar
+            bun run mobile-nav
+            bun run context-menu
+          '';
+          after = [
+            "lific:web:build"
+            "lific:install:e2e"
+          ];
+        };
+        "lific:e2e" = {
+          after = [ "lific:e2e:app" "lific:e2e:components" ];
         };
       };
     };
@@ -361,7 +364,7 @@ in
     # Only attach the test graph when actually running `devenv test`.
     "devenv:git-hooks:run" = {
       before = lib.mkForce (lib.optionals config.devenv.isTesting [ "devenv:enterTest" ]);
-      after = [ "lific:web:build" ];
+      after = [ "lific:web:build" ] ++ lib.optionals config.devenv.isTesting [ "lific:web:check" ];
     };
     "devenv:treefmt:run" = {
       # Formatting is explicit in development and checked before CI builds.
@@ -375,6 +378,23 @@ in
       before = lib.optionals (config.languages.javascript.directory == "${repoRoot}/web") [
         "devenv:enterShell"
       ];
+    };
+    "lific:install:site" = {
+      cwd = "${repoRoot}/site";
+      exec = lockedBunInstall "site";
+      before = lib.optionals (config.languages.javascript.directory == "${repoRoot}/site") [
+        "devenv:enterShell"
+      ];
+    };
+    "lific:docs:build" = {
+      cwd = "${repoRoot}/site";
+      exec = "bun run build";
+      after = [ "lific:install:site" ];
+    };
+    "lific:docs:check" = {
+      cwd = repoRoot;
+      exec = "bun scripts/check-docs.mjs";
+      after = [ "lific:docs:build" ];
     };
     "lific:web:lock-check" = {
       cwd = "${repoRoot}/web";
@@ -392,12 +412,17 @@ in
     "lific:rust-test" = {
       cwd = repoRoot;
       exec = "cargo test --all-targets --locked";
-      after = [ "lific:web:build" ];
+      after = [ "lific:web:build" ] ++ lib.optionals config.devenv.isTesting [ "lific:web:check" ];
     };
     "lific:web:check" = {
       cwd = "${repoRoot}/web";
       exec = "bun run check && bun test";
       after = [ "lific:install:web" ] ++ lib.optionals config.devenv.isTesting [ "devenv:treefmt:run" ];
+    };
+    "lific:community-proxy:check" = {
+      cwd = repoRoot;
+      exec = "bun test ./deploy/community-redirect/worker.test.mjs";
+      after = [ "lific:install:web" ];
     };
     "lific:web:build" = {
       cwd = "${repoRoot}/web";
@@ -407,7 +432,7 @@ in
         # marker so the generated tree remains safe for native git hooks.
         touch dist/.gitkeep
       '';
-      after = [ "lific:web:check" ];
+      after = [ "lific:install:web" ];
     };
     "lific:release-test" = {
       cwd = repoRoot;
@@ -439,8 +464,10 @@ in
       before = lib.optionals config.devenv.isTesting [ "devenv:enterTest" ];
       after = [
         "lific:rust-test"
+        "lific:web:check"
         "lific:release-test"
         "lific:web:lock-check"
+        "lific:community-proxy:check"
         "lific:devenv-test"
       ];
     };

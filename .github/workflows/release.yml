@@ -93,6 +93,12 @@ jobs:
       - name: Install devenv
         shell: bash
         run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv shell -- {0}
+          prefix-key: devenv-${{ hashFiles('devenv.lock') }}
+          shared-key: linux-debug
+          save-if: false
       - name: Run the Devenv project test graph
         run: devenv test
 
@@ -155,6 +161,13 @@ jobs:
         if: matrix.devenv
         shell: bash
         run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        if: matrix.devenv
+        with:
+          cmd-format: devenv --profile ${{ matrix.profile }} shell -- {0}
+          prefix-key: devenv-${{ hashFiles('devenv.lock') }}
+          shared-key: release-${{ matrix.target }}
+          save-if: false
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.devenv }}
         with:

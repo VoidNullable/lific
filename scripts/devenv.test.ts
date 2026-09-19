@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
-function evaluate(attributes: string[], testing = false) {
+function evaluate(attributes: string[], testing = false, profile?: string) {
   const result = Bun.spawnSync(
     [
       "devenv",
       "--no-reload",
+      ...(profile ? ["--profile", profile] : []),
       "--option",
       "devenv.isTesting:bool",
       String(testing),
@@ -39,6 +40,49 @@ test("shell setup cannot select the project checks or rewrite formatting", () =>
   expect(install.execIfModified).toEqual([]);
   expect(install.before).toContain("devenv:enterShell");
   expect(config.tasks["lific:web:lock-update"].exec).toBe("bun2nix -o bun.nix");
+  expect(config.tasks["lific:web:build"].after).toEqual(["lific:install:web"]);
+  expect(config.tasks["lific:check"].after).toContain("lific:web:check");
+  expect(config.tasks["lific:install:site"].before).toEqual([]);
+  expect(config.tasks["lific:docs:check"].after).toContain("lific:docs:build");
+}, 360_000);
+
+test("e2e profile runs backend and component suites concurrently", () => {
+  const { tasks } = evaluate(["tasks"], false, "e2e");
+  expect(tasks["lific:e2e:app"].after).toEqual([
+    "lific:debug-build",
+    "lific:install:e2e",
+  ]);
+  expect(tasks["lific:e2e:components"].after).toEqual([
+    "lific:web:build",
+    "lific:install:e2e",
+  ]);
+  expect(tasks["lific:e2e"].after).toEqual([
+    "lific:e2e:app",
+    "lific:e2e:components",
+  ]);
+}, 360_000);
+
+test("docs profile omits Rust and source formatting tools", () => {
+  const config = evaluate(
+    [
+      "languages.rust.enable",
+      "treefmt.enable",
+      "git-hooks.hooks.clippy.enable",
+      "git-hooks.hooks.treefmt.enable",
+      "tasks",
+    ],
+    false,
+    "docs",
+  );
+  for (const key of [
+    "languages.rust.enable",
+    "treefmt.enable",
+    "git-hooks.hooks.clippy.enable",
+    "git-hooks.hooks.treefmt.enable",
+  ]) {
+    expect(config[key]).toBe(false);
+  }
+  expect(config.tasks["lific:install:site"].before).toContain("devenv:enterShell");
 }, 360_000);
 
 test("tests check formatting before compilation and use the native processes", () => {
@@ -47,6 +91,8 @@ test("tests check formatting before compilation and use the native processes", (
   expect(tasks["devenv:treefmt:run"].exec).toBe("treefmt --ci");
   expect(tasks["lific:web:check"].after).toContain("devenv:treefmt:run");
   expect(tasks["devenv:git-hooks:run"].after).toContain("lific:web:build");
+  expect(tasks["devenv:git-hooks:run"].after).toContain("lific:web:check");
+  expect(tasks["lific:rust-test"].after).toContain("lific:web:check");
   expect(processes.backend.exec).toContain("mktemp -d");
   expect(processes.frontend.after).toContain("devenv:processes:backend@ready");
   const watchedPaths = processes.backend.watch.paths;

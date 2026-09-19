@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,19 +24,45 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Restore the Devenv toolchain
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          # Source edits reuse the toolchain; Nix validates fallback store paths.
+          primary-key: devenv-tools-${{ runner.os }}-${{ runner.arch }}-check-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix') }}
+          restore-prefixes-first-match: devenv-tools-${{ runner.os }}-${{ runner.arch }}-check-
+          paths: ~/.cache/nix
+          # Keep rooted tools, discard temporary evaluation/build inputs before saving.
+          gc-max-store-size: 0
       - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
         with:
           name: devenv
       - name: Install devenv
         shell: bash
         run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
-      - name: Build and smoke-test the packaged release
-        shell: bash
-        run: |
-          package_path="$(devenv build outputs.lific | jq -r '."outputs.lific"')"
-          devenv shell -- bash scripts/verify-release-binary.sh "$package_path/bin/lific"
-      - name: Run the Devenv project test graph
-        run: devenv test
+      - name: Prepare the Devenv environment
+        run: devenv shell -- true
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv shell -- {0}
+          # The locked environment supplies Rust. Ignore unrelated host rustup
+          # toolchains when forming the key, and allow this PR to warm its cache.
+          prefix-key: devenv-rust-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          shared-key: linux-debug-check
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          cache-workspace-crates: true
+      - name: Run project, hook, and documentation checks
+        run: devenv tasks run lific:check devenv:git-hooks:run lific:docs:check
+      - name: Run the browser task graph
+        run: devenv --profile e2e tasks run lific:e2e
+      - name: Retain native-link browser traces on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-link-traces
+          path: /tmp/lific-native-links-*/trace.zip
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows:
     # Keep native Windows compilation, Clippy, and tests as a CI gate while
@@ -53,113 +86,3 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
-
-  windows-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: devenv
-      - name: Install devenv
-        shell: bash
-        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
-      - name: Cross-build the Windows release with devenv
-        shell: bash
-        run: devenv --profile release-windows tasks run lific:release:x86_64-pc-windows-gnu
-      - name: Verify Windows artifact structure
-        shell: bash
-        run: devenv --profile release-windows shell -- bash -euo pipefail -c "file target/x86_64-pc-windows-gnu/dist/lific.exe | grep -q 'PE32+'"
-
-  macos:
-    strategy:
-      matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: devenv
-      - name: Install devenv
-        shell: bash
-        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
-      - name: Build macOS release with devenv
-        shell: bash
-        run: devenv --profile release-darwin tasks run "lific:release:${{ matrix.target }}"
-
-  web:
-    # The frontend used to ship completely unverified: ci.yml only ran
-    # `mkdir -p web/dist` so rust-embed would compile, and nothing ever
-    # typechecked or built web/. That is how v2.7.0 released with every issue
-    # page broken (LIF-428/LIF-429). This job catches type and template
-    # errors; the `smoke` job below catches runtime-only breakage.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-        working-directory: web
-      - name: Typecheck (svelte-check + tsc)
-        run: bun run check
-        working-directory: web
-      - name: Frontend unit tests
-        run: bun test
-        working-directory: web
-      - name: Community proxy security tests
-        run: bun test ./deploy/community-redirect/worker.test.mjs
-      - name: Build
-        run: bun run build
-        working-directory: web
-
-
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: devenv
-      - name: Install devenv
-        shell: bash
-        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
-      - name: Run the browser task graph
-        run: devenv --profile e2e tasks run lific:e2e
-      - name: Retain native-link browser traces on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: native-link-traces
-          path: /tmp/lific-native-links-*/trace.zip
-          if-no-files-found: ignore
-          retention-days: 7
-
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
-        with:
-          name: devenv
-      - name: Install devenv
-        shell: bash
-        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
-      - name: Build and check documentation
-        run: devenv --profile docs tasks run lific:docs:check
