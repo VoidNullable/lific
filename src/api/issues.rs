@@ -84,11 +84,24 @@ pub(super) async fn update_issue(
     Extension(realtime): Extension<RealtimeHub>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
-    Json(mut input): Json<UpdateIssue>,
+    Json(input): Json<UpdateIssue>,
 ) -> Result<Json<Issue>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
-    let user = super::require_user(&identity)?;
+    commit_issue_update(&db, &realtime, &identity, id, input).map(Json)
+}
+
+/// The REST editor and commit-message hook share one authorized transaction
+/// and one post-commit publication. Query-layer side effects (audit, status
+/// transitions, attachment reconciliation and plan sync) cannot drift by caller.
+pub(super) fn commit_issue_update(
+    db: &DbPool,
+    realtime: &RealtimeHub,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    id: i64,
+    mut input: UpdateIssue,
+) -> Result<Issue, LificError> {
+    let user = super::require_user(identity)?;
     input.attachments = AttachmentActor::Authenticated(CommentActor::from(&user));
     let issue = db.transaction(|conn| {
         // Same recheck as the create path, against the issue's project as it
@@ -96,7 +109,7 @@ pub(super) async fn update_issue(
         // An update cannot move an issue between projects, so reading it here
         // and writing below are the same project by construction.
         let project_id = crate::db::queries::get_issue(conn, id)?.project_id;
-        authz::require_role_conn(conn, &identity, project_id, Role::Maintainer)?;
+        authz::require_role_conn(conn, identity, project_id, Role::Maintainer)?;
         // LIF-262: `update_issue` re-scans the stored description and
         // reconciles links in the same savepoint as the edit.
         crate::db::queries::update_issue(conn, id, &input)
@@ -108,7 +121,7 @@ pub(super) async fn update_issue(
         },
         issue.seq,
     );
-    Ok(Json(issue))
+    Ok(issue)
 }
 
 pub(super) async fn delete_issue_handler(

@@ -17,7 +17,7 @@
 //!
 //! ## Closing goes through the ordinary update path
 //!
-//! The write below is the body of `api::issues::update_issue`, not a bespoke
+//! The write delegates to `api::issues::commit_issue_update`, not a bespoke
 //! `UPDATE`: `queries::update_issue` inside `db.transaction`, with the
 //! Maintainer role re-read on the writing connection, attachment links
 //! reconciled, and the realtime event stamped with the row's new `seq`. That
@@ -35,7 +35,7 @@ use crate::authz;
 use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::issue_refs;
-use crate::realtime::{RealtimeEvent, RealtimeHub};
+use crate::realtime::RealtimeHub;
 
 use super::with_read;
 
@@ -118,35 +118,18 @@ fn close_issue(
     db: &DbPool,
     realtime: &RealtimeHub,
     identity: &Option<crate::resolve_caller::ResolvedIdentity>,
-    user: &AuthUser,
     id: i64,
 ) -> Result<(), LificError> {
-    let issue = db.transaction(|conn| {
-        // The gate ran on a read connection before this write began; re-run it
-        // here against the issue's project as it stands inside the
-        // transaction, so a revocation cannot slip in between.
-        let project_id = crate::db::queries::get_issue(conn, id)?.project_id;
-        authz::require_role_conn(conn, identity, project_id, Role::Maintainer)?;
-        crate::db::queries::update_issue(
-            conn,
-            id,
-            &UpdateIssue {
-                status: Some(Status::Done),
-                // LIF-409: closing an issue rewrites nothing, but it still
-                // re-scans the description, exactly as `PUT /api/issues/{id}`
-                // does, and with the pusher's reach rather than an inferred one.
-                attachments: AttachmentActor::Authenticated(CommentActor::from(user)),
-                ..Default::default()
-            },
-        )
-    })?;
-    realtime.send_with_seq(
-        RealtimeEvent::IssueUpdated {
-            project_id: issue.project_id,
-            issue_id: issue.id,
+    super::issues::commit_issue_update(
+        db,
+        realtime,
+        identity,
+        id,
+        UpdateIssue {
+            status: Some(Status::Done),
+            ..Default::default()
         },
-        issue.seq,
-    );
+    )?;
     Ok(())
 }
 
@@ -156,7 +139,7 @@ pub(super) async fn git_hook(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Json(input): Json<GitHookRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
-    let user = super::require_user(&identity)?;
+    super::require_user(&identity)?;
     let caller = identity
         .clone()
         .ok_or_else(|| LificError::Forbidden("authentication required".into()))?;
@@ -186,7 +169,7 @@ pub(super) async fn git_hook(
             Verdict::Skip(reason) => skips.push(skipped(&identifier, reason)),
             Verdict::Close(id) => {
                 if !input.dry_run {
-                    close_issue(&db, &realtime, &identity, &user, id)?;
+                    close_issue(&db, &realtime, &identity, id)?;
                 }
                 acted.push(identifier);
             }
@@ -310,6 +293,92 @@ mod tests {
         );
         let issue = parse_json(json_get(&test.app, &format!("/api/issues/{id}")).await).await;
         assert_eq!(issue["status"], "backlog", "dry run wrote to the database");
+    }
+
+    #[tokio::test]
+    async fn rest_and_hook_closes_share_transition_audit_and_realtime_consequences() {
+        let (db, admin, _, _, _, _, project_id) = setup_membership_test();
+        let realtime = crate::realtime::RealtimeHub::new();
+        let app = app_as_user_with_realtime(db.clone(), &admin, realtime.clone());
+        for through_hook in [false, true] {
+            let id = seed_issue(&app, project_id, "Shared close consequences").await;
+            let before = queries::get_issue(&db.read().unwrap(), id).unwrap();
+            let transitions = status_transition_count(&db, id);
+            let mut events = realtime.subscribe();
+            let response = if through_hook {
+                json_post(
+                    &app,
+                    "/api/git-hook",
+                    serde_json::json!({
+                        "messages": [format!("closes {}", before.identifier)]
+                    }),
+                )
+                .await
+            } else {
+                json_put(
+                    &app,
+                    &format!("/api/issues/{id}"),
+                    serde_json::json!({"status": "done"}),
+                )
+                .await
+            };
+            assert_eq!(response.status(), StatusCode::OK);
+            let after = queries::get_issue(&db.read().unwrap(), id).unwrap();
+            assert_eq!(after.status, Status::Done);
+            assert!(after.seq > before.seq);
+            assert_eq!(status_transition_count(&db, id), transitions + 1);
+            let audits: i64 = db.read().unwrap().query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE issue_id = ?1 AND field = 'status' AND new_value = 'done'",
+                [id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(audits, 1);
+            let message = events.try_recv().expect("committed close must publish");
+            let axum::extract::ws::Message::Text(text) = message.message else {
+                panic!("expected text event")
+            };
+            let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(event["type"], "issue.updated");
+            assert_eq!(event["issue_id"], id);
+            assert_eq!(event["seq"], after.seq);
+            assert!(events.try_recv().is_err(), "one update must publish once");
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_update_refuses_a_current_viewer_without_writing_or_publishing() {
+        let (db, _, lead, _, viewer, _, project_id) = setup_membership_test();
+        let app = app_as_user(db.clone(), &lead);
+        let id = seed_issue(&app, project_id, "Writer recheck").await;
+        let realtime = crate::realtime::RealtimeHub::new();
+        let mut events = realtime.subscribe();
+        let identity = Some(crate::resolve_caller::ResolvedIdentity {
+            user: AuthUser {
+                id: viewer.id,
+                username: viewer.username,
+                display_name: viewer.display_name,
+                is_admin: false,
+            },
+            transport: crate::actor::Transport::Web,
+        });
+        let before = queries::get_issue(&db.read().unwrap(), id).unwrap();
+        let result = crate::api::issues::commit_issue_update(
+            &db,
+            &realtime,
+            &identity,
+            id,
+            UpdateIssue {
+                status: Some(Status::Done),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(crate::error::LificError::Forbidden(_))
+        ));
+        let after = queries::get_issue(&db.read().unwrap(), id).unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.seq, before.seq);
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
