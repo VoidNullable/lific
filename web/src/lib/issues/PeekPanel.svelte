@@ -30,11 +30,13 @@
     listModules,
     listLabels,
     listComments,
+    getMyProjectRole,
     type Issue,
     type Module,
     type Label,
   } from "../api";
   import { safeLabelColor } from "../labelColors";
+  import { deriveCanEdit } from "../projectRole.svelte";
   import { peekState, closePeek, notifyPeekSync } from "./peek.svelte";
   import { sheetDrag } from "../actions/sheetdrag"; // swipe-down dismiss (mobile sheet)
   import { updateIssueWithUndo } from "./state.svelte";
@@ -71,6 +73,9 @@
   let commentCountIsPartial = $state(false);
   let loading = $state(false);
   let error = $state("");
+  let editable = $state(false);
+  let permissionsChecked = $state(false);
+  let permissionsFailed = $state(false);
 
   // Guards against a stale fetch (for a since-superseded identifier)
   // landing after a newer one — "opening another issue while open swaps
@@ -91,6 +96,9 @@
     const token = ++loadToken;
     loading = true;
     error = "";
+    editable = false;
+    permissionsChecked = false;
+    permissionsFailed = false;
     commentCount = null;
     commentCountIsPartial = false;
     const res = await resolveIssue(identifier);
@@ -106,12 +114,22 @@
     issue = res.data;
     loading = false;
 
-    const [modRes, lblRes, cmtRes] = await Promise.all([
+    // Peek can open an issue from another project without changing the route.
+    // Its capability must not borrow the background page's singleton role.
+    const [modRes, lblRes, cmtRes, roleRes] = await Promise.all([
       listModules(res.data.project_id),
       listLabels(res.data.project_id),
       listComments(res.data.id),
+      getMyProjectRole(res.data.project_id),
     ]);
     if (token !== loadToken) return;
+    permissionsChecked = true;
+    permissionsFailed = !roleRes.ok;
+    editable = roleRes.ok && deriveCanEdit({
+      role: roleRes.data.role,
+      enforced: roleRes.data.enforced,
+      isAdmin: roleRes.data.is_admin,
+    });
     if (modRes.ok) modules = modRes.data;
     if (lblRes.ok) labels = lblRes.data;
     if (cmtRes.ok) {
@@ -139,7 +157,7 @@
   let resyncTick = $state(0);
 
   async function applyMeta(patch: Record<string, unknown>, prevPatch: Record<string, unknown>) {
-    if (!issue) return;
+    if (!issue || !editable) return;
     const id = issue.id;
     const identifier = issue.identifier;
     await updateIssueWithUndo({
@@ -171,7 +189,7 @@
   // Title isn't a one-click-reversible value (it's free text), so it skips
   // the undo layer — mirrors IssueDetail's saveField for the same field.
   async function saveTitle(next: string) {
-    if (!issue) return;
+    if (!issue || !editable) return;
     const id = issue.id;
     const res = await updateIssue(id, { title: next });
     if (res.ok) {
@@ -361,7 +379,12 @@
           <p class="text-caption text-[var(--text-faint)]">{error}</p>
         </div>
       {:else if issue}
-        <InlineTitle value={issue.title} size="md" onSave={saveTitle} />
+        <InlineTitle value={issue.title} {editable} size="md" onSave={saveTitle} />
+        {#if !editable}
+          <p class="text-caption text-[var(--text-faint)] mb-3">
+            {permissionsFailed ? "Editing permissions could not be checked." : permissionsChecked ? "Read-only access" : "Checking editing permissions..."}
+          </p>
+        {/if}
 
         <!-- Status / priority / module. Each Select is keyed by its
              current server value so a failed mutation (updateIssueWithUndo
@@ -370,6 +393,7 @@
              optimistic value nothing ever confirmed — same fix
              ProjectMembers.svelte uses for its role picker. -->
         <div class="flex flex-wrap items-center gap-2 mb-4">
+          {#if editable}
           {#key `${issue.status}:${resyncTick}`}
             <Select
               options={statusOptions}
@@ -447,6 +471,24 @@
                 {/snippet}
               </Select>
             {/key}
+          {/if}
+          {:else}
+            <span class="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2 py-1 text-body-sm text-[var(--text)] cursor-default">
+              <StatusIcon status={issue.status} size={13} />
+              {statusOptions.find((option) => option.value === issue?.status)?.label ?? issue.status}
+            </span>
+            <span class="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2 py-1 text-body-sm text-[var(--text)] cursor-default">
+              <PriorityIcon priority={issue.priority} size={13} />
+              {priorityOptions.find((option) => option.value === issue?.priority)?.label ?? issue.priority}
+            </span>
+            <span class="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] px-2 py-1 text-body-sm text-[var(--text)] cursor-default">
+              {#if moduleEmoji(issue.module_id)}
+                <ProjectIcon value={moduleEmoji(issue.module_id)} size={13} />
+              {:else}
+                <Layers size={13} class="text-[var(--text-faint)]" />
+              {/if}
+              {issue.module_id == null ? "No module" : modules.find((module) => module.id === issue?.module_id)?.name ?? `Module #${issue.module_id}`}
+            </span>
           {/if}
         </div>
 

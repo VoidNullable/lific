@@ -124,7 +124,7 @@ jobs:
         run: bun run public
         working-directory: e2e
       - name: Sidebar, mobile navigation, and context menu contracts
-        run: bun run sidebar && bun run mobile-nav && bun run context-menu
+        run: bun run sidebar && bun run mobile-nav && bun run context-menu && bun run peek-permissions
         working-directory: e2e
       - name: Retain native-link browser traces on failure
         if: failure()

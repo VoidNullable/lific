@@ -8,6 +8,7 @@
     "archives": "bun project-archives.ts",
     "mobile-nav": "bun mobile-nav.ts",
     "context-menu": "bun context-menu.ts",
+    "peek-permissions": "bun peek-permissions.ts",
     "sidebar": "bun sidebar.ts"
   },
   "devDependencies": {
