@@ -13,8 +13,8 @@ use std::path::Path;
 use std::time::SystemTime;
 
 fn main() {
-    // `web/dist/.gitkeep` keeps the embed directory present in clean checkouts.
-    // Do not create it here: builds must not mutate the source tree.
+    // The frontend must be built before this crate; never create web/dist here.
+    // Builds must not mutate the source tree.
     let dist = Path::new("web/dist");
 
     // The built bundle: changing it must trigger a re-embed.
@@ -28,13 +28,18 @@ fn main() {
 
     match (newest_mtime(dist), newest_mtime(src)) {
         (None, _) => {
+            if matches!(std::env::var("PROFILE").as_deref(), Ok("release" | "dist")) {
+                panic!(
+                    "web/dist is missing or empty; build the frontend first with `devenv tasks run lific:web:build`"
+                );
+            }
             println!(
-                "cargo:warning=web/dist is missing or empty; the binary will ship without the web UI (run `bun run build` in web/)"
+                "cargo:warning=web/dist is missing or empty; development builds use the frontend dev server (run `devenv tasks run lific:web:build` for an embedded UI)"
             );
         }
         (Some(dist_mtime), Some(src_mtime)) if src_mtime > dist_mtime => {
             println!(
-                "cargo:warning=web/src is newer than web/dist; the embedded frontend is stale (run `bun run build` in web/)"
+                "cargo:warning=web/src is newer than web/dist; the embedded frontend is stale (run `devenv tasks run lific:web:build`)"
             );
         }
         _ => {}

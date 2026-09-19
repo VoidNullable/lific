@@ -13,28 +13,29 @@ Welcome to your Remotion project!
 
 ## Commands
 
-**Install Dependencies**
+Approve the checkout and enter the promo environment:
 
 ```console
-npm i
+devenv allow
+devenv --profile promo shell
 ```
 
-**Start Preview**
+From that shell, start the preview:
 
 ```console
-npm run dev
+bun run dev
 ```
 
-**Render video**
+Run the profile's checks from a regular shell with:
 
 ```console
-npx remotion render
+devenv --profile promo tasks run lific:promo:check
 ```
 
-**Upgrade Remotion**
+Render the video:
 
 ```console
-npx remotion upgrade
+devenv --profile promo tasks run lific:promo:render
 ```
 
 ## Docs
