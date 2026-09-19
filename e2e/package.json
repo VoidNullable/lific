@@ -9,6 +9,7 @@
     "mobile-nav": "bun mobile-nav.ts",
     "context-menu": "bun context-menu.ts",
     "peek-permissions": "bun peek-permissions.ts",
+    "issue-topbar": "bun issue-topbar.ts",
     "sidebar": "bun sidebar.ts"
   },
   "devDependencies": {

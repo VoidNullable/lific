@@ -131,7 +131,7 @@
     ];
   });
 
-  // ── LIF-350 follow-up: sub-`sm` overflow group keyboard/AT behaviour ──
+  // Compact controls extend through small tablets (LIF-400), below `md`.
   // The panel is a disclosure region, not a menu. Its contents are composite
   // widgets in their own right (SavedViews owns a menu with rename/create
   // forms; Sort and Display each own their own popover), and `role="menu"`
@@ -148,7 +148,7 @@
   let overflowPanelEl = $state<HTMLDivElement | null>(null);
   let overflowWasOpen = false;
 
-  /** True only while the sub-`sm` layout is live: at `sm` and up the trigger
+  /** True only while the sub-`md` layout is live: at `md` and up the trigger
    *  is `hidden`, so there is nothing to focus into or back out of. */
   function overflowIsMobile(): boolean {
     return !!overflowTriggerEl && overflowTriggerEl.offsetParent !== null;
@@ -185,10 +185,10 @@
   });
 </script>
 
-<div class="relative flex flex-wrap items-center gap-2 sm:gap-3 px-3 sm:px-6 py-2 w-full">
+<div class="relative flex flex-wrap items-center gap-2 md:gap-3 px-3 md:px-6 py-2 w-full">
 
   <!-- ── LEFT ZONE: scope + view switcher ───────────────────── -->
-  <div class="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
+  <div class="flex items-center gap-2 md:gap-3 shrink-0 min-w-0">
     <!-- Breadcrumb (LIF-286: shared component). The project segment and its
          separator still carry `hideBelowSm`, which is what every other
          detail topbar does; below sm the wrapper hides the trail before
@@ -202,7 +202,7 @@
          both segments, which would leave an empty <nav> still claiming a
          gap in the row. `min-w-0` moves onto the wrapper so the trail can
          still shrink at sm and up exactly as it did. -->
-    <div class="hidden sm:block min-w-0">
+    <div class="hidden md:block min-w-0">
       <Breadcrumbs
         segments={[
           { label: projectIdentifier, href: `#/${projectIdentifier}/overview`, mono: true, hideBelowSm: true },
@@ -219,7 +219,7 @@
          labels in the accessibility tree, so the buttons still announce as
          "List" / "Board" on a phone, and it takes them out of flow rather
          than out of the box tree, so they claim neither width nor a flex
-         gap there. `sm:not-sr-only` restores them verbatim at sm and up. -->
+         gap there. `md:not-sr-only` restores them at desktop widths. -->
     <div
       class="flex items-center gap-0.5 p-0.5 rounded-md bg-[var(--bg)]
              shadow-[inset_0_1px_2px_rgba(0,0,0,0.10)]"
@@ -234,7 +234,7 @@
         onclick={() => navigate(`/${projectIdentifier}/issues`)}
       >
         <ListIcon size={11} class="shrink-0" />
-        <span class="sr-only sm:not-sr-only">List</span>
+        <span class="sr-only md:not-sr-only">List</span>
       </button>
       <button
         class="flex items-center gap-1 px-2 py-0.5 rounded
@@ -246,7 +246,7 @@
         onclick={() => navigate(`/${projectIdentifier}/board`)}
       >
         <LayoutGrid size={11} class="shrink-0" />
-        <span class="sr-only sm:not-sr-only">Board</span>
+        <span class="sr-only md:not-sr-only">Board</span>
       </button>
     </div>
 
@@ -365,7 +365,7 @@
         placement="bottom"
       >
         <button
-          class="h-7 flex items-center gap-1 px-1.5 sm:px-2 sm:mr-1 rounded-md
+          class="h-7 flex items-center gap-1 px-1.5 md:px-2 md:mr-1 rounded-md
                  text-caption font-medium tabular-nums
                  text-[var(--accent)] bg-[var(--accent-subtle)]
                  hover:bg-[var(--accent)] hover:text-[var(--accent-text)]
@@ -382,7 +382,7 @@
             aria-hidden="true"
           ></span>
           <span>{changedLabel}</span>
-          <span class="hidden sm:inline">updated</span>
+          <span class="hidden md:inline">updated</span>
         </button>
       </Tooltip>
     {/if}
@@ -390,35 +390,35 @@
     <!-- Issue count. Reserved min-width so the brief load frame can't reflow.
          Hidden below sm to save horizontal room on phones. -->
     <span
-      class="hidden sm:inline mr-1.5 min-w-[2ch] text-right text-micro tabular-nums
+      class="hidden md:inline mr-1.5 min-w-[2ch] text-right text-micro tabular-nums
              font-medium text-[var(--text-faint)]"
     >
       {countLabel}
     </span>
-    <div class="hidden sm:block w-px h-4 bg-[var(--border)] mr-1"></div>
+    <div class="hidden md:block w-px h-4 bg-[var(--border)] mr-1"></div>
 
-    <!-- ── LIF-350: sub-`sm` overflow group ─────────────────────
+    <!-- ── LIF-350 / LIF-400: sub-`md` overflow group ────────────
          Saved views, sort and display/swimlanes cost ~88px of a 360px
          phone row that has none to spare, and they are the three least
-         load-bearing controls here. Below sm they fold behind one 28px
+          load-bearing controls here. Below md they fold behind one 28px
          button and stack vertically inside its popover.
 
-         Both wrappers go `display: contents` at sm and up, which deletes
+          Both wrappers go `display: contents` at md and up, which deletes
          them from layout outright: the three controls become direct flex
          children of the right zone again, in the same order, with the same
          `gap-0.5`, so the desktop row is untouched. The popover is
          `absolute` under the button (the topbar row clips nothing), and
          each control keeps its own popover — re-anchored `left-0` below
-         sm so a 220-260px panel opens rightward into the viewport instead
+          md so a 220-260px panel opens rightward into the viewport instead
          of leftward off the edge of it.
 
          The children keep their original indentation: this file already
          wraps controls in `{#if layout === ...}` without indenting them
          (see the swimlane and display blocks below), and re-indenting
          ~160 untouched lines would bury the actual change. -->
-    <div class="max-sm:relative sm:contents">
+    <div class="max-md:relative md:contents">
       <button
-        class="sm:hidden touch-target size-7 flex items-center justify-center rounded-md
+        class="md:hidden touch-target size-7 flex items-center justify-center rounded-md
                text-[var(--text-muted)] hover:text-[var(--text)]
                hover:bg-[var(--bg-subtle)] transition-colors
                {view.overflowOpen ? 'text-[var(--text)] bg-[var(--bg-subtle)]' : ''}"
@@ -441,11 +441,11 @@
       <div
         id={OVERFLOW_PANEL_ID}
         bind:this={overflowPanelEl}
-        class="sm:contents max-sm:absolute max-sm:right-0 max-sm:top-full max-sm:mt-1.5
-               max-sm:z-30 max-sm:w-[212px] max-sm:flex-col max-sm:gap-0.5 max-sm:p-1
-               max-sm:rounded-lg max-sm:border max-sm:border-[var(--border)]
-               max-sm:bg-[var(--surface)] max-sm:shadow-lg
-               {view.overflowOpen ? 'max-sm:flex' : 'max-sm:hidden'}"
+        class="md:contents max-md:absolute max-md:right-0 max-md:top-full max-md:mt-1.5
+               max-md:z-30 max-md:w-[212px] max-md:flex-col max-md:gap-0.5 max-md:p-1
+               max-md:rounded-lg max-md:border max-md:border-[var(--border)]
+               max-md:bg-[var(--surface)] max-md:shadow-lg
+               {view.overflowOpen ? 'max-md:flex' : 'max-md:hidden'}"
       >
 
     <!-- LIF-242: saved views. Self-contained — hides itself when /api/me
@@ -455,7 +455,7 @@
     <!-- Sort button + popover. The `[&>span]` rule below sm stretches the
          Tooltip's `inline-flex` wrapper so the trigger fills the overflow
          panel's width instead of hugging its label; no-op at sm and up. -->
-    <div class="relative max-sm:[&>span]:w-full">
+    <div class="relative max-md:[&>span]:w-full">
       <Tooltip
         content={view.sortOpen
           ? null
@@ -486,7 +486,7 @@
                unchanged. The "Sort:" qualifier only appears in the panel,
                where a row reading just "Priority" would be indistinguishable
                from a grouping choice; in the row it would be noise. -->
-          <span class="sm:hidden">Sort:</span>
+          <span class="md:hidden">Sort:</span>
           <span>
             {view.sortField === "age"
               ? "Age"
@@ -502,7 +502,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[220px]
-                 max-sm:right-auto max-sm:left-0
+                 max-md:right-auto max-md:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -553,7 +553,7 @@
     <!-- LIF-241: Swimlane picker. Board view only — splits the board into
          horizontal bands (module / priority) on top of the status columns. -->
     {#if layout === "board"}
-    <div class="relative max-sm:[&>span]:w-full">
+    <div class="relative max-md:[&>span]:w-full">
       <Tooltip content={view.lanesOpen ? null : "Swimlanes"} placement="bottom">
         <button
           class="h-7 flex items-center gap-1 px-2 rounded-md
@@ -581,7 +581,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[188px]
-                 max-sm:right-auto max-sm:left-0
+                 max-md:right-auto max-md:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -620,7 +620,7 @@
 
     <!-- LIF-191: Display options — group-by + density. List view only. -->
     {#if layout !== "board"}
-    <div class="relative max-sm:[&>span]:w-full">
+    <div class="relative max-md:[&>span]:w-full">
       <Tooltip content={view.displayOpen ? null : "Display options"} placement="bottom">
         <!-- LIF-350: a bare 28px square in the row at sm and up; a labeled,
              full-width row inside the overflow panel below it. The `max-sm:`
@@ -628,7 +628,7 @@
              `size-7` square is exactly what it was on desktop. -->
         <button
           class="touch-target size-7 flex items-center justify-center rounded-md
-                 max-sm:w-full max-sm:justify-start max-sm:gap-1.5 max-sm:px-2
+                 max-md:w-full max-md:justify-start max-md:gap-1.5 max-md:px-2
                  text-caption font-medium
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors
@@ -636,14 +636,14 @@
           onclick={(e) => { e.stopPropagation(); view.displayOpen = !view.displayOpen; view.sortOpen = false; view.newMenuOpen = false; }}
         >
           <SlidersHorizontal size={14} class="shrink-0" />
-          <span class="sm:hidden">Display</span>
+          <span class="md:hidden">Display</span>
         </button>
       </Tooltip>
       {#if view.displayOpen}
         <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
         <div
           class="absolute right-0 top-full mt-1.5 z-30 w-[224px]
-                 max-sm:right-auto max-sm:left-0
+                 max-md:right-auto max-md:left-0
                  bg-[var(--surface)] border border-[var(--border)]
                  rounded-lg shadow-lg py-1.5 text-body-sm"
           onclick={(e) => e.stopPropagation()}
@@ -694,10 +694,10 @@
          "zoomed out"). Instead it overlays the entire topbar row. -->
     {#if view.searchExpanded}
       <div
-        class="max-sm:absolute max-sm:inset-0 max-sm:z-20 max-sm:bg-[var(--chrome)]
-               max-sm:flex max-sm:items-center max-sm:px-3 max-sm:py-1.5"
+        class="max-md:absolute max-md:inset-0 max-md:z-20 max-md:bg-[var(--chrome)]
+               max-md:flex max-md:items-center max-md:px-3 max-md:py-1.5"
       >
-        <div class="relative w-full sm:w-auto">
+        <div class="relative w-full md:w-auto">
           <div class="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]">
             <Search size={12} />
           </div>
@@ -717,7 +717,7 @@
                 (e.currentTarget as HTMLInputElement).blur();
               }
             }}
-            class="w-full sm:w-[200px] pl-7 pr-2 py-1 text-body-sm rounded-md
+            class="w-full md:w-[200px] pl-7 pr-2 py-1 text-body-sm rounded-md
                    border border-[var(--border)] bg-[var(--surface)]
                    text-[var(--text)] placeholder:text-[var(--text-faint)]
                    focus:border-[var(--accent)]
@@ -729,6 +729,7 @@
     {:else}
       <Tooltip content="Search  ·  /" placement="bottom">
         <button
+          aria-label="Search issues"
           class="touch-target size-7 flex items-center justify-center rounded-md
                  text-[var(--text-muted)] hover:text-[var(--text)]
                  hover:bg-[var(--bg-subtle)] transition-colors"
@@ -772,11 +773,12 @@
       >
         <!-- Main segment: quick-create -->
         <button
-          class="group flex items-center gap-1.5 px-2 sm:pl-2.5 sm:pr-2
+          class="group flex items-center gap-1.5 px-2 md:pl-2.5 md:pr-2
                  text-body-sm font-medium text-[var(--btn-success-text)]
                  bg-[var(--btn-success)] hover:bg-[var(--btn-success-hover)]
                  transition-colors focus:outline-none
                  motion-safe:active:scale-[0.97]"
+          aria-label="New issue"
           onclick={(e) => {
             e.stopPropagation();
             view.newMenuOpen = false;
@@ -789,9 +791,9 @@
             class="motion-safe:transition-transform
                    motion-safe:group-hover:rotate-90"
           />
-          <span class="hidden sm:inline">New</span>
+          <span class="hidden md:inline">New</span>
           <kbd
-            class="hidden sm:grid ml-0.5 place-items-center min-w-[1.05rem] h-[1.05rem]
+            class="hidden md:grid ml-0.5 place-items-center min-w-[1.05rem] h-[1.05rem]
                    rounded bg-white/20 font-mono text-micro leading-none"
           >
             C
