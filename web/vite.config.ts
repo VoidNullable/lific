@@ -39,16 +39,16 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // Bind on all interfaces so other machines on your LAN/VPN can reach the
-    // dev server. Without this vite only listens on 127.0.0.1.
-    host: true,
+    // Keep the dev server local by default. Set VITE_HOST=0.0.0.0 when remote
+    // access is intentional, and pair it with VITE_ALLOWED_HOSTS.
+    host: process.env.VITE_HOST ?? "127.0.0.1",
     // Vite rejects Host headers it doesn't recognize (SSRF guard). Opt extra
     // hostnames in via VITE_ALLOWED_HOSTS (comma-separated; a leading dot
     // matches all subdomains, e.g. ".your-tailnet.ts.net").
     allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(",") ?? [],
     // If 5173 is taken, fail fast instead of switching ports (avoids "module load failed"
     // when the browser tab still points at the old URL).
-    port: 5173,
+    port: Number(process.env.VITE_PORT ?? 5173),
     strictPort: true,
     proxy: {
       "/api": API_PROXY,

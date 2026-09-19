@@ -16,9 +16,9 @@
  *      console error, throws an uncaught exception, or is missing content
  *      the seed guarantees should be visible.
  *
- * Run locally:   bun install && bun run smoke        (from e2e/)
+ * Run locally:   devenv --profile e2e tasks run lific:e2e
  * Binary picked: $LIFIC_BIN, else target/debug/lific (debug rust-embed reads
- * web/dist from disk at runtime, so `bun run build` in web/ first).
+ * web/dist from disk at runtime; the task graph builds it first).
  *
  * Everything is owned by this process and torn down in `finally`; nothing
  * outlives the script.
@@ -93,11 +93,11 @@ async function waitForServer(url: string, timeoutMs: number): Promise<void> {
 
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
-    console.error(`no binary at ${BIN} — run \`cargo build\` first (or set LIFIC_BIN)`);
+    console.error(`no binary at ${BIN} — run \`devenv --profile e2e tasks run lific:e2e\` first (or set LIFIC_BIN)`);
     return 1;
   }
   if (!existsSync(join(ROOT, "web", "dist", "index.html"))) {
-    console.error("web/dist/index.html missing — run `bun run build` in web/ first");
+    console.error("web/dist/index.html missing — run `devenv --profile e2e tasks run lific:e2e` first");
     return 1;
   }
 
@@ -152,7 +152,7 @@ async function main(): Promise<number> {
     await waitForServer(`${base}/`, 30_000);
 
     // ---- browser -------------------------------------------------------
-    browser = await chromium.launch();
+    browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
     const context = await browser.newContext();
 
     // Sign in the way a person does. The login flow stores the bearer token

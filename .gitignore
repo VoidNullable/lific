@@ -1,4 +1,8 @@
 /target
+/.devenv/
+/devenv.local.nix
+/devenv.local.yaml
+/.pre-commit-config.yaml
 *.db
 *.db-wal
 *.db-shm
