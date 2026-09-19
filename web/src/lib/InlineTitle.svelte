@@ -35,6 +35,9 @@
   }
 
   async function commit() {
+    // Enter and Ctrl+S remove the input, which can dispatch blur before the
+    // save resolves. Escape also removes it, but has already cancelled editing.
+    if (!editing) return;
     editing = false;
     const trimmed = draft.trim();
     if (trimmed && trimmed !== value) {
