@@ -26,13 +26,16 @@ fn main() {
 
     let src = Path::new("web/src");
 
+    if matches!(std::env::var("PROFILE").as_deref(), Ok("release" | "dist"))
+        && !has_frontend_entry(dist)
+    {
+        panic!(
+            "web/dist/index.html is missing or empty; build the frontend first with `devenv tasks run lific:web:build`"
+        );
+    }
+
     match (newest_mtime(dist), newest_mtime(src)) {
         (None, _) => {
-            if matches!(std::env::var("PROFILE").as_deref(), Ok("release" | "dist")) {
-                panic!(
-                    "web/dist is missing or empty; build the frontend first with `devenv tasks run lific:web:build`"
-                );
-            }
             println!(
                 "cargo:warning=web/dist is missing or empty; development builds use the frontend dev server (run `devenv tasks run lific:web:build` for an embedded UI)"
             );
@@ -44,6 +47,12 @@ fn main() {
         }
         _ => {}
     }
+}
+
+fn has_frontend_entry(dist: &Path) -> bool {
+    dist.join("index.html")
+        .metadata()
+        .is_ok_and(|entry| entry.is_file() && entry.len() > 0)
 }
 
 /// Newest file modification time anywhere under `dir`, or `None` if the
@@ -72,7 +81,18 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
-    use super::newest_mtime;
+    use super::{has_frontend_entry, newest_mtime};
+
+    #[test]
+    fn assets_without_an_html_entry_are_not_a_shippable_frontend() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bundle.js"), "console.log('hello')").unwrap();
+        assert!(!has_frontend_entry(dir.path()));
+        std::fs::write(dir.path().join("index.html"), "").unwrap();
+        assert!(!has_frontend_entry(dir.path()));
+        std::fs::write(dir.path().join("index.html"), "<!doctype html>").unwrap();
+        assert!(has_frontend_entry(dir.path()));
+    }
 
     #[test]
     fn checkout_placeholder_is_not_a_built_frontend() {

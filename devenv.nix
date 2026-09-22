@@ -8,6 +8,21 @@
 let
   repoRoot = if config.git.root != null then config.git.root else builtins.toString ./.;
   lificVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+  # An explicit config prevents local development and `devenv test` from
+  # inheriting an operator's production URL, credentials, or backup location.
+  devConfig = pkgs.writeText "lific-dev.toml" ''
+    [server]
+    host = "127.0.0.1"
+    port = ${toString config.processes.backend.ports.http.value}
+    public_url = "http://127.0.0.1:${toString config.processes.backend.ports.http.value}"
+
+    [auth]
+    required = true
+    allow_signup = false
+
+    [backup]
+    enabled = false
+  '';
   bun2nix = inputs.bun2nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
   msvcPkgs = import inputs.nixpkgs {
     system = pkgs.stdenv.hostPlatform.system;
@@ -524,6 +539,7 @@ in
           export LIFIC_DEV_DB="$(mktemp -d "$DEVENV_RUNTIME/lific-test.XXXXXX")/lific.db"
         ''}
         exec cargo run --locked -- \
+          --config ${devConfig} \
           --db "$LIFIC_DEV_DB" \
           start --init-if-missing --host 127.0.0.1 \
           --port "$LIFIC_DEV_PORT"
