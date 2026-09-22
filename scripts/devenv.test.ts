@@ -94,6 +94,7 @@ test("tests check formatting before compilation and use the native processes", (
   expect(tasks["devenv:git-hooks:run"].after).toContain("lific:web:check");
   expect(tasks["lific:rust-test"].after).toContain("lific:web:check");
   expect(processes.backend.exec).toContain("mktemp -d");
+  expect(processes.backend.exec).toMatch(/--config \/nix\/store\/[^\s]+-lific-dev\.toml/);
   expect(processes.frontend.after).toContain("devenv:processes:backend@ready");
   const watchedPaths = processes.backend.watch.paths;
   expect(watchedPaths.join()).toMatch(/\/build\.rs/);
