@@ -63,6 +63,12 @@ when Rust source or Cargo configuration changes. Both bind to localhost by
 default; set `VITE_HOST` and `VITE_ALLOWED_HOSTS` explicitly when remote UI
 access is needed.
 
+The managed backend uses an explicit development configuration and stores its
+database under `.devenv/state/`. Its initial administrator name is `Devenv`,
+with password `devenv-local-password`. These credentials belong to the local
+development instance. Existing project, user, and system Lific configurations
+are not loaded by these processes.
+
 ## Tests
 
 ```bash
@@ -119,7 +125,8 @@ The checks exercise these behaviors:
   The native-link cases capture CDP events and browser state so Ctrl-click and
   middle-click popup regressions retain useful failure evidence.
 - The release smoke check runs each native artifact's `--version` and `--help`,
-  starts it with a temporary config/database, and fetches the embedded HTML.
+  starts it with a temporary config/database, and fetches its API, embedded HTML,
+  and JavaScript/CSS bundles. Missing assets that return the SPA fallback fail.
 - `devenv test` also starts the actual backend and Vite processes through the
   native process manager, waits for their readiness probes, checks the UI and
   API proxy, then stops both. Its freshly allocated database is under
@@ -180,16 +187,28 @@ project check task without the test lifecycle.
 Pushing a version tag runs the release workflow. It builds the embedded web UI
 and produces locked `dist` artifacts for Linux x86_64 and aarch64,
 macOS x86_64 and aarch64, and Windows x86_64 (MSVC). Linux targets use the
-devenv-provided Zig linker locally; the other targets build on their native
-GitHub Actions runners. The workflow verifies artifact existence, smoke-tests
-native artifacts, publishes SHA-256 checksums, and attaches all five binaries
-to the GitHub release.
+devenv-provided Zig linker. macOS targets build on macOS runners; the Windows
+MSVC artifact is cross-built on Linux using the `release-windows-msvc` profile.
+A Windows runner verifies its checksum and executes those exact bytes before
+publication. CI also retains native Windows Clippy and all-target Rust tests.
+The workflow publishes SHA-256 checksums and attaches all five binaries to the
+GitHub release.
 
 For a local Linux cross-build:
 
 ```bash
 devenv --profile release-linux tasks run lific:release:aarch64-unknown-linux-gnu
 ```
+
+For the Windows release cross-build on Linux:
+
+```bash
+devenv --profile release-windows-msvc tasks run lific:release:x86_64-pc-windows-msvc
+```
+
+This profile accepts the Microsoft Visual Studio SDK license for its build
+inputs. The default development shell does not enable those unfree packages.
+The executable is written to `target/x86_64-pc-windows-msvc/dist/lific.exe`.
 
 On macOS, `devenv` also provides both Apple Rust targets and the Apple SDK
 used by the credential and SQLite stacks. Build the current Mac
