@@ -208,8 +208,11 @@ jobs:
     needs: [verify, build]
     runs-on: windows-latest
     steps:
-      # Do not check out or rebuild here: this job executes the exact MSVC
-      # artifact produced by the Devenv build matrix entry above.
+      # Checkout supplies the same verifier exercised by pull-request CI.
+      # The executable is downloaded from the build matrix, never rebuilt here.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Download Windows executable
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -221,57 +224,7 @@ jobs:
       - name: Verify and smoke-test Windows release
         shell: pwsh
         run: |
-          $binary = (Resolve-Path .\lific-windows-x86_64.exe).Path
-          $expected = (Get-Content .\lific-windows-x86_64.exe.sha256).Split()[0].ToLowerInvariant()
-          $actual = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) {
-            throw "MSVC artifact checksum mismatch: expected $expected, got $actual"
-          }
-
-          & $binary --version
-          if ($LASTEXITCODE -ne 0) { throw "lific --version failed" }
-          & $binary --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "lific --help failed" }
-
-          $port = 3456
-          $db = Join-Path $PWD "lific-release-ci.db"
-          $env:LIFIC_INIT_ADMIN_NAME = "CI"
-          $env:LIFIC_INIT_ADMIN_PASSWORD = "ci-release-password-123"
-          $server = Start-Process -FilePath $binary `
-            -ArgumentList @("--db", $db, "start", "--init-if-missing", "--host", "127.0.0.1", "--port", $port) `
-            -PassThru -RedirectStandardOutput .\lific-server.out -RedirectStandardError .\lific-server.err
-          try {
-            $ready = $false
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              if ($server.HasExited) {
-                throw "lific exited with code $($server.ExitCode)`n$(Get-Content .\lific-server.err -Raw)"
-              }
-              try {
-                $health = Invoke-WebRequest "http://127.0.0.1:$port/api/health" -TimeoutSec 2
-                if ($health.StatusCode -eq 200) {
-                  $ready = $true
-                  break
-                }
-              } catch { }
-              Start-Sleep -Seconds 1
-            }
-            if (-not $ready) { throw "lific did not become healthy`n$(Get-Content .\lific-server.err -Raw)" }
-
-            & $binary --db $db doctor --repair | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw "lific database doctor failed" }
-            if (-not (Test-Path $db)) { throw "lific did not create its database" }
-
-            $page = Invoke-WebRequest "http://127.0.0.1:$port/" -TimeoutSec 5
-            if ($page.StatusCode -ne 200 -or $page.Content -notmatch "<html") {
-              throw "embedded web UI did not respond with HTML"
-            }
-            $asset = [regex]::Match($page.Content, '(?:src|href)="([^"]+/assets/[^"]+)"').Groups[1].Value
-            if (-not $asset) { throw "embedded web UI did not reference a static asset" }
-            $assetResponse = Invoke-WebRequest "http://127.0.0.1:$port$asset" -TimeoutSec 5
-            if ($assetResponse.StatusCode -ne 200) { throw "embedded web UI asset failed: $asset" }
-          } finally {
-            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
-          }
+          ./scripts/verify-release-binary.ps1 -Binary ./lific-windows-x86_64.exe -ChecksumFile ./lific-windows-x86_64.exe.sha256
 
   release:
     needs: [verify, build, windows-msvc-verify]

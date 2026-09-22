@@ -64,6 +64,26 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  windows:
+    # Keep native Windows-only code and tests covered in addition to executing
+    # the cross-built release artifact. A startup smoke test cannot replace them.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Ensure web/dist exists for rust-embed
+        run: mkdir -p web/dist
+        shell: bash
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+
   windows-msvc-cross-build:
     # This is the proposed release path: Linux owns the reproducible Devenv
     # build, while Windows executes the exact uploaded bytes below.
@@ -119,8 +139,10 @@ jobs:
     needs: windows-msvc-cross-build
     runs-on: windows-latest
     steps:
-      # Deliberately do not check out or rebuild the source: this job executes
-      # the exact artifact produced by the Linux Devenv job.
+      # Checkout supplies only the shared verifier. Never rebuild the artifact.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Download the Devenv-built executable
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -128,54 +150,4 @@ jobs:
       - name: Verify and smoke-test the exact artifact
         shell: pwsh
         run: |
-          $binary = (Resolve-Path .\lific-windows-msvc-x86_64.exe).Path
-          $expected = (Get-Content .\lific-windows-msvc-x86_64.exe.sha256).Split()[0].ToLowerInvariant()
-          $actual = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) {
-            throw "MSVC artifact checksum mismatch: expected $expected, got $actual"
-          }
-
-          & $binary --version
-          if ($LASTEXITCODE -ne 0) { throw "lific --version failed" }
-          & $binary --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "lific --help failed" }
-
-          $port = 3456
-          $db = Join-Path $PWD "lific-ci.db"
-          $env:LIFIC_INIT_ADMIN_NAME = "CI"
-          $env:LIFIC_INIT_ADMIN_PASSWORD = "ci-release-password-123"
-          $server = Start-Process -FilePath $binary `
-            -ArgumentList @("--db", $db, "start", "--init-if-missing", "--host", "127.0.0.1", "--port", $port) `
-            -PassThru -RedirectStandardOutput .\lific-server.out -RedirectStandardError .\lific-server.err
-          try {
-            $ready = $false
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              if ($server.HasExited) {
-                throw "lific exited with code $($server.ExitCode)`n$(Get-Content .\lific-server.err -Raw)"
-              }
-              try {
-                $health = Invoke-WebRequest "http://127.0.0.1:$port/api/health" -TimeoutSec 2
-                if ($health.StatusCode -eq 200) {
-                  $ready = $true
-                  break
-                }
-              } catch { }
-              Start-Sleep -Seconds 1
-            }
-            if (-not $ready) { throw "lific did not become healthy`n$(Get-Content .\lific-server.err -Raw)" }
-
-            & $binary --db $db doctor --repair | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw "lific database doctor failed" }
-            if (-not (Test-Path $db)) { throw "lific did not create its database" }
-
-            $page = Invoke-WebRequest "http://127.0.0.1:$port/" -TimeoutSec 5
-            if ($page.StatusCode -ne 200 -or $page.Content -notmatch "<html") {
-              throw "embedded web UI did not respond with HTML"
-            }
-            $asset = [regex]::Match($page.Content, '(?:src|href)="(/assets/[^"]+)"').Groups[1].Value
-            if (-not $asset) { throw "embedded web UI did not reference a static asset" }
-            $assetResponse = Invoke-WebRequest "http://127.0.0.1:$port$asset" -TimeoutSec 5
-            if ($assetResponse.StatusCode -ne 200) { throw "embedded web UI asset failed: $asset" }
-          } finally {
-            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
-          }
+          ./scripts/verify-release-binary.ps1 -Binary ./lific-windows-msvc-x86_64.exe -ChecksumFile ./lific-windows-msvc-x86_64.exe.sha256
