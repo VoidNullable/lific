@@ -28,9 +28,9 @@
  * a child process of this script and dies with it, and the scratch directory
  * is removed. Nothing is left running in the background.
  *
- * Run locally:   bun install && bun public-projects.ts     (from e2e/)
+ * Run locally:   devenv --profile e2e tasks run lific:e2e
  * Binary picked: $LIFIC_BIN, else target/debug/lific (a debug build reads
- * web/dist from disk at runtime, so run `bun run build` in web/ first).
+ * web/dist from disk at runtime; the task graph builds it first).
  */
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -224,11 +224,11 @@ const BODY_SELECTOR = ".em-rendered .prose";
 
 async function main(): Promise<number> {
   if (!existsSync(BIN)) {
-    console.error(`no binary at ${BIN}: run \`cargo build\` first (or set LIFIC_BIN)`);
+    console.error(`no binary at ${BIN}: run \`devenv --profile e2e tasks run lific:e2e\` first (or set LIFIC_BIN)`);
     return 1;
   }
   if (!existsSync(join(ROOT, "web", "dist", "index.html"))) {
-    console.error("web/dist/index.html missing: run `bun run build` in web/ first");
+    console.error("web/dist/index.html missing: run `devenv --profile e2e tasks run lific:e2e` first");
     return 1;
   }
 
@@ -303,7 +303,7 @@ async function main(): Promise<number> {
     server.stderr?.on("data", (d: Buffer) => (serverLog += d.toString()));
     await waitForServer(`${base}/`, 30_000);
 
-    browser = await chromium.launch();
+    browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
 
     // ---- 1. desktop: the list, with no session -------------------------
     {

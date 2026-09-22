@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Real Layout, Settings, palette and MobileNav. Only HTTP is mocked; no copied
 // sidebar state or handlers. Vite and Chromium are owned by this finite process.
-// Run: bun run sidebar (in e2e). Screenshots: $E2E_SCREENSHOT_DIR or the OS temp directory.
+// Run inside `devenv --profile e2e shell`: bun run sidebar. Screenshots:
+// $E2E_SCREENSHOT_DIR or the OS temp directory.
 // This checks the client's per-session ordering contract, not server isolation.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
@@ -272,9 +273,12 @@ async function test(name: string, run: () => Promise<void>) {
 
 try {
   await server.listen(); base = server.resolvedUrls!.local[0];
-  // Full Chromium exercises real tab lifecycle behavior. The lightweight
-  // headless shell can stall module loading in native Vite popups.
-  browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  browser = await chromium.launch(
+    executablePath
+      ? { headless: true, executablePath }
+      : { headless: true, channel: "chromium" },
+  );
 
   await test("separate disclosure and Overview links", async () => {
     const s = await session(); const { page, aside } = s;

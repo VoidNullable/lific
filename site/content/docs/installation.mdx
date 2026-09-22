@@ -42,24 +42,24 @@ lific --version
 
 ## Build from source
 
-Lific requires Rust 1.88 or later. SQLite is bundled with the Rust build.
-
-For a build without the web UI, create the frontend output directory before compiling. The binary still provides the CLI, REST API, MCP server, OAuth, and backup features. Requests for the web UI report that the frontend has not been built.
-
-```bash
-git clone https://github.com/VoidNullable/lific
-cd lific
-mkdir -p web/dist
-cargo build --release
-```
-
-For a build with the embedded web UI, install Bun and build the frontend before compiling the Rust binary.
+Source builds use the repository's [devenv](https://devenv.sh/) environment.
+Release artifacts always include the web UI; the task graph builds it before
+the Rust binary.
 
 ```bash
 git clone https://github.com/VoidNullable/lific
 cd lific
-cd web && bun install && bun run build && cd ..
-cargo build --release
+devenv allow
+devenv shell
+# inside the devenv shell:
+devenv tasks run lific:debug-build
 ```
 
-The release binary is written to `target/release/lific`.
+For a Linux release artifact:
+
+```bash
+devenv --profile release-linux tasks run lific:release:x86_64-unknown-linux-gnu
+```
+
+Use `release-darwin` with an Apple target for macOS builds. The debug binary
+and release artifacts are written beneath `target/`.

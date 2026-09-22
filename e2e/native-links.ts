@@ -9,6 +9,7 @@ type OpenPopup = (link: Locator, gesture: Gesture, verify: (popup: Page) => Prom
 
 export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: OpenPopup) => Promise<void>) {
   const context = page.context();
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
   let phase = "setup";
   let tracing = false;
   const cdp = await context.newCDPSession(page);
@@ -94,7 +95,7 @@ export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: Ope
       console.log(`[native links:${label}] clicking and waiting for page`);
       // Keep the modifier held through the native tab-open acknowledgment.
       // Release it in finally so a failed gesture cannot affect later checks.
-      if (gesture === "ctrl") await page.keyboard.down("Control");
+      if (gesture === "ctrl") await page.keyboard.down(modifier);
       let popup: Page;
       try {
         [popup] = await Promise.all([
@@ -106,7 +107,7 @@ export async function withNativeLinkDiagnostics(page: Page, run: (openPopup: Ope
             .then(() => console.log(`[native links:${label}] click completed`)),
         ]);
       } finally {
-        if (gesture === "ctrl") await page.keyboard.up("Control");
+        if (gesture === "ctrl") await page.keyboard.up(modifier);
       }
       // Hash-only links can create a correctly addressed page without another
       // document lifecycle event. The verifier owns readiness by waiting for

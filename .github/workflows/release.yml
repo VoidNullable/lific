@@ -3,10 +3,8 @@ name: Release
 # Triggered by pushing a version tag (e.g. v1.4.0).
 #
 # The maintainer cuts the tag locally from the version-bump commit and pushes
-# it here. Do NOT have this workflow create tags: a workflow-created tag once
-# interacted with a (since-dismantled) mirror setup to strand releases as
-# drafts (LIF-120), and keeping tag creation human-driven also means a release
-# only ever fires from a deliberate act.
+# it here. Do NOT have this workflow create tags: keeping tag creation
+# human-driven means a release only ever fires from a deliberate act.
 #
 # Release ritual:
 #   1. bump Cargo.toml, commit, and push the version change (no release yet)
@@ -14,7 +12,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -30,7 +28,9 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Verify tag matches Cargo.toml version
         id: v
         run: |
@@ -83,12 +83,24 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Ensure web/dist exists for rust-embed
-        run: mkdir -p web/dist
-      - run: cargo test
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: devenv
+      - name: Install devenv
+        shell: bash
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv shell -- {0}
+          prefix-key: devenv-${{ hashFiles('devenv.lock') }}
+          shared-key: linux-debug
+          save-if: false
+      - name: Run the Devenv project test graph
+        run: devenv test
 
   build:
     needs: [verify, test]
@@ -98,16 +110,25 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: lific-linux-x86_64
+            profile: release-linux
+            devenv: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: lific-linux-aarch64
             cross: true
+            file_pattern: "ARM aarch64"
+            profile: release-linux
+            devenv: true
           - target: x86_64-apple-darwin
             os: macos-latest
             name: lific-macos-x86_64
+            profile: release-darwin
+            devenv: true
           - target: aarch64-apple-darwin
             os: macos-latest
             name: lific-macos-aarch64
+            profile: release-darwin
+            devenv: true
           # MSVC rather than GNU: it is rustup's default host toolchain on
           # Windows and carries no mingw runtime dependency. `cross` cannot
           # target MSVC, so this builds natively on a Windows runner. `ext`
@@ -116,43 +137,86 @@ jobs:
             os: windows-latest
             name: lific-windows-x86_64
             ext: .exe
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            name: lific-windows-gnu-x86_64
+            ext: .exe
+            cross: true
+            file_pattern: "PE32[+]"
+            profile: release-windows
+            devenv: true
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        if: matrix.devenv
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        if: matrix.devenv
+        with:
+          name: devenv
+      - name: Install devenv
+        if: matrix.devenv
+        shell: bash
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        if: matrix.devenv
+        with:
+          cmd-format: devenv --profile ${{ matrix.profile }} shell -- {0}
+          prefix-key: devenv-${{ hashFiles('devenv.lock') }}
+          shared-key: release-${{ matrix.target }}
+          save-if: false
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.devenv }}
         with:
           targets: ${{ matrix.target }}
-
-      # Build the embedded web UI before cargo build, so rust-embed
-      # picks it up and bakes it into the release binary. Without this
-      # the binary would ship without a web frontend.
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !matrix.devenv }}
       - uses: oven-sh/setup-bun@v2
+        if: ${{ !matrix.devenv }}
       - name: Build web frontend
+        if: ${{ !matrix.devenv }}
         run: |
-          cd web
           bun install --frozen-lockfile
           bun run build
+        working-directory: web
+      - name: Build release with devenv
+        if: matrix.devenv
         shell: bash
-
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
-
+        run: devenv --profile "${{ matrix.profile }}" tasks run "lific:release:${{ matrix.target }}"
       - name: Build (native)
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.devenv }}
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary
+      - name: Rename devenv binary
+        if: matrix.devenv
+        run: cp target/${{ matrix.target }}/dist/lific${{ matrix.ext }} ${{ matrix.name }}${{ matrix.ext }}
+        shell: bash
+      - name: Rename native binary
+        if: ${{ !matrix.devenv }}
         run: cp target/${{ matrix.target }}/release/lific${{ matrix.ext }} ${{ matrix.name }}${{ matrix.ext }}
         shell: bash
 
+      - name: Verify artifact exists
+        run: test -s ${{ matrix.name }}${{ matrix.ext }}
+        shell: bash
+
+      - name: Verify cross artifact structure
+        if: matrix.cross
+        run: |
+          devenv --profile "${{ matrix.profile }}" shell -- bash -euo pipefail -c \
+            "file '${{ matrix.name }}${{ matrix.ext }}' | tee /dev/stderr | grep -q '${{ matrix.file_pattern }}'"
+        shell: bash
+
+      - name: Smoke-test native artifact and embedded web UI
+        if: ${{ matrix.devenv && !matrix.cross }}
+        run: devenv --profile "${{ matrix.profile }}" shell -- bash scripts/verify-release-binary.sh ${{ matrix.name }}${{ matrix.ext }}
+        shell: bash
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}${{ matrix.ext }}
@@ -161,10 +225,12 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: binaries
           merge-multiple: true
@@ -172,7 +238,8 @@ jobs:
       - name: Generate checksums
         run: |
           cd binaries
-          sha256sum * > sha256sums.txt
+          sha256sum -- * > sha256sums.txt
+          sha256sum -c sha256sums.txt
           cat sha256sums.txt
 
       # Use the curated top section of CHANGELOG.md as the release notes
@@ -193,24 +260,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          NOTES_ARG="--generate-notes"
+          notes_args=(--generate-notes)
           if [ -s RELEASE_NOTES.md ]; then
-            NOTES_ARG="--notes-file RELEASE_NOTES.md"
+            notes_args=(--notes-file RELEASE_NOTES.md)
           fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            $NOTES_ARG \
+            "${notes_args[@]}" \
             --latest \
             binaries/lific-linux-x86_64 \
             binaries/lific-linux-aarch64 \
             binaries/lific-macos-x86_64 \
             binaries/lific-macos-aarch64 \
+            binaries/lific-windows-gnu-x86_64.exe \
             binaries/lific-windows-x86_64.exe \
             binaries/sha256sums.txt
 
       # Belt-and-suspenders against gh's occasional draft-fallback at create
-      # time (the LIF-120 stranded-draft failure). Re-asserts the published
-      # state; idempotent.
+      # time. Re-asserts the published state; idempotent.
       - name: Publish release (force non-draft)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,36 +290,20 @@ jobs:
     needs: [verify, release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      # Build the web UI before publishing so the source tarball that
-      # goes to crates.io contains a working dist/, not just a stub.
-      # `cargo install lific` builds from source — without this, every
-      # crates.io install would produce a UI-less binary.
-      - uses: oven-sh/setup-bun@v2
-      - name: Build web frontend
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          bun run build
-      # Tolerate exactly one failure mode — the version already being on
-      # crates.io (idempotent re-run of the workflow) — and fail the job on
-      # everything else. The old `|| echo` swallowed ALL failures, which let
-      # a 403 auth error report success during v2.0.0 (LIF-288).
-      - name: Publish to crates.io
-        run: |
-          set -o pipefail
-          if out="$(cargo publish --allow-dirty --no-verify 2>&1)"; then
-            echo "$out"
-          else
-            echo "$out"
-            if printf '%s\n' "$out" | grep -qiE 'crate version .* is already uploaded'; then
-              echo "::notice::Version already on crates.io; treating as success."
-            else
-              echo "::error::cargo publish failed."
-              exit 1
-            fi
-          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: devenv
+      - name: Install devenv
+        shell: bash
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      # The Devenv publish task builds web/dist first so the source tarball
+      # contains the embedded UI, then publishes with the locked toolchain.
+      - name: Publish to crates.io through devenv
+        run: devenv tasks run lific:publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -272,7 +323,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
-      id-token: write   # required for `mcp-publisher login github-oidc`
+      id-token: write # required for `mcp-publisher login github-oidc`
       contents: read
     env:
       # Pin the publisher CLI + its linux/amd64 checksum rather than tracking
@@ -283,7 +334,9 @@ jobs:
       MCP_PUBLISHER_VERSION: v1.7.9
       MCP_PUBLISHER_SHA256: ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Install mcp-publisher (pinned + checksum-verified)
         run: |
