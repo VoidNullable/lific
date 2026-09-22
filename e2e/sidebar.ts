@@ -643,7 +643,7 @@ try {
           await openPopup(link, gesture, async popup => {
             assert.equal(new URL(popup.url()).hash, href);
             assert.equal(new URL(page.url()).hash, "#/ONE/issues");
-            await popup.locator('aside a[title="Account settings"]').waitFor({ state: "attached" });
+            await popup.locator('aside a[title="Account settings"]').waitFor();
             await settle({ ...s, page: popup });
           });
         }
