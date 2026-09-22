@@ -372,8 +372,8 @@ Release builds always build and embed the Svelte 5 web UI:
 devenv --profile release-linux tasks run lific:release:x86_64-unknown-linux-gnu
 ```
 
-Use `release-darwin` for macOS targets and `release-windows` for the
-cross-compiled Windows GNU release. `devenv build outputs.lific` builds the
+Use `release-darwin` for macOS targets and `release-windows-msvc` for the
+Windows MSVC cross-build on Linux. `devenv build outputs.lific` builds the
 native, Nix-packaged release; it builds the locked frontend in an isolated
 derivation and embeds it before compiling Rust. SQLite is bundled via
 `rusqlite`; no system SQLite is required.

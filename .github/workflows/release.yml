@@ -129,22 +129,17 @@ jobs:
             name: lific-macos-aarch64
             profile: release-darwin
             devenv: true
-          # MSVC rather than GNU: it is rustup's default host toolchain on
-          # Windows and carries no mingw runtime dependency. `cross` cannot
-          # target MSVC, so this builds natively on a Windows runner. `ext`
-          # is empty on every other entry and renders as nothing.
+          # Build the MSVC artifact through the pinned Devenv profile on Linux;
+          # the exact bytes are executed and smoke-tested on Windows below.
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            name: lific-windows-x86_64
-            ext: .exe
-          - target: x86_64-pc-windows-gnu
             os: ubuntu-latest
-            name: lific-windows-gnu-x86_64
+            name: lific-windows-x86_64
             ext: .exe
             cross: true
             file_pattern: "PE32[+]"
-            profile: release-windows
+            profile: release-windows-msvc
             devenv: true
+            verify_on_windows: true
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -168,35 +163,11 @@ jobs:
           prefix-key: devenv-${{ hashFiles('devenv.lock') }}
           shared-key: release-${{ matrix.target }}
           save-if: false
-      - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !matrix.devenv }}
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        if: ${{ !matrix.devenv }}
-      - uses: oven-sh/setup-bun@v2
-        if: ${{ !matrix.devenv }}
-      - name: Build web frontend
-        if: ${{ !matrix.devenv }}
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-        working-directory: web
       - name: Build release with devenv
-        if: matrix.devenv
         shell: bash
         run: devenv --profile "${{ matrix.profile }}" tasks run "lific:release:${{ matrix.target }}"
-      - name: Build (native)
-        if: ${{ !matrix.devenv }}
-        run: cargo build --release --target ${{ matrix.target }}
-
       - name: Rename devenv binary
-        if: matrix.devenv
         run: cp target/${{ matrix.target }}/dist/lific${{ matrix.ext }} ${{ matrix.name }}${{ matrix.ext }}
-        shell: bash
-      - name: Rename native binary
-        if: ${{ !matrix.devenv }}
-        run: cp target/${{ matrix.target }}/release/lific${{ matrix.ext }} ${{ matrix.name }}${{ matrix.ext }}
         shell: bash
 
       - name: Verify artifact exists
@@ -221,8 +192,42 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}${{ matrix.ext }}
 
-  release:
+      - name: Generate Windows verification checksum
+        if: matrix.verify_on_windows
+        shell: bash
+        run: sha256sum "${{ matrix.name }}${{ matrix.ext }}" > "${{ matrix.name }}${{ matrix.ext }}.sha256"
+
+      - name: Upload Windows verification checksum
+        if: matrix.verify_on_windows
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.name }}-checksum
+          path: ${{ matrix.name }}${{ matrix.ext }}.sha256
+
+  windows-msvc-verify:
     needs: [verify, build]
+    runs-on: windows-latest
+    steps:
+      # Checkout supplies the same verifier exercised by pull-request CI.
+      # The executable is downloaded from the build matrix, never rebuilt here.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Download Windows executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lific-windows-x86_64
+      - name: Download Windows checksum
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lific-windows-x86_64-checksum
+      - name: Verify and smoke-test Windows release
+        shell: pwsh
+        run: |
+          ./scripts/verify-release-binary.ps1 -Binary ./lific-windows-x86_64.exe -ChecksumFile ./lific-windows-x86_64.exe.sha256
+
+  release:
+    needs: [verify, build, windows-msvc-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -238,7 +243,13 @@ jobs:
       - name: Generate checksums
         run: |
           cd binaries
-          sha256sum -- * > sha256sums.txt
+          sha256sum \
+            lific-linux-x86_64 \
+            lific-linux-aarch64 \
+            lific-macos-x86_64 \
+            lific-macos-aarch64 \
+            lific-windows-x86_64.exe \
+            > sha256sums.txt
           sha256sum -c sha256sums.txt
           cat sha256sums.txt
 
@@ -272,7 +283,6 @@ jobs:
             binaries/lific-linux-aarch64 \
             binaries/lific-macos-x86_64 \
             binaries/lific-macos-aarch64 \
-            binaries/lific-windows-gnu-x86_64.exe \
             binaries/lific-windows-x86_64.exe \
             binaries/sha256sums.txt
 

@@ -2,11 +2,12 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
 function evaluate(attributes: string[], testing = false, profile?: string) {
+  const profileArgs = profile ? ["--profile", profile] : [];
   const result = Bun.spawnSync(
     [
       "devenv",
       "--no-reload",
-      ...(profile ? ["--profile", profile] : []),
+      ...profileArgs,
       "--option",
       "devenv.isTesting:bool",
       String(testing),
@@ -98,6 +99,23 @@ test("tests check formatting before compilation and use the native processes", (
   expect(processes.frontend.after).toContain("devenv:processes:backend@ready");
   const watchedPaths = processes.backend.watch.paths;
   expect(watchedPaths.join()).toMatch(/\/build\.rs/);
+}, 360_000);
+
+test("the MSVC release profile owns its cross-linker environment", () => {
+  const config = evaluate(
+    ["languages.rust.targets", "env", "tasks"],
+    false,
+    "release-windows-msvc",
+  );
+  expect(config["languages.rust.targets"]).toEqual(["x86_64-pc-windows-msvc"]);
+  expect(config.env.CC_x86_64_pc_windows_msvc).toContain("clang-cl");
+  expect(config.env.AR_x86_64_pc_windows_msvc).toContain("llvm-lib");
+  expect(config.env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER).toContain(
+    "lific-msvc-linker",
+  );
+  expect(config.tasks["lific:release:x86_64-pc-windows-msvc"].after).toContain(
+    "lific:web:build",
+  );
 }, 360_000);
 
 test("packages use the selected compiler, release profile, and bounded sources", () => {
