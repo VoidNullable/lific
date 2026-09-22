@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // Real Svelte components and browser focus/default actions. No backend or persistent server.
+// Run inside `devenv --profile e2e shell`: bun run context-menu.
 import { strict as assert } from "node:assert";
 import { resolve } from "node:path";
 import { chromium } from "playwright";
@@ -76,8 +77,12 @@ const deadline = setTimeout(() => { console.error("Context menu test deadline ex
 let browser;
 try {
   await server.listen();
-  // Match the sidebar suite's full-browser native-tab behavior.
-  browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  browser = await chromium.launch(
+    executablePath
+      ? { headless: true, executablePath }
+      : { headless: true, channel: "chromium" },
+  );
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: "reduce", colorScheme: "light" });
   const page = await context.newPage();
   page.setDefaultTimeout(8_000);

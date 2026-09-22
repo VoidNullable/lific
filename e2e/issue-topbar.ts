@@ -37,7 +37,12 @@ const deadline = setTimeout(() => { console.error("Topbar test deadline exceeded
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  browser = await chromium.launch(
+    executablePath
+      ? { headless: true, executablePath }
+      : { headless: true, channel: "chromium" },
+  );
   const page = await browser.newPage({ reducedMotion: "reduce" });
   page.setDefaultTimeout(8_000);
   const errors: string[] = [];

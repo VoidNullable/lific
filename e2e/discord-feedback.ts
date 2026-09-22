@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { BrowserContext } from "playwright";
 
 export async function checkDiscordFeedback(context: BrowserContext, base: string) {
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
   for (const width of [1440, 390]) {
     const page = await context.newPage();
     const errors: string[] = [];
@@ -46,7 +47,7 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
         else {
           // Leave search focus without changing the row selection.
           await rows.first().getByRole("checkbox").focus();
-          await page.keyboard.press("Control+a");
+          await page.keyboard.press(`${modifier}+a`);
         }
       }
       async function clearSelection() {
@@ -59,7 +60,7 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
       const initialUrl = page.url();
       await rows.first().click({ position: { x: 2, y: 2 } });
       assert.equal(page.url(), initialUrl, "row whitespace must not navigate");
-      await page.keyboard.press("Control+a");
+      await page.keyboard.press(`${modifier}+a`);
       await assertSelection(["DEMO-1", "DEMO-2", "DEMO-3"], 3);
       await clearSelection();
       await assertSelection([], 3);
@@ -105,7 +106,7 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
       const search = page.getByPlaceholder("Search issues...");
       await search.fill("Second smoke");
       await page.waitForFunction(() => document.querySelectorAll("[data-issue-index]").length === 1);
-      await search.press("Control+a");
+      await search.press(`${modifier}+a`);
       assert.equal(await search.evaluate((el: HTMLInputElement) => el.selectionEnd! - el.selectionStart!), "Second smoke".length);
       assert.equal(await selected.count(), 0, "Ctrl+A in search must select text, not rows");
       await assertSelection([], 1);

@@ -13,6 +13,6 @@
     "sidebar": "bun sidebar.ts"
   },
   "devDependencies": {
-    "playwright": "^1.58.0"
+    "playwright": "1.61.1"
   }
 }

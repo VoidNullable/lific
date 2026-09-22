@@ -119,7 +119,9 @@ One caveat: WSL shuts down its virtual machine when no WSL sessions or processes
 
 ## Build from source (native)
 
-Building from source on Windows requires Rust 1.88 or later. Building the web UI additionally requires [Bun](https://bun.sh), which ships Windows builds.
+Native source builds require Rust 1.88 or later, the Visual Studio C++ build
+tools, and [Bun](https://bun.sh). Build the web UI first so it is embedded in
+the binary:
 
 ```powershell
 git clone https://github.com/VoidNullable/lific
@@ -130,9 +132,8 @@ cargo build --release
 
 The binary is written to `target\release\lific.exe`.
 
-To build without the web UI, create an empty `web\dist` directory instead of running Bun. The binary still provides the CLI, REST API, MCP server, OAuth, and backups.
-
-```powershell
-mkdir web\dist
-cargo build --release
-```
+The published Windows artifact uses the same MSVC target, cross-built on Linux
+through the repository's `release-windows-msvc` Devenv profile. CI runs that
+executable on Windows and checks its checksum, startup, database, API, and
+embedded frontend before publication. Native Windows Clippy and Rust tests
+remain a separate CI check.

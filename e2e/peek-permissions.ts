@@ -42,7 +42,12 @@ const deadline = setTimeout(() => { console.error("Peek permission test deadline
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  browser = await chromium.launch(
+    executablePath
+      ? { headless: true, executablePath }
+      : { headless: true, channel: "chromium" },
+  );
   const cases = [
     { name: "viewer", role: "viewer", enforced: true, is_admin: false, editable: false },
     { name: "maintainer", role: "maintainer", enforced: true, is_admin: false, editable: true },

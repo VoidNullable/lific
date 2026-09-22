@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,140 +20,134 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Ensure web/dist exists for rust-embed
-        run: mkdir -p web/dist
-
-      - name: Clippy
-        # --all-targets covers tests + binaries + examples so lint regressions
-        # in test code (e.g. clippy::await_holding_lock) get caught here too.
-        # -D warnings keeps the bar high; if a future Rust release adds noisy
-        # style lints, allow them per-lint in code rather than weakening CI.
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets
-
-  windows:
-    # Windows ships a release binary, so it gets the same gate as Linux rather
-    # than a compile-only smoke check. Nothing verified the platform at all
-    # until v2.4.0 turned out not to compile there: `src/cli/service.rs` called
-    # the unix-only `libc::getuid()` with no cfg guard, and the release matrix
-    # built only Linux and macOS, so no job would ever have noticed (GitHub
-    # #20). A `cargo check` would have caught that one bug and nothing about
-    # runtime behavior, which is the more interesting half on a platform none
-    # of the maintainers develop on.
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Restore the Devenv toolchain
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Ensure web/dist exists for rust-embed
-        run: mkdir -p web/dist
+          # Source edits reuse the toolchain; Nix validates fallback store paths.
+          primary-key: devenv-tools-${{ runner.os }}-${{ runner.arch }}-check-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix') }}
+          restore-prefixes-first-match: devenv-tools-${{ runner.os }}-${{ runner.arch }}-check-
+          paths: ~/.cache/nix
+          # Keep rooted tools, discard temporary evaluation/build inputs before saving.
+          gc-max-store-size: 0
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: devenv
+      - name: Install devenv
         shell: bash
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets
-
-  web:
-    # The frontend used to ship completely unverified: ci.yml only ran
-    # `mkdir -p web/dist` so rust-embed would compile, and nothing ever
-    # typechecked or built web/. That is how v2.7.0 released with every issue
-    # page broken (LIF-428/LIF-429). This job catches type and template
-    # errors; the `smoke` job below catches runtime-only breakage.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-        working-directory: web
-      - name: Typecheck (svelte-check + tsc)
-        run: bun run check
-        working-directory: web
-      - name: Frontend unit tests
-        run: bun test
-        working-directory: web
-      - name: Community proxy security tests
-        run: bun test ./deploy/community-redirect/worker.test.mjs
-      - name: Build
-        run: bun run build
-        working-directory: web
-
-  smoke:
-    # svelte-check reported 0 errors on the code that shipped v2.7.0 with
-    # every issue page broken — the crash was a runtime reactive-effect loop,
-    # so only running the app catches that class of bug. e2e/smoke.ts spawns
-    # the real binary on a scratch DB, seeds data through the CLI, signs in
-    # through the real login page, and drives headless Chromium through the
-    # main routes, failing on the error-boundary fallback, console errors,
-    # uncaught exceptions, or missing seeded content (LIF-429). Its first
-    # local run also caught LIF-431, a 403 on every direct-connection
-    # realtime WebSocket handshake.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: oven-sh/setup-bun@v2
-      - name: Build frontend
-        run: bun install --frozen-lockfile && bun run build
-        working-directory: web
-      - name: Build binary
-        # Debug on purpose: rust-embed serves web/dist from disk in debug
-        # builds, so the freshly built frontend is exercised without paying
-        # for a release compile. Release embedding is covered by release.yml.
-        run: cargo build
-      - name: Install e2e dependencies and browser
-        run: bun install --frozen-lockfile && bunx playwright install --with-deps chromium
-        working-directory: e2e
-      - name: Browser smoke test
-        run: bun run smoke
-        working-directory: e2e
-      - name: Project archive browser round-trip
-        run: bun run archives
-        working-directory: e2e
-      - name: Public project browser isolation
-        run: bun run public
-        working-directory: e2e
-      - name: Sidebar, mobile navigation, and context menu contracts
-        run: bun run sidebar && bun run mobile-nav && bun run context-menu && bun run peek-permissions && bun run issue-topbar
-        working-directory: e2e
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - name: Prepare the Devenv environment
+        run: devenv shell -- true
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv shell -- {0}
+          # The locked environment supplies Rust. Ignore unrelated host rustup
+          # toolchains when forming the key, and allow this PR to warm its cache.
+          prefix-key: devenv-rust-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          shared-key: linux-debug-check
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          cache-workspace-crates: true
+      - name: Run project, hook, and documentation checks
+        run: devenv tasks run lific:check devenv:git-hooks:run lific:docs:check
+      - name: Run the browser task graph
+        run: devenv --profile e2e tasks run lific:e2e
       - name: Retain native-link browser traces on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-link-traces
           path: /tmp/lific-native-links-*/trace.zip
           if-no-files-found: ignore
           retention-days: 7
 
-  docs:
+  windows:
+    # Keep native Windows-only code and tests covered in addition to executing
+    # the cross-built release artifact. A startup smoke test cannot replace them.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Ensure web/dist exists for rust-embed
+        run: mkdir -p web/dist
+        shell: bash
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+
+  windows-msvc-cross-build:
+    # This is the proposed release path: Linux owns the reproducible Devenv
+    # build, while Windows executes the exact uploaded bytes below.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - name: Install documentation site dependencies
-        run: bun install --frozen-lockfile
-        working-directory: site
-      - name: Build documentation site
-        run: bun run build
-        working-directory: site
-      - name: Check documented surfaces and local links
-        # Validate navigation, local links and the advertised MCP tool count
-        # on pull requests too, before documentation changes reach master.
-        run: bun scripts/check-docs.mjs
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: devenv
+      - name: Restore the MSVC toolchain
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: devenv-tools-${{ runner.os }}-${{ runner.arch }}-msvc-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix') }}
+          restore-prefixes-first-match: devenv-tools-${{ runner.os }}-${{ runner.arch }}-msvc-
+          paths: ~/.cache/nix
+          gc-max-store-size: 0
+      - name: Install devenv
+        shell: bash
+        run: nix profile add "github:cachix/devenv/$(jq -r '.nodes.devenv.locked.rev' devenv.lock)#devenv"
+      - name: Prepare the MSVC environment
+        run: devenv --profile release-windows-msvc shell -- true
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cmd-format: devenv --profile release-windows-msvc shell -- {0}
+          prefix-key: devenv-rust-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          shared-key: release-x86_64-pc-windows-msvc
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          cache-workspace-crates: true
+      - name: Build the MSVC release with devenv
+        shell: bash
+        run: devenv --profile release-windows-msvc tasks run lific:release:x86_64-pc-windows-msvc
+      - name: Verify Windows artifact structure
+        shell: bash
+        run: |
+          devenv --profile release-windows-msvc shell -- bash -euo pipefail -c \
+            "file target/x86_64-pc-windows-msvc/dist/lific.exe | grep -q 'PE32+'"
+          cp target/x86_64-pc-windows-msvc/dist/lific.exe lific-windows-msvc-x86_64.exe
+          sha256sum lific-windows-msvc-x86_64.exe > lific-windows-msvc-x86_64.exe.sha256
+      - name: Upload the exact executable for native Windows verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-msvc-cross
+          path: |
+            lific-windows-msvc-x86_64.exe
+            lific-windows-msvc-x86_64.exe.sha256
+          retention-days: 7
+
+  windows-msvc-cross-test:
+    needs: windows-msvc-cross-build
+    runs-on: windows-latest
+    steps:
+      # Checkout supplies only the shared verifier. Never rebuild the artifact.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Download the Devenv-built executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-msvc-cross
+      - name: Verify and smoke-test the exact artifact
+        shell: pwsh
+        run: |
+          ./scripts/verify-release-binary.ps1 -Binary ./lific-windows-msvc-x86_64.exe -ChecksumFile ./lific-windows-msvc-x86_64.exe.sha256
