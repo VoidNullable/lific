@@ -69,6 +69,9 @@ level = "info"
 [auth]
 allow_signup = true
 required = true
+
+[retention]
+trash_days = 30
 ```
 
 ## `[server]`
@@ -118,6 +121,14 @@ Automatic backups use the same archive format as `lific dump`.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `level` | string | `"info"` | Lific log level. The documented levels are `trace`, `debug`, `info`, `warn`, and `error`. |
+
+## `[retention]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `trash_days` | unsigned integer | `30` | Days a deleted issue, page or comment stays in the trash, where it can still be restored, before it is removed permanently. `0` never empties the trash. |
+
+The server sweeps the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving. Changing the window takes effect at the next restart.
 
 ## `[auth]`
 
