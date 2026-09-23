@@ -174,10 +174,26 @@ pub(super) async fn upload_attachment(
         return Err(LificError::BadRequest("empty file".into()));
     }
 
-    // Browsers disagree on legacy HWP's registered MIME (and some report
-    // application/octet-stream). Use the filename only to select the expected
-    // HWP MIME; storage validation still requires the OLE signature.
-    let sniff_mime = if filename.to_ascii_lowercase().ends_with(".hwp") {
+    // Some installers share OLE's compound-file signature with legacy HWP.
+    // Require an HWP extension whenever the client explicitly claims an HWP
+    // MIME, and use the extension to choose the expected MIME for browsers
+    // that only report application/octet-stream.
+    let has_hwp_extension = filename.to_ascii_lowercase().ends_with(".hwp");
+    let claims_hwp = declared_mime.as_deref().is_some_and(|mime| {
+        [
+            "application/x-hwp",
+            "application/haansofthwp",
+            "application/vnd.hancom.hwp",
+        ]
+        .iter()
+        .any(|allowed| mime.eq_ignore_ascii_case(allowed))
+    });
+    if claims_hwp && !has_hwp_extension {
+        return Err(LificError::BadRequest(
+            "HWP MIME requires a .hwp filename".into(),
+        ));
+    }
+    let sniff_mime = if has_hwp_extension {
         Some("application/x-hwp")
     } else {
         declared_mime.as_deref()
@@ -3182,9 +3198,18 @@ mod media_tests {
     }
 
     #[tokio::test]
-    async fn legacy_hwp_upload_uses_filename_and_remains_download_only() {
+    async fn legacy_hwp_upload_requires_filename_and_remains_download_only() {
         let app = test_app();
         let hwp = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
+        let mislabeled = upload(
+            &app,
+            "installer.msi",
+            "application/x-hwp",
+            &hwp,
+            None,
+        )
+        .await;
+        assert_eq!(mislabeled.status(), StatusCode::BAD_REQUEST);
         let uploaded = upload(
             &app,
             "report.hwp",

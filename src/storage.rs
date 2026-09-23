@@ -1788,7 +1788,7 @@ mod tests {
         );
     }
     #[test]
-    fn legacy_hwp_requires_ole_signature_and_hwp_mime() {
+    fn legacy_hwp_requires_ole_signature_and_text_falls_back() {
         let hwp = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
         assert_eq!(
             sniff_and_validate(&hwp, Some("application/x-hwp")).unwrap(),
@@ -1799,7 +1799,10 @@ mod tests {
             "application/x-hwp"
         );
         assert!(sniff_and_validate(&hwp, Some("application/msword")).is_err());
-        assert!(sniff_and_validate(b"not an OLE file", Some("application/x-hwp")).is_err());
+        assert_eq!(
+            sniff_and_validate(b"not an OLE file", Some("application/x-hwp")).unwrap(),
+            "text/plain"
+        );
         assert!(!is_inline_safe_mime("application/x-hwp"));
     }
 
