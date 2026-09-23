@@ -223,14 +223,14 @@ pub(crate) fn issue_link_context_reads() -> usize {
 /// `get_info`. This is unconditional context cost on every session, so the
 /// convention guidance appended after the discovery guidance is kept tight
 /// (imperative, no filler). Extracted as a const so it stays testable.
-const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use list_resources(type='project') to discover projects. \
+const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use list_resources(resource_type='project') to discover projects. \
      Use list_issues to browse issues with filters. Use get_issue with an identifier like 'PRO-42' \
      for details. Use workable=true to find issues ready to work on (no unresolved blockers). \
      Use search to find anything by text across issues and pages. \
      Conventions: when you finish work on an issue, mark it done (status='done'). \
      Organize issues into modules; keep each issue a self-contained work item. \
      Prefer edit_issue/edit_page (exact string replacement) over update_issue/update_page for small changes. \
-      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(type='plan', project='X'), then get_plan to see where you left off. \
+      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(resource_type='plan', project='X'), then get_plan(plan='X-PLAN-1') to see where you left off. \
      Use pages for documentation and design notes.";
 
 /// LIF-452: the one sentence a repository-bound stdio session appends to
@@ -901,7 +901,7 @@ mod tests {
             .expect("server info must carry instructions");
 
         // Discovery guidance is preserved.
-        assert!(instructions.contains("list_resources(type='project')"));
+        assert!(instructions.contains("list_resources(resource_type='project')"));
         assert!(instructions.contains("workable=true"));
 
         // Convention guidance is present.
@@ -917,8 +917,8 @@ mod tests {
         assert!(instructions.contains("modules"));
         assert!(instructions.contains("create_plan"));
         assert!(instructions.contains("check for existing plans"));
-        assert!(instructions.contains("list_resources(type='plan', project='X')"));
-        assert!(instructions.contains("then get_plan to see where you left off"));
+        assert!(instructions.contains("list_resources(resource_type='plan', project='X')"));
+        assert!(instructions.contains("then get_plan(plan='X-PLAN-1') to see where you left off"));
         assert!(instructions.contains("pages for documentation"));
     }
 
@@ -937,7 +937,7 @@ mod tests {
     // cost; keep the whole addition tight (~150 tokens / ~600 chars).
     #[test]
     fn server_instructions_stay_compact() {
-        let base = "Lific is a local-first issue tracker. Use list_resources(type='project') to discover projects. \
+        let base = "Lific is a local-first issue tracker. Use list_resources(resource_type='project') to discover projects. \
      Use list_issues to browse issues with filters. Use get_issue with an identifier like 'PRO-42' \
      for details. Use workable=true to find issues ready to work on (no unresolved blockers). \
      Use search to find anything by text across issues and pages. ";
@@ -1319,6 +1319,44 @@ mod surface_tests {
     fn live_surface() -> Vec<(String, serde_json::Value)> {
         let db = crate::db::open_memory().expect("test db");
         LificMcp::new(db).list_tool_schemas()
+    }
+
+    /// Session instructions are examples clients may copy as MCP calls, so
+    /// every named argument in them must exist in the tool's published schema.
+    #[test]
+    fn server_instruction_examples_use_published_tool_arguments() {
+        let instructions = super::SERVER_INSTRUCTIONS;
+        let mut checked = 0;
+
+        for (tool, schema) in live_surface() {
+            let marker = format!("{tool}(");
+            let mut remaining = instructions;
+            while let Some((_, call)) = remaining.split_once(&marker) {
+                let (arguments, rest) = call
+                    .split_once(')')
+                    .unwrap_or_else(|| panic!("unterminated {tool} example in instructions"));
+                let properties = schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .unwrap_or_else(|| panic!("{tool} has no published input properties"));
+
+                for argument in arguments.split(',').map(str::trim) {
+                    let Some((name, _)) = argument.split_once('=') else {
+                        continue;
+                    };
+                    let name = name.trim();
+                    assert!(
+                        properties.contains_key(name),
+                        "{tool} instructions use `{name}`, absent from its published schema"
+                    );
+                    checked += 1;
+                }
+
+                remaining = rest;
+            }
+        }
+
+        assert!(checked >= 4, "checked only {checked} instruction arguments");
     }
 
     /// Every parameter a client is told to send must be snake_case, because
