@@ -790,6 +790,10 @@ pub const ALLOWED_MIMES: &[&str] = &[
     // LIF-418: SQLite databases, so `GET /api/attachments/{id}/preview` can
     // list their tables. Always served as a download, never inline.
     "application/vnd.sqlite3",
+    // Legacy Hangul Word Processor files use the Compound File Binary
+    // container. The uploader's HWP MIME declaration disambiguates that
+    // container from other OLE formats; always serve it as a download.
+    "application/x-hwp",
 ];
 
 /// The raster image formats we can decode dimensions for and thumbnail. SVG is
@@ -894,6 +898,20 @@ enum PrefixVerdict {
 /// disagreeing about what a file is.
 fn classify_prefix(prefix: &[u8], declared: Option<&str>) -> PrefixVerdict {
     let declared = declared.map(|d| d.split(';').next().unwrap_or(d).trim().to_ascii_lowercase());
+    // Legacy HWP is an OLE compound document. OLE's signature is not unique
+    // to HWP, so require the HWP MIME supplied by the file picker as well.
+    // Other OLE formats remain rejected instead of being mislabeled as HWP.
+    const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    if prefix.starts_with(OLE_MAGIC)
+        && matches!(
+            declared.as_deref(),
+            Some("application/x-hwp")
+                | Some("application/haansofthwp")
+                | Some("application/vnd.hancom.hwp")
+        )
+    {
+        return PrefixVerdict::Decided("application/x-hwp".to_string());
+    }
 
     // Signature-based detection first (authoritative).
     if let Some(mime) = sniff_magic(prefix) {
@@ -1768,6 +1786,21 @@ mod tests {
             sniff_and_validate(&[0x50, 0x4B, 0x03, 0x04, 0], None).unwrap(),
             "application/zip"
         );
+    }
+    #[test]
+    fn legacy_hwp_requires_ole_signature_and_hwp_mime() {
+        let hwp = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
+        assert_eq!(
+            sniff_and_validate(&hwp, Some("application/x-hwp")).unwrap(),
+            "application/x-hwp"
+        );
+        assert_eq!(
+            sniff_and_validate(&hwp, Some("application/haansofthwp")).unwrap(),
+            "application/x-hwp"
+        );
+        assert!(sniff_and_validate(&hwp, Some("application/msword")).is_err());
+        assert!(sniff_and_validate(b"not an OLE file", Some("application/x-hwp")).is_err());
+        assert!(!is_inline_safe_mime("application/x-hwp"));
     }
 
     #[test]

@@ -174,9 +174,15 @@ pub(super) async fn upload_attachment(
         return Err(LificError::BadRequest("empty file".into()));
     }
 
-    // Validate the content type from magic bytes (allowlist), never trusting
-    // the client-declared header alone.
-    let mime = storage::sniff_and_validate(&bytes, declared_mime.as_deref())?;
+    // Browsers disagree on legacy HWP's registered MIME (and some report
+    // application/octet-stream). Use the filename only to select the expected
+    // HWP MIME; storage validation still requires the OLE signature.
+    let sniff_mime = if filename.to_ascii_lowercase().ends_with(".hwp") {
+        Some("application/x-hwp")
+    } else {
+        declared_mime.as_deref()
+    };
+    let mime = storage::sniff_and_validate(&bytes, sniff_mime)?;
     if !storage::ALLOWED_MIMES.contains(&mime.as_str()) {
         return Err(LificError::BadRequest(format!(
             "rejected: '{mime}' is not an allowed file type"
@@ -3172,6 +3178,39 @@ mod media_tests {
                 .await
                 .status(),
             StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_hwp_upload_uses_filename_and_remains_download_only() {
+        let app = test_app();
+        let hwp = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
+        let uploaded = upload(
+            &app,
+            "report.hwp",
+            "application/octet-stream",
+            &hwp,
+            None,
+        )
+        .await;
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let payload = parse_json(uploaded).await;
+        assert_eq!(payload["mime"], "application/x-hwp");
+
+        let response = json_get(
+            &app,
+            &format!("/api/attachments/{}", payload["id"].as_i64().unwrap()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("content-disposition")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("attachment;")
         );
     }
 
