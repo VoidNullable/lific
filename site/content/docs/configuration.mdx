@@ -87,6 +87,8 @@ Use an HTTPS URL for `public_url` when Lific is exposed through a public HTTPS e
 
 `trusted_proxies` identifies proxy hops, not trusted clients. Forwarding headers are ignored unless the immediate TCP peer is in this list. For a trusted peer, Lific walks `X-Forwarded-For` from right to left, skips configured proxy addresses, and uses the first untrusted address as the client IP. It uses `X-Real-IP` only when `X-Forwarded-For` is absent. Malformed or entirely trusted chains fall back to the TCP peer, and IPv4-mapped IPv6 addresses are normalized. List every proxy layer you operate; do not add client networks merely because they appear in a header.
 
+A trusted proxy can instead pass the client address directly in `X-Lific-Client-IP`, authenticated by `X-Lific-Proxy-Secret`. Lific accepts that pair only from a peer in `trusted_proxies`, and only when the secret matches the `LIFIC_TRUSTED_PROXY_SECRET` environment variable. If a trusted peer sends either header without a valid pair, rate-limited routes answer `503` rather than falling back to a shared bucket. Set the variable before the proxy starts sending the headers, use a long random value, and have the proxy remove any client-supplied copies of both headers.
+
 `mcp_path_token` bypasses API key and OAuth authentication. Anyone who knows the resulting URL can use the endpoint. Use a long random token and HTTPS when this key is configured.
 
 ## `[database]`

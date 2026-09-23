@@ -1,10 +1,10 @@
 ---
-title: Upgrade from 2.0 through 2.9
-description: Back up an existing Lific instance, check client and hosting compatibility, upgrade to 2.9, and verify the result before resuming work.
+title: Upgrade from 2.0 through 2.10
+description: Back up an existing Lific instance, check client and hosting compatibility, upgrade to 2.10, and verify the result before resuming work.
 ---
 
-This guide covers existing installations from Lific 2.0 through 2.9. Read the
-sections newer than your installed version before upgrading to 2.9. You do not
+This guide covers existing installations from Lific 2.0 through 2.10. Read the
+sections newer than your installed version before upgrading to 2.10. You do not
 need to install each intervening binary: the new binary applies pending
 migrations on startup. Migration paths from versions older than 2.0 are outside
 this guide.
@@ -20,7 +20,7 @@ back a migrated database requires restoring the backup with a compatible binary.
 2. Make a complete backup while the service is stopped or quiesced:
 
    ```shell
-   lific dump --out ./lific-before-2.9.tar.gz
+   lific dump --out ./lific-before-2.10.tar.gz
    ```
 
    The archive includes a consistent database snapshot, attachments, and `manifest.json`.
@@ -301,10 +301,41 @@ Unpublishing stops subsequent requests but cannot recall downloaded material.
 Require instance authentication and disable browser auto-login before exposing
 the server; publication does not secure other routes for you.
 
+### v2.10
+
+No migrations run, so a 2.9 database opens unchanged and an older 2.9 binary
+can still open it after the upgrade. The pre-upgrade backup is still the safe
+rollback path.
+
+- `edit_comment` gains exact string replacement through `old_string` and
+  `new_string`, matching `edit_issue` and `edit_page`. A full replacement still
+  uses `content`. The tool now rejects a call that mixes the two modes, supplies
+  neither, or passes an unknown parameter. Update any automation that sent
+  extra fields and relied on them being ignored.
+- A reverse proxy in `server.trusted_proxies` can now hand Lific the client
+  address through `X-Lific-Client-IP`, authenticated by `X-Lific-Proxy-Secret`
+  against the `LIFIC_TRUSTED_PROXY_SECRET` environment variable. This is
+  optional; `X-Forwarded-For` handling is unchanged. If a trusted peer sends
+  either header without a matching secret, the rate-limited routes (login,
+  signup, OAuth registration and device authorization, public reads) answer
+  `503` instead of guessing. Set the variable on the server before any proxy
+  starts sending the headers, and make sure your proxy strips client-supplied
+  copies of both.
+- The public read surface serves at most four attachment downloads at once and
+  derives one thumbnail or preview at a time. Excess requests get `503` with
+  `Retry-After` rather than queueing.
+- Every response now forbids framing (`X-Frame-Options: DENY` and
+  `frame-ancestors 'none'`). A page that embedded Lific in an iframe stops
+  working.
+- The Windows release binary is now built for `x86_64-pc-windows-msvc`. The
+  file name is unchanged.
+- Source builds of a release binary require the web UI first: release builds
+  fail unless `web/dist/index.html` exists. Debug builds are unaffected.
+
 ## Upgrade and verify
 
 1. Upgrade CLI clients first if the server is older than 2.8 and those clients
-   use `lific login`. Install the v2.9 binary and restart the existing service
+   use `lific login`. Install the v2.10 binary and restart the existing service
    with the same configuration and database. Confirm `lific --version` using
    the executable your service actually runs, not an unrelated binary on PATH.
 2. Run `lific doctor` with the operator credential. Resolve configuration, database, backup, server, OAuth, and MCP failures before opening the instance to users.
