@@ -378,12 +378,28 @@ pub struct ListCommentsInput {
     pub offset: Option<i64>,
 }
 
+/// Two modes, exactly one per call: `content` replaces the whole body, or
+/// `old_string` + `new_string` does the exact-string replacement that
+/// `edit_issue` and `edit_page` do. Unknown fields are rejected so a caller
+/// that guesses the contract wrong gets an error instead of a silently
+/// rewritten comment (GitHub #64).
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditCommentInput {
     #[schemars(description = "Comment id (from add_comment or list_comments)")]
     pub comment_id: i64,
-    #[schemars(description = "New comment content (markdown)")]
-    pub content: String,
+    #[schemars(
+        description = "Replace the ENTIRE comment body with this markdown. Omit when using old_string/new_string."
+    )]
+    pub content: Option<String>,
+    #[schemars(
+        description = "Exact string to find in the comment. Must be unique unless replace_all is true. Use with new_string instead of content."
+    )]
+    pub old_string: Option<String>,
+    #[schemars(description = "Replacement for old_string (must differ from it)")]
+    pub new_string: Option<String>,
+    #[schemars(description = "With old_string: replace all occurrences (default false)")]
+    pub replace_all: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

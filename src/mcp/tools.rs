@@ -856,6 +856,60 @@ fn apply_edit(
     }
 }
 
+/// What an `edit_comment` call asks for, validated before any database work.
+///
+/// GitHub #64: the tool used to take only `content`, so an agent that assumed
+/// the `edit_issue` contract and sent a snippet overwrote the whole comment.
+/// Both modes now exist, and a call must pick exactly one of them.
+enum CommentEdit {
+    Replace(String),
+    Substitute {
+        old: String,
+        new: String,
+        replace_all: bool,
+    },
+}
+
+impl CommentEdit {
+    fn from_input(input: &EditCommentInput) -> Result<Self, crate::error::LificError> {
+        let bad = |msg: &str| Err(crate::error::LificError::BadRequest(msg.into()));
+        match (&input.content, &input.old_string, &input.new_string) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => bad(
+                "pass either content (replaces the entire comment) or old_string/new_string (exact string replacement), not both",
+            ),
+            (Some(content), None, None) => {
+                if input.replace_all.is_some() {
+                    return bad("replace_all only applies with old_string/new_string");
+                }
+                Ok(Self::Replace(content.clone()))
+            }
+            // Same double-escape repair `edit_issue` applies to a description
+            // edit, so the needle matches what the comment write path stored.
+            (None, Some(old), Some(new)) => Ok(Self::Substitute {
+                old: queries::unescape_text(old),
+                new: queries::unescape_text(new),
+                replace_all: input.replace_all.unwrap_or(false),
+            }),
+            (None, Some(_), None) => bad("old_string requires new_string"),
+            (None, None, Some(_)) => bad("new_string requires old_string"),
+            (None, None, None) => bad(
+                "nothing to edit: pass old_string/new_string for exact string replacement, or content to replace the entire comment",
+            ),
+        }
+    }
+
+    fn apply(&self, current: &str) -> Result<String, crate::error::LificError> {
+        match self {
+            Self::Replace(content) => Ok(content.clone()),
+            Self::Substitute {
+                old,
+                new,
+                replace_all,
+            } => apply_edit(current, old, new, *replace_all),
+        }
+    }
+}
+
 // LIF-387: the pre-flight resolvers take a borrowed connection rather than
 // the pool, so a tool that resolves a project *and* a module (create_issue,
 // bulk_update, manage_resource) does it on one checkout instead of one per
@@ -3829,7 +3883,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Edit a comment's content by id. Author or admin only; @mentions re-resolve."
+        description = "Edit a comment by id. Either pass old_string/new_string for exact string replacement (same contract as edit_issue), or pass content to replace the entire body. Author or admin only; @mentions re-resolve."
     )]
     fn edit_comment(&self, Parameters(input): Parameters<EditCommentInput>) -> String {
         self.edit_comment_inner(input)
@@ -3837,6 +3891,11 @@ impl LificMcp {
     }
 
     fn edit_comment_inner(&self, input: EditCommentInput) -> Result<String, String> {
+        // Reject a malformed call before touching the database. The edit
+        // itself is applied only after the authorization checks below, so a
+        // "not found" or "matches N locations" error can never describe a
+        // comment the caller is not allowed to read.
+        let edit = CommentEdit::from_input(&input).map_err(|e| e.to_string())?;
         let (comment, context) = self.transaction(|conn| {
             let actor = resolve_comment_actor_conn(conn)?;
             let existing = queries::comments::get_comment(conn, input.comment_id)?;
@@ -3859,6 +3918,7 @@ impl LificMcp {
                 ));
             }
             let member_scoped = crate::authz::authz_enforced_conn(conn)?;
+            let body = edit.apply(&existing.content)?;
             // LIF-375: shared with the REST edit path; re-derives mentions
             // and attachment links from the new body (LIF-369).
             let comment = queries::comments::update_comment_with_mentions(
@@ -3867,7 +3927,7 @@ impl LificMcp {
                 context.project_id(),
                 // The editor's reach, not the original author's.
                 models::AttachmentActor::Authenticated(models::CommentActor::from(&actor.user)),
-                &input.content,
+                &body,
                 member_scoped,
             )?;
             Ok((comment, context))
@@ -7929,7 +7989,8 @@ mod tests {
 
         let result = m.edit_comment(Parameters(EditCommentInput {
             comment_id,
-            content: format!("/api/attachments/{new}"),
+            content: Some(format!("/api/attachments/{new}")),
+            ..Default::default()
         }));
         assert!(result.starts_with("Comment #"), "got: {result}");
 
@@ -8686,7 +8747,8 @@ mod tests {
 
         let edited = m.edit_comment(Parameters(EditCommentInput {
             comment_id,
-            content: "revised".into(),
+            content: Some("revised".into()),
+            ..Default::default()
         }));
         assert!(edited.starts_with("Comment #"), "got: {edited}");
         assert_eq!(
@@ -10199,7 +10261,8 @@ mod tests {
 
         let edited = m.edit_comment(Parameters(EditCommentInput {
             comment_id: cid,
-            content: "revised".into(),
+            content: Some("revised".into()),
+            ..Default::default()
         }));
         assert!(
             edited.contains(&format!("Comment #{cid} edited")),
@@ -10251,7 +10314,8 @@ mod tests {
 
         let rejected = m.edit_comment(Parameters(EditCommentInput {
             comment_id: cid,
-            content: oversized,
+            content: Some(oversized),
+            ..Default::default()
         }));
         assert!(
             rejected.starts_with("Error:") && rejected.contains("too large"),
@@ -10322,7 +10386,8 @@ mod tests {
                 let comment_id = comment_id_from(&added);
                 let edited = m.edit_comment(Parameters(EditCommentInput {
                     comment_id,
-                    content: "revised".into(),
+                    content: Some("revised".into()),
+                    ..Default::default()
                 }));
                 let deleted = m.delete_comment(Parameters(DeleteCommentInput { comment_id }));
                 (comment_id, edited, deleted)
@@ -10362,7 +10427,8 @@ mod tests {
 
         m.edit_comment(Parameters(EditCommentInput {
             comment_id,
-            content: "revised".into(),
+            content: Some("revised".into()),
+            ..Default::default()
         }));
         assert_eq!(
             realtime_events(&mut events),
@@ -10404,7 +10470,8 @@ mod tests {
         let _guard = act_as(&other);
         let edit = m.edit_comment(Parameters(EditCommentInput {
             comment_id: cid,
-            content: "hijacked".into(),
+            content: Some("hijacked".into()),
+            ..Default::default()
         }));
         assert!(
             edit.contains("Error") && edit.contains("only edit your own"),
@@ -10423,6 +10490,161 @@ mod tests {
             ..Default::default()
         }));
         assert!(listing.contains("mine"), "comment must survive: {listing}");
+    }
+
+    // ── GitHub #64: edit_comment exact-string replacement ────
+
+    fn comment_body(m: &LificMcp, cid: i64) -> String {
+        let conn = m.db.read().unwrap();
+        queries::comments::get_comment(&conn, cid).unwrap().content
+    }
+
+    fn seed_own_comment(m: &LificMcp, body: &str) -> (i64, tokio::sync::MutexGuard<'static, ()>) {
+        seed_project(m, "Proj", "PRJ");
+        seed_issue(m, "PRJ", "Commented");
+        let author = make_user(m, "author", false);
+        let guard = act_as(&author);
+        let added = m.add_comment(Parameters(AddCommentInput {
+            identifier: "PRJ-1".into(),
+            content: body.into(),
+        }));
+        (comment_id_from(&added), guard)
+    }
+
+    #[test]
+    fn edit_comment_old_new_string_replaces_only_the_match() {
+        let (m, _guard) = mcp();
+        let plan = "## Plan\n\n1. Parse the input\n2. Validate it\n3. Store it\n";
+        let (cid, _as_author) = seed_own_comment(&m, plan);
+
+        let edited = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            old_string: Some("2. Validate it".into()),
+            new_string: Some("2. Validate it strictly".into()),
+            ..Default::default()
+        }));
+        assert!(
+            edited.contains(&format!("Comment #{cid} edited")),
+            "got: {edited}"
+        );
+        assert_eq!(
+            comment_body(&m, cid),
+            "## Plan\n\n1. Parse the input\n2. Validate it strictly\n3. Store it\n",
+            "the rest of the comment must survive a surgical edit"
+        );
+    }
+
+    #[test]
+    fn edit_comment_substitution_failures_leave_the_body_untouched() {
+        let (m, _guard) = mcp();
+        let (cid, _as_author) = seed_own_comment(&m, "todo: a\ntodo: b\n");
+
+        let missing = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            old_string: Some("absent".into()),
+            new_string: Some("x".into()),
+            ..Default::default()
+        }));
+        assert!(missing.contains("not found"), "got: {missing}");
+
+        let ambiguous = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            old_string: Some("todo".into()),
+            new_string: Some("done".into()),
+            ..Default::default()
+        }));
+        assert!(
+            ambiguous.contains("matches 2 locations"),
+            "got: {ambiguous}"
+        );
+        assert_eq!(comment_body(&m, cid), "todo: a\ntodo: b\n");
+
+        let all = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            old_string: Some("todo".into()),
+            new_string: Some("done".into()),
+            replace_all: Some(true),
+            ..Default::default()
+        }));
+        assert!(!all.starts_with("Error"), "got: {all}");
+        assert_eq!(comment_body(&m, cid), "done: a\ndone: b\n");
+    }
+
+    #[test]
+    fn edit_comment_rejects_ambiguous_or_empty_mode() {
+        let (m, _guard) = mcp();
+        let (cid, _as_author) = seed_own_comment(&m, "keep this body");
+
+        let cases = [
+            // The #64 call shape: a full body plus a snippet to find.
+            EditCommentInput {
+                comment_id: cid,
+                content: Some("snippet".into()),
+                old_string: Some("keep".into()),
+                new_string: Some("full new body".into()),
+                replace_all: None,
+            },
+            EditCommentInput {
+                comment_id: cid,
+                ..Default::default()
+            },
+            EditCommentInput {
+                comment_id: cid,
+                old_string: Some("keep".into()),
+                ..Default::default()
+            },
+            EditCommentInput {
+                comment_id: cid,
+                new_string: Some("keep".into()),
+                ..Default::default()
+            },
+            EditCommentInput {
+                comment_id: cid,
+                content: Some("whole".into()),
+                replace_all: Some(true),
+                ..Default::default()
+            },
+        ];
+        for input in cases {
+            let described = format!("{input:?}");
+            let result = m.edit_comment(Parameters(input));
+            assert!(
+                result.starts_with("Error"),
+                "{described} must be refused: {result}"
+            );
+        }
+        assert_eq!(comment_body(&m, cid), "keep this body");
+    }
+
+    #[test]
+    fn edit_comment_input_rejects_unknown_fields() {
+        let err = serde_json::from_value::<EditCommentInput>(serde_json::json!({
+            "comment_id": 1,
+            "old_str": "a",
+            "content": "b",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn edit_comment_substitution_checks_authorship_before_matching() {
+        let (m, _guard) = mcp();
+        let (cid, as_author) = seed_own_comment(&m, "secret phrase");
+        drop(as_author);
+        let other = make_user(&m, "other", false);
+        let _as_other = act_as(&other);
+
+        // A needle that does not match must not produce "not found", which
+        // would tell a non-author something about the body.
+        let edit = m.edit_comment(Parameters(EditCommentInput {
+            comment_id: cid,
+            old_string: Some("absent".into()),
+            new_string: Some("x".into()),
+            ..Default::default()
+        }));
+        assert!(edit.contains("only edit your own"), "got: {edit}");
+        assert_eq!(comment_body(&m, cid), "secret phrase");
     }
 
     #[test]
@@ -10460,7 +10682,8 @@ mod tests {
 
         let edit = m.edit_comment(Parameters(EditCommentInput {
             comment_id: 9999,
-            content: "nope".into(),
+            content: Some("nope".into()),
+            ..Default::default()
         }));
         assert!(edit.contains("Error"), "unknown edit must error: {edit}");
         assert!(edit.contains("9999"), "error should name the id: {edit}");
@@ -12790,7 +13013,8 @@ mod authz_gating_tests {
         let allowed = as_user(&maintainer, || {
             m.edit_comment(Parameters(EditCommentInput {
                 comment_id,
-                content: "still mine".into(),
+                content: Some("still mine".into()),
+                ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed), "member author edit: {allowed}");
@@ -12804,7 +13028,8 @@ mod authz_gating_tests {
         let denied_edit = as_user(&maintainer, || {
             m.edit_comment(Parameters(EditCommentInput {
                 comment_id,
-                content: "sneaking back in".into(),
+                content: Some("sneaking back in".into()),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied_edit), "ex-member edit: {denied_edit}");
@@ -13297,7 +13522,8 @@ mod authz_gating_tests {
         let edit = as_user(&viewer, || {
             m.edit_comment(Parameters(EditCommentInput {
                 comment_id: edit_comment_id,
-                content: "tampered".into(),
+                content: Some("tampered".into()),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&edit), "got: {edit}");
@@ -13312,7 +13538,8 @@ mod authz_gating_tests {
         let foreign_edit = as_user(&viewer, || {
             m.edit_comment(Parameters(EditCommentInput {
                 comment_id: foreign_edit_id,
-                content: "tampered".into(),
+                content: Some("tampered".into()),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&foreign_edit), "got: {foreign_edit}");

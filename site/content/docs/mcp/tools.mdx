@@ -345,12 +345,15 @@ When the page is smaller than the thread, the first line says how many of the to
 
 ### `edit_comment`
 
-Updates the content of a comment by its numeric identifier.
+Edits a comment by its numeric identifier, in one of two modes. Pass `old_string` and `new_string` to replace an exact string, with the same contract as `edit_issue`. Pass `content` to replace the entire body. A call must use exactly one mode; mixing them, passing neither, or passing an unknown parameter is an error and leaves the comment unchanged.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `comment_id` | `integer` | Yes | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
-| `content` | `string` | Yes | New comment content (markdown). Rejected over 262144 bytes after normalization, leaving the stored comment unchanged. |
+| `old_string` | `string` | No | Exact string to find. Must be unique unless replace_all is true. Requires `new_string`. |
+| `new_string` | `string` | No | Replacement string (must differ from old_string) |
+| `replace_all` | `boolean` | No | With `old_string`: replace all occurrences (default false) |
+| `content` | `string` | No | Replaces the entire comment body (markdown). Rejected over 262144 bytes after normalization, leaving the stored comment unchanged. |
 
 ### `delete_comment`
 
