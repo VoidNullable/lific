@@ -1,23 +1,47 @@
 ---
 title: Introduction
-description: An overview of Lific and its documentation.
+description: What Lific is, how its interfaces share one database, and which page to read first for your goal.
 ---
 
-Lific is a local-first issue tracker: it runs on your machine, stores its data locally in SQLite and the attachments directory, and requires no hosted Lific service. A Lific instance is one authoritative source of truth; separate instances do not synchronize or merge. It runs as a single Rust binary.
+Lific is an issue tracker you run yourself, built to be used by coding agents as much as by people. One binary contains the server, a web UI, a command-line interface, a REST API and an MCP server. Everything it knows lives in one SQLite database and a directory of attachments on a machine you control. There is no hosted Lific service and no account to create anywhere else.
 
-The binary provides an embedded Svelte web UI, a command-line interface, a REST API, and an MCP server. The web UI assets are embedded from the frontend build output.
+Issues, pages and plans have short readable identifiers such as `APP-42`, `APP-DOC-3` and `APP-PLAN-2`. They are meant to be typed into a prompt, pasted into a commit message, or read aloud.
 
-## Documentation map
+## One database, four ways in
 
-- [Installation](/docs/installation) covers release binaries, Cargo installation, and source builds.
-- [Quickstart](/docs/quickstart) covers initializing an instance and creating a first issue.
-- [Connect agents](/docs/connect) covers `lific connect`, which writes MCP configuration for installed AI tools.
-- [Windows](/docs/windows) covers native Windows setup and WSL 2.
-- [Web UI guide](/docs/web-ui) covers dashboard, issue views, pages, plans, accounts, and mobile workflows.
-- [Upgrading](/docs/upgrading) covers backups, version-specific changes through 2.6, authorization, and verification.
-- [Concepts](/docs/concepts) describes Lific resources and identifiers.
-- [CLI](/docs/cli) documents command-line operations.
-- [Configuration](/docs/configuration) documents `lific.toml` and command-line overrides.
-- [Self-hosting](/docs/self-hosting) documents running a Lific server.
-- [REST API](/docs/rest-api) documents HTTP endpoints.
-- [MCP](/docs/mcp) documents the MCP server and its tools.
+An instance is one database. The web UI, the CLI, the REST API and MCP all read and write that same data, so an issue an agent creates over MCP shows up in the browser immediately, and a status you change on the board is what the agent sees on its next call.
+
+| Interface | Use it for | Needs the server running |
+| --- | --- | --- |
+| Web UI | Triage, boards, reading and writing pages, account and project settings | Yes |
+| MCP | Letting a coding agent plan, track and document its work | Not for local stdio, which opens the database directly. Yes for HTTP and for remote stdio. |
+| CLI | Setup, administration, scripts, backups and recovery | No for local commands. Yes with `--backend http`. |
+| REST API | Integrations and custom clients | Yes |
+
+Separate instances never synchronize or merge. If you need a project somewhere else, move it with a [project archive](/docs/project-archives).
+
+## Where to start
+
+**Trying it on your own machine.** Read [Installation](/docs/installation), then follow the [Quickstart](/docs/quickstart). You will have a running tracker and a connected agent in a few minutes.
+
+**Giving a coding agent a tracker.** [Connect agents](/docs/connect) writes the MCP configuration for your AI tools. [Repository bindings](/docs/repository-bindings) then let an agent working in a checkout find its project without being told.
+
+**Running it for a team.** Read [Self-hosting](/docs/self-hosting) for deployment, accounts and backups, [Configuration](/docs/configuration) for every setting, and [Upgrading](/docs/upgrading) before you install a new version.
+
+**Building on it.** The [MCP tools](/docs/mcp/tools), [REST API](/docs/rest-api) and [CLI](/docs/cli) references list every operation with its parameters.
+
+**Learning the model.** [Concepts](/docs/concepts) explains projects, issues, pages, plans and how they relate.
+
+## If you are an agent reading this
+
+These docs are also published as plain text. [/llms.txt](https://lific.dev/llms.txt) is an index of every page, and [/llms-full.txt](https://lific.dev/llms-full.txt) is the whole documentation in one file.
+
+A few conventions hold across the MCP tools and are worth knowing before your first call:
+
+- Refer to things by identifier: `APP-42` for an issue, `APP-DOC-3` for a project page, `DOC-3` for a workspace page, `APP-PLAN-2` for a plan. Comments use their numeric id.
+- A failed tool call returns text that starts with `Error:` and says what to change. It is not a protocol error, so read the text.
+- For a small change to a long description or comment, use `edit_issue`, `edit_page` or `edit_comment` with `old_string` and `new_string`. They replace one exact string and leave the rest alone, so you do not have to resend the whole body.
+- List results are paged. When more exist, the output ends with the `offset` to pass on the next call.
+- Call `list_issues` with `workable=true` to get open issues whose blockers are all done.
+
+The [MCP overview](/docs/mcp) covers transports and authentication, and the [tool reference](/docs/mcp/tools) documents every parameter.

@@ -1,72 +1,84 @@
 ---
 title: Issues
-description: Issue fields, workflow values, labels, dates, and relationships.
+description: What an issue holds, what Lific does with each status, how blockers decide which work is ready, and what happens when an issue is deleted.
 ---
 
-An issue is a project-scoped work item. It has a title, Markdown description, status, priority, optional module, optional start and target dates, labels, and timestamps.
+An issue is one piece of work inside a project. It is identified by the project's identifier and a number, such as `APP-42`, and it behaves the same whether it was created in the browser, by the CLI, over REST or by an agent over MCP.
 
-## Identifiers and sequence numbers
+## Fields
 
-Each issue has a sequence number that is unique within its project. Its identifier combines the project identifier and sequence number.
-
-For example, the forty-second issue in project `LIF` is `LIF-42`.
-
-## Statuses
-
-Issues use one of these status values.
-
-| Status | Description |
+| Field | What it holds |
 | --- | --- |
-| `backlog` | The default status for a new issue. |
-| `todo` | An open workflow status. |
-| `active` | An open workflow status. |
-| `done` | A completed workflow status. |
-| `cancelled` | A closed workflow status. |
+| `title` | A one-line summary. Required. |
+| `description` | Markdown. In the web UI, an identifier such as `APP-12`, `APP-DOC-3` or `APP-PLAN-2` in the text becomes a link. |
+| `status` | Where the work stands. New issues start in `backlog`. See [Status](#status). |
+| `priority` | `urgent`, `high`, `medium`, `low` or `none`. New issues start at `none`. |
+| `module` | At most one [module](/docs/concepts/modules-and-labels) from the same project. |
+| `labels` | Any number of the project's [labels](/docs/concepts/modules-and-labels). |
+| `start_date`, `target_date` | Optional calendar dates, written `YYYY-MM-DD`. |
+| `created_at`, `updated_at` | Set by Lific. Adding a comment or changing labels also moves `updated_at`. |
 
-## Priorities
+When you update an issue and include `labels`, the list you send becomes the issue's complete label set. Leave `labels` out to keep the current ones.
 
-Issues use one of these priority values.
+The number in an identifier counts up within its project. A number is not handed out again while a deleted issue that held it is still in the trash, so restoring an issue never collides with a newer one.
 
-| Priority | Description |
-| --- | --- |
-| `urgent` | Highest priority value. |
-| `high` | High priority value. |
-| `medium` | Medium priority value. |
-| `low` | Low priority value. |
-| `none` | The default priority value. |
+## Status
 
-When issues are sorted by priority, the order is `urgent`, `high`, `medium`, `low`, then `none`.
+Lific has five fixed statuses. Three are open and two are closed, and `done` is the only one with side effects.
 
-## Modules, labels, and dates
+| Status | Meaning | Open or closed |
+| --- | --- | --- |
+| `backlog` | Recorded, not yet planned. | Open |
+| `todo` | Planned, not started. | Open |
+| `active` | Someone is working on it. | Open |
+| `done` | Finished. | Closed |
+| `cancelled` | Will not be done. | Closed |
 
-An issue can be assigned to one module in the same project. It can have any number of labels defined by that project.
+Moving an issue to `done` has two effects that `cancelled` does not:
 
-Supplying labels during an update replaces the issue's complete label set. Omitting labels from an update leaves the current labels unchanged.
+- Issues it blocks stop counting it as a blocker.
+- Plan steps that mirror it are checked off in active plans, and a plan anchored to it is archived. Moving the issue out of `done` again unchecks those steps. See [Plans](/docs/concepts/plans).
 
-Issues can store optional `start_date` and `target_date` values. The MCP interface accepts ISO 8601 dates for these fields.
+A commit message such as `closes APP-42`, `fixes APP-42` or `resolves APP-42` moves the issue to `done` when you run [`lific git-hook`](/docs/cli) from a git hook or CI job.
 
-Each issue also stores `created_at` and `updated_at` timestamps. Issue activity from comments and label changes updates the issue's `updated_at` value.
+The [activity log](/docs/concepts/comments-and-activity) records every status change with who made it and through which interface.
 
-## Relationships
+## Priority
 
-Issue relationships use one of three types.
+Priority is for sorting and filtering. When issues are sorted by priority the order is `urgent`, `high`, `medium`, `low`, then `none`. Lific attaches no other behavior to it.
 
-| Type | Meaning |
-| --- | --- |
-| `blocks` | The source issue blocks the target issue. |
-| `relates_to` | The issues are shown as related on both issue records. |
-| `duplicate` | The source issue duplicates the target issue. |
+## Relations
 
-A `blocks` relation is directional. If `LIF-1` blocks `LIF-2`, `LIF-1` lists `LIF-2` under blocks. `LIF-2` lists `LIF-1` under blocked by.
+Two issues can be linked in one of three ways. Links may cross projects, but an issue cannot be linked to itself.
 
-A `duplicate` relation is also directional. If `LIF-1` duplicates `LIF-2`, `LIF-1` lists `LIF-2` under duplicates. `LIF-2` lists `LIF-1` under duplicated by.
+| Type | Direction | How each issue shows it |
+| --- | --- | --- |
+| `blocks` | `APP-1` blocks `APP-2` | `APP-1` lists **Blocks** `APP-2`; `APP-2` lists **Blocked by** `APP-1`. |
+| `relates_to` | None | Both issues list the other as related. |
+| `duplicate` | `APP-3` duplicates `APP-1` | `APP-3` lists **Duplicate of** `APP-1`; `APP-1` lists **Duplicated by** `APP-3`. |
 
-Relationships can connect issues in different projects. An issue cannot be linked to itself.
+Only `blocks` changes behavior. A duplicate is not closed automatically; set its status yourself.
 
-## Workable and blocked issues
+## Ready and blocked work
 
-An issue is workable when it is not `done` or `cancelled` and has no unresolved blockers.
+Two filters answer "what can be worked on now" without walking the relation graph yourself. Both exist on the MCP `list_issues` tool and the REST issue list; the CLI has `lific issue list --workable`.
 
-A blocker is unresolved until its status is `done`. A blocker with status `cancelled` still counts as unresolved.
+`workable=true` returns issues that are open (not `done` or `cancelled`) and whose blockers are all `done`. A deleted blocker no longer counts.
 
-The blocked filter returns issues with at least one unresolved incoming `blocks` relationship. The workable filter excludes those issues.
+`blocked=true` returns issues with at least one blocker that is not `done`. It does not look at the issue's own status, so a closed issue with an open blocker still appears.
+
+A blocker that was `cancelled` still blocks. That is deliberate: cancelling the prerequisite does not make the dependent work possible. When the dependency no longer matters, remove the `blocks` relation.
+
+## Deleting and restoring
+
+Deleting an issue moves it to the trash, along with its comments. It disappears from lists, search, boards and [public projects](/docs/public-projects) straight away. For the next 30 days, a maintainer can restore it with `POST /api/issues/{id}/restore`, and its comments come back with it. After that the retention sweep removes it permanently. Change the window with `trash_days` in the [`[retention]`](/docs/configuration#retention) section of the configuration.
+
+The trash protects against mistakes. It is not a backup; use the automatic backups or `lific dump` for that.
+
+## Concurrent edits
+
+By default the last write wins. To avoid overwriting someone else's change, send the `expected_seq` you last read with an update. If the issue has changed since, the update is refused: REST answers `409` with the current issue, and MCP returns an error. For a small change to a long description, `edit_issue` replaces one exact string and leaves the rest of the text untouched.
+
+## Who can change an issue
+
+When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, linking, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
