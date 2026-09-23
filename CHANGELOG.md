@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.10.0 (2026-09-23)
+
+A hardening release. Public projects get firmer limits and a spoof-resistant way for a reverse proxy to identify clients, `edit_comment` stops overwriting comments when an agent asks for a small edit, and newer MCP clients can talk to the stdio server again. There are no database migrations.
+
+### MCP
+
+- `edit_comment` now supports exact string replacement with `old_string` and `new_string` (plus `replace_all`), the same contract as `edit_issue` and `edit_page`. Passing `content` still replaces the whole body. A call must choose one mode, and unknown parameters are rejected, so an agent that guesses the contract wrong gets an error instead of a comment reduced to the snippet it sent ([#64](https://github.com/VoidNullable/lific/issues/64), reported by [@bgie](https://github.com/bgie)).
+- The stdio server answers a `server/discover` request sent before `initialize` with a method-not-found error and keeps running, instead of exiting. Newer MCP clients that probe first can now connect (PR #58 by [@bgie](https://github.com/bgie)).
+- Server instructions now show the correct argument names for listing projects and plans and for `get_plan` (PR #63 by [@mjc](https://github.com/mjc)).
+
+### Public projects and security
+
+- A reverse proxy listed in `server.trusted_proxies` can pass the client address in `X-Lific-Client-IP`, authenticated with `X-Lific-Proxy-Secret` against the new `LIFIC_TRUSTED_PROXY_SECRET` environment variable. A trusted peer that sends either header without a valid pair gets `503` on rate-limited routes, rather than every visitor sharing the proxy's rate-limit bucket. Forwarded-header handling is otherwise unchanged (PR #59 by [@mjc](https://github.com/mjc)).
+- Public attachment downloads have their own budget of four concurrent streams, so slow readers cannot starve ordinary public reads. Public thumbnail and preview derivation runs one at a time to stay inside small deployments' memory. Excess requests get `503` with `Retry-After`.
+- Every response now carries `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, a `Content-Security-Policy` of `frame-ancestors 'none'; base-uri 'self'; object-src 'none'`, and `Cross-Origin-Resource-Policy: same-origin`, including OAuth consent pages. Lific can no longer be embedded in another site's frame.
+- Mermaid diagram limits can no longer be bypassed with semicolon-separated statements, comments, or titled equal-axis chart ranges, each of which could make a viewer's browser do unbounded work. Quoted labels and ordinary ranges still render.
+- Svelte, DOMPurify and Mermaid are updated.
+
+### Web UI
+
+- The issue peek panel checks your role in the issue's own project. Viewers see read-only controls, and a refused edit says so instead of failing quietly.
+- Inline title edits save once whether you press Enter, press Ctrl+S or click away, and Escape cancels without saving.
+- Issue list controls stay on one row down to small tablet widths, with secondary controls moved into a compact menu.
+
+### Builds and releases
+
+- The Windows release binary is built for `x86_64-pc-windows-msvc` and smoke-tested on Windows before publication. The download name is unchanged (PRs #60 and #61 by [@mjc](https://github.com/mjc)).
+- Release builds now fail unless the web UI has been built, so a release binary can no longer ship without its interface. Development builds are unaffected.
+- Development and release builds use a pinned [Devenv](https://devenv.sh) environment. See the installation guide for building from source.
+
+### Upgrading
+
+- No migrations. A 2.9 database opens unchanged. Keep your usual backup before upgrading.
+- Automation that called `edit_comment` with extra parameters must drop them; the tool now rejects unknown fields.
+- If you embedded the Lific web UI in an iframe, that stops working: every response now forbids framing.
+- `LIFIC_TRUSTED_PROXY_SECRET` is optional. If you adopt it, set it on the Lific server before your proxy starts sending the new headers, and make the proxy strip client-supplied copies of both.
+
 ## v2.9.0 (2026-09-11)
 
 Lific can now associate a repository with its project, route one agent connection to several trackers, and move complete projects between instances. Publish a project's current issues and pages for anyone to read in the same web UI. Sidebar ordering becomes personal, and CLI diagnostics and account recovery get stricter. Read the upgrade notes before changing a container or automated client.
