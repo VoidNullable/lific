@@ -150,10 +150,10 @@ impl LificMcp {
         };
         let plans = self.plans_section(context, project.id, ident)?;
         let blocked = self.blocked_section(context, project.id, ident)?;
-        // Seam: a "Waiting on people and dates" section (issues held by a user
-        // or a date range rather than by another issue) belongs right here,
-        // built like `blocked_section`: an `Option<Section>` that is `None`
-        // when nothing waits, so it is omitted and shares the budget pass.
+        // LIF-484: waits that still hold are named in `blocked`. A date wait
+        // whose window has arrived no longer blocks, so without this section
+        // the follow-up it asks for would hide among workable issues.
+        let due = self.due_section(context, project.id, ident)?;
         let workable = self.workable_section(context, project.id, ident)?;
         let pages = self.pages_section(
             context,
@@ -164,7 +164,7 @@ impl LificMcp {
         )?;
         let active = self.active_section(context, project.id, ident)?;
 
-        let mut sections: Vec<Section> = [changes, plans, blocked, workable, pages, active]
+        let mut sections: Vec<Section> = [changes, plans, due, blocked, workable, pages, active]
             .into_iter()
             .flatten()
             .collect();
@@ -380,11 +380,26 @@ impl LificMcp {
                 if hidden > 0 {
                     named.push(format!("{hidden} in a project you cannot view"));
                 }
-                format!(
-                    "{}; blocked by {}",
-                    issue_line(context, issue),
-                    named.join(", ")
-                )
+                let mut line = issue_line(context, issue);
+                if !named.is_empty() {
+                    let _ = write!(line, "; blocked by {}", named.join(", "));
+                }
+                // LIF-484: a person or a not-yet-started date window blocks
+                // like an issue does, so it is named here too.
+                for wait in issue
+                    .waits
+                    .iter()
+                    .filter(|wait| wait.state == models::WaitState::Holding)
+                {
+                    let text = crate::mcp::waits::WaitLine(wait).to_string();
+                    let mut chars = text.chars();
+                    let lowered: String = chars
+                        .next()
+                        .map(|first| first.to_lowercase().chain(chars).collect())
+                        .unwrap_or_default();
+                    let _ = write!(line, "; {lowered}");
+                }
+                line
             })
             .collect();
         Ok(Some(Section {
@@ -394,6 +409,50 @@ impl LificMcp {
             total,
             total_is_floor,
             more: format!("list_issues(project='{ident}', blocked=true)"),
+        }))
+    }
+
+    fn due_section(
+        &self,
+        context: Option<&IssueLinkContext>,
+        project_id: i64,
+        ident: &str,
+    ) -> Result<Option<Section>, String> {
+        let today = queries::waits::today_text();
+        let ids =
+            self.read(|conn| queries::briefing::issues_with_due_waits(conn, project_id, &today))?;
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let issues = self.read(|conn| {
+            ids.iter()
+                .take(ISSUE_LINES)
+                .map(|&id| queries::get_issue(conn, id))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        let lines = issues
+            .iter()
+            .map(|issue| {
+                let mut line = issue_line(context, issue);
+                for wait in issue
+                    .waits
+                    .iter()
+                    .filter(|wait| wait.state != models::WaitState::Holding)
+                {
+                    let _ = write!(line, "; {}", crate::mcp::waits::WaitLine(wait));
+                }
+                line
+            })
+            .collect();
+        Ok(Some(Section {
+            heading: format!("Due to check ({})", ids.len()),
+            summary: Some(
+                "Date waits whose window has arrived. Follow up, then clear the wait with unlink_issues.".into(),
+            ),
+            lines,
+            total: ids.len(),
+            total_is_floor: false,
+            more: format!("list_issues(project='{ident}'), rows tagged due_since or overdue_since"),
         }))
     }
 

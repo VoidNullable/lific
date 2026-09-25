@@ -180,3 +180,28 @@ pub fn open_blockers(
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+
+/// Open, live issues in a project with a date wait that no longer holds
+/// (LIF-484): its earliest day has arrived, so it is due to check or overdue.
+/// Most overdue first (earliest `latest`), then by identifier. `today` is
+/// [`super::waits::today_text`].
+pub fn issues_with_due_waits(
+    conn: &Connection,
+    project_id: i64,
+    today: &str,
+) -> Result<Vec<i64>, LificError> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id
+           FROM issues i
+           JOIN issue_waits w ON w.issue_id = i.id
+          WHERE i.project_id = ?1
+            AND i.deleted_at IS NULL
+            AND i.status NOT IN ('done', 'cancelled')
+            AND w.kind = 'date'
+            AND w.earliest <= ?2
+          GROUP BY i.id
+          ORDER BY MIN(w.latest), i.sequence",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id, today], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}

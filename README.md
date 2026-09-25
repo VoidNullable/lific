@@ -63,7 +63,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 
 ## What your agent can now do
 
-- **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
+- **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them (issues, people, or date windows), date waits that have come due, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
 - **Block on people and dates, not only issues.** `link_issues(target="APP-9", relation_type="blocks", user="blake")` parks an issue until someone clears it; `from="2026-09-28", until="2026-10-02", note="filing office"` parks it until a window opens, then shows it as due and later overdue.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.

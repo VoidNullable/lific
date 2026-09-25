@@ -458,3 +458,82 @@ fn the_budget_pass_trims_the_longest_sections_and_notes_each_cut() {
         "{out}"
     );
 }
+
+#[test]
+fn briefing_names_holding_waits_as_blockers_and_lists_due_date_waits() {
+    let (m, _guard) = mcp();
+    let _day = crate::db::queries::waits::pin_today("2026-09-25");
+    seed_project(&m, "Waits", "WTB");
+    issue(&m, "WTB", "Needs a decision", "todo", "high"); // WTB-1
+    issue(&m, "WTB", "Filing pending", "todo", "medium"); // WTB-2
+    issue(&m, "WTB", "Bank reply", "todo", "medium"); // WTB-3
+    issue(&m, "WTB", "Vendor quote", "todo", "low"); // WTB-4
+    let wait = |target: &str, input: LinkIssuesInput| {
+        let added = m.link_issues(Parameters(LinkIssuesInput {
+            target: target.into(),
+            relation_type: "blocks".into(),
+            ..input
+        }));
+        assert!(!added.starts_with("Error"), "got: {added}");
+    };
+    wait(
+        "WTB-1",
+        LinkIssuesInput {
+            user: Some("admin".into()),
+            note: Some("pick the schema".into()),
+            ..Default::default()
+        },
+    );
+    wait(
+        "WTB-2",
+        LinkIssuesInput {
+            from: Some("2026-09-28".into()),
+            until: Some("2026-09-29".into()),
+            ..Default::default()
+        },
+    );
+    wait(
+        "WTB-3",
+        LinkIssuesInput {
+            from: Some("2026-09-24".into()),
+            until: Some("2026-09-26".into()),
+            note: Some("bank said 2 days".into()),
+            ..Default::default()
+        },
+    );
+    wait(
+        "WTB-4",
+        LinkIssuesInput {
+            from: Some("2026-09-20".into()),
+            ..Default::default()
+        },
+    );
+
+    let out = briefing(&m, Some("WTB"), None, &[]);
+    let due = out.split("## Due to check (2)").nth(1).expect(&out);
+    let due = due.split("\n## ").next().unwrap();
+    let overdue_at = due.find("WTB-4").expect(due);
+    let due_at = due.find("WTB-3").expect(due);
+    assert!(overdue_at < due_at, "most overdue first: {due}");
+    assert!(due.contains("Overdue since 2026-09-21"), "{due}");
+    assert!(
+        due.contains("Due to check since 2026-09-24, expected by 2026-09-26 (bank said 2 days)"),
+        "{due}"
+    );
+    assert!(!due.contains("WTB-1") && !due.contains("WTB-2"), "{due}");
+
+    let blocked = out.split("## Blocked (2)").nth(1).expect(&out);
+    let blocked = blocked.split("\n## ").next().unwrap();
+    assert!(
+        blocked.contains("; waiting on @admin (pick the schema)"),
+        "{blocked}"
+    );
+    assert!(
+        blocked.contains("; waiting until 2026-09-28..29"),
+        "{blocked}"
+    );
+    assert!(
+        !blocked.contains("blocked by"),
+        "no empty issue-blocker clause: {blocked}"
+    );
+}
