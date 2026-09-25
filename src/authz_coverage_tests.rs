@@ -579,6 +579,7 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
     HashMap::from([
         ("search", Filtered),
         ("get_activity", Gated(Viewer)),
+        ("get_briefing", Gated(Viewer)),
         ("list_issues", Gated(Viewer)),
         ("get_issue", Gated(Viewer)),
         ("export", Gated(Viewer)),

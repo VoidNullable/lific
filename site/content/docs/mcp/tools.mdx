@@ -3,7 +3,7 @@ title: MCP tools
 description: Reference for the MCP tools exposed by Lific.
 ---
 
-Lific exposes 30 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
+Lific exposes 31 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
 When MCP is reached over HTTP and its origin is known, issue, project, page, plan, module, and comment references are rendered as Markdown links to their canonical web routes. Comment links include an anchor that scrolls the issue or page thread to that comment. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain references.
 
@@ -364,6 +364,29 @@ Deletes a comment by its numeric identifier.
 | `comment_id` | `integer` | Yes | Comment id (the numeric handle returned by add_comment / shown by list_comments) |
 
 ## Search and activity
+
+### `get_briefing`
+
+Summarizes a project for an agent resuming work, in one bounded read. Call it first at the start of a session instead of rebuilding the picture from search, pages, issue lists and plans.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | No | Project identifier (e.g. LIF). Optional when the session is bound to a repository. |
+| `since` | `string` | No | ISO date or datetime. Adds a section for what changed strictly after it. Read like `get_activity`'s `since`: UTC unless an offset is given. |
+| `pages` | `string[]` | No | Page identifiers to report on, such as the pages an `AGENTS.md` tells agents to read. At most 10. Without it, the three most recently updated pages are shown. |
+
+The response opens with the current time and a `since` value to pass next time. The sections that follow are built from live records when the call is made. Nothing is stored or summarized by a model.
+
+- **Since the cursor**, only when `since` is given: counts of issues created, issues closed, other status changes and pages edited, followed by the most recent of each. Status changes are net per issue, so an issue moved and moved back is not listed.
+- **Active plans**, with progress and the next open step. The next step is the first unfinished step in tree order, descending into its first unfinished child.
+- **Blocked** issues that are still open, each with the issues that block it and their status. A blocker in a project you cannot view is counted but not named.
+- **Workable, not yet active** issues, highest priority first. Active issues are excluded here because they have their own section.
+- **Key pages**: identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`.
+- **Active** issues, highest priority first.
+
+Sections with nothing to report are left out. Issue sections show up to 8 items, plans up to 5, and each kind of change up to 5. The whole response stays under 6,000 characters. When a section is cut, either by its own limit or to fit that budget, it ends with the number of items left out and the call that lists them all.
+
+Access follows `list_issues`: you need at least viewer access to the project.
 
 ### `search`
 

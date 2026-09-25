@@ -89,6 +89,22 @@ pub struct GetActivityInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetBriefingInput {
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
+    #[schemars(
+        description = "Also summarize changes after this ISO date or datetime (UTC unless offset given)"
+    )]
+    pub since: Option<String>,
+    #[schemars(
+        description = "Page IDs to report on (e.g. LIF-DOC-1); default: recently updated pages"
+    )]
+    pub pages: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CreateIssueInput {
     #[schemars(
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"

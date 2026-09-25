@@ -938,6 +938,7 @@ impl LificMcp {
     /// | `create_issue` | resolvable | omission is an error today |
     /// | `get_board` | resolvable | omission is an error today |
     /// | `create_plan` | resolvable | omission is an error today |
+    /// | `get_briefing` | resolvable | omission is an error without a binding |
     /// | `list_resources` (issue, plan, module, label, folder) | resolvable | omission is an error today |
     /// | `list_resources` (page) | meaning-preserved | omission lists pages across every project |
     /// | `list_resources` (project) | meaning-preserved | `project` is ignored for this type |
@@ -972,7 +973,7 @@ const FALLBACK_RESOURCE_TYPES: [&str; 5] = ["issue", "plan", "module", "label", 
 /// machine, and has nothing but the tool name and arguments to go on.
 pub(crate) fn project_fallback_applies(tool: &str, resource_type: Option<&str>) -> bool {
     match tool {
-        "list_issues" | "create_issue" | "get_board" | "create_plan" => true,
+        "list_issues" | "create_issue" | "get_board" | "create_plan" | "get_briefing" => true,
         "list_resources" => {
             resource_type.is_some_and(|kind| FALLBACK_RESOURCE_TYPES.contains(&kind))
         }
@@ -1567,6 +1568,7 @@ impl LificMcp {
 
 #[cfg(test)]
 mod activity_since_tests;
+mod briefing;
 
 #[tool_router]
 impl LificMcp {
@@ -1854,6 +1856,14 @@ impl LificMcp {
             }
             (None, _, _) => "No activity entries in this range.".into(),
         })
+    }
+
+    #[tool(
+        description = "Call first when resuming a project: active plans with next steps, blocked, workable and active issues, key pages (metadata only) and, with since, what changed. Bounded to about 6,000 characters."
+    )]
+    fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
+        self.get_briefing_inner(input)
+            .unwrap_or_else(error_response)
     }
 
     #[tool(
@@ -12572,11 +12582,12 @@ mod tests {
     #[test]
     fn the_fallback_classification_matches_the_documented_table() {
         // Every row of the table on `project_or_bound`, in order.
-        let resolvable: [(&str, Option<&str>); 9] = [
+        let resolvable: [(&str, Option<&str>); 10] = [
             ("list_issues", None),
             ("create_issue", None),
             ("get_board", None),
             ("create_plan", None),
+            ("get_briefing", None),
             ("list_resources", Some("issue")),
             ("list_resources", Some("plan")),
             ("list_resources", Some("module")),

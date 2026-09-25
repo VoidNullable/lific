@@ -80,11 +80,12 @@ const LIST_INSTANCES: &str = "list_instances";
 /// is supplied by the server being routed to, so trusting it would let a
 /// backend widen what routes without an explicit alias. Unknown tools are
 /// outside the list.
-const READONLY_TOOLS: [&str; 12] = [
+const READONLY_TOOLS: [&str; 13] = [
     "export",
     "get_activity",
     "get_attachment",
     "get_board",
+    "get_briefing",
     "get_issue",
     "get_page",
     "get_plan",
