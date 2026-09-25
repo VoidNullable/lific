@@ -181,6 +181,8 @@ struct Spec {
     scope: &'static str,
 }
 // This list, including column order, is format v2. No SELECT * and no schema dump.
+// `page_revisions` (LIF-480) is left out on purpose: its seqs are instance-scoped
+// and mean nothing on the importing instance.
 const SPECS: &[Spec] = &[
     Spec {
         name: "projects",

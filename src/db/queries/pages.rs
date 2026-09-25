@@ -515,6 +515,37 @@ pub fn page_seq(conn: &Connection, id: i64) -> Result<i64, LificError> {
     })
 }
 
+/// A page's content as it stood at instance seq `seq` (LIF-480), from the
+/// history migration 055 records. `None` when that point is outside the
+/// retained history: before the page existed or its oldest kept revision, or
+/// past the newest seq this instance has issued.
+pub fn page_content_at_seq(
+    conn: &Connection,
+    id: i64,
+    seq: i64,
+) -> Result<Option<String>, LificError> {
+    let (issued, current_seq, current): (i64, i64, String) = conn.query_row(
+        "SELECT (SELECT value FROM sync_seq WHERE id = 1), seq, content FROM pages WHERE id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if seq > issued {
+        return Ok(None);
+    }
+    // Nothing about the page has changed since `seq`, recorded or not.
+    if seq >= current_seq {
+        return Ok(Some(current));
+    }
+    Ok(conn
+        .query_row(
+            "SELECT content FROM page_revisions WHERE page_id = ?1 AND seq <= ?2
+              ORDER BY seq DESC LIMIT 1",
+            params![id, seq],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// Bring a tombstoned page back, together with the comments that went down
 /// with it (LIF-438).
 pub fn restore_page(conn: &Connection, id: i64) -> Result<Page, LificError> {

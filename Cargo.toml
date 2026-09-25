@@ -130,6 +130,9 @@ console = "0.16.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tempfile = "3"
 fs2 = "0.4"
+# Line diffs for get_page(since_seq) (LIF-480). No dependencies with only the
+# `text` feature; 2.x because 3.x needs a newer toolchain than rust-version.
+similar = { version = "2", default-features = false, features = ["text"] }
 
 # SIGPIPE handling for piped CLI output (see main.rs); unix only.
 [target.'cfg(unix)'.dependencies]

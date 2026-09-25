@@ -71,6 +71,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 - **Close with the proof attached.** `update_issue(status="done", evidence="cargo test: 412 passed")` saves the evidence as a verification comment in the same write as the close. `get_issue` marks it `[verification]` and the web UI badges it, so whoever reviews the close can see what was actually checked. If the description has a `- [ ]` task list, `get_issue` and `list_issues` show its progress (`3/5`), and closing with boxes still unchecked says how many.
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
+- **Read long pages a section at a time.** A page over 30,000 characters comes back as an outline with section sizes plus its opening, and `get_page(section="Current state")` fetches just that part. Nothing is silently cut off by the harness. Coming back to a page later, `get_page(since_seq=...)` returns only the lines that changed. Writes that push a page past the budget say so, with a nudge to split it.
 - **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
 
 ## Every tool gets its own identity, and that's the point
