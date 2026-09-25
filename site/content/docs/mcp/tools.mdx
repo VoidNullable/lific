@@ -574,7 +574,7 @@ Issue frontmatter lists relations (`blocks`, `blocked_by`, `relates_to`, `duplic
 
 ## Attachments
 
-Uploads share the REST limits: 10 MiB per file, and a type allowlist decided from the bytes. The allowlist is PNG, JPEG, GIF, WebP, SVG, PDF, ZIP, plain text, MP4, WebM video and audio, Ogg audio, MP3 and SQLite databases. The filename's extension decides the type only for formats with no signature: `.svg` is SVG, and `.txt`, `.log`, `.md`, `.csv` and `.json` are plain text. Everything else is read from its magic bytes, so a renamed executable is refused.
+Uploads share the REST limits: 10 MiB per file, and a type allowlist decided from the bytes. The allowlist is PNG, JPEG, GIF, WebP, SVG, PDF, ZIP, plain text, MP4, WebM video and audio, Ogg audio, MP3, SQLite databases and legacy HWP. The filename's extension decides the type only for formats with no signature of their own: `.svg` is SVG, `.txt`, `.log`, `.md`, `.csv` and `.json` are plain text, and `.hwp` marks a file with the OLE compound-document signature as HWP. Everything else is read from its magic bytes, so a renamed executable is refused.
 
 ### `upload_attachment`
 

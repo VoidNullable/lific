@@ -169,6 +169,7 @@ Lific reads no environment variable in place of a `lific.toml` key. These are th
 | `LIFIC_INIT_ADMIN_PASSWORD` | `lific start --init-if-missing` | The first administrator's password. Ignored once the database exists. |
 | `LIFIC_TRUSTED_PROXY_SECRET` | `lific start` | The shared secret a trusted proxy sends in `X-Lific-Proxy-Secret`. See [`[server]`](#server). |
 | `RUST_LOG` | `lific start`, `lific mcp` | Replaces `[log] level` with a `tracing` filter. |
+| `TOKIO_WORKER_THREADS` | Every command | Number of async worker threads. Unset, Lific uses one per available CPU, up to 8. |
 | `GITHUB_TOKEN` | `lific import github` | The GitHub token, when `--token` is not given. |
 | `LINEAR_API_KEY` | `lific import linear` | The Linear API key, when `--token` is not given. |
 | `JIRA_EMAIL`, `JIRA_API_TOKEN` | `lific import jira` | The Jira account email and API token, when `--email` and `--token` are not given. |

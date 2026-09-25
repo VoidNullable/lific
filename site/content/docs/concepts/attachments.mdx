@@ -20,11 +20,13 @@ Lific decides a file's type from its contents, not from its name or the type the
 | Kind | Types |
 | --- | --- |
 | Images | PNG, JPEG, GIF, WebP, SVG |
-| Documents | PDF, plain text |
+| Documents | PDF, plain text, legacy HWP (Hangul Word Processor) |
 | Archives and data | ZIP, SQLite database |
 | Media | MP4 and WebM video; WebM, Ogg and MP3 audio |
 
 Anything else is refused.
+
+Legacy HWP is the one type the bytes cannot settle alone: its file signature is shared with other Office-era formats, so Lific also requires the name to end in `.hwp`. HWP files are always downloaded, never shown in the browser. The newer HWPX format is a ZIP file and is accepted as one.
 
 ### Annotating a screenshot
 

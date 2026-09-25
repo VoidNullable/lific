@@ -22,7 +22,7 @@ Uploads one file as `multipart/form-data`.
 | `file` | The file. Required. |
 | `entity_type`, `entity_id` | Optional, together: link the file to an `issue`, `page` or `comment` straight away. Linking needs the same role as editing that item: **maintainer** for an issue or page, **viewer** for a comment. |
 
-Files may be at most 10 MiB; a larger one is `400`. Lific decides the type from the file's own bytes, not from the name or the type the client declares, and accepts PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM video and audio, Ogg audio, MP3 and SQLite databases. An empty file, an unlisted type or `entity_type` without `entity_id` is `400`.
+Files may be at most 10 MiB; a larger one is `400`. Lific decides the type from the file's own bytes, not from the name or the type the client declares, and accepts PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM video and audio, Ogg audio, MP3, SQLite databases and legacy HWP. HWP shares its file signature with other formats, so it is accepted only when the filename ends in `.hwp`; a request that declares an HWP type for any other name is `400`. HWP is always served as a download. An empty file, an unlisted type or `entity_type` without `entity_id` is `400`.
 
 Each account may upload 30 files per 10 minutes. The 31st is refused with `403`, not `429`.
 
