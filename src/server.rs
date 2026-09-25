@@ -475,8 +475,9 @@ pub(crate) fn build_app_with_store(
         //    clients send (`mcp-protocol-version`, `mcp-session-id`,
         //    `last-event-id` for SSE resumption).
         //
-        // The internal CORS layer inside `api::router()` still runs for
-        // /api/* but is effectively shadowed by this outer one.
+        // This is the only CORS layer. Keeping it outside the merged router
+        // gives REST, MCP, authless MCP, OAuth, and fallback routes one
+        // equivalent policy boundary instead of wrapping every API route.
         .layer(build_global_cors(&cfg.server.cors_origins))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         // Gzip/brotli compression for text responses. The embedded
@@ -917,6 +918,7 @@ mod reachability_tests {
 #[cfg(test)]
 mod cors_tests {
     use super::*;
+    use crate::{db, realtime, storage};
     use axum::routing::post;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1186,6 +1188,65 @@ mod cors_tests {
         assert!(exposed.contains("www-authenticate"));
         assert!(exposed.contains(crate::api::comments::HAS_MORE_HEADER));
         assert!(exposed.contains(crate::api::comments::NEXT_OFFSET_HEADER));
+    }
+
+    /// Production assembles one global CORS layer around every route family.
+    /// Preflights must therefore remain independent of whether the request is
+    /// handled by REST, authenticated MCP, authless MCP, or the fallback.
+    #[tokio::test]
+    async fn production_cors_covers_all_route_surfaces() {
+        let pool = db::open_memory().expect("test db");
+        let store_guard = tempfile::tempdir().expect("attachment tempdir");
+        let mut cfg = Config::default();
+        cfg.auth.required = true;
+        cfg.server.cors_origins = vec!["https://client.example".into()];
+        cfg.server.mcp_path_token = Some("secret".into());
+        let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
+            cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
+        );
+        let app = build_app_with_store(
+            &cfg,
+            pool,
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            storage::AttachmentStore::new(store_guard.path().to_path_buf()),
+        );
+
+        for (uri, requested_method) in [
+            ("/api/health", "GET"),
+            ("/mcp", "POST"),
+            ("/mcp/secret", "POST"),
+            ("/not-a-route", "GET"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri(uri)
+                        .header("origin", "https://client.example")
+                        .header("access-control-request-method", requested_method)
+                        .header("access-control-request-headers", "authorization")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                response.status().is_success(),
+                "preflight for {uri} should succeed, got {}",
+                response.status()
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("access-control-allow-origin")
+                    .and_then(|value| value.to_str().ok()),
+                Some("https://client.example"),
+                "preflight for {uri} lost the configured origin"
+            );
+        }
     }
 }
 
