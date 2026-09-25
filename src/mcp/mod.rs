@@ -22,6 +22,9 @@ use crate::links::IssueLinkContext;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 use crate::storage::AttachmentStore;
 
+/// HTTP content negotiation used by stdio proxies to carry binary results.
+pub(crate) const INLINE_ATTACHMENT_HEADER: &str = "x-lific-mcp-inline-attachment";
+
 /// Serialization lock for MCP request handling.
 /// Ensures only one MCP request processes at a time, preventing the race
 /// condition where concurrent requests could overwrite each other's user identity.

@@ -15,7 +15,7 @@ use axum::{
     Router,
     body::Body,
     extract::Request,
-    http::{HeaderName, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -40,6 +40,46 @@ use crate::{
 #[folder = "web/dist/"]
 #[allow(dead_code)]
 struct WebAssets;
+
+/// Stdio proxies ask for bytes in the MCP result because their client cannot
+/// use the HTTP backend's authenticated download URL directly.
+fn mcp_issue_link_context(
+    public_url: Option<&str>,
+    headers: &HeaderMap,
+    allowed_hosts: &[String],
+) -> Option<links::IssueLinkContext> {
+    if headers
+        .get(mcp::INLINE_ATTACHMENT_HEADER)
+        .is_some_and(|value| value == "1")
+    {
+        return None;
+    }
+    links::IssueLinkContext::for_http_request(
+        public_url,
+        headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok()),
+        allowed_hosts,
+    )
+}
+
+#[cfg(test)]
+mod inline_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_inline_header_suppresses_the_http_attachment_origin() {
+        let mut headers = HeaderMap::new();
+        let origin = Some("https://example.test/");
+        assert!(mcp_issue_link_context(origin, &headers, &[]).is_some());
+
+        headers.insert(mcp::INLINE_ATTACHMENT_HEADER, HeaderValue::from_static("0"));
+        assert!(mcp_issue_link_context(origin, &headers, &[]).is_some());
+
+        headers.insert(mcp::INLINE_ATTACHMENT_HEADER, HeaderValue::from_static("1"));
+        assert!(mcp_issue_link_context(origin, &headers, &[]).is_none());
+    }
+}
 
 /// Serve an embedded static file, or fall back to index.html for SPA routing.
 async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
@@ -348,12 +388,9 @@ pub(crate) fn build_app_with_store(
                     .cloned()
                     .flatten();
 
-                let issue_links = links::IssueLinkContext::for_http_request(
+                let issue_links = mcp_issue_link_context(
                     mcp_public_url.as_deref(),
-                    request
-                        .headers()
-                        .get(header::HOST)
-                        .and_then(|value| value.to_str().ok()),
+                    request.headers(),
                     &mcp_allowed_hosts_for_links,
                 );
 
@@ -767,12 +804,9 @@ fn build_authless_mcp_router(
     Router::new().route(
         &format!("/mcp/{token}"),
         any(move |request: Request<Body>| async move {
-            let issue_links = links::IssueLinkContext::for_http_request(
+            let issue_links = mcp_issue_link_context(
                 public_url.as_deref(),
-                request
-                    .headers()
-                    .get(header::HOST)
-                    .and_then(|value| value.to_str().ok()),
+                request.headers(),
                 &allowed_hosts_for_links,
             );
             mcp::with_request_context(user, issue_links, || async {

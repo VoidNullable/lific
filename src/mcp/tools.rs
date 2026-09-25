@@ -5005,7 +5005,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read attachments: paged text, inline images, binary resources (no HTTP origin), or download links (HTTP)."
+        description = "Read attachment text, images, or binary content; HTTP may return a download URL."
     )]
     fn get_attachment(
         &self,
