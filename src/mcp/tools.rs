@@ -989,6 +989,7 @@ fn canonical_project_identifier(
         .map_err(|e| e.to_string())
 }
 
+mod export_pages;
 mod names;
 
 fn resolve_module(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
@@ -2143,7 +2144,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). Issues and pages return the markdown; projects return the exported file paths."
+        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). A project returns its issue and page documents a page at a time; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
         self.export_inner(input)
@@ -2209,13 +2210,11 @@ impl LificMcp {
                 || "Error: issue export produced no files".into(),
                 |file| file.content,
             )),
-            Kind::Project => Ok(render_response(|output| {
-                writeln!(output, "{} exported file(s):", bundle.files.len())?;
-                bundle
-                    .files
-                    .iter()
-                    .try_for_each(|file| writeln!(output, "- {}", file.path))
-            })),
+            Kind::Project => Ok(export_pages::render_project_page(
+                &bundle,
+                input.offset,
+                input.limit,
+            )),
         }
     }
 
@@ -8998,6 +8997,7 @@ mod tests {
         let issue = m
             .export(Parameters(ExportInput {
                 identifier: "EXP-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(issue.contains("issue body here"), "got: {issue}");
@@ -9006,22 +9006,26 @@ mod tests {
         let page = m
             .export(Parameters(ExportInput {
                 identifier: "EXP-DOC-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(page.contains("page body here"), "got: {page}");
 
-        // Bare project shape (EXP) returns the exported file listing.
+        // Bare project shape (EXP) returns the documents themselves.
         let project = m
             .export(Parameters(ExportInput {
                 identifier: "EXP".into(),
+                ..Default::default()
             }))
             .await;
-        assert!(project.contains("exported file(s)"), "got: {project}");
+        assert!(project.contains("issue body here"), "got: {project}");
+        assert!(project.contains("page body here"), "got: {project}");
 
         // Unknown identifiers name all three shapes in the error.
         let err = m
             .export(Parameters(ExportInput {
                 identifier: "NOPE-999".into(),
+                ..Default::default()
             }))
             .await;
         assert!(
@@ -9034,6 +9038,7 @@ mod tests {
         let blocked = m
             .export(Parameters(ExportInput {
                 identifier: "EXP".into(),
+                ..Default::default()
             }))
             .await;
         assert!(blocked.contains("too many exports"), "got: {blocked}");
@@ -9065,6 +9070,7 @@ mod tests {
         let exported = m
             .export(Parameters(ExportInput {
                 identifier: "ESC-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(

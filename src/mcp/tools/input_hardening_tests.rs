@@ -631,3 +631,66 @@ fn every_tool_input_rejects_unknown_fields() {
         );
     }
 }
+
+// ── LIF-475: project export returns content, paged ───────────
+
+#[tokio::test]
+async fn project_export_pages_through_markdown_without_paths() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Export", "EXQ");
+    for (title, body) in [
+        ("First", "first body"),
+        ("Second", "second body"),
+        ("Third", "third body"),
+    ] {
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("EXQ".into()),
+            title: title.into(),
+            description: Some(body.into()),
+            ..Default::default()
+        }));
+    }
+    m.create_page(Parameters(CreatePageInput {
+        project: Some("EXQ".into()),
+        title: "Handbook".into(),
+        content: Some("page body".into()),
+        ..Default::default()
+    }));
+
+    let first = m
+        .export(Parameters(ExportInput {
+            identifier: "EXQ".into(),
+            limit: Some(2),
+            ..Default::default()
+        }))
+        .await;
+    assert!(
+        first.starts_with(
+            "Project EXQ export: 3 issue(s) and 1 page(s), 4 document(s). Documents 1-2 follow."
+        ),
+        "got: {first}"
+    );
+    assert!(first.contains("identifier: EXQ-1"), "got: {first}");
+    assert!(first.contains("first body") && first.contains("second body"));
+    assert!(!first.contains("third body"), "got: {first}");
+    assert!(
+        first.ends_with("... 2 more document(s); call export with identifier=\"EXQ\" and offset=2"),
+        "got: {first}"
+    );
+
+    let second = m
+        .export(Parameters(ExportInput {
+            identifier: "EXQ".into(),
+            offset: Some(2),
+            limit: Some(2),
+        }))
+        .await;
+    assert!(second.contains("Documents 3-4 follow."), "got: {second}");
+    assert!(second.contains("third body") && second.contains("page body"));
+    assert!(!second.contains("more document(s)"), "got: {second}");
+
+    for output in [&first, &second] {
+        assert!(!output.contains(".md"), "a file path leaked: {output}");
+        assert!(!output.contains("EXQ/"), "a file path leaked: {output}");
+    }
+}

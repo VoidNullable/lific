@@ -50,11 +50,15 @@ The comment trail is bounded in every mode, and each mode reads only the rows it
 
 ### `export`
 
-Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return the markdown content; projects return the exported file paths.
+Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return their markdown.
+
+A project returns the markdown of its issues and pages, one document each, a page of documents at a time. Every document opens with frontmatter naming its identifier. The first line gives the issue, page and document totals and which documents follow; when more remain, the last line gives the `offset` to call with next. A page stops early at 256 KiB of markdown, but always carries at least one document. No file paths are returned. To write a project to disk as files, use `lific export project` from the CLI.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO) |
+| `offset` | `integer` | No | Project only: zero-indexed document offset |
+| `limit` | `integer` | No | Project only: max documents per page (default 20, cap 100) |
 
 ### `create_issue`
 

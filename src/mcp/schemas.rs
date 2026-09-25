@@ -599,4 +599,8 @@ pub struct ExportInput {
         description = "What to export: an issue ID (PRO-42), a page ID (PRO-DOC-3), or a bare project ID (PRO) for the whole project"
     )]
     pub identifier: String,
+    #[schemars(description = "Project only: zero-indexed document offset")]
+    pub offset: Option<i64>,
+    #[schemars(description = "Project only: max documents (default 20, cap 100)")]
+    pub limit: Option<i64>,
 }
