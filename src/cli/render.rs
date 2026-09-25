@@ -577,6 +577,7 @@ mod tests {
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
             seq: 1,
+            kind: Default::default(),
         }
     }
 

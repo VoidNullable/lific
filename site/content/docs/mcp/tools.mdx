@@ -35,6 +35,8 @@ Lists issues in a project with filters and paging.
 | `limit` | `integer` | No | Max results (default 50) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. The output appends a hint like "has_more: use offset=N" when more results exist. |
 
+An issue whose description contains a markdown task list ends its line with its progress, for example `checklist: 2/5`. Issues without task items carry no marker.
+
 ### `get_issue`
 
 Gets an issue and its details.
@@ -45,6 +47,8 @@ Gets an issue and its details.
 | `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all` (most recent 500), or `none` (count only). |
 
 Relation lines include the related issue's current status, for example `Blocked by: LIF-42 (done)`.
+
+When the description contains a markdown task list, a `Checklist: 3/5 done` line follows the status and labels. Task items are `- [ ]`, `- [x]` (either case of `x`), with `*`, `+` or numbered list markers too, nested or not. Items inside fenced code blocks are not counted, so a task list quoted as an example does not become the issue's checklist.
 
 The comment trail is bounded in every mode, and each mode reads only the rows it renders. `none` loads no comment bodies at all and reports the total. `recent` loads three. `all` loads the most recent 500, the same cap every other comment list uses, and is not a way to retrieve an entire thread: when a thread is longer than that, the header says it is showing the most recent 500 and directs you to `list_comments` for the rest. Every mode prints its comments oldest first.
 
@@ -91,8 +95,13 @@ Updates the provided fields of an issue.
 | `labels` | `string[]` | No | Replace labels |
 | `start_date` | `string` | No | New start date (ISO 8601 date, e.g. 2026-06-01) |
 | `target_date` | `string` | No | New target/due date (ISO 8601 date, e.g. 2026-06-15) |
+| `evidence` | `string` | No | Completion evidence (markdown). Only accepted with `status: "done"` on an issue that is not already done. Saved as a verification comment. |
 
 When a status change automatically completes or reopens linked plan steps, the response reports those step side effects.
+
+Closing an issue whose description still has unchecked task items succeeds, and the response ends with a warning such as `Warning: 2 of 5 checklist items still unchecked.`
+
+`evidence` records how the work was checked (test counts, the command that passed, what a person looked at) as a comment of kind `verification`, written in the same transaction as the close, and the response names the new comment. It is refused with any other status, including `cancelled`: cancelled work has nothing to verify. It is also refused on an issue that is already done, and when empty. A refusal changes nothing, including the other fields in the call. Closing without `evidence` behaves exactly as before. `get_issue` and `list_comments` print verification comments with a `[verification]` marker after the timestamp.
 
 ### `bulk_update`
 

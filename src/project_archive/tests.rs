@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::queries;
 
-fn fixture() -> (DbPool, tempfile::TempDir, AttachmentStore) {
+pub(super) fn fixture() -> (DbPool, tempfile::TempDir, AttachmentStore) {
     let pool = db::open_memory().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let store = AttachmentStore::new(dir.path().to_path_buf());
@@ -12,7 +12,7 @@ fn fixture() -> (DbPool, tempfile::TempDir, AttachmentStore) {
     (pool, dir, store)
 }
 
-fn seed(pool: &DbPool, store: &AttachmentStore) {
+pub(super) fn seed(pool: &DbPool, store: &AttachmentStore) {
     let hash = store.write(b"project archive attachment").unwrap();
     let conn = pool.write().unwrap();
     conn.execute_batch("INSERT INTO users(id,username,email,password_hash) VALUES(2,'author','secret@example.test','PRIVATE PASSWORD HASH');
@@ -57,7 +57,7 @@ fn seed(pool: &DbPool, store: &AttachmentStore) {
     tx.commit().unwrap();
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest, blobs: &[(&str, &[u8])]) {
+pub(super) fn write_manifest(path: &Path, manifest: &Manifest, blobs: &[(&str, &[u8])]) {
     let gzip =
         flate2::write::GzEncoder::new(File::create(path).unwrap(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);

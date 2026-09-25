@@ -1860,6 +1860,9 @@ mod tests {
 
         // Turn this row into an unindexed legacy key and re-run migration 053
         // to exercise the same quarantine step as a real database upgrade.
+        // The SQL runs directly: `migrate::run` only applies versions above
+        // the newest stamped one, so un-stamping 053 stops re-running it as
+        // soon as any later migration exists.
         {
             let conn = pool.write().unwrap();
             conn.execute(
@@ -1867,10 +1870,11 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute("DELETE FROM _migrations WHERE version = 53", [])
-                .unwrap();
+            conn.execute_batch(include_str!(
+                "../migrations/053_revoke_unindexed_api_keys.sql"
+            ))
+            .unwrap();
         }
-        crate::db::migrate::run(&pool.write().unwrap()).unwrap();
         let (quarantined, quarantined_expiry): (bool, Option<String>) = pool
             .read()
             .unwrap()

@@ -261,6 +261,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "revoke unindexed api keys",
         include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
     ),
+    (
+        56,
+        "comment kind",
+        include_str!("../../migrations/056_comment_kind.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -813,6 +818,41 @@ mod tests {
             .unwrap();
             assert_eq!(conn.last_insert_rowid(), 43);
         }
+    }
+
+    #[test]
+    fn comment_kind_migration_defaults_existing_rows_without_moving_their_seq() {
+        let conn = migrated_up_to(56);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES(1,'owner','owner@test','hash');
+             INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO comments(id,issue_id,user_id,content) VALUES(1,1,1,'Existing');",
+        )
+        .unwrap();
+        let seq_before = count(&conn, "SELECT seq FROM comments WHERE id=1");
+        run(&conn).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM comments WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "comment");
+        assert_eq!(
+            count(&conn, "SELECT seq FROM comments WHERE id=1"),
+            seq_before
+        );
+        conn.execute(
+            "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'Tests pass','verification')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'x','note')",
+                [],
+            )
+            .is_err(),
+            "the CHECK constraint must reject an unknown kind"
+        );
     }
 
     fn stored_checksum(conn: &Connection, version: i64) -> Option<String> {

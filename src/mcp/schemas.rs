@@ -144,6 +144,10 @@ pub struct UpdateIssueInput {
         description = "Optional concurrency check: the 'seq' you last read for this issue. The update is refused if the issue has changed since. Omit for last-writer-wins."
     )]
     pub expected_seq: Option<i64>,
+    #[schemars(
+        description = "Completion evidence (markdown), only with status=done. Saved as a verification comment."
+    )]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

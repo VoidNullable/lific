@@ -95,9 +95,13 @@ report. Re-export preserves existing inert names and original history snapshots.
 ## Archive validation and failure handling
 
 The archive is a gzip-compressed tar containing `manifest.json` first, followed
-only by regular `blobs/<sha256>` files. Format version 1 is independent of the
+only by regular `blobs/<sha256>` files. Format version 2 is independent of the
 database migration version. Table names and positional column definitions are
 compiled into Lific. Archive data cannot supply SQL, column names or schema.
+Version 2 added each comment's kind, so verification evidence survives the
+move. Lific still imports version 1 archives and treats their comments as
+ordinary comments. An older Lific rejects a version 2 archive as an
+unsupported format.
 
 Limits apply to both export and import, and depend on the interface. The CLI
 runs as the local operator, who already holds the database file. An HTTP caller

@@ -549,6 +549,9 @@
             <div class="cmt__meta">
               <a href="#comment-{comment.id}" class="cmt__anchor">#{comment.id}</a>
               <span class="cmt__author">{author}</span>
+              {#if comment.kind === "verification"}
+                <span class="cmt__kind" title="Evidence recorded when this issue was closed">Verification</span>
+              {/if}
               <span class="cmt__time"><TimeAgo date={comment.created_at} /></span>
               {#if commentWasEdited(comment)}
                 <span class="cmt__edited" title={`Edited ${comment.updated_at}`}>edited</span>
@@ -874,6 +877,18 @@
   .cmt__time {
     font-size: 0.75rem;
     color: var(--text-muted);
+  }
+  /* Same pill as the project role badges (ProjectMembers). */
+  .cmt__kind {
+    align-self: center;
+    padding: 0.125rem 0.375rem;
+    border-radius: 9999px;
+    background: var(--success-bg);
+    color: var(--success);
+    font-size: var(--text-micro);
+    font-weight: 600;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
   }
   .cmt__edited {
     font-size: 0.6875rem;

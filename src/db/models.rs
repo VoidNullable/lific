@@ -891,6 +891,45 @@ pub struct Comment {
     /// pages. See [`Issue::seq`].
     #[serde(default)]
     pub seq: i64,
+    /// LIF-486: `verification` for evidence recorded by closing an issue.
+    #[serde(default)]
+    pub kind: CommentKind,
+}
+
+/// What a comment is (migration 056). The string forms match the column's
+/// CHECK constraint exactly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentKind {
+    #[default]
+    Comment,
+    /// Completion evidence written by `update_issue` alongside a close.
+    Verification,
+}
+
+impl CommentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentKind::Comment => "comment",
+            CommentKind::Verification => "verification",
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for CommentKind {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "comment" => Ok(CommentKind::Comment),
+            "verification" => Ok(CommentKind::Verification),
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl rusqlite::types::ToSql for CommentKind {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1156,6 +1195,8 @@ pub struct CommentChange {
     pub username: String,
     pub created_at: String,
     pub updated_at: String,
+    /// [`Comment::kind`], renamed because `kind` is the change discriminator.
+    pub comment_kind: CommentKind,
 }
 
 /// A deleted row (migration 047). Carries identity, its place in the stream,
