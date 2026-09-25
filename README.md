@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **31 MCP tools in 6,978 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **31 MCP tools in 7,626 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -205,7 +205,7 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 ## MCP tools
 
-All 31, in 6,978 tokens:
+All 31, in 7,626 tokens:
 
 | Family | Tools |
 |--------|-------|
