@@ -1054,7 +1054,7 @@ mod cors_tests {
     async fn explicit_origins_are_allowlisted() {
         let app = app_with_cors(&[
             "https://claude.ai".to_string(),
-            "not a valid header value".to_string(),
+            "invalid\norigin".to_string(),
         ]);
 
         let req = Request::builder()
