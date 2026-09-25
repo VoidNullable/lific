@@ -181,7 +181,7 @@ Every change carries `kind` (`issue`, `page`, or `comment`), `seq` (integer), `d
 
 - `issue`: `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, and `labels` (array of label names).
 - `page`: `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, and `labels` (array of label names).
-- `comment`: `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`.
+- `comment`: `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment` or `verification`; named so because `kind` is the change discriminator).
 
 ```json
 {

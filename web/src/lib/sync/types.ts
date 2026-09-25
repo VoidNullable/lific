@@ -13,6 +13,9 @@
 
 export type SyncKind = "issue" | "page" | "comment";
 
+/** Mirrors the server's `CommentKind`. */
+export type CommentKind = "comment" | "verification";
+
 /** A live issue row. `labels` carries label NAMES (not ids), matching the
  *  `Issue.labels` shape the list views already filter on. */
 export interface IssueRow {
@@ -73,6 +76,8 @@ export interface CommentRow {
   username: string;
   created_at: string;
   updated_at: string;
+  /** The comment's own kind; `kind` above is the change discriminator. */
+  comment_kind: CommentKind;
 }
 
 /** A deleted row: identity + stream position, nothing else. `kind` still

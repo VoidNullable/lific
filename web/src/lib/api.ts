@@ -1126,6 +1126,9 @@ export interface Comment {
   content: string;
   created_at: string;
   updated_at: string;
+  /** "verification" marks evidence recorded when the issue was closed.
+   *  Absent from a server too old to send it. */
+  kind?: "comment" | "verification";
 }
 
 // ── Activity / audit log (LIF-156/157) ─────────────────

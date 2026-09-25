@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::models::{AttachmentActor, AttachmentEntity, Comment, CommentActor};
+use crate::db::models::{AttachmentActor, AttachmentEntity, Comment, CommentActor, CommentKind};
 use crate::error::LificError;
 
 use super::{TOMBSTONE_NOW, unescape_text};
@@ -209,6 +209,7 @@ fn insert_comment_row(
     parent: CommentParent,
     user_id: i64,
     content: &str,
+    kind: CommentKind,
 ) -> Result<Comment, LificError> {
     let content = unescape_text(content);
     validate_comment_content(&content)?;
@@ -236,9 +237,9 @@ fn insert_comment_row(
     }
 
     conn.execute(
-        "INSERT INTO comments (issue_id, page_id, user_id, content)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![parent.issue_id(), parent.page_id(), user_id, content],
+        "INSERT INTO comments (issue_id, page_id, user_id, content, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![parent.issue_id(), parent.page_id(), user_id, content, kind],
     )?;
 
     let id = conn.last_insert_rowid();
@@ -258,7 +259,7 @@ pub fn create_imported_comment(
     bot_id: i64,
     content: &str,
 ) -> Result<Comment, LificError> {
-    insert_comment_row(conn, parent, bot_id, content)
+    insert_comment_row(conn, parent, bot_id, content, CommentKind::Comment)
 }
 
 /// LIF-409: test-only handles on the unreconciled primitives, so a test can
@@ -273,7 +274,7 @@ pub(crate) fn create_comment(
     user_id: i64,
     content: &str,
 ) -> Result<Comment, LificError> {
-    insert_comment_row(conn, parent, user_id, content)
+    insert_comment_row(conn, parent, user_id, content, CommentKind::Comment)
 }
 
 /// See [`create_comment`].
@@ -291,7 +292,7 @@ pub fn get_comment(conn: &Connection, id: i64) -> Result<Comment, LificError> {
     conn.query_row(
         "SELECT c.id, c.issue_id, c.page_id, COALESCE(c.user_id, -1),
                 COALESCE(c.imported_author, u.username), COALESCE(c.imported_author, u.display_name),
-                c.content, c.created_at, c.updated_at, c.seq
+                c.content, c.created_at, c.updated_at, c.seq, c.kind
          FROM comments c
          LEFT JOIN users u ON u.id = c.user_id
          WHERE c.id = ?1 AND c.deleted_at IS NULL",
@@ -841,7 +842,7 @@ impl CommentQuery {
         let sql = format!(
             "SELECT c.id, c.issue_id, c.page_id, COALESCE(c.user_id, -1),
                     COALESCE(c.imported_author, u.username), COALESCE(c.imported_author, u.display_name),
-                    c.content, c.created_at, c.updated_at, c.seq {}{limit_clause}",
+                    c.content, c.created_at, c.updated_at, c.seq, c.kind {}{limit_clause}",
             self.tail
         );
         let mut bound: Vec<&dyn rusqlite::types::ToSql> =
@@ -1191,9 +1192,56 @@ pub fn create_comment_with_mentions(
     content: &str,
     member_scoped: bool,
 ) -> Result<Comment, LificError> {
+    create_reconciled_comment(
+        conn,
+        parent,
+        project_id,
+        author,
+        attachments,
+        content,
+        member_scoped,
+        CommentKind::Comment,
+    )
+}
+
+/// Record verification evidence on an issue (LIF-486): a comment of kind
+/// `verification`, reconciled exactly like any other comment. The caller owns
+/// the rule that evidence only accompanies a close.
+pub fn create_verification_comment(
+    conn: &Connection,
+    issue_id: i64,
+    project_id: i64,
+    author: CommentActor,
+    attachments: AttachmentActor,
+    content: &str,
+    member_scoped: bool,
+) -> Result<Comment, LificError> {
+    create_reconciled_comment(
+        conn,
+        CommentParent::Issue(issue_id),
+        Some(project_id),
+        author,
+        attachments,
+        content,
+        member_scoped,
+        CommentKind::Verification,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_reconciled_comment(
+    conn: &Connection,
+    parent: CommentParent,
+    project_id: Option<i64>,
+    author: CommentActor,
+    attachments: AttachmentActor,
+    content: &str,
+    member_scoped: bool,
+    kind: CommentKind,
+) -> Result<Comment, LificError> {
     super::savepoint(conn, "create_comment_with_mentions", || {
         let candidates = mention_candidates(conn, project_id, member_scoped)?;
-        let comment = insert_comment_row(conn, parent, author.user_id, content)?;
+        let comment = insert_comment_row(conn, parent, author.user_id, content, kind)?;
         sync_mentions(conn, comment.id, &comment.content, &candidates)?;
         super::attachments::sync_links(
             conn,
@@ -1259,6 +1307,7 @@ fn row_to_comment(row: &rusqlite::Row) -> Result<Comment, rusqlite::Error> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         seq: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
+        kind: row.get(10)?,
     })
 }
 

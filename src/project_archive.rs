@@ -13,7 +13,9 @@ use crate::db::{self, DbPool};
 use crate::error::LificError;
 use crate::storage::{AttachmentStore, valid_sha256};
 
-const VERSION: u32 = 1;
+/// Format 2 added `comments.kind` (migration 056). Format 1 archives still
+/// import: see [`upgrade_manifest`].
+const VERSION: u32 = 2;
 
 /// One resource profile for a whole export or import.
 ///
@@ -178,7 +180,7 @@ struct Spec {
     columns: &'static str,
     scope: &'static str,
 }
-// This list, including column order, is format v1. No SELECT * and no schema dump.
+// This list, including column order, is format v2. No SELECT * and no schema dump.
 const SPECS: &[Spec] = &[
     Spec {
         name: "projects",
@@ -222,7 +224,7 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         name: "comments",
-        columns: "id,issue_id,page_id,content,created_at,updated_at,deleted_at,imported_author",
+        columns: "id,issue_id,page_id,content,created_at,updated_at,deleted_at,imported_author,kind",
         scope: "issue_id IN (SELECT id FROM issues WHERE project_id = ?1) OR page_id IN (SELECT id FROM pages WHERE project_id = ?1)",
     },
     Spec {
@@ -1042,6 +1044,22 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Bring a format 1 manifest up to the current format. Format 1 predates
+/// comment kinds, so each of its comment rows is one column short and every
+/// one of them was an ordinary comment. Anything else is left for
+/// [`validate_manifest`] to judge.
+fn upgrade_manifest(m: &mut Manifest) {
+    if m.format_version != 1 {
+        return;
+    }
+    m.format_version = VERSION;
+    for table in m.tables.iter_mut().filter(|t| t.name == "comments") {
+        for row in &mut table.rows {
+            row.push("comment".into());
+        }
+    }
+}
+
 fn validate_manifest(m: &Manifest) -> Result<()> {
     if m.external_references.len() > limits().max_rows {
         return Err(too_large("too many external references"));
@@ -1160,6 +1178,12 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
                 let page = s.get(row, "page_id");
                 if issue.is_null() == page.is_null() {
                     return Err(invalid("comment must have exactly one parent"));
+                }
+                if !matches!(
+                    s.get(row, "kind").as_str(),
+                    Some("comment" | "verification")
+                ) {
+                    return Err(invalid("invalid comment kind"));
                 }
             }
         }
@@ -1299,13 +1323,14 @@ fn stage(path: &Path) -> Result<Staged> {
                 return Err(metadata_too_large());
             }
             arm_budget_marker();
-            let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+            let mut m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
                 if budget_marker_tripped() {
                     too_large("manifest exceeds a resource limit")
                 } else {
                     invalid(format!("invalid manifest: {e}"))
                 }
             })?;
+            upgrade_manifest(&mut m);
             validate_manifest(&m)?;
             manifest = Some(m);
         } else {
@@ -1793,3 +1818,6 @@ pub fn import_with(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod comment_kind_tests;

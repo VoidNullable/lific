@@ -5,6 +5,8 @@ description: Comments, mentions, and the audit activity log.
 
 Comments belong to exactly one issue or one page. A comment stores its author, Markdown content, creation time, and update time.
 
+A comment's kind is `comment`, or `verification` when it records the evidence an agent gave while closing an issue. Verification comments are marked `[verification]` in MCP output and carry a Verification badge in the web UI. Otherwise they behave like any other comment: the author can edit or delete them.
+
 Comments on issues and pages have separate threads. Deleting an issue or page also deletes its comments.
 
 An author can edit and delete their own comments. Over REST, an administrator can also edit or delete any comment. An edited comment keeps its identity and records a new update time, which is what marks it as edited.

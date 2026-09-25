@@ -455,10 +455,14 @@ struct CommentLines<'a> {
 impl Display for CommentLines<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.comments.iter().try_for_each(|comment| {
+            write!(formatter, "[{}] ", comment.created_at)?;
+            if comment.kind == models::CommentKind::Verification {
+                formatter.write_str("[verification] ")?;
+            }
             write!(
                 formatter,
-                "[{}] {} ({})",
-                comment.created_at, comment.author, comment.author_display_name
+                "{} ({})",
+                comment.author, comment.author_display_name
             )?;
             self.context.map_or(Ok(()), |context| {
                 write!(
@@ -2281,13 +2285,30 @@ impl LificMcp {
     }
 
     fn update_issue_inner(&self, input: UpdateIssueInput) -> Result<String, String> {
+        // LIF-486: evidence documents a close, so it rides only on a
+        // transition to done. Cancelled work has nothing to verify, and a
+        // verification badge on abandoned work would mislead the reader.
+        let evidence = match input.evidence.as_deref() {
+            Some(text) if text.trim().is_empty() => {
+                return Err(
+                    "evidence is empty. Omit it, or describe how the work was verified.".into(),
+                );
+            }
+            Some(_)
+                if models::Status::parse_opt(input.status.as_deref())
+                    != Ok(Some(models::Status::Done)) =>
+            {
+                return Err("evidence is only accepted with status=done in the same call. Use add_comment for notes on an open issue.".into());
+            }
+            other => other,
+        };
         let (id, project_id) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let project_id = queries::get_issue(conn, id)?.project_id;
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (issue, cascade_action, cascaded_steps) = self.transaction(|conn| {
+        let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
             // Keep an audit checkpoint before the direct issue update so the
@@ -2313,6 +2334,12 @@ impl LificMcp {
                 )?)),
                 None => None,
             };
+            if evidence.is_some() && previous_issue.status == models::Status::Done {
+                return Err(crate::error::LificError::BadRequest(format!(
+                    "{} is already done; evidence is recorded only when closing. Use add_comment instead.",
+                    previous_issue.identifier
+                )));
+            }
             // LIF-369/LIF-409: resolved before the write it authorizes, on the
             // same connection and transaction, so no revocation can slip in.
             let attachments = sync_link_actor_conn(
@@ -2353,7 +2380,25 @@ impl LificMcp {
                 }
                 _ => Vec::new(),
             };
-            Ok((issue, cascade_action, cascaded_steps))
+            let (issue, verification) = match evidence {
+                Some(evidence) => {
+                    let actor = resolve_comment_actor_conn(conn)?;
+                    let author = models::CommentActor::from(&actor.user);
+                    let comment = queries::comments::create_verification_comment(
+                        conn,
+                        id,
+                        issue.project_id,
+                        author,
+                        models::AttachmentActor::Authenticated(author),
+                        evidence,
+                        crate::authz::authz_enforced_conn(conn)?,
+                    )?;
+                    // The comment bumped the issue's seq; report the current one.
+                    (queries::get_issue(conn, id)?, Some(comment.id))
+                }
+                None => (issue, None),
+            };
+            Ok((issue, cascade_action, cascaded_steps, verification))
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
@@ -2387,6 +2432,9 @@ impl LificMcp {
                         context: context.as_deref(),
                     }
                 )
+            })?;
+            verification.map_or(Ok(()), |comment_id| {
+                write!(output, "\nVerification recorded as comment #{comment_id}.")
             })
         }))
     }
@@ -4962,6 +5010,9 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 }
 
 #[cfg(test)]
+mod tests_verification;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -5020,7 +5071,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5104,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -5070,7 +5121,7 @@ mod tests {
         ident.to_string()
     }
 
-    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+    pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: Some(project.into()),
             title: title.into(),
