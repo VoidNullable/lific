@@ -1050,7 +1050,6 @@ pub(super) struct CreateKeyRequest {
 pub(super) async fn create_key(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Extension(manager): Extension<std::sync::Arc<crate::auth::ApiKeyManager>>,
     headers: HeaderMap,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -1062,7 +1061,7 @@ pub(super) async fn create_key(
         return Err(LificError::BadRequest("key name cannot be empty".into()));
     }
 
-    let prepared = crate::auth::PreparedApiKey::generate(&manager)?;
+    let prepared = crate::auth::PreparedApiKey::generate()?;
     let plaintext = db.transaction(|tx| {
         crate::auth::revalidate_recent_session(tx, &session_token, user.id)?;
         // LIF-391: the key is created already bound to the caller, in one write.
@@ -1127,7 +1126,6 @@ pub(super) struct CreateBotRequest {
 pub(super) async fn create_bot(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Extension(manager): Extension<std::sync::Arc<crate::auth::ApiKeyManager>>,
     headers: HeaderMap,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -1172,7 +1170,7 @@ pub(super) async fn create_bot(
 
     let bot_username = format!("{tool}-{}", user.username);
 
-    let prepared = crate::auth::PreparedApiKey::generate(&manager)?;
+    let prepared = crate::auth::PreparedApiKey::generate()?;
     let (bot_user, plaintext_key) = db.transaction(|tx| {
         crate::auth::revalidate_recent_session(tx, &session_token, user.id)?;
 
@@ -1541,10 +1539,8 @@ mod tests {
         }
 
         fn real_stack(db: &DbPool) -> axum::Router {
-            let manager = crate::auth::create_key_manager();
             let auth_state = crate::auth::AuthState {
                 db: db.clone(),
-                manager,
                 public_url: "https://example.com".into(),
                 required: true,
             };
@@ -1558,7 +1554,6 @@ mod tests {
                     required: true,
                     secure_cookies: false,
                 }))
-                .layer(axum::Extension(std::sync::Arc::new(manager)))
                 .layer(axum::middleware::from_fn_with_state(
                     auth_state,
                     crate::auth::require_api_key,
@@ -1600,7 +1595,6 @@ mod tests {
             limiter: Option<std::sync::Arc<crate::ratelimit::RateLimiter>>,
         ) -> Fixture {
             let db = crate::db::open_memory().unwrap();
-            let manager = crate::auth::create_key_manager();
 
             let (user_id, bot_id, stranger_id, session) = {
                 let conn = db.write().unwrap();
@@ -1651,7 +1645,7 @@ mod tests {
             };
 
             let key = |name: &str, owner: Option<i64>| {
-                crate::auth::create_api_key(&db, &manager, name, owner).unwrap()
+                crate::auth::create_api_key(&db, name, owner).unwrap()
             };
 
             Fixture {
@@ -4582,13 +4576,12 @@ mod tests {
         let app = app_as_user(db.clone(), &admin);
 
         // The victim's key and connected tool.
-        let manager = crate::auth::create_key_manager();
         let victim_bot = {
             let conn = db.write().unwrap();
             crate::db::queries::users::ensure_bot(&conn, member.id, "zed", "Zed").unwrap()
         };
-        crate::auth::create_api_key(&db, &manager, "victim-key", Some(member.id)).unwrap();
-        crate::auth::create_api_key(&db, &manager, "victim-bot-key", Some(victim_bot.id)).unwrap();
+        crate::auth::create_api_key(&db, "victim-key", Some(member.id)).unwrap();
+        crate::auth::create_api_key(&db, "victim-bot-key", Some(victim_bot.id)).unwrap();
         let victim_key_id: i64 = db
             .read()
             .unwrap()

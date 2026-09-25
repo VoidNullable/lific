@@ -12,7 +12,6 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = term::wants_json(json_flag);
     let pool = db::open(&cfg.database.path)?;
-    let manager = auth::create_key_manager();
 
     match action {
         KeyAction::Create {
@@ -28,13 +27,7 @@ pub fn run(
             } else {
                 None
             };
-            let key = auth::create_api_key_with_expiry(
-                &pool,
-                &manager,
-                &name,
-                expires.as_deref(),
-                owner,
-            )?;
+            let key = auth::create_api_key_with_expiry(&pool, &name, expires.as_deref(), owner)?;
             let assigned = user;
 
             if json {
@@ -106,7 +99,7 @@ pub fn run(
             }
         }
         KeyAction::Rotate { name } => {
-            let key = auth::rotate_api_key(&pool, &manager, &name)?;
+            let key = auth::rotate_api_key(&pool, &name)?;
             if json {
                 let out = serde_json::json!({ "name": name, "key": key });
                 println!("{}", serde_json::to_string_pretty(&out)?);
