@@ -26,7 +26,7 @@
     onFiles,
     busy = false,
     disabled = false,
-    accept = "image/*,application/pdf,text/plain,.log,application/zip",
+    accept = "image/*,application/pdf,text/plain,text/csv,.csv,.log,application/zip,.docx,.xlsx,.hwp,.hwpx",
     /** `outlined` matches the comment composer's bordered chip; `plain` matches
      *  the description editor's borderless footer action. */
     variant = "outlined",

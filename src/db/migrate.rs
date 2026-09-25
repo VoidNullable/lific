@@ -276,6 +276,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "comment kind",
         include_str!("../../migrations/056_comment_kind.sql"),
     ),
+    (
+        57,
+        "HWP attachment MIME",
+        include_str!("../../migrations/057_hwp_attachment_mime.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -304,7 +309,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// before its savepoint releases, and `run_inner` repeats the check
 /// batch-wide before commit to cover every other migration that ran while
 /// enforcement was off.
-const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50];
+const FK_REBUILD_MIGRATIONS: &[i64] = &[39, 43, 50, 57];
 
 /// Highest migration version this binary knows how to apply. Used by
 /// `lific dump`/`restore` (LIF-266) to stamp and gate archives on schema
@@ -862,6 +867,58 @@ mod tests {
             )
             .is_err(),
             "the CHECK constraint must reject an unknown kind"
+        );
+    }
+
+    /// The HWP migration rebuilds `attachments` to widen its MIME CHECK. The
+    /// rebuild must carry every column the table has gained since it was
+    /// created: the first version dropped `imported_author` (migration 050),
+    /// which erased the author of every file that arrived in a project archive.
+    #[test]
+    fn hwp_mime_rebuild_keeps_attachment_columns_links_and_search() {
+        let conn = migrated_up_to(57);
+        let sha = "a".repeat(64);
+        conn.execute_batch(&format!(
+            "INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO attachments(id,sha256,filename,mime,size_bytes,imported_author)
+                 VALUES(7,'{sha}','diagram.png','image/png',10,'ada-lovelace');
+             INSERT INTO attachment_links(attachment_id,entity_type,entity_id)
+                 VALUES(7,'issue',1);"
+        ))
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let author: Option<String> = conn
+            .query_row(
+                "SELECT imported_author FROM attachments WHERE id=7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(author.as_deref(), Some("ada-lovelace"));
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM attachment_links WHERE attachment_id=7"
+            ),
+            1,
+            "the rebuild must not cascade-delete links"
+        );
+        conn.execute(
+            "INSERT INTO attachments(sha256,filename,mime,size_bytes)
+             VALUES(?1,'report.hwp','application/x-hwp',20)",
+            [&sha],
+        )
+        .expect("the widened CHECK accepts legacy HWP");
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM attachments_fts WHERE attachments_fts MATCH 'report'"
+            ),
+            1,
+            "the search triggers must be recreated"
         );
     }
 

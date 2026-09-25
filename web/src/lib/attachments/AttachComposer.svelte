@@ -22,7 +22,7 @@
     composer,
     radius = "0.75rem",
     dropLabel = "Drop files to attach",
-    accept = "image/*,application/pdf,text/plain,.log,application/zip",
+    accept = "image/*,application/pdf,text/plain,text/csv,.csv,.log,application/zip,.docx,.xlsx,.hwp,.hwpx",
     children,
     footer,
   }: {
