@@ -1,285 +1,125 @@
 ---
 title: Projects
-description: Projects, membership, saved views, boards, analytics, and imports.
+description: Create and configure projects, publish them, manage members and roles, arrange your sidebar, keep saved views, read the board and insights, and import from GitHub.
 ---
+
+A project holds everything else and is the unit of access. The [projects concept page](/docs/concepts/projects) explains identifiers, roles and what deletion destroys. The project's own issues, pages and plans are on [Issues, pages and plans](/docs/rest-api/work); its repository bindings are on [Repositories and commits](/docs/rest-api/repositories).
 
 ## Projects
 
 ### GET `/api/projects`
 
-Lists projects visible to the caller. This endpoint has no path or query parameters. It has no request body.
-
-Response: a `Project` array.
+The projects you can read, as a `Project` array in your own sidebar order. With enforcement on, a project you are not a member of is absent rather than an error. Administrators see every project.
 
 ### POST `/api/projects`
 
-Creates a project. This endpoint has no path or query parameters.
+Creates a project. Any signed-in caller.
 
-Creating a project also gives its lead a `lead` membership on it. Omitting `lead_user_id`, or setting it to yourself, is unchanged and needs no recent sign-in: an API key can still create its own projects. Naming **somebody else** as the lead is a lasting access grant, so it requires a browser session created within the last 15 minutes, and an API key or OAuth token gets `403 recent authentication required`. For a connected tool, "yourself" is the human it acts for, which is the identity the project would resolve to in any case.
+Body: `name`, `identifier`, and optional `description` (Markdown, default empty), `emoji` and `lead_user_id`. The identifier is one to five characters, an uppercase letter followed by uppercase letters or digits, and cannot be `DOC`; anything else is `400`.
 
-Request body fields are `name` (string), `identifier` (string), `description` (string, optional, defaults to an empty string), `emoji` (string or null, optional), and `lead_user_id` (integer or null, optional). When no lead is supplied and the request has an authenticated user, the creator becomes the lead.
+The lead gets a `lead` membership. Leaving `lead_user_id` out, or naming yourself, makes you the lead with no further check; for a connected tool, "yourself" is the person who owns it. Naming **somebody else** gives them lasting access, so it needs a [recent browser session](/docs/rest-api#which-credentials-an-endpoint-accepts).
 
-Response: a `Project` object.
+Returns the `Project`.
 
 ```bash
-curl -X POST https://your-server.example/api/projects \
-  -H "Authorization: Bearer <API_KEY>" \
+curl -X POST "$LIFIC/api/projects" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Lific","identifier":"LIF"}'
-```
-
-```json
-{
-  "id": 1,
-  "name": "Lific",
-  "identifier": "LIF",
-  "description": "",
-  "emoji": null,
-  "lead_user_id": 1,
-  "sort_order": 0,
-  "created_at": "2026-07-14 12:00:00",
-  "updated_at": "2026-07-14 12:00:00"
-}
+  -d '{"name":"Mobile app","identifier":"APP","emoji":"lucide:Smartphone"}'
 ```
 
 ### GET `/api/projects/{id}`
 
-Returns a project. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: a `Project` object.
+One `Project`. **Viewer.**
 
 ### PUT `/api/projects/{id}`
 
-Updates supplied project fields. Path parameter: `id` (integer project ID). It has no query parameters.
+Changes project settings. **Lead.** Every field is optional: `name`, `identifier`, `description`, `emoji` (null clears it), `lead_user_id` (null clears it) and `is_public`.
 
-Lead-gated. Setting `lead_user_id` to a user also grants that user a `lead` membership on the project, so a request that does so **requires a recent browser session** on the same terms as `POST /api/projects/{id}/members`, and an API key or OAuth token gets `403 recent authentication required`. Every other field, and clearing `lead_user_id` to `null`, is ungated.
+Setting `lead_user_id` to a user also gives them a `lead` membership, so that one change needs a recent browser session. Clearing it does not.
 
-Request body fields are `name` (string, optional), `identifier` (string, optional), `description` (string, optional), `emoji` (string, null, or omitted), and `lead_user_id` (integer, null, or omitted). An omitted nullable field is unchanged. A `null` nullable field clears its value.
+`is_public: true` publishes the project on the anonymous [public read API](/docs/rest-api/public), and `false` withdraws it on the next request. See [Public projects](/docs/public-projects) before turning it on: it exposes existing content, not just what you write afterwards.
 
-Response: a `Project` object.
+Changing the identifier renames every issue, page and plan identifier in the project at once; old written references stop resolving. Returns the `Project`.
 
 ### DELETE `/api/projects/{id}`
 
-Deletes a project. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: the standard delete response.
+Deletes the project and everything in it, immediately and permanently, including anything in its trash. **Lead**, or **administrator** when enforcement is off. The check is repeated inside the delete transaction. Returns `{"deleted": true}`.
 
 ### PUT `/api/projects/reorder`
 
-Reorders the supplied projects by list position. This endpoint has no path or query parameters.
+Sets your own sidebar order. Other people's order is unaffected. Body: `ids`, the project ids in the order you want. Ids you leave out keep their relative order after the ones you list. A duplicate or an id you cannot see is `400`. Returns the reordered `Project` array.
 
-Request body field: `ids` (integer array). Response: a `Project` array in the resulting order.
+## Sidebar groups
 
-## Project groups
+Groups are private to the person who made them. Every route here works only on your own groups; another person's group answers `404`. Filing a project in a group changes nothing about the project.
 
-Project groups are the caller's own sidebar grouping. Every endpoint here requires an authenticated user and operates only on that user's groups; another user's group reads as missing rather than forbidden.
+A group has `id`, `user_id`, `name`, `sort_order`, `project_ids`, `created_at` and `updated_at`. `project_ids` lists only projects you can still read, so a project you lose access to drops out of the group without being unfiled.
 
 ### GET `/api/project-groups`
 
-Lists the caller's project groups. This endpoint has no path or query parameters. It has no request body.
-
-Response: an array of objects with `id` (integer), `user_id` (integer), `name` (string), `sort_order` (integer), `project_ids` (integer array), `created_at` (string), and `updated_at` (string). `project_ids` lists only projects the caller can still see, so a project whose membership was revoked disappears from the group without being unfiled.
+Your groups, in order.
 
 ### POST `/api/project-groups`
 
-Creates a group owned by the caller. This endpoint has no path or query parameters.
-
-Request body field: `name` (string). Response: a project group object with an empty `project_ids`. A name the caller already uses returns a conflict.
-
-```bash
-curl -X POST https://your-server.example/api/project-groups \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Day job"}'
-```
-
-```json
-{
-  "id": 1,
-  "user_id": 1,
-  "name": "Day job",
-  "sort_order": 0,
-  "project_ids": [],
-  "created_at": "2026-07-14 12:00:00",
-  "updated_at": "2026-07-14 12:00:00"
-}
-```
+Creates a group. Body: `name`. A name you already use is `409`. Returns the group with an empty `project_ids`.
 
 ### PATCH `/api/project-groups/{id}`
 
-Renames a caller-owned group. Path parameter: `id` (integer group ID). It has no query parameters.
-
-Request body field: `name` (string, optional). Response: a project group object. A group owned by another user returns `404`.
+Renames a group. Body: `name`. Returns the group.
 
 ### DELETE `/api/project-groups/{id}`
 
-Deletes a caller-owned group. Path parameter: `id` (integer group ID). It has no query parameters or request body. The projects themselves are untouched.
-
-Response: the standard delete response. A group owned by another user returns `404` and is left intact.
+Deletes a group. Its projects are not touched. Returns `{"deleted": true}`.
 
 ### PUT `/api/project-groups/assign`
 
-Files a project into one of the caller's groups, or takes it out of all of them. This endpoint has no path or query parameters.
+Files a project into one of your groups, or out of all of them. Body: `project_id` and `group_id` (null takes the project out of every group). A project sits in at most one of your groups. Filing a project you cannot read is `403`. Returns `{"ok": true}`.
 
-Request body fields are `project_id` (integer) and `group_id` (integer or null). A null `group_id` removes the project from every group the caller owns. Unlike the rest of this family, this endpoint checks project access: assigning a project the caller cannot view returns `403`.
+### PUT `/api/project-groups/reorder`
 
-Response: `{ "ok": true }`.
+Sets the order of your groups. Body: `ids`, group ids in the order you want; groups you leave out follow in their current order. Returns your groups.
 
-## Project data
+## Members and roles
 
-### GET `/api/projects/{id}/board`
-
-Returns project issues grouped into named arrays. Path parameter: `id` (integer project ID). Query parameter: `group_by` (string, optional). Omit it or use any value other than `priority` or `module` to group by status. Use `priority` or `module` for those groupings.
-
-It has no request body. Response: an object whose keys are group names and whose values are `Issue` arrays.
-
-### GET `/api/projects/{id}/issue-counts`
-
-Returns issue counts by status. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: an object with `backlog`, `todo`, `active`, `done`, `cancelled`, and `total` integer fields.
-
-### GET `/api/projects/{id}/insights`
-
-Returns project issue and activity aggregates. Path parameter: `id` (integer project ID). Query parameter: `weeks` (integer, optional). The value defaults to `12` and is clamped to `1..=52`.
-
-It has no request body. Response: an object with `weeks` (integer), `created_per_week` (array of objects with `week_start` string and `count` integer), `closed_per_week` (the same shape), `status_counts`, `priority_counts`, `module_counts`, and `top_actors`.
-
-`status_counts` has the same fields as issue counts. `priority_counts` has `urgent`, `high`, `medium`, `low`, `none`, and `total` integer fields. Each `module_counts` item has `module_id` (integer or null), `name` (string), and `count` (integer). Each `top_actors` item has `actor_user_id` (integer or null), `username` (string or null), `display_name` (string or null), `is_bot` (boolean), `actions` (integer), `last_ts` (string), and `top_transport` (string).
-
-### GET `/api/projects/{id}/mention-candidates`
-
-Lists users who can be mentioned in comments for a project. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: an array of objects with `user_id` (integer), `username` (string), and `display_name` (string).
-
-## Delta sync
-
-Issues, pages, and comments each carry `seq`, a monotonic counter shared across all three and across every project on the instance. A client bootstraps once with `/index`, remembers the cursor it returns, and then asks `/changes` what happened above it.
-
-Rows on both endpoints are *skinny*: no issue `description`, no page `content`, no comment body. Fetch those from the entity's own endpoint when a detail view needs them.
-
-Issue and page rows do carry `preview`, the first non-empty line of the body trimmed and truncated to 200 characters (Unicode scalar values, not bytes), or `""` when there is no body. It is enough to render a list row's summary line without fetching anything.
-
-### GET `/api/projects/{id}/index`
-
-Returns every live issue and page in a project, plus the cursor to resume `/changes` from. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: an object with `cursor` (integer), `issues` (array), and `pages` (array). Deleted rows are excluded, and comments are not included at all.
-
-The cursor is read before the lists, so a write that lands during the request is delivered twice rather than skipped: it may appear in the snapshot and will also come back from the next `/changes` call, since its `seq` is above the cursor. Apply changes as upserts keyed by `id` and duplicates cost nothing.
-
-### GET `/api/projects/{id}/changes`
-
-Returns everything in the project that changed above a cursor, oldest first. Path parameter: `id` (integer project ID). Query parameters are `since` (integer, optional, defaults to `0`) and `limit` (integer, optional). `limit` defaults to `5000` and is clamped to `1..=50000`. `since=0` returns everything, which works but is what `/index` is for.
-
-It has no request body. Response: an object with `changes` (array), `cursor` (integer), and `has_more` (boolean). `cursor` is the highest `seq` in `changes`, or the `since` you supplied when the page is empty, so it never moves backwards. When `has_more` is true, repeat the call with `since` set to the returned cursor.
-
-Comments are scoped through whichever parent they hang off, so an issue comment arrives with the issue's project and a page comment with the page's.
-
-Every change carries `kind` (`issue`, `page`, or `comment`), `seq` (integer), `deleted` (boolean), and `id` (integer). A change with `deleted: true` is a tombstone and carries nothing else: delete your copy. Live changes add the fields for their kind.
-
-- `issue`: `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, and `labels` (array of label names).
-- `page`: `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, and `labels` (array of label names).
-- `comment`: `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`.
-
-```json
-{
-  "changes": [
-    {
-      "kind": "issue",
-      "seq": 41,
-      "deleted": false,
-      "id": 7,
-      "identifier": "LIF-3",
-      "title": "Ship delta sync",
-      "status": "active",
-      "priority": "high",
-      "module_id": 2,
-      "sort_order": 1000.0,
-      "start_date": null,
-      "target_date": null,
-      "created_at": "2026-08-20 09:14:02",
-      "updated_at": "2026-08-27 11:02:55",
-      "preview": "Bootstrap once, then pull deltas by cursor.",
-      "labels": ["sync"]
-    },
-    { "kind": "page", "seq": 42, "deleted": true, "id": 4 }
-  ],
-  "cursor": 42,
-  "has_more": false
-}
-```
-
-## Membership
+The role rules, including what `authz_enforced` changes, are in [Roles](/docs/rest-api#roles). A member record has `project_id`, `user_id`, `role` and `created_at`.
 
 ### GET `/api/projects/{id}/members`
 
-Lists project members with display identity. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: an array of objects with `project_id` (integer), `user_id` (integer), `role` (string), `created_at` (string), `username` (string), and `display_name` (string).
+Members with their names: each record adds `username` and `display_name`. **Viewer.**
 
 ### POST `/api/projects/{id}/members`
 
-Adds a project member. Path parameter: `id` (integer project ID). It has no query parameters.
+Adds a member. **Lead, from a recent browser session**, even for a caller who is a lead: an API key cannot hand out standing access. Both checks run inside the transaction that writes the row.
 
-Lead-gated, and **requires a recent browser session**: the `Authorization` header must carry a `lific_sess_` token created within the last 15 minutes. API keys and OAuth tokens get `403 recent authentication required` even when they do lead the project. Adding a member hands out standing access that no lockdown on the granter's own credentials takes back, so it is gated like credential minting. Both the session check and the lead check run inside the transaction that writes the row.
-
-Request body fields are `user_id` (integer) and `role` (string, optional). `role` defaults to `viewer`. Valid roles are `viewer`, `maintainer`, and `lead`.
-
-Response: an object with `project_id` (integer), `user_id` (integer), `role` (string), and `created_at` (string).
+Body: `user_id` and optional `role` (`viewer`, `maintainer` or `lead`; default `viewer`). An unknown role is `400`; a user who is already a member is `409`. Returns the member record.
 
 ```bash
-curl -X POST https://your-server.example/api/projects/1/members \
-  -H "Authorization: Bearer <SESSION_TOKEN>" \
+curl -X POST "$LIFIC/api/projects/1/members" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"user_id":2,"role":"viewer"}'
-```
-
-```json
-{
-  "project_id": 1,
-  "user_id": 2,
-  "role": "viewer",
-  "created_at": "2026-07-14 12:00:00"
-}
+  -d '{"user_id":2,"role":"maintainer"}'
 ```
 
 ### PATCH `/api/projects/{id}/members/{user_id}`
 
-Changes a member role. Path parameters are `id` (integer project ID) and `user_id` (integer user ID). It has no query parameters.
-
-Lead-gated. **A recent browser session is required only when the new role is higher than the current one** (`viewer` < `maintainer` < `lead`). Raising a role expands access and is gated like `POST`; lowering it, or setting the role it already has, is not, so an API key can still downgrade people while an incident is being contained. The current role is read inside the write transaction, so the comparison is never made against a stale value.
-
-Request body field: `role` (string). Valid roles are `viewer`, `maintainer`, and `lead`. Response: a project member object. Demoting the only lead returns a conflict.
+Changes a member's role. **Lead.** Body: `role`. Raising a role needs a recent browser session; lowering it, or setting the role it already has, does not, so an API key can still reduce access during an incident. Demoting the last `lead` is `409`. Returns the member record.
 
 ### DELETE `/api/projects/{id}/members/{user_id}`
 
-Removes a member. Path parameters are `id` (integer project ID) and `user_id` (integer user ID). It has no query parameters or request body.
-
-Lead-gated, with no recency requirement: removal only takes access away. The lead check runs inside the write transaction.
-
-Response: the standard delete response. Removing or demoting the only lead returns a conflict.
+Removes a member. **Lead**, with no recency requirement. Removing the last `lead` is `409`; promote somebody first. If the removed member was the primary lead, `lead_user_id` moves to another lead or is cleared. Returns `{"deleted": true}`.
 
 ### GET `/api/projects/{id}/my-role`
 
-Returns the caller's effective project role. Path parameter: `id` (integer project ID). It has no query parameters or request body.
-
-Response: an object with `role` (string or null), `enforced` (boolean), and `is_admin` (boolean).
+Your own standing, so a client can decide what to show without reading the roster. **Viewer.** Returns `role` (`viewer`, `maintainer`, `lead`, or null when you are not a member), `enforced` (whether `authz_enforced` is on) and `is_admin`. For a connected tool, the role is its owner's.
 
 ## Saved views
 
-### GET `/api/projects/{id}/views`
+Saved views are personal. Every route lists and changes only your own views in one project, and needs a signed-in caller. **Viewer.**
 
-Lists saved views owned by the caller for one project. Path parameter: `id` (integer project ID). It has no query parameters or request body.
+A view has `id`, `project_id`, `user_id`, `name`, `config`, `is_default`, `created_at` and `updated_at`.
 
-Response: an array of objects with `id` (integer), `project_id` (integer), `user_id` (integer), `name` (string), `config` (string containing JSON), `is_default` (boolean), `created_at` (string), and `updated_at` (string). Views are returned only for the authenticated caller.
-
-### POST `/api/projects/{id}/views`
-
-Creates a saved view owned by the caller. Path parameter: `id` (integer project ID). It has no query parameters.
-
-Request body fields are `name` (string), `config` (string containing valid JSON, at most 8 KiB), and `is_default` (boolean, optional). Response: a saved view object. The server treats `config` as opaque JSON; the web client currently uses the shape below and tolerates missing fields when applying older views.
+`config` is a string containing JSON, at most 8 KiB. Lific checks only that it parses and never reads inside it. The web UI stores this shape and tolerates missing fields:
 
 ```json
 {
@@ -299,38 +139,89 @@ Request body fields are `name` (string), `config` (string containing valid JSON,
 }
 ```
 
-The recognized client fields are `version`, `layout` (`list` or `board`), filters, `searchQuery`, sorting, `groupBy`, `density`, `laneBy`, and `hiddenStatuses`. Clients may evolve this object without a database migration; invalid JSON is rejected, while unknown or missing fields are tolerated by the web client.
+### GET `/api/projects/{id}/views`
+
+Your views in the project.
+
+### POST `/api/projects/{id}/views`
+
+Creates a view. Body: `name`, `config` and optional `is_default`. Returns the view.
 
 ### PATCH `/api/projects/{id}/views/{view_id}`
 
-Updates a caller-owned saved view. Path parameters are `id` (integer project ID) and `view_id` (integer saved view ID). It has no query parameters.
-
-Request body fields are `name` (string, optional), `config` (string containing valid JSON, at most 8 KiB, optional), and `is_default` (boolean, optional). Response: a saved view object. The caller must own the view.
+Changes any of `name`, `config` and `is_default`. Returns the view.
 
 ### DELETE `/api/projects/{id}/views/{view_id}`
 
-Deletes a caller-owned saved view. Path parameters are `id` (integer project ID) and `view_id` (integer saved view ID). It has no query parameters or request body.
+Deletes the view. Returns `{"deleted": true}`.
 
-Response: the standard delete response.
+## Board and numbers
 
-## Activity and import
+### GET `/api/projects/{id}/board`
+
+The project's issues grouped into columns. **Viewer.** Query: `group_by`, which is `status` (the default), `priority` or `module`. Returns an object whose keys are column names (a status, a priority, or a module name with `unassigned` for issues without one) and whose values are `Issue` arrays. Empty columns are left out. The board reads at most 500 issues.
+
+### GET `/api/projects/{id}/issue-counts`
+
+Issue counts by status: `backlog`, `todo`, `active`, `done`, `cancelled` and `total`. **Viewer.** Issues in the trash are not counted.
+
+### GET `/api/projects/{id}/insights`
+
+Charts for the project's insights tab. **Viewer.** Query: `weeks` (default 12, clamped to 1 through 52).
+
+Returns:
+
+- `weeks`
+- `created_per_week` and `closed_per_week`: arrays of `week_start` and `count`
+- `status_counts`: the issue-count object above
+- `priority_counts`: `urgent`, `high`, `medium`, `low`, `none` and `total`
+- `module_counts`: `module_id` (null for no module), `name` and `count`
+- `top_actors`: the actor summary described under [project activity](#get-apiprojectsidactivityactors)
+
+### GET `/api/projects/{id}/mention-candidates`
+
+People who can be `@`-mentioned in the project's comments: `user_id`, `username` and `display_name`. **Viewer.** With enforcement on, only the project's members; otherwise every user.
+
+## Activity
+
+The activity log records who changed what, through which interface. The per-issue, per-page and per-plan feeds are on [Issues, pages and plans](/docs/rest-api/work#activity).
 
 ### GET `/api/projects/{id}/activity`
 
-Returns activity for a project, newest first. Path parameter: `id` (integer project ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
+The project's activity, newest first. **Viewer.** Query: `limit` (default 50, at most 200) and `offset`.
 
-It has no request body. Response: an activity feed object with `items` (activity array) and `has_more` (boolean). Each activity item has `id` (integer), `ts` (string), `actor_user_id` (integer or null), `actor_username` (string or null), `actor_display_name` (string or null), `actor_is_bot` (boolean), `transport` (string), `entity_type` (string), `entity_id` (integer), `entity_label` (string or null), `project_id` (integer or null), `issue_id` (integer or null), `page_id` (integer or null), `action` (string), `field` (string or null), `old_value` (string or null), and `new_value` (string or null).
+Returns `items` and `has_more`. Each item has:
+
+- `id`, `ts`
+- `actor_user_id`, `actor_username`, `actor_display_name` (null once the account is gone) and `actor_is_bot`
+- `transport`: `web`, `mcp`, `api`, `cli` or `system`
+- `entity_type`, `entity_id`, `entity_label`, and `project_id`, `issue_id`, `page_id` where they apply
+- `action`: such as `create`, `update`, `delete`, `attach`, `detach`, `link` or `unlink`
+- `field`, `old_value` and `new_value` for a field change
 
 ### GET `/api/projects/{id}/activity/actors`
 
-Returns activity totals grouped by actor. Path parameter: `id` (integer project ID). It has no query parameters or request body.
+Totals per actor in the project. **Viewer.** Each entry has `actor_user_id`, `username`, `display_name`, `is_bot`, `actions`, `last_ts` and `top_transport` (the interface they used most).
 
-Response: an array of actor objects with `actor_user_id` (integer or null), `username` (string or null), `display_name` (string or null), `is_bot` (boolean), `actions` (integer), `last_ts` (string), and `top_transport` (string).
+## GitHub import
 
 ### POST `/api/projects/{id}/import/github`
 
-Imports GitHub issues into a project, or returns a preview when `dry_run` is true. Path parameter: `id` (integer project ID). It has no query parameters.
+Copies a GitHub repository's issues and their comments and labels into the project, or previews what would be copied. **Lead.** The request body may be at most 16 KiB.
 
-Request body fields are `repo` (string in `owner/name` form), `token` (string, optional), `state` (string, optional, defaults to `all`), `map_open` (string, optional, defaults to `backlog`), `map_closed` (string, optional, defaults to `done`), and `dry_run` (boolean, optional, defaults to false).
+Body:
 
-Response: an object with `dry_run` (boolean), `issues_created` (integer), `issues_skipped_existing` (integer), `comments_created` (integer), `labels_created` (integer), `comments_planned` (integer), `labels_planned` (integer), `skipped_non_issues` (integer), `skipped_assignees` (integer), and `skipped_other` (integer).
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `repo` | required | `owner/name`. |
+| `token` | none | A GitHub token, needed for private repositories and higher rate limits. It is used for this request only and not stored. |
+| `state` | `all` | Which GitHub issues to read: `open`, `closed` or `all`. |
+| `map_open` | `backlog` | Lific status for open GitHub issues. |
+| `map_closed` | `done` | Lific status for closed GitHub issues. |
+| `dry_run` | `false` | Count what would be created and write nothing. |
+
+Each imported issue records its origin in `source` (such as `github:owner/name#12`), so running the import again skips issues it already brought in.
+
+Returns `dry_run`, `issues_created`, `issues_skipped_existing`, `comments_created`, `labels_created`, `comments_planned`, `labels_planned`, `skipped_non_issues` (pull requests), `skipped_assignees` and `skipped_other`.
+
+One import runs per project at a time and four across the instance; another request meanwhile is `409`. A repository past Lific's import limits is `413`, with the limit named.

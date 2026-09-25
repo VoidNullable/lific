@@ -1,51 +1,49 @@
 ---
 title: Configuration
-description: Reference for lific.toml discovery, sections, values, defaults, and command line overrides.
+description: Where Lific looks for lific.toml, what every setting does and its default, and the environment variables Lific reads.
 ---
 
-Lific reads TOML configuration from `lific.toml`. Every section and key is optional. Missing values use built-in defaults.
+Lific reads its settings from one TOML file, `lific.toml`. `lific init` writes one for you. Every section and key is optional, and anything you leave out takes the default shown on this page.
+
+Some settings live in the database instead, because administrators change them while the server runs: the instance name, signup, session length, the login message, browser auto-login and membership enforcement. Change those in the web UI's instance settings or with [`lific instance set`](/docs/cli#instance).
 
 ## File discovery
 
-Lific uses the first configuration file that exists in this order.
+Lific uses the first of these files that exists:
 
-1. The path passed with `--config <PATH>`. This path is used alone. Lific does not search other locations.
+1. The path given with `--config <PATH>`. When you pass it, Lific looks nowhere else, and a path that does not exist is an error.
 2. `./lific.toml` in the current directory.
 3. The user configuration directory.
 4. The system configuration directory.
 
-User and system paths vary by platform.
-
-| Platform | User path | System path |
+| Platform | User file | System file |
 | --- | --- | --- |
-| Linux | `~/.config/lific/lific.toml`, respecting `XDG_CONFIG_HOME` | `/etc/lific/lific.toml` |
+| Linux | `~/.config/lific/lific.toml`, or under `$XDG_CONFIG_HOME` when set | `/etc/lific/lific.toml` |
 | macOS | `~/Library/Application Support/lific/lific.toml` | `/Library/Application Support/Lific/lific.toml` |
 | Windows | `%APPDATA%\lific\lific.toml` | `%ProgramData%\lific\lific.toml` |
 
-A file that exists but cannot be read or parsed is a fatal error. Lific stops and names the file and the error; it does not fall through to the next location. Unknown keys are rejected, so a typo such as `allow_signupp` fails instead of being ignored. An explicit `--config` path that does not exist is also an error. If automatic discovery finds no file, Lific uses its built-in defaults.
+A file that exists but cannot be read or parsed stops Lific with an error naming the file. It does not fall through to the next location, because silently using another file, or the defaults, would quietly undo settings such as a loopback bind or closed signup. Unknown keys are errors too, so a typo like `allow_signupp` fails instead of being ignored.
 
-Defaults do not create a database. Ordinary local commands refuse a missing database and name the expected path. Run `lific init` first, restore a backup, or use the explicit [container bootstrap](/docs/self-hosting#containers). `lific doctor` can diagnose an absent or unreadable config; it skips checks that depend on that config rather than silently using defaults.
+On Linux and macOS, Lific refuses a configuration file that is a symbolic link or not a regular file, and when the file can be read by other users it changes the permissions to owner-only. The file can hold secrets such as `mcp_path_token`.
 
-Relative `database.path` values resolve relative to the directory containing the selected configuration file. A relative backup directory then resolves relative to the database directory.
+If no file exists anywhere, Lific uses the built-in defaults. Defaults never create a database: ordinary commands refuse a missing database and name the path they expected. Run `lific init`, restore a backup, or use the [container bootstrap](/docs/self-hosting#containers). `lific doctor` reports a missing or unreadable configuration and skips the checks that depend on it.
 
-## Command line overrides
+A relative `database.path` resolves against the directory holding the configuration file. A relative backup directory then resolves against the database's directory.
 
-The following command line flags override configuration values.
+## Command-line overrides
 
 | Flag | Effect |
 | --- | --- |
-| `--config <PATH>` | Selects the configuration file and disables automatic discovery. |
-| `--db <PATH>` | Overrides `database.path` for the command. |
-| `lific start --host <HOST>` | Overrides `server.host` for that server process. |
-| `lific start --port <PORT>` | Overrides `server.port` for that server process. |
+| `--config <PATH>` | Uses this configuration file and turns off discovery. |
+| `--db <PATH>` | Uses this database file instead of `database.path`, for this command only. |
+| `lific start --host <HOST>` | Binds to this address instead of `server.host`. |
+| `lific start --port <PORT>` | Listens on this port instead of `server.port`. |
 
-`src/config.rs` does not define environment variable overrides for `lific.toml` keys. Other commands use environment variables for their own inputs. For example, `lific doctor --key` can use `LIFIC_API_KEY`, and import commands can use source-specific credentials.
-
-`start --init-if-missing` reads `LIFIC_INIT_ADMIN_NAME` and `LIFIC_INIT_ADMIN_PASSWORD` to create the first administrator on a fresh instance. These are bootstrap inputs, not general overrides of configuration or existing accounts. Multi-instance MCP uses a [separate TOML file](/docs/mcp/multi-instance) for server aliases and credential sources.
+No environment variable overrides a `lific.toml` key. The variables Lific does read are listed under [Environment variables](#environment-variables).
 
 ## Default configuration
 
-This is the built-in default configuration. Optional server keys are omitted because their default is unset.
+This is the built-in configuration. The optional `[server]` and `[backup]` keys that default to unset are left out.
 
 ```toml
 [server]
@@ -76,87 +74,111 @@ trash_days = 30
 
 ## `[server]`
 
-| Key | Type | Default | Description |
+| Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `host` | string | `"0.0.0.0"` | Address used by `lific start` for the TCP listener. |
-| `port` | unsigned 16-bit integer | `3456` | TCP port used by `lific start`. |
-| `public_url` | optional string | unset | Public base URL. Lific uses it as the OAuth issuer. `lific connect` uses it to derive the remote MCP URL. |
-| `cors_origins` | array of strings | `[]` | Allowed browser CORS origins. An empty array allows any origin. |
-| `trusted_proxies` | array of strings | `[]` | Isolated IP addresses or CIDR ranges trusted to supply client IP proxy headers. Invalid values stop server startup. |
-| `mcp_path_token` | optional string | unset | Enables an unauthenticated MCP endpoint at `/mcp/<token>`. The path token is the credential. |
-| `mcp_path_user` | optional string | unset | Selects the username attributed to requests through `mcp_path_token`. When unset, Lific uses the first administrator if one exists. |
+| `host` | string | `"0.0.0.0"` | The address `lific start` listens on. The default accepts connections from any network the machine is on. |
+| `port` | integer, 0 to 65535 | `3456` | The TCP port `lific start` listens on. |
+| `public_url` | string | unset | The address people and tools use to reach the server, such as `https://lific.example.com`. See below. |
+| `cors_origins` | array of strings | `[]` | Browser origins allowed to call the API from another site. An empty list allows any origin. |
+| `trusted_proxies` | array of strings | `[]` | IP addresses or CIDR ranges of your reverse proxies. Only these may tell Lific the real client address. An invalid entry stops the server from starting. |
+| `mcp_path_token` | string | unset | Opens an MCP endpoint at `/mcp/<token>` that needs no other credential. |
+| `mcp_path_user` | string | unset | The username that requests through `mcp_path_token` are attributed to. Defaults to the first administrator. |
 
-Use an HTTPS URL for `public_url` when Lific is exposed through a public HTTPS endpoint. The server includes the configured hostname in its MCP host allowlist for reverse proxy requests.
+`public_url` is the OAuth issuer that MCP clients discover, the base of the links in CLI and MCP output, and the address `lific connect` writes into remote tool configurations. Its host name is added to the hosts the MCP endpoint accepts, which a reverse proxy needs. Its scheme also decides the session cookie: an `https://` URL, or no URL at all, gives a cookie marked `Secure`, and only an explicit `http://` URL turns that off, because browsers discard `Secure` cookies over plain HTTP.
 
-`trusted_proxies` identifies proxy hops, not trusted clients. Forwarding headers are ignored unless the immediate TCP peer is in this list. For a trusted peer, Lific walks `X-Forwarded-For` from right to left, skips configured proxy addresses, and uses the first untrusted address as the client IP. It uses `X-Real-IP` only when `X-Forwarded-For` is absent. Malformed or entirely trusted chains fall back to the TCP peer, and IPv4-mapped IPv6 addresses are normalized. List every proxy layer you operate; do not add client networks merely because they appear in a header.
+`trusted_proxies` names proxy hops, not trusted clients. Lific ignores forwarding headers unless the connection itself comes from an address on this list. From a trusted proxy, Lific reads `X-Forwarded-For` from right to left, skips addresses on the list, and takes the first one that is not as the client. It uses `X-Real-IP` only when `X-Forwarded-For` is absent. A malformed chain, or one made entirely of trusted addresses, falls back to the proxy's own address, and IPv4-mapped IPv6 addresses count as IPv4. List every proxy layer you run, and do not add client networks just because they appear in a header. The client address matters because rate limits and the audit log are keyed on it.
 
-A trusted proxy can instead pass the client address directly in `X-Lific-Client-IP`, authenticated by `X-Lific-Proxy-Secret`. Lific accepts that pair only from a peer in `trusted_proxies`, and only when the secret matches the `LIFIC_TRUSTED_PROXY_SECRET` environment variable. If a trusted peer sends either header without a valid pair, rate-limited routes answer `503` rather than falling back to a shared bucket. Set the variable before the proxy starts sending the headers, use a long random value, and have the proxy remove any client-supplied copies of both headers.
+A trusted proxy can instead send the client address in `X-Lific-Client-IP`, together with `X-Lific-Proxy-Secret`. Lific accepts that pair only from an address in `trusted_proxies`, and only when the secret equals the `LIFIC_TRUSTED_PROXY_SECRET` environment variable of the server process. If a trusted proxy sends either header without a valid pair, including when the variable is unset, requests to rate-limited routes are answered with `503` rather than counted against a bucket every visitor shares. Set the variable before the proxy starts sending the headers, use a long random value, and have the proxy strip any copies of both headers that arrive from clients. [Self-hosting](/docs/self-hosting) shows complete proxy setups.
 
-`mcp_path_token` bypasses API key and OAuth authentication. Anyone who knows the resulting URL can use the endpoint. Use a long random token and HTTPS when this key is configured.
+`mcp_path_token` bypasses API keys and OAuth: anyone who knows the URL can use every MCP tool as `mcp_path_user`. It exists for MCP clients whose OAuth support is broken. Use a long random token and serve it only over HTTPS.
 
 ## `[database]`
 
-| Key | Type | Default | Description |
+| Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `path` | path string | `"lific.db"` | Path to the SQLite database file. Relative paths resolve beside the selected configuration file. |
+| `path` | path | `"lific.db"` | The SQLite database file. A relative path resolves against the configuration file's directory. |
 
-The attachment directory is named `attachments` and is stored beside the database file.
+Attachments are stored in a directory named `attachments` next to the database file.
 
-A relative `--db` path is resolved against the current working directory. `lific init --db <PATH>` records the resulting absolute path in its config, so later commands select the same database regardless of their working directory. It refuses a conflicting path already named by the selected config.
+`--db` on the command line resolves a relative path against the current directory instead. `lific init --db <PATH>` writes the absolute path into a new configuration file, so later commands find the same database from anywhere.
 
 ## `[backup]`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Enables automatic backup archives when the HTTP server starts. |
-| `dir` | path string | `"backups"` | Backup directory. An absolute path is used directly. A relative path resolves beside the database file. |
-| `interval_minutes` | unsigned integer | `60` | Interval between automatic backups, in minutes. |
-| `retain` | unsigned integer | `24` | Maximum number of backup artifacts to retain. The oldest matching artifacts are removed first. |
-| `audit_retention_days` | optional unsigned integer | unset | Number of days of audit log history to keep. Rows older than the window are deleted at the end of each backup cycle. Unset or `0` keeps history forever. |
+Automatic backups run only while `lific start` is serving. Five seconds after startup the server writes the first archive, then writes another every `interval_minutes`. Each one has the same format as [`lific dump`](/docs/cli#dump).
 
-Automatic backups use the same archive format as `lific dump`.
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Takes automatic backups. Set `false` to turn them off. |
+| `dir` | path | `"backups"` | Where archives go. A relative path resolves against the database's directory. The directory is created if missing. |
+| `interval_minutes` | integer | `60` | Minutes between backups. |
+| `retain` | integer | `24` | How many archives to keep. After each backup, the oldest beyond this number are deleted. |
+| `audit_retention_days` | integer | unset | Days of audit log history to keep. Older entries are deleted after each successful backup, so history is only removed once an archive holds it. Unset or `0` keeps the history forever. |
+
+`interval_minutes = 0` and `retain = 0` are not honored. A zero interval is not a schedule, and keeping zero archives would delete every backup seconds after writing it. Either value falls back to its default, and the server logs a warning saying so. To stop taking backups, set `enabled = false`.
 
 ## `[log]`
 
-| Key | Type | Default | Description |
+| Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `level` | string | `"info"` | Lific log level. The documented levels are `trace`, `debug`, `info`, `warn`, and `error`. |
+| `level` | string | `"info"` | How much Lific logs: `trace`, `debug`, `info`, `warn` or `error`. |
+
+The level applies to `lific start` and `lific mcp`. Setting the `RUST_LOG` environment variable replaces it entirely, using the `tracing` filter syntax. `lific mcp` always logs to standard error so the stdio session stays clean.
 
 ## `[retention]`
 
-| Key | Type | Default | Description |
+| Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `trash_days` | unsigned integer | `30` | Days a deleted issue, page or comment stays in the trash, where it can still be restored, before it is removed permanently. `0` never empties the trash. |
+| `trash_days` | integer | `30` | Days a deleted issue, page or comment stays in the trash, where it can still be restored, before it is removed for good. `0` never empties the trash. |
 
-The server sweeps the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving. Changing the window takes effect at the next restart.
+The server empties the trash 30 seconds after it starts and then every six hours, so an item can outlive its window by up to six hours. The sweep runs only while `lific start` is serving, and a changed value takes effect at the next restart.
 
 ## `[auth]`
 
-| Key | Type | Default | Description |
+| Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `allow_signup` | boolean | `true` | Initial self-service signup setting. Lific seeds the database-backed instance setting from this value when it first creates the setting. Later changes through instance settings are stored in the database. |
-| `required` | boolean | `true` | Requires a bearer credential on REST and MCP requests. |
+| `allow_signup` | boolean | `true` | Whether signup starts out open. Lific copies this into the database the first time it creates the instance settings. After that the database value wins, and administrators change it in instance settings. |
+| `required` | boolean | `true` | Requires a credential on every REST and MCP request. |
 
-When `required = false`, a request with no credential is treated as an operator request. In the web UI, the browser automatically signs in as the first administrator; an instance with no accounts shows signup instead, so an attribution identity can be created. A request with an invalid credential still fails authentication.
+With `required = false`, a request that carries no credential is treated as the operator, and the browser signs in as the first administrator automatically. An instance with no accounts shows signup instead, so there is an account to attribute changes to. A request with an invalid credential is still rejected.
 
-Lific refuses to start with `required = false` or `web_auto_login` enabled if `[server] host` is not loopback, or if a nonempty `server.public_url` cannot be identified as loopback or private-network. Public DNS names and unparseable URLs fail this check. A loopback bind alone does not exempt a public URL.
+Lific refuses to start with `required = false`, or with browser auto-login turned on, when `server.host` is not a loopback address, or when `server.public_url` is set and does not point at a loopback or private-network address. Public DNS names and URLs that cannot be parsed fail this check. Binding to loopback does not exempt a public URL.
 
-`secure_cookies` is not a TOML key. Setting it under `[auth]` is now an unknown-key error; remove it if an older configuration file carries it. Lific derives the runtime value at startup: false only when `server.public_url` explicitly begins with `http://`, true for HTTPS and for an unset public URL.
+`secure_cookies` is not a setting. Older configuration files may carry it under `[auth]`; remove it, because it is now an unknown key. Lific derives the value from `public_url`, as described under [`[server]`](#server).
 
 ### What `lific init` writes
 
-On a fresh install, `lific init` resolves an auth mode and edits the configuration file in place, leaving every other section and setting alone.
+On a fresh install, `lific init` asks how people should sign in and edits the configuration file in place, leaving every other setting alone.
 
-| Mode | `[auth] required` | `[server] host` | `web_auto_login` | First administrator |
+| Mode | `[auth] required` | `[server] host` | Browser auto-login | First administrator |
 | --- | --- | --- | --- | --- |
-| `login-free` | `false` | `127.0.0.1` | enabled | passwordless |
-| `passwords` | `true` | unchanged | disabled | password you choose |
+| `login-free` | `false` | `127.0.0.1` | on | no password |
+| `passwords` | `true` | unchanged | off | the password you choose |
 
-`web_auto_login` lives in the database rather than in `lific.toml`; change it later with `lific instance set --auto-login <BOOLEAN>`. Enabling it through the CLI checks the selected configuration using the same rule as startup and the web settings page. Disabling it remains available for recovery. Login-free mode writes a loopback bind; changing that bind or adding a public URL can make the instance refuse to start.
+Browser auto-login is stored in the database, not in `lific.toml`. Change it later with `lific instance set --auto-login <BOOLEAN>`. Turning it on checks the configuration by the same rule as startup; turning it off always works, so you can recover. Because login-free mode depends on the loopback bind, changing `host` or adding a public `public_url` makes such an instance refuse to start.
+
+## Environment variables
+
+Lific reads no environment variable in place of a `lific.toml` key. These are the variables it does read.
+
+| Variable | Read by | Effect |
+| --- | --- | --- |
+| `LIFIC_URL` | CLI with `--backend http`, `lific mcp --remote` | The server to talk to, when `--url` is not given. It also names the server that `LIFIC_TOKEN` belongs to. |
+| `LIFIC_API_KEY` | CLI with `--backend http`, `lific mcp --remote`, `lific doctor` | An API key, when `--api-key` (or `doctor --key`) is not given. It takes precedence over `LIFIC_TOKEN` and stored logins. |
+| `LIFIC_TOKEN` | `lific mcp`; CLI with `--backend http`; `lific mcp --remote` | For local `lific mcp`, the key of the agent the session acts as. `lific connect --stdio` writes it into each tool's configuration. Unset runs as the operator with a warning; set but invalid refuses to start. For the HTTP backend and `--remote`, it is used as the credential only when `LIFIC_URL` names the same server. `lific mcp --instances` ignores it. |
+| `LIFIC_INIT_ADMIN_NAME` | `lific start --init-if-missing` | The first administrator's name when a fresh database is created. Must be set together with the password. |
+| `LIFIC_INIT_ADMIN_PASSWORD` | `lific start --init-if-missing` | The first administrator's password. Ignored once the database exists. |
+| `LIFIC_TRUSTED_PROXY_SECRET` | `lific start` | The shared secret a trusted proxy sends in `X-Lific-Proxy-Secret`. See [`[server]`](#server). |
+| `RUST_LOG` | `lific start`, `lific mcp` | Replaces `[log] level` with a `tracing` filter. |
+| `GITHUB_TOKEN` | `lific import github` | The GitHub token, when `--token` is not given. |
+| `LINEAR_API_KEY` | `lific import linear` | The Linear API key, when `--token` is not given. |
+| `JIRA_EMAIL`, `JIRA_API_TOKEN` | `lific import jira` | The Jira account email and API token, when `--email` and `--token` are not given. |
+| Any name set as `token_env` | `lific mcp --instances` | That instance's bearer token. See [Multiple instances](/docs/mcp/multi-instance). |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `APPDATA`, `ProgramData` | Configuration discovery, `lific init`, `lific login` | The standard platform directories. They decide where Lific looks for the user and system configuration files, where `lific init` puts a new instance, and where stored logins are kept. |
+| `LIFIC_CONNECT_HOME` | `lific connect` | Replaces the home directory that tool configurations are written under. Meant for trying `connect` against a scratch directory. |
 
 ## Example public configuration
 
-This example sets an external HTTPS URL and restricts browser CORS requests to one origin. Replace the example values with values for the deployment.
+This configuration serves Lific behind a reverse proxy on the same machine, at a public HTTPS address, and allows browser API calls only from that address. Replace the example values with your own.
 
 ```toml
 [server]
@@ -164,7 +186,7 @@ host = "127.0.0.1"
 port = 3456
 public_url = "https://lific.example.com"
 cors_origins = ["https://lific.example.com"]
-trusted_proxies = []
+trusted_proxies = ["127.0.0.1"]
 
 [database]
 path = "/var/lib/lific/lific.db"
@@ -179,6 +201,6 @@ retain = 24
 level = "info"
 
 [auth]
-allow_signup = true
+allow_signup = false
 required = true
 ```

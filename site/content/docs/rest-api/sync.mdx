@@ -1,0 +1,131 @@
+---
+title: Search, sync and realtime
+description: Search across projects, keep a local copy of a project current with the index and changes endpoints, and listen for updates on the realtime WebSocket.
+---
+
+## Search
+
+### GET `/api/search`
+
+Searches issues, pages, comments and attachments in every project you can read. A project you cannot read is left out of the results, even when you name it with `project_id`, so a search cannot reveal that it exists.
+
+| Parameter | Meaning |
+| --- | --- |
+| `query` | Required. Up to 4 KiB, or 256 bytes in `literal` mode. |
+| `mode` | `fts` (default): words, matched as prefixes, ranked. `literal`: a case-insensitive substring. |
+| `project_id` | Only this project. |
+| `result_type` | `issue`, `page`, `comment` or `attachment`. Any other value is `400`. |
+| `sort` | `relevance` (default) or `recent` (most recently updated first). |
+| `limit`, `offset` | Default 20, at most 500. `offset` stops at 100,000. |
+
+Returns an array of `result_type`, `id`, `identifier`, `title`, `snippet` and `project_id`. For a comment on a page, `parent_page_id` holds the page's id.
+
+Attachment matches cover file names and the text of small text files. Their relevance cannot be compared with the other results, so in `fts` mode they come after all issue, page and comment matches. An attachment result's `identifier` names an item you can read that uses it, and `title` is the file name.
+
+```bash
+curl -G "$LIFIC/api/search" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode "query=offline cache" \
+  --data-urlencode "result_type=issue"
+```
+
+## Delta sync
+
+These two endpoints let a client keep its own copy of a project and stay current by asking only for what changed. The web UI uses them.
+
+Issues, pages and comments share one counter, `seq`, across the whole instance; every write moves the row it touches above every value handed out so far. A client loads a snapshot once with `/index`, keeps the cursor it returns, and then asks `/changes` for everything above that cursor.
+
+Rows from both endpoints are summaries. They leave out issue descriptions, page content and comment text; fetch the item itself when a detail view needs them. Issue and page rows do carry `preview`, the first non-empty line of the body cut to 200 characters (or `""` when there is none), which is enough for a list row.
+
+### GET `/api/projects/{id}/index`
+
+Every live issue and page in the project, and the cursor to continue from. **Viewer.**
+
+Returns `cursor`, `issues` and `pages`. Rows in the trash are left out, and comments are not included.
+
+The cursor is read before the rows, so a write that lands during the request can appear both in the snapshot and in the next `/changes`. Apply changes as updates keyed by `id` and a duplicate does no harm.
+
+### GET `/api/projects/{id}/changes`
+
+What changed in the project above a cursor, oldest first. **Viewer.**
+
+Query: `since` (default 0) and `limit` (default 5,000, at most 50,000). `since=0` returns the whole history, which works, but `/index` is cheaper for a first load.
+
+Returns `changes`, `cursor` and `has_more`. `cursor` is the highest `seq` in `changes`, or your `since` when nothing changed, so it never moves backwards. When `has_more` is true, call again with `since` set to the returned cursor.
+
+Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id`. A change with `deleted: true` carries nothing else: remove your copy. Otherwise it also has:
+
+- **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`
+- **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, `labels`
+- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`
+
+A comment belongs to the project of the issue or page it is on.
+
+```json
+{
+  "changes": [
+    {
+      "kind": "issue",
+      "seq": 41,
+      "deleted": false,
+      "id": 7,
+      "identifier": "APP-3",
+      "title": "Ship delta sync",
+      "status": "active",
+      "priority": "high",
+      "module_id": 2,
+      "sort_order": 1000.0,
+      "start_date": null,
+      "target_date": null,
+      "created_at": "2026-08-20 09:14:02",
+      "updated_at": "2026-08-27 11:02:55",
+      "preview": "Load once, then pull changes by cursor.",
+      "labels": ["sync"]
+    },
+    { "kind": "page", "seq": 42, "deleted": true, "id": 4 }
+  ],
+  "cursor": 42,
+  "has_more": false
+}
+```
+
+## Realtime
+
+### GET `/api/events/ws`
+
+A WebSocket that tells a signed-in client when something it can see has changed. Events say **what** changed, not the new content: refetch the affected view, or call `/changes`.
+
+**Authentication is the `lific_token` session cookie, and nothing else.** A bearer header, API key or OAuth token is not accepted here. A browser sends the cookie automatically after signing in; another client can send a `Cookie: lific_token=<session token>` header on the upgrade request. A request carrying an `Origin` header must come from the server's own origin or one listed in `cors_origins`. A missing or invalid session, or a refused origin, is `403`.
+
+Each user may hold 16 sockets and the instance 1,024; one more is refused with `429` before the upgrade. The server checks the session again about once a minute and closes the socket when it is no longer valid. A password change, signing out everywhere or deactivation closes it at once.
+
+Events are JSON objects with a `type`:
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `issue.created`, `issue.updated`, `issue.deleted` | `project_id`, `issue_id`, `seq` | An issue changed. Restoring from the trash sends `issue.created`. |
+| `issue.linked`, `issue.unlinked` | `project_id`, `issue_id` | A relation changed. Sent once for each issue involved. |
+| `project.created`, `project.updated`, `project.deleted` | `project_id`, sometimes `seq` | `project.updated` also covers pages, plans, comments, modules, labels, folders and attachments in the project. |
+| `projects.reordered` | none | Your sidebar order changed, from another tab or device. |
+| `project_groups.changed` | none | Your sidebar groups changed. |
+| `resync.required` | none | Refetch everything you show, for example after an administrator changed `authz_enforced`. |
+| `sync_required` | `project_id` | The answer to a `resume` that can no longer be replayed. Backfill from `/changes`. |
+| `activity.baseline` | `day_count` | The answer to `activity.baseline.request`. |
+
+You only receive events for projects you can read. The server rechecks which projects those are each time it rechecks the session.
+
+```json
+{ "type": "issue.updated", "project_id": 1, "issue_id": 7, "seq": 121 }
+```
+
+A client may send three messages:
+
+- `{"type": "heartbeat"}`. Optional; see below.
+- `{"type": "activity.baseline.request"}` asks for `activity.baseline`.
+- `{"type": "resume", "project_id": 1, "cursor": 118}` asks for the events above `cursor` that were missed while disconnected. The server keeps the last 1,024 events that carry a `seq` for each project, for 5 minutes. If it still has everything above the cursor, it replays those events exactly as they were first sent; otherwise it answers `sync_required`. Replayed events can repeat ones you already applied, which is why they carry `seq`.
+
+Anything else closes the socket: another text message, a binary frame, a frame over 4 KiB, a message over 16 KiB, or more than 64 messages in 10 seconds.
+
+The server sends a ping every 30 seconds. Browsers and WebSocket libraries answer pings on their own, so a client that only listens stays connected with no code of its own. A socket that answers nothing for 120 seconds is closed. Sending `heartbeat` also counts as an answer.
+
+These events cover writes made through the running server, over REST, MCP or the web UI. Local CLI commands and local stdio MCP write the database file directly and do not produce events; clients pick those changes up on their next refetch or `/changes` call.

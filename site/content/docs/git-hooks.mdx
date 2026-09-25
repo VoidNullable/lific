@@ -1,0 +1,150 @@
+---
+title: Git hooks
+description: Close issues from commit messages with lific git-hook, locally or in CI, and tell a repository's agents about Lific with lific agents-md.
+---
+
+Write `Fixes APP-42` in a commit message, and `lific git-hook` can mark `APP-42` done. Nothing happens on its own: Lific installs no hooks and does not watch your repository. You decide where the command runs, whether in a local git hook, a CI job after your checks pass, or a script calling the HTTP endpoint.
+
+## What counts as a closing reference
+
+A closing reference is one of these keywords, then at least one space, tab or line break, then an issue identifier:
+
+`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`
+
+Case does not matter, so `fixes app-42` closes `APP-42`. Each keyword closes the one identifier right after it.
+
+| Message text | Closes |
+| --- | --- |
+| `Fixes APP-42` | `APP-42` |
+| `Fixes APP-42 and closes APP-43` | `APP-42` and `APP-43` |
+| `Fixes APP-42, APP-43` | Only `APP-42`. Repeat the keyword for each issue. |
+| `Fixes: APP-42` | Nothing. The keyword must be followed directly by whitespace. |
+| `See APP-42` or `Part of APP-42` | Nothing. A mention is not a closing reference. |
+| `Closes #42` | Nothing. Lific identifiers include the project. |
+
+An issue referenced several times, in one message or across a range of commits, is closed once. Anything shaped like an identifier after a keyword counts, so `fixes UTF-8 decoding` is read as a reference to `UTF-8`. Unless you have a project called `UTF`, that shows up as skipped with `not found` and does no harm.
+
+## Run it
+
+```bash
+lific git-hook [--range A..B] [--dry-run]
+```
+
+Without `--range`, the command reads standard input to the end as one commit message. With `--range`, it runs `git log` over that range in the current repository and checks every commit's message. `--dry-run` reports what would close and changes nothing.
+
+```bash
+git log -1 --format=%B | lific git-hook --dry-run
+lific git-hook --range origin/main..HEAD --dry-run
+```
+
+```text
+  would close APP-42
+  skipped APP-9 (not found)
+
+1 to close, 1 skipped.
+```
+
+Closing an issue is the same update as setting its status to `done` yourself: it is recorded in the issue's history and the activity log, and any issue it was blocking is released. An issue that is already `done` or `cancelled` is skipped as `already closed`, so running the command twice over the same commits is harmless. It does close an issue again if someone reopened it after the first run.
+
+### Against a local database or a server
+
+By default `git-hook` writes to the local database your configuration selects, with the full authority of whoever holds that file. Every referenced issue that exists is closed.
+
+To close issues on a server, use the HTTP backend:
+
+```bash
+git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook
+```
+
+It authenticates the way every HTTP-backend command does: `--api-key` or `LIFIC_API_KEY` if given, otherwise the token `lific login` stored for that server. `--url` can come from `LIFIC_URL` too. The server checks each issue separately. With project permissions on, the caller must be a maintainer or lead of the issue's project; an issue in a project the caller can read but not change is skipped as `forbidden`, and an issue in a project the caller cannot see is reported as `not found`, exactly like one that does not exist. Closures made through the server appear live in open browsers.
+
+### Output
+
+With `--json`, or whenever standard output is not a terminal, the result is JSON:
+
+```json
+{
+  "closed": ["APP-42"],
+  "skipped": [
+    { "identifier": "APP-9", "reason": "not found" },
+    { "identifier": "APP-7", "reason": "already closed" }
+  ]
+}
+```
+
+A dry run names the first list `would_close` instead of `closed`, so the output of a rehearsal cannot be mistaken for a real run. `reason` is `not found`, `already closed`, or, from a server only, `forbidden`. The command succeeds even when some issues are skipped, so read the list rather than the exit status if you need to know that every reference closed.
+
+## Close issues on each commit
+
+A `post-commit` hook runs after a commit is made, which is the right moment: the work is committed, and a failure in the hook cannot block or undo the commit. Save this as `.git/hooks/post-commit`, or in the directory `core.hooksPath` names if your repository sets it, and make it executable:
+
+```sh
+#!/bin/sh
+git log -1 --format=%B | lific git-hook
+```
+
+If a hook with that name already exists, add the line to it rather than replacing it. For a remote tracker, add `--backend http --url https://tracker.example.com` before `git-hook`, and make sure the credentials the hook sees are the ones you intend. Git runs `post-commit` for `git commit --amend` and, in current versions, for the commits a rebase replays, so the same message can be processed more than once; the already-closed rule makes that harmless.
+
+The command also works in a `commit-msg` hook, which receives the message file as its first argument:
+
+```sh
+#!/bin/sh
+lific git-hook < "$1"
+```
+
+That runs before the commit exists, so an issue can end up closed by a commit that was then aborted. Prefer `post-commit` locally, or CI when an issue should only close once the change has passed review or tests.
+
+## Close issues from CI
+
+In CI, process the commits a push brought in, after your checks pass, against the server. This GitHub Actions job runs on pushes to `main`:
+
+```yaml
+name: Close referenced issues
+on:
+  push:
+    branches: [main]
+
+jobs:
+  close-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install lific
+        run: |
+          curl -fsSLo lific https://github.com/VoidNullable/lific/releases/latest/download/lific-linux-x86_64
+          chmod +x lific
+      - name: Close issues
+        env:
+          LIFIC_URL: https://tracker.example.com
+          LIFIC_API_KEY: ${{ secrets.LIFIC_API_KEY }}
+        run: ./lific --backend http git-hook --range "${{ github.event.before }}..${{ github.sha }}"
+```
+
+`fetch-depth: 0` fetches the history `git log` needs. The push's `before` commit does not exist on the first push of a branch or after a force push, and then `git log` fails and nothing is closed. Run it once with `--dry-run` to check the range before you let it write, and pin a release version instead of `latest` once it works.
+
+For `LIFIC_API_KEY`, create a key for an account whose roles cover only the projects this repository should close issues in, for example a bot account made a maintainer of those projects: `lific key create --name ci --user <account>`. A key created without `--user` acts as an administrator and can close anything. Run write-enabled automation only on commits you trust, because anyone who can get a message into the range can name any issue the key can reach.
+
+## The HTTP endpoint
+
+`POST /api/git-hook` is what the HTTP backend calls. Use it directly from anything that already has the commit messages:
+
+```bash
+curl -X POST https://tracker.example.com/api/git-hook \
+  -H "Authorization: Bearer $LIFIC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"messages": ["Fixes APP-42", "Resolves APP-43"], "dry_run": true}'
+```
+
+`messages` is an array of commit messages and `dry_run` defaults to `false`. The response is the same JSON as the CLI's. A request carries at most 500 messages and 500 distinct references; anything larger is refused with `400`. The endpoint needs a credential, and it applies the per-issue checks described [above](#against-a-local-database-or-a-server).
+
+## Tell agents about Lific with agents-md
+
+```bash
+lific agents-md --project APP
+```
+
+`agents-md` writes a short section into `AGENTS.md` in the current directory, creating the file if it does not exist. Most coding agents read `AGENTS.md` from the repository root, so run it there, or point `--path` at another file. The section tells agents that the repository tracks its work in Lific, that the MCP tools are for tracker data and the `lific` command for anything that depends on this machine, and gives a few CLI examples with `APP` filled in, plus conventions such as marking an issue `done` when its work is finished. Without `--project`, the examples use the placeholder `APP` and tell the agent to look up the real identifier with `lific project list`.
+
+The section sits between `<!-- lific:begin -->` and `<!-- lific:end -->` markers. Running the command again replaces only that section and leaves the rest of the file alone; if the file has no section yet, it is appended at the end. Commit the file so every clone and every agent gets it. [`lific connect`](/docs/connect#agentsmd) also writes this section, with the placeholder identifier, to `./AGENTS.md` when it configures your tools, unless you pass `--skip-agents`. Run `lific agents-md --project APP` afterwards to fill in the real one.

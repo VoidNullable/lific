@@ -1,0 +1,108 @@
+---
+title: Working with Lific as an agent
+description: "Conventions for an MCP client using Lific: identifiers, edit versus update, triaging workable issues, plans across sessions, paging, errors and attribution."
+---
+
+This page is for the agent making the calls. It assumes a working connection; [MCP](/docs/mcp) covers transports and authentication, and the [tool reference](/docs/mcp/tools) lists every parameter. The server sends a shorter version of this guidance in its initialization instructions.
+
+## Name things by identifier
+
+Projects, issues, pages and plans are named by readable identifiers. Comments, plan steps and attachments are named by number.
+
+| Thing | Shape | Example |
+| --- | --- | --- |
+| Project | The bare identifier | `APP` |
+| Issue | Project identifier, a hyphen, a number | `APP-42` |
+| Project page | Project identifier, `-DOC-`, a number | `APP-DOC-3` |
+| Workspace page | `DOC-`, a number | `DOC-3` |
+| Plan | Project identifier, `-PLAN-`, a number | `APP-PLAN-2` |
+| Comment | A number, returned by `add_comment` and shown by `list_comments` | `128` |
+| Plan step | A number, shown by `get_plan` as `#18` | `18` |
+| Attachment | A number, returned by `upload_attachment` | `12` |
+
+Pass comment, step and attachment ids as integers: for step `#18`, send `step_id: 18`, with no `#` and no quotes.
+
+`get_activity` and `export` accept an issue, page or project identifier and act on whichever shape you pass, so `get_activity` with `APP` reads the whole project's feed.
+
+## Find the work
+
+Start with `list_resources(resource_type='project')`. Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long since anything happened, so the list already shows where work is waiting.
+
+Then triage with `list_issues`:
+
+- `workable=true` returns issues that are open (not `done` or `cancelled`) and whose blockers are all `done`. This answers "what can I start now".
+- `blocked=true` returns issues with at least one blocker that is not `done`, and annotates each row with `blocked_by:APP-3,APP-7`. It ignores the issue's own status, so a closed issue with an open blocker still appears.
+
+These are independent filters, not opposites. A cancelled blocker still blocks, deliberately: cancelling a prerequisite does not make the dependent work possible. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
+
+When you finish an issue, set `status='done'`. That releases the issues it blocks, and checks off any plan step that mirrors it.
+
+## Edit instead of rewriting
+
+`update_issue` and `update_page` replace whole fields, so changing one sentence of a long description means resending all of it. `edit_issue`, `edit_page`, `edit_plan_step` and `edit_comment` replace one exact string instead.
+
+Use an edit tool for a targeted change to existing text. Use an update tool to set structured fields (status, priority, module, labels, dates, folder, pin) or to replace a body wholesale.
+
+The edit tools share one contract. `old_string` must appear exactly once, or the call fails and says whether it matched nowhere or how many places it matched; pass `replace_all=true` to change every occurrence. Matching is byte-exact, so whitespace and newlines count. If your client double-escapes JSON, a string with no real newline or tab has its literal `\n` and `\t` turned into real ones before matching; this applies to issue descriptions, page contents, step descriptions and comments, not to titles. Nothing is written when an edit fails.
+
+`edit_issue`, `edit_page` and `edit_comment` also reject an empty `old_string` and a `new_string` identical to it. `edit_comment` has a second mode, `content`, that replaces the whole body; use one mode per call.
+
+## Avoid overwriting someone else
+
+By default the last write wins. `update_issue` and `update_page` accept `expected_seq`, a record's change counter, and refuse the update if the record has changed since. The refusal names the current `seq` and summarizes the current state in one line, so you can decide how to merge without another read.
+
+MCP read tools do not print `seq`. You get it from the REST API's issue and page responses, or from a refusal. When you have no `seq`, prefer an exact-string edit: it cannot clobber text it did not match.
+
+## Keep plans for work that outlasts a session
+
+A plan is a nested step tree stored in the project, so multi-session work does not depend on your transcript. `create_plan` takes the whole tree in one call. A step with an `issue` mirrors that issue while the plan is active: moving the issue to `done` checks the step, checking the step moves the issue to `done`, and moving the issue out of `done` unchecks it again. `cancelled` does not count. A plan with an `anchor_issue` is archived when that issue moves to `done`.
+
+On resume, look for a plan before re-deriving anything: `list_resources(resource_type='plan', project='APP')`, then `get_plan(plan='APP-PLAN-2')`. The tree shows each step's `#id`, whether it is done and its linked issue. Those ids are what `edit_plan_step` and `update_plan_step` take.
+
+`update_plan_step` answers with a short receipt of what changed and the plan's progress. Pass `echo_tree=true` for the whole tree, or call `get_plan`. See [Plans](/docs/concepts/plans).
+
+## Page through lists
+
+Lists return one page, not the whole set, because a single comment can be 256 KiB. When more rows exist, the output ends with the `offset` for the next call. Pass it back with the same filters.
+
+| Tool | Default | Cap | Paging hint |
+| --- | --- | --- | --- |
+| `list_issues` | 50 | 500 | Yes |
+| `list_comments` | 50 | 500 | Yes |
+| `search` | 20 | 500 | Yes |
+| `get_activity` | 30 | 200 | Yes |
+| `list_resources`, issues and pages | 100 | 500 | Yes |
+| `list_resources`, plans | 50 | 500 | No: ask for the next page when a full one comes back |
+| `get_attachment`, text lines | 200 | 500 | Yes |
+
+`list_resources` returns every project, module, label or folder at once and ignores `limit` for them. `list_attachments` is not paged.
+
+`get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones.
+
+## Read the error text
+
+A failed call is a tool result whose text begins with `Error:`, not a protocol error, and the text says what to fix. Some you will meet:
+
+- `project required (this session has no repository binding)`: you omitted `project` on a tool that needs it, and the session is not bound.
+- `old_string matches N locations`: add surrounding context, or pass `replace_all=true`.
+- `Forbidden: requires at least 'maintainer' access to this project`: your owner's role in that project is too low for the call.
+- A message that `LIFIC_TOKEN` is no longer valid: the session's credential was revoked. Nothing was written. A person must run `lific connect` and restart the MCP server.
+
+A call whose arguments do not fit the tool's schema, such as a missing required parameter or an unknown parameter to `edit_comment`, is refused before the tool runs with a JSON-RPC `invalid params` error.
+
+## What a bound repository gives you
+
+If the client launched `lific mcp` or `lific mcp --remote` inside a checkout bound with [`lific bind`](/docs/repository-bindings), the session has a bound project and the initialization instructions name it. On these tools an omitted `project` then resolves to it:
+
+| Tool | Applies |
+| --- | --- |
+| `list_issues`, `create_issue`, `get_board`, `create_plan` | Always |
+| `list_resources` | For `resource_type` `issue`, `plan`, `module`, `label` or `folder` |
+
+An explicit `project` always wins. The binding never changes what a call means: `search` still covers every project you can see, `create_page` without `project` still creates a workspace page, and `list_resources` for pages still lists every project's pages. `bulk_update` and `delete` never take it, because a destructive call should name its target. A binding grants no permissions.
+
+## You are your own identity
+
+Each tool connected with `lific connect`, or approved through OAuth, gets its own bot account and credential. Your writes are attributed to that bot in the [activity log](/docs/concepts/comments-and-activity#activity-log), with `mcp` as the transport, and everyone who can see the project sees them. You act with your owner's project access and never more. Where membership is enforced, reading and commenting take `viewer`, writing issues, pages and plans takes `maintainer`, and project settings take `lead`. See [Projects](/docs/concepts/projects#members-and-roles).
+
+Comments belong to their authors. `edit_comment` and `delete_comment` refuse a comment you did not write, unless the calling account is an administrator.

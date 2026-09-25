@@ -1,492 +1,316 @@
 ---
-title: Work items and resources
-description: Issues, pages, plans, comments, attachments, exports, search, and realtime events.
+title: Issues, pages and plans
+description: Create, update, link, delete and restore issues; write comments; manage pages, plans, modules, labels and folders; read each item's activity.
 ---
+
+The [concept pages](/docs/concepts) explain what each of these is for. The `Issue`, `Page`, `Comment`, `Module`, `Label` and `Folder` shapes are defined once in [Shared shapes](/docs/rest-api#shared-shapes).
 
 ## Issues
 
 ### GET `/api/issues`
 
-Lists issues. Query parameters are `project_id` (integer), `status` (string), `priority` (string), `module_id` (integer), `label` (string), `workable` (boolean), `blocked` (boolean), `created_since` (string), `created_until` (string), `updated_since` (string), `updated_until` (string), `order_by` (string), `order` (string), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+Lists issues. **Viewer** on the project when `project_id` is given; without it, issues from every project you can read. Returns an `Issue` array without relation arrays or `source`.
 
-`order_by` accepts `sort_order`, `sequence`, `created`, `created_at`, `updated`, `updated_at`, or `priority`. `order` accepts `asc` or `desc`. The `since` bounds are inclusive. The `until` bounds are exclusive.
+Every query parameter is optional:
 
-It has no request body. Response: an `Issue` array.
+| Parameter | Meaning |
+| --- | --- |
+| `project_id` | Only this project. |
+| `status`, `priority` | One exact value. |
+| `module_id` | Only this module. |
+| `label` | Only issues carrying this label name. |
+| `workable` | `true`: open issues whose blockers are all `done`. |
+| `blocked` | `true`: issues with at least one blocker that is not `done`, whatever their own status. |
+| `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
+| `created_until`, `updated_until` | Exclusive upper bound. |
+| `order_by` | `sort_order` (default), `sequence`, `created`, `updated` or `priority`. `created_at` and `updated_at` also work. |
+| `order` | `asc` (default) or `desc`. |
+| `limit`, `offset` | Default 50, at most 500. |
+
+The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks.
 
 ### POST `/api/issues`
 
-Creates an issue. This endpoint has no path or query parameters.
+Creates an issue. **Maintainer.**
 
-Request body fields are `project_id` (integer), `title` (string), `description` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `backlog`), `priority` (string, optional, defaults to `none`), `module_id` (integer or null, optional), `start_date` (string or null, optional), `target_date` (string or null, optional), `labels` (string array, optional), and `source` (string or null, optional).
+Body: `project_id` and `title`, then optionally `description` (Markdown), `status` (default `backlog`), `priority` (default `none`), `module_id`, `start_date` and `target_date` (`YYYY-MM-DD`), `labels` and `source`. `labels` are names of labels that already exist in the project; a name that matches none is ignored. A module from another project is `400`.
 
-Response: an `Issue` object.
+Attachments referenced from the description as `/api/attachments/{id}` are linked to the new issue if you uploaded them, are an administrator, or they are already linked somewhere in the same project.
+
+Returns the `Issue`.
 
 ```bash
-curl -X POST https://your-server.example/api/issues \
-  -H "Authorization: Bearer <API_KEY>" \
+curl -X POST "$LIFIC/api/issues" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"project_id":1,"title":"Document the REST API"}'
-```
-
-```json
-{
-  "id": 1,
-  "project_id": 1,
-  "sequence": 1,
-  "identifier": "LIF-1",
-  "title": "Document the REST API",
-  "description": "",
-  "status": "backlog",
-  "priority": "none",
-  "module_id": null,
-  "sort_order": 0,
-  "start_date": null,
-  "target_date": null,
-  "created_at": "2026-07-14 12:00:00",
-  "updated_at": "2026-07-14 12:00:00",
-  "labels": []
-}
+  -d '{"project_id":1,"title":"Crash on empty cart","priority":"urgent","labels":["bug"]}'
 ```
 
 ### GET `/api/issues/{id}`
 
-Returns an issue with labels and relations. Path parameter: `id` (integer issue ID). It has no query parameters or request body.
-
-Response: an `Issue` object.
-
-### PUT `/api/issues/{id}`
-
-Updates supplied issue fields. Path parameter: `id` (integer issue ID). It has no query parameters.
-
-Request body fields are `title` (string, optional), `description` (string, optional), `status` (string, optional), `priority` (string, optional), `module_id` (integer, null, or omitted), `sort_order` (number, optional), `start_date` (string or null, optional), `target_date` (string or null, optional), and `labels` (string array, optional). An omitted `module_id` is unchanged. A null `module_id` clears the assignment. Supplied `labels` replace the issue label set.
-
-Response: an `Issue` object.
-
-### DELETE `/api/issues/{id}`
-
-Deletes an issue. Path parameter: `id` (integer issue ID). It has no query parameters or request body.
-
-Response: the standard delete response.
+One issue with its relations. **Viewer.** An issue in the trash is `404`.
 
 ### GET `/api/issues/resolve/{identifier}`
 
-Resolves an issue identifier such as `LIF-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
+The same, by identifier such as `APP-42`. Case does not matter. **Viewer.**
 
-Response: an `Issue` object.
+### PUT `/api/issues/{id}`
+
+Changes an issue. **Maintainer.** Every field is optional: `title`, `description`, `status`, `priority`, `module_id` (null unassigns), `sort_order`, `start_date`, `target_date`, `labels` and `expected_seq`. An issue cannot move between projects.
+
+`labels`, when present, becomes the complete label set; leave it out to keep the current labels. Send `expected_seq` to refuse the update with `409` if somebody else changed the issue since you read it; see [Concurrent edits](/docs/rest-api#concurrent-edits-and-expected_seq).
+
+Moving an issue to `done` checks off plan steps that mirror it and archives a plan anchored to it; moving it out of `done` unchecks them. Returns the `Issue`.
 
 ```bash
-curl https://your-server.example/api/issues/resolve/LIF-1 \
-  -H "Authorization: Bearer <API_KEY>"
+curl -X PUT "$LIFIC/api/issues/42" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"done","expected_seq":118}'
 ```
 
-```json
-{
-  "id": 1,
-  "identifier": "LIF-1",
-  "title": "Document the REST API",
-  "status": "backlog",
-  "priority": "none",
-  "labels": [],
-  "blocks": [],
-  "blocked_by": [],
-  "relates_to": [],
-  "duplicates": [],
-  "duplicated_by": []
-}
-```
+### DELETE `/api/issues/{id}`
+
+Moves the issue and its comments to the trash. **Maintainer.** It disappears from lists, boards, search and public projects at once. Returns `{"deleted": true}`.
+
+Trashed issues are removed for good after 30 days, or whatever `trash_days` in the [`[retention]`](/docs/configuration#retention) section says. Its number is not reused while it is in the trash.
+
+### POST `/api/issues/{id}/restore`
+
+Brings an issue back from the trash, with the comments that went with it. **Maintainer.** No body. Returns the restored `Issue`. An id that is not in the trash, including one already purged, is `404`.
+
+There is no endpoint that lists the trash. Keep the id from the delete if you might want to restore it.
+
+## Relations
+
+Relations are `blocks`, `relates_to` and `duplicate`. They may cross projects; every endpoint here needs **maintainer** on both issues' projects. The [issues concept page](/docs/concepts/issues#relations) explains the direction of each.
 
 ### POST `/api/issues/link`
 
-Links two issues by identifier. This endpoint has no path or query parameters.
+Links two issues. Body: `source` and `target` (identifiers) and `relation_type`. Linking an issue to itself or using another type is `400`; linking a pair that is already linked that way does nothing. Returns `{"linked": true}`.
 
-Request body fields are `source` (string issue identifier), `target` (string issue identifier), and `relation_type` (string). `relation_type` must be `blocks`, `relates_to`, or `duplicate`. Response: `{ "linked": true }`.
+```bash
+curl -X POST "$LIFIC/api/issues/link" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"APP-12","target":"APP-15","relation_type":"blocks"}'
+```
 
 ### POST `/api/issues/unlink`
 
-Removes the relation between two issues. This endpoint has no path or query parameters.
+Removes every relation between two issues, in either direction. Body: `source` and `target`. Returns `{"unlinked": true}`.
 
-Request body fields are `source` (string issue identifier) and `target` (string issue identifier). Response: `{ "unlinked": true }`.
+### POST `/api/issues/reverse`
 
-### GET `/api/issues/{id}/activity`
+Flips the direction of the relations that run from `source` to `target`, in one step, so a failure leaves the original relation in place. Body: `source` and `target`. No relation in that direction is `404`. Returns `{"reversed": true}`.
 
-Returns activity for an issue. Path parameter: `id` (integer issue ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
+### GET `/api/projects/{id}/relations`
 
-It has no request body. Response: an activity feed with the shape documented for project activity.
+Every relation between two issues of this project, for drawing a dependency graph in one request. **Viewer.** Returns an array of `source_id`, `source_identifier`, `target_id`, `target_identifier` and `relation_type`.
 
 ## Comments
 
+Anyone who can read a project can comment in it: **viewer**. On a workspace page, that means an administrator when enforcement is on. Deleting an issue or page takes its comments to the trash with it.
+
 ### GET `/api/issues/{issue_id}/comments`
-
-Lists one page of comments on an issue. Path parameter: `issue_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), `offset` (integer), `before_created_at` (string), and `before_id` (integer). Every query parameter is optional.
-
-`order` defaults to `asc` (oldest first). `limit` defaults to `50` and is clamped to `1..=500`. `offset` defaults to `0` and is floored at `0`. The default page of a long thread is therefore its oldest comments; pass `order=desc` to read the newest.
-
-`before_created_at` and `before_id` form an optional keyset cursor naming a comment the client has already seen. The response then holds only the comments strictly older than that position under the `(created_at, id)` ordering. Use it to page backwards through a thread that is still being written to: an `offset` shifts by one every time somebody posts above the reader, so the next page repeats a comment or skips one, while a cursor names a position that inserts cannot move.
-
-The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
-
-- Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
-- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
-- `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
-
-No request body. Response: a `Comment` array, capped by row count and a 2 MiB byte budget. A short page does not necessarily end the thread. Read `x-comment-has-more` and `x-comment-returned`; continuation headers are `x-comment-next-offset` in offset mode and `x-comment-next-created-at` plus `x-comment-next-id` for descending reads.
-
-If the first comment cannot fit, the server returns `413` with an explicit offset or cursor you can use to deliberately skip it. Comments are never silently skipped.
-
-### POST `/api/issues/{issue_id}/comments`
-
-Creates a comment on an issue. Path parameter: `issue_id` (integer). It has no query parameters.
-
-Request body field: `content` (string). Response: a `Comment` object. After normalization, new bodies cannot exceed 256 KiB. Each body allows at most 256 distinct mention tokens and 256 distinct attachment IDs. Exceeding either limit returns `400`.
 
 ### GET `/api/pages/{page_id}/comments`
 
-Lists one page of comments on a page. Path parameter: `page_id` (integer). Query parameters are `author` (string), `order` (string, `asc` or `desc`), `limit` (integer), `offset` (integer), `before_created_at` (string), and `before_id` (integer). Every query parameter is optional.
+One page of the comments on an issue or a page. Returns a `Comment` array.
 
-`order` defaults to `asc` (oldest first). `limit` defaults to `50` and is clamped to `1..=500`. `offset` defaults to `0` and is floored at `0`. The default page of a long thread is therefore its oldest comments; pass `order=desc` to read the newest.
+| Parameter | Meaning |
+| --- | --- |
+| `order` | `asc` (default, oldest first) or `desc`. |
+| `limit`, `offset` | Default 50, at most 500. |
+| `author` | Only comments by this username. |
+| `before_created_at`, `before_id` | A cursor: only comments older than the one you name. |
 
-`before_created_at` and `before_id` form an optional keyset cursor naming a comment the client has already seen. The response then holds only the comments strictly older than that position under the `(created_at, id)` ordering. Use it to page backwards through a thread that is still being written to: an `offset` shifts by one every time somebody posts above the reader, so the next page repeats a comment or skips one, while a cursor names a position that inserts cannot move.
+The default page of a long thread is its oldest comments; pass `order=desc` for the newest.
 
-The cursor has three requirements, and a request that breaks any of them is rejected with `400`:
+A response is also cut short at about 2 MiB of comment text, so a short page does not mean the thread has ended. Read the response headers instead:
 
-- Both halves must be supplied. One alone is rejected rather than ignored, because `before_created_at` on its own would silently include comments sharing that second, which is the case `before_id` exists to settle.
-- `order` must be `desc`. Paging to what comes *before* a position is a backwards read.
-- `offset` must be absent or `0`. Skipping relative to a position that already did the skipping has no meaning.
+| Header | Meaning |
+| --- | --- |
+| `x-comment-has-more` | `true` when more comments follow. |
+| `x-comment-returned` | How many comments this page holds. |
+| `x-comment-next-offset` | The `offset` for the next page, when paging by offset. |
+| `x-comment-next-created-at`, `x-comment-next-id` | The cursor for the next page, when reading with `order=desc`. |
 
-No request body. Response: a `Comment` array, capped by row count and a 2 MiB byte budget. A short page does not necessarily end the thread. Read `x-comment-has-more` and `x-comment-returned`; continuation headers are `x-comment-next-offset` in offset mode and `x-comment-next-created-at` plus `x-comment-next-id` for descending reads.
+To page backwards through a thread that people are still writing to, use the cursor rather than `offset`: an offset shifts every time a comment is posted, so the next page repeats or skips one, while a cursor names a fixed position. Send both halves, with `order=desc` and no `offset`; anything else is `400`.
 
-If the first comment cannot fit, the server returns `413` with an explicit offset or cursor you can use to deliberately skip it. Comments are never silently skipped.
+If even the first comment is larger than the budget, the answer is `413` with the offset or cursor that skips it, so a client can step past it on purpose. Comments are never skipped silently.
+
+### POST `/api/issues/{issue_id}/comments`
 
 ### POST `/api/pages/{page_id}/comments`
 
-Creates a comment on a page. Path parameter: `page_id` (integer). It has no query parameters.
-
-Request body field: `content` (string). Response: a `Comment` object. After normalization, new bodies cannot exceed 256 KiB. Each body allows at most 256 distinct mention tokens and 256 distinct attachment IDs. Exceeding either limit returns `400`.
+Adds a comment. Body: `content` (Markdown). A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
 
 ### PUT `/api/comments/{id}`
 
-Updates a comment. Path parameter: `id` (integer comment ID). It has no query parameters. Only the comment author or an administrator can update it.
-
-Request body field: `content` (string). Response: a `Comment` object. The create limits apply, except an existing body above 256 KiB may be edited without growing. Reference limits have no exception: reduce excess references before saving. Rejected edits leave the comment unchanged. The HTTP request body limit remains 2 MiB.
+Replaces a comment's text. Body: `content`. Only the author or an administrator, and only while they can still read the project; anyone else gets `400`. The create limits apply, except that a body already over 256 KiB may be edited as long as it does not grow. Returns the `Comment`.
 
 ### DELETE `/api/comments/{id}`
 
-Deletes a comment. Path parameter: `id` (integer comment ID). It has no query parameters or request body. Only the comment author or an administrator can delete it.
-
-Response: the standard delete response.
-
-## Modules, labels, and folders
-
-### GET `/api/modules`
-
-Lists modules for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
-
-Response: a `Module` array.
-
-### POST `/api/modules`
-
-Creates a module. This endpoint has no path or query parameters.
-
-Request body fields are `project_id` (integer), `name` (string), `description` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `active`), and `emoji` (string or null, optional). Response: a `Module` object.
-
-### GET `/api/modules/{id}`
-
-Returns a module. Path parameter: `id` (integer module ID). It has no query parameters or request body.
-
-Response: a `Module` object.
-
-### PUT `/api/modules/{id}`
-
-Updates supplied module fields. Path parameter: `id` (integer module ID). It has no query parameters.
-
-Request body fields are `name` (string, optional), `description` (string, optional), `status` (string, optional), and `emoji` (string, null, or omitted). Response: a `Module` object.
-
-### DELETE `/api/modules/{id}`
-
-Deletes a module. Path parameter: `id` (integer module ID). It has no query parameters or request body.
-
-Response: the standard delete response.
-
-### GET `/api/labels`
-
-Lists labels for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
-
-Response: a `Label` array.
-
-### POST `/api/labels`
-
-Creates a label. This endpoint has no path or query parameters.
-
-Request body fields are `project_id` (integer), `name` (string), and `color` (string, optional, defaults to `#6B7280`). Response: a `Label` object.
-
-### PUT `/api/labels/{id}`
-
-Updates supplied label fields. Path parameter: `id` (integer label ID). It has no query parameters.
-
-Request body fields are `name` (string, optional) and `color` (string, optional). Response: a `Label` object.
-
-### DELETE `/api/labels/{id}`
-
-Deletes a label. Path parameter: `id` (integer label ID). It has no query parameters or request body.
-
-Response: the standard delete response.
-
-### POST `/api/labels/{id}/merge`
-
-Moves source label associations to a target label in the same project. Path parameter: `id` (integer source label ID). It has no query parameters.
-
-Request body field: `into` (integer target label ID). Response: the surviving `Label` object.
-
-### GET `/api/folders`
-
-Lists folders for a project. Query parameter: `project_id` (integer, required). It has no path parameters or request body.
-
-Response: a `Folder` array.
-
-### POST `/api/folders`
-
-Creates a folder. This endpoint has no path or query parameters.
-
-Request body fields are `project_id` (integer), `parent_id` (integer or null, optional), and `name` (string). Response: a `Folder` object.
-
-### PUT `/api/folders/{id}`
-
-Renames a folder. Path parameter: `id` (integer folder ID). It has no query parameters.
-
-Request body field: `name` (string, optional). No other folder field is updatable here; a folder's project and parent are fixed after creation. Response: a `Folder` object.
-
-### DELETE `/api/folders/{id}`
-
-Deletes a folder. Path parameter: `id` (integer folder ID). It has no query parameters or request body.
-
-Response: the standard delete response.
+Deletes a comment. Same rule: the author or an administrator who can read the project. There is no endpoint to restore a single comment. Returns `{"deleted": true}`.
 
 ## Pages
 
+A page has a project, or none for a workspace page. With enforcement on, workspace pages are administrator-only for reading and writing.
+
 ### GET `/api/pages`
 
-Lists pages. Query parameters are `project_id` (integer), `folder_id` (integer), `label` (string), `status` (string), `order_by` (string), `order` (string), `limit` (integer), and `offset` (integer). Every query parameter is optional.
+Lists pages. **Viewer** on `project_id`. Without `project_id`, lists workspace pages only, and `folder_id` is ignored.
 
-When `project_id` is omitted, this endpoint lists workspace pages. `order_by` accepts `sort_order`, `title`, `status`, `created`, `created_at`, `updated`, or `updated_at`. `order` accepts `asc` or `desc`.
-
-It has no request body. Response: a `Page` array.
+Query: `project_id`, `folder_id`, `label`, `status`, `order_by` (`sort_order`, `title`, `status`, `created` or `updated`), `order` (`asc` or `desc`), `limit` and `offset`. Returns every match unless `limit` or `offset` is given; then at most 500. Returns a `Page` array.
 
 ### POST `/api/pages`
 
-Creates a page. This endpoint has no path or query parameters.
+Creates a page. **Maintainer**, or administrator for a workspace page.
 
-Request body fields are `project_id` (integer or null, optional), `folder_id` (integer or null, optional), `title` (string), `content` (string, optional, defaults to an empty string), `status` (string, optional, defaults to `draft`), and `labels` (string array, optional). Response: a `Page` object.
-
-### GET `/api/pages/resolve/{identifier}`
-
-Resolves a page identifier such as `LIF-DOC-1` or the workspace form `DOC-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
-
-Response: a `Page` object.
-
-```bash
-curl https://your-server.example/api/pages/resolve/LIF-DOC-1 \
-  -H "Authorization: Bearer <API_KEY>"
-```
+Body: `title`, and optionally `project_id`, `folder_id`, `content` (Markdown), `status` (`draft` by default, or `active`, `complete`, `archived`) and `labels` (names; ignored on workspace pages). Returns the `Page`.
 
 ### GET `/api/pages/{id}`
 
-Returns a page. Path parameter: `id` (integer page ID). It has no query parameters or request body.
+One page with its content. **Viewer.**
 
-Response: a `Page` object.
+### GET `/api/pages/resolve/{identifier}`
+
+The same, by identifier: `APP-DOC-3`, or `DOC-3` for a workspace page. **Viewer.**
 
 ### PUT `/api/pages/{id}`
 
-Updates supplied page fields. Path parameter: `id` (integer page ID). It has no query parameters.
-
-Request body fields are `title` (string, optional), `content` (string, optional), `folder_id` (integer, null, or omitted), `sort_order` (number, optional), `status` (string, optional), `pinned` (boolean, optional), and `labels` (string array, optional). Supplied `labels` replace the page label set.
-
-Response: a `Page` object.
+Changes a page. **Maintainer.** Every field is optional: `title`, `content`, `folder_id` (null moves it to the top level), `sort_order`, `status`, `pinned`, `labels` (replaces the set) and `expected_seq`. A stale `expected_seq` is `409`, as for issues. Returns the `Page`.
 
 ### DELETE `/api/pages/{id}`
 
-Deletes a page. Path parameter: `id` (integer page ID). It has no query parameters or request body.
+Moves the page and its comments to the trash. **Maintainer.** Returns `{"deleted": true}`.
 
-Response: the standard delete response.
+### POST `/api/pages/{id}/restore`
 
-### GET `/api/pages/{id}/activity`
-
-Returns activity for a page. Path parameter: `id` (integer page ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
-
-It has no request body. Response: an activity feed with the shape documented for project activity.
+Brings a page back from the trash, with its comments. **Maintainer.** No body. Returns the `Page`. An id that is not in the trash is `404`.
 
 ## Plans
 
+A plan is a tree of steps kept across sessions, optionally anchored to one issue. The [plans concept page](/docs/concepts/plans) covers how steps mirror issues.
+
+A plan has `id`, `project_id`, `sequence`, `identifier` (`APP-PLAN-2`), `issue_id` and `anchor_identifier` (the anchor issue, when set), `title`, `status` (`active`, `done` or `archived`), `created_at`, `updated_at`, `step_count`, `done_count` and `steps`.
+
+Each step has `id`, `plan_id`, `parent_step_id`, `position`, `title`, `description`, `issue_id`, `issue_identifier` and `issue_status` (when it mirrors an issue), `done`, `reopened_via_issue_at` (set when reopening the issue unchecked it), `created_at`, `edited_at` and `children`.
+
 ### GET `/api/plans`
 
-Lists plans without their nested step trees. Query parameters are `project_id` (integer), `status` (string), `limit` (integer), `offset` (integer), `order_by` (string), and `before_id` (integer). Every query parameter is optional.
-
-`order_by` accepts `updated` or `id`. `before_id` requires `order_by=id`. It has no request body. Response: a plan array. Each list item has `id`, `project_id`, `sequence`, `identifier`, `issue_id`, `anchor_identifier`, `title`, `status`, `created_at`, `updated_at`, `steps` (empty array), `step_count` (integer), and `done_count` (integer).
+Lists plans without their step trees (`steps` is empty; the counts are filled in). **Viewer.** Query: `project_id`, `status`, `order_by` (`updated`, the default, or `id`), `limit`, `offset`, and `before_id` for keyset paging, which needs `order_by=id`.
 
 ### POST `/api/plans`
 
-Creates a plan and an optional nested step tree. This endpoint has no path or query parameters.
+Creates a plan, with as much of its step tree as you like, in one request. **Maintainer.**
 
-Request body fields are `project_id` (integer), `title` (string), `issue_id` (integer or null, optional), and `steps` (array, optional). Each step has `title` (string), `description` (string, optional), `issue_id` (integer or null, optional), `done` (boolean, optional), and `steps` (step array, optional).
-
-Response: a plan object with the nested `steps` tree. Each step node has `id` (integer), `plan_id` (integer), `parent_step_id` (integer or null), `position` (integer), `title` (string), `description` (string), `issue_id` (integer or null), `issue_identifier` (string or null), `issue_status` (string or null), `done` (boolean), `reopened_via_issue_at` (string or null), `created_at` (string), `edited_at` (string or null), and `children` (step array).
-
-### GET `/api/plans/{id}`
-
-Returns a plan with its nested steps. Path parameter: `id` (integer plan ID). It has no query parameters or request body.
-
-Response: a plan object with the full step tree.
-
-### PUT `/api/plans/{id}`
-
-Updates supplied plan fields. Path parameter: `id` (integer plan ID). It has no query parameters.
-
-Request body fields are `title` (string, optional), `status` (string, optional), and `issue_id` (integer, null, or omitted). Valid plan statuses are `active`, `done`, and `archived`. Response: a plan object with the full step tree.
-
-### DELETE `/api/plans/{id}`
-
-Deletes a plan. Path parameter: `id` (integer plan ID). It has no query parameters or request body.
-
-Response: the standard delete response.
-
-### GET `/api/plans/resolve/{identifier}`
-
-Resolves a plan identifier such as `LIF-PLAN-1`. Path parameter: `identifier` (string). It has no query parameters or request body.
-
-Response: a plan object with the full step tree.
-
-### GET `/api/plans/{id}/activity`
-
-Returns activity for a plan and its steps. Path parameter: `id` (integer plan ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).
-
-It has no request body. Response: an activity feed with the shape documented for project activity.
-
-### POST `/api/plans/{id}/steps`
-
-Adds a step to a plan. Path parameter: `id` (integer plan ID). It has no query parameters.
-
-Request body fields are `parent_step_id` (integer or null, optional), `title` (string), `description` (string, optional, defaults to an empty string), and `issue_id` (integer or null, optional). Response: a plan object with the full step tree.
-
-### PUT `/api/plans/{plan_id}/steps/{step_id}`
-
-Updates, moves, links, or completes a plan step. Path parameters are `plan_id` (integer) and `step_id` (integer). It has no query parameters.
-
-Request body fields are `title` (string, optional), `description` (string, optional), `done` (boolean, optional), `issue_id` (integer, null, or omitted), `move_parent_step_id` (integer, optional), `move_to_root` (boolean, optional), and `move_position` (integer, optional).
-
-Response: an object with `plan` (a plan object with the full step tree). When the request supplies `done`, the response also includes `effect`, an object with `step_id` (integer), `done` (boolean), `issue_identifier` (string or null), `issue_status_changed` (boolean), and `issue_new_status` (string or null). Otherwise, `effect` is omitted.
-
-### DELETE `/api/plans/{plan_id}/steps/{step_id}`
-
-Deletes a plan step. Path parameters are `plan_id` (integer) and `step_id` (integer). It has no query parameters or request body.
-
-Response: a plan object with the full step tree.
-
-## Attachments
-
-### GET `/api/attachments`
-
-Lists attachments linked to one entity. Query parameters are `entity_type` (string, required) and `entity_id` (integer, required). `entity_type` accepts `issue`, `page`, or `comment`.
-
-It has no path parameters or request body. Response: an attachment array. Each attachment has `id` (integer), `filename` (string), `mime` (string), `size_bytes` (integer), `uploader_id` (integer or null), and `created_at` (string).
-
-### POST `/api/attachments`
-
-Uploads a `file` part in a multipart request. Uploads require authentication. The production default maximum is 10 MiB per file and the per-user rate limit is 30 uploads per 10 minutes. Optional `entity_type` and `entity_id` form fields immediately link the attachment to an issue, page, or comment; otherwise the attachment remains unlinked until content is saved and rescanned.
-
-Form fields are `file` (file, required), `entity_type` (string, optional), and `entity_id` (integer, optional). Response: an object with `id` (integer), `url` (string), `filename` (string), `mime` (string), and `size` (integer).
-
-Allowed content types are PNG, JPEG, GIF, WebP, SVG, PDF, plain text, and ZIP. Lific validates magic bytes where available, rejects empty files and executable-looking content, normalizes the stored MIME, and does not trust the client-declared type alone. The maximum can be configured per instance. Unlinked attachments are swept by the hourly orphan collector after their grace period; content-addressed blobs are removed only when no attachment row still references them.
-
-```bash
-curl -X POST https://your-server.example/api/attachments \
-  -H "Authorization: Bearer <API_KEY>" \
-  -F "file=@diagram.png" \
-  -F "entity_type=issue" \
-  -F "entity_id=1"
-```
+Body: `project_id`, `title`, optional `issue_id` (the anchor) and optional `steps`. Each step has `title` and optionally `description`, `issue_id`, `done` and its own `steps`. Returns the plan with its tree.
 
 ```json
 {
-  "id": 1,
-  "url": "/api/attachments/1",
-  "filename": "diagram.png",
-  "mime": "image/png",
-  "size": 1024
-}
-```
-
-### GET `/api/attachments/{id}`
-
-Downloads attachment bytes. Path parameter: `id` (integer attachment ID). It has no query parameters or request body.
-
-Response: file bytes. The response sets `Content-Type` to the stored MIME type. It sets `Content-Disposition` to `inline` for images and `attachment` for non-image files.
-
-### DELETE `/api/attachments/{id}`
-
-Deletes an attachment metadata row and its links. Path parameter: `id` (integer attachment ID). It has no query parameters or request body.
-
-Response: the standard delete response.
-
-## Exports
-
-### GET `/api/export/issues/{identifier}`
-
-Exports an issue. Path parameter: `identifier` (string such as `LIF-1`). Query parameter: `format` (string, optional). `format` accepts `markdown` by default or `json`. It has no request body.
-
-Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8` for `format=markdown`. For `format=json`, the response is an export bundle in the same shape the project export returns, carrying the path the file belongs at as well as its content.
-
-### GET `/api/export/pages/{identifier}`
-
-Exports a page. Path parameter: `identifier` (string such as `LIF-DOC-1` or `DOC-1`). Query parameter: `format` (string, optional). `format` accepts `markdown` by default or `json`. It has no request body.
-
-Response: Markdown bytes with `Content-Type: text/markdown; charset=utf-8` for `format=markdown`. For `format=json`, the response is an export bundle in the same shape the project export returns, carrying the path the file belongs at as well as its content.
-
-### GET `/api/export/projects/{identifier}`
-
-Exports a project. Path parameter: `identifier` (string such as `LIF`). Query parameter: `format` (string, optional). `format` accepts `zip` by default or `json`.
-
-It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`, the response is an export bundle with `root` (string) and `files` (array). Each `files` item has `path` (string) and `content` (string). The JSON form is a serialization of the ZIP file list; paths and content are not a versioned request schema, so consumers should tolerate new files and avoid assuming a fixed complete list.
-
-```json
-{
-  "root": "LIF",
-  "files": [
-    { "path": "LIF/issues/lif-1-example.md", "content": "# Example\n" }
+  "project_id": 1,
+  "title": "Ship offline mode",
+  "steps": [
+    { "title": "Cache reads", "steps": [{ "title": "Issues" }, { "title": "Pages" }] },
+    { "title": "Queue writes", "issue_id": 42 }
   ]
 }
 ```
 
-## Search, health, and realtime
+### GET `/api/plans/{id}`
 
-### GET `/api/search`
+### GET `/api/plans/resolve/{identifier}`
 
-Searches indexed issues, pages, and comments. Query parameters are `query` (string, required), `project_id` (integer, optional), `result_type` (string, optional), `sort` (string, optional), `mode` (string, optional), `limit` (integer, optional), and `offset` (integer, optional).
+One plan with its full tree, by id or by identifier. **Viewer.**
 
-`result_type` accepts `issue`, `page`, or `comment`. `sort` accepts `relevance` or `recent`. `mode` accepts `fts` or `literal`. It has no request body.
+### PUT `/api/plans/{id}`
 
-Response: an array of objects with `result_type` (string), `id` (integer), `identifier` (string or null), `title` (string), `snippet` (string), `project_id` (integer or null), and `parent_page_id` (integer). `parent_page_id` is present only when the result is a comment on a page, and it holds the id of that page.
+Changes `title`, `status` or `issue_id` (null removes the anchor). **Maintainer.** Returns the plan with its tree.
 
-### GET `/api/health`
+### DELETE `/api/plans/{id}`
 
-Returns the health marker. This endpoint has no path or query parameters. It has no request body.
+Deletes the plan and its steps permanently. Plans have no trash. **Maintainer.** Returns `{"deleted": true}`.
 
-Response: plain text `ok`.
+### POST `/api/plans/{id}/steps`
 
-### GET `/api/events/ws`
+Adds a step to the plan, under `parent_step_id` when given. **Maintainer.** Body: `title`, and optionally `parent_step_id`, `description` and `issue_id`. Returns the plan with its tree.
 
-Upgrades the request to a WebSocket that receives project and issue update events. It has no path or query parameters. It has no request body.
+### PUT `/api/plans/{plan_id}/steps/{step_id}`
 
-The request requires a `lific_token` cookie containing a valid session token. Response: a WebSocket connection. Event JSON uses a `type` field. Event types are `resync.required`, `project.created`, `project.updated`, `project.deleted`, `projects.reordered`, `issue.created`, `issue.updated`, `issue.deleted`, `issue.linked`, and `issue.unlinked`.
+Edits, moves, links or checks off a step. **Maintainer**, and also maintainer on the issue's project when you link the step to an issue or check off a step that mirrors one.
 
-Events are invalidation signals, not complete resource snapshots. `project.updated` covers changes to non-issue project resources such as pages, plans, comments, labels, folders, and modules; clients should refetch the affected view. On `resync.required`, refetch visible projects and the current resource state before resuming incremental updates. The server filters events by the caller's visible projects, revalidates the session about once per minute, and closes the connection when the session becomes invalid. A user may have at most 16 concurrent event sockets, and the instance as a whole at most 1024; a connection over either limit is refused with `429 Too Many Requests` before the upgrade completes.
+Body, every field optional: `title`, `description`, `done`, `issue_id` (null unlinks), and to move the step, `move_parent_step_id` or `move_to_root: true` with an optional `move_position`.
 
-Liveness is handled at the WebSocket protocol layer, so a purely passive client needs no application-level keepalive. The server sends a ping every 30 seconds and treats the matching pong as proof of life. Browsers, `tokio-tungstenite`, and every other conforming WebSocket implementation answer pings automatically, so a client that only listens for events stays connected indefinitely without sending anything. A peer that answers nothing at all for 120 seconds is disconnected. Clients that want to signal liveness explicitly may send `{"type":"heartbeat"}`, which also resets the 120 second timer, but doing so is optional. The server accepts only `heartbeat` and `{"type":"activity.baseline.request"}` from clients; any other text payload, any binary payload, more than 64 messages in 10 seconds, a frame over 4 KiB, or a message over 16 KiB closes the connection.
+Returns `plan` (the plan with its tree). When the request set `done`, it also returns `effect`: `step_id`, `done`, `issue_identifier`, `issue_status_changed` and `issue_new_status`, which say whether checking the step also changed the mirrored issue.
 
-These events cover writes routed through the running HTTP/MCP server. CLI data commands and stdio MCP access SQLite directly and cannot publish into another Lific process's in-memory hub; clients should refresh or rely on normal revalidation after such direct database changes.
+### DELETE `/api/plans/{plan_id}/steps/{step_id}`
 
-```json
-{
-  "type": "issue.updated",
-  "project_id": 1,
-  "issue_id": 1
-}
-```
+Deletes a step and the steps under it. **Maintainer.** Returns the plan with its tree.
+
+## Modules, labels and folders
+
+Reading these needs **viewer**. Changing them needs **maintainer** with enforcement on and **lead** with it off.
+
+### GET `/api/modules`
+
+### GET `/api/labels`
+
+### GET `/api/folders`
+
+The project's modules, labels or folders. Query: `project_id`, required.
+
+### GET `/api/modules/{id}`
+
+One module.
+
+### POST `/api/modules`
+
+Body: `project_id`, `name`, and optionally `description`, `status` (default `active`) and `emoji`. Returns the `Module`.
+
+### PUT `/api/modules/{id}`
+
+Changes `name`, `description`, `status` or `emoji` (null clears it). Returns the `Module`.
+
+### DELETE `/api/modules/{id}`
+
+Deletes the module. Its issues stay, with no module. Returns `{"deleted": true}`.
+
+### POST `/api/labels`
+
+Body: `project_id`, `name` and optional `color` (default `#6B7280`). Returns the `Label`.
+
+### PUT `/api/labels/{id}`
+
+Changes `name` or `color`. Returns the `Label`.
+
+### DELETE `/api/labels/{id}`
+
+Deletes the label and removes it from every issue and page. Returns `{"deleted": true}`.
+
+### POST `/api/labels/{id}/merge`
+
+Moves everything labelled `{id}` onto another label in the same project, then deletes `{id}`. Body: `into` (the surviving label's id). Labels in different projects are `400`. Returns the surviving `Label`.
+
+### POST `/api/folders`
+
+Body: `project_id`, `name` and optional `parent_id`. Returns the `Folder`.
+
+### PUT `/api/folders/{id}`
+
+Renames a folder. Body: `name`. A folder's project and parent are fixed. Returns the `Folder`.
+
+### DELETE `/api/folders/{id}`
+
+Deletes the folder and the folders inside it. Their pages are kept and move to the top level. Returns `{"deleted": true}`.
+
+## Activity
+
+### GET `/api/issues/{id}/activity`
+
+### GET `/api/pages/{id}/activity`
+
+### GET `/api/plans/{id}/activity`
+
+One item's history, newest first. A plan's feed includes its steps. **Viewer**, or administrator for a workspace page with enforcement on. Query: `limit` (default 50, at most 200) and `offset`. Returns `items` and `has_more`, in the shape described under [project activity](/docs/rest-api/projects#get-apiprojectsidactivity).

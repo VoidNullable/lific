@@ -1,0 +1,83 @@
+---
+title: Repositories and commits
+description: Bind git repositories to projects so tools can find the right project from a checkout, and close issues from commit messages in CI.
+---
+
+## Repository bindings
+
+A binding says "this repository files its work in this project". It is keyed by **aliases**, each an object with a `kind` and a `value`:
+
+- `remote`: a normalized remote URL, such as `github.com/acme/app`.
+- `root`: an absolute path to a checkout's root.
+
+Lific compares aliases exactly as sent. `lific bind` computes and normalizes them from a checkout, so use it, or send the same values it reports with `lific bind --json`. [Repository bindings](/docs/repository-bindings) explains the workflow.
+
+An alias is a way to find a project, never proof of owning it: anyone can claim any remote URL. So a binding grants no access, and none of these routes will tell you about a project you cannot read. Changing bindings is limited to 30 requests per hour per user; beyond that, `400` with the seconds to wait.
+
+A binding record has `binding` (`id`, `project_id`, `created_at`, `created_by`) and `identities`, each with `id`, `binding_id`, `kind`, `value` and `first_seen_at`.
+
+### POST `/api/repos/resolve`
+
+Which project a checkout belongs to. Any signed-in caller. Body: `aliases`.
+
+Returns one of three shapes:
+
+```json
+{ "resolution": "none" }
+{ "resolution": "one", "project": { "id": 1, "identifier": "APP", "name": "Mobile app" }, "binding_id": 7 }
+{ "resolution": "conflict", "projects": [
+  { "id": 1, "identifier": "APP", "name": "Mobile app", "binding_id": 7 },
+  { "id": 3, "identifier": "WEB", "name": "Website", "binding_id": 9 }
+] }
+```
+
+Bindings in projects you cannot read are dropped before the shape is chosen. A match you cannot see looks exactly like no match, and a conflict with one hidden side looks like `one`. Resolving never adds aliases to a binding.
+
+### POST `/api/repos/bind`
+
+Binds a repository to a project. **Lead** on the project. Body: `project` (its identifier) and `aliases` (at least one).
+
+If some aliases already belong to a binding of this project, the others are added to it; otherwise a new binding is made. Binding aliases that are already bound the same way changes nothing. Returns the binding record.
+
+An alias already bound to a different project is `409` with a message that does not say which project. So are aliases spread across two bindings of this project; merge those first. A project you cannot read is `404`, the same answer as one that does not exist.
+
+### GET `/api/projects/{id}/bindings`
+
+The project's bindings with their aliases. **Viewer.** Returns an array of binding records.
+
+### DELETE `/api/repos/bindings/{id}`
+
+Removes a binding. **Lead** on its project, so an administrator can always clear a binding made by someone who has left. A binding in a project you cannot read is `404`, as if it did not exist. Returns `{"deleted": true}`.
+
+### POST `/api/repos/merge`
+
+Moves every alias from one binding into another and deletes the emptied one. **Lead** on both bindings' projects, so nobody can pull another project's repository over to their own. Body: `from` and `into`, binding ids rather than project ids. Merging a binding into itself is `400`. The projects' contents are not merged. Returns the surviving binding record.
+
+## Closing issues from commits
+
+### POST `/api/git-hook`
+
+Reads commit messages and marks the issues they close as `done`. This is for CI; [`lific git-hook`](/docs/cli) does the same from a local git hook, with the same rules.
+
+A reference is `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves` or `resolved`, then whitespace, then an issue identifier, in any case. Repeat the keyword for each issue: `Fixes APP-42. Closes APP-43.`
+
+Body: `messages` (an array of commit messages, at most 500) and optional `dry_run`. A request that references more than 500 issues is `400`.
+
+Each close goes through the ordinary update path, so it is recorded in the activity log under your credential, checks off mirrored plan steps and notifies realtime clients like any other change. It needs **maintainer** on the issue's project.
+
+Returns `closed` (or `would_close` with `dry_run`) and `skipped`. Each skipped entry has `identifier` and `reason`:
+
+- `not found`: no such issue, **or** an issue in a project you cannot read. The two are deliberately indistinguishable.
+- `forbidden`: you can read the project but are not a maintainer.
+- `already closed`: the issue is already `done` or `cancelled`.
+
+```bash
+curl -X POST "$LIFIC/api/git-hook" \
+  -H "Authorization: Bearer $CI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":["Fix empty cart crash\n\nFixes APP-42"],"dry_run":true}'
+```
+
+```json
+{ "would_close": ["APP-42"], "skipped": [] }
+```

@@ -1,0 +1,75 @@
+---
+title: Attachments
+description: How uploaded files are stored beside the database, how Markdown references link them to issues, pages and comments, who can read them, and when they are removed.
+---
+
+An attachment is a file uploaded to Lific, such as a screenshot, a log or a reproduction database, that an issue, page or comment refers to from its Markdown. A description refers to attachment 12 as `![screenshot](/api/attachments/12)` for an image, or `[crash.log](/api/attachments/12)` for anything else.
+
+## Uploading
+
+| Interface | How |
+| --- | --- |
+| Web UI | Paste, drop or pick a file in any editor or comment box, take a photo, or record a voice note. The editor inserts the reference for you. |
+| MCP | `upload_attachment` with the file base64-encoded. It returns the Markdown to embed. |
+| REST | `POST /api/attachments` as a multipart form. |
+
+A file can be up to 10 MiB, and each account can upload 30 files per 10 minutes. Any signed-in user can upload. An upload can also be linked to an issue, page or comment in the same request, which takes `maintainer` on the project for an issue or page, and `viewer` for a comment.
+
+Lific decides a file's type from its contents, not from its name or the type the client claims, and accepts only these:
+
+| Kind | Types |
+| --- | --- |
+| Images | PNG, JPEG, GIF, WebP, SVG |
+| Documents | PDF, plain text |
+| Archives and data | ZIP, SQLite database |
+| Media | MP4 and WebM video; WebM, Ogg and MP3 audio |
+
+Anything else is refused.
+
+### Annotating a screenshot
+
+When you paste, drop or photograph a PNG, JPEG or WebP image in the web UI, it briefly offers to annotate it first. The editor can crop, draw arrows, rectangles and freehand lines, and redact. Redaction pixelates the region before the image is flattened, so the uploaded file never contains the original pixels. The editing happens in your browser: Lific receives only the finished image, and ignoring the offer uploads the original.
+
+## Where the files live
+
+The bytes are stored on disk in an `attachments` directory beside the database file, never inside the database. Each file is named by the SHA-256 hash of its contents. The database holds each attachment's metadata: filename, type, size, uploader, upload time, image dimensions and alt text.
+
+Because files are named by content, uploading the same bytes twice stores them once. Each upload still gets its own attachment id, filename and uploader, and deleting one never breaks the other. `GET /api/attachments/{id}/links` shows where an attachment and its identical copies are used.
+
+Keep the `attachments` directory with the database when you move or back up an instance. Automatic backups and `lific dump` include it; see [Backups](/docs/self-hosting#backups).
+
+## How references become links
+
+The Markdown is the source of truth. Every time an issue description, page or comment is saved, Lific reads the `/api/attachments/{id}` references in the text and updates that item's links to match: new references are linked, and attachments the text no longer mentions are unlinked. Removing a reference from the text is how you detach a file.
+
+A reference is only linked if the person saving uploaded that attachment, is an administrator, or the attachment is already linked somewhere else in the same project. A reference to someone else's unlinked upload stays in the text but is not linked, so guessing an id does not expose another person's file. A reference to an id that does not exist is ignored.
+
+The same attachment can be linked from several places, for instance when a screenshot is quoted into a second comment.
+
+## Who can read an attachment
+
+A linked attachment can be read by anyone who can read a project it is linked into. An attachment that is not linked anywhere yet can be read only by its uploader and administrators. [Public projects](/docs/public-projects) serve the attachments linked from their published content.
+
+Browsers display PNG, JPEG, GIF and WebP images and play audio and video in place. Every other type, SVG included, is sent as a download, and every attachment response is sandboxed so it cannot run scripts on the Lific site.
+
+## Previews and search
+
+A PNG, JPEG, GIF or WebP image whose longer side is over 480 pixels gets a 480-pixel WebP thumbnail, at `GET /api/attachments/{id}/thumbnail`. Thumbnails are made the first time they are asked for and kept in `attachments/thumbs/`; they are derived from the file and deleted with it. Lific records the dimensions of these images at upload so the web UI can lay out a page before the images arrive.
+
+`GET /api/attachments/{id}/preview` shows what is inside a ZIP (file names and sizes) or a SQLite database (tables and row counts), up to 200 entries, without extracting or running anything from the file.
+
+Search finds attachments by filename, and by the contents of plain-text files up to 512 KiB. Attachments that are not linked anywhere are never returned. Over MCP, `get_attachment` returns a text file in pages of lines and an image as something a multimodal agent can look at.
+
+An attachment has optional alt text for screen readers, set with `PATCH /api/attachments/{id}` by anyone who could delete it.
+
+## Orphans
+
+An attachment with no links is an orphan. A sweep runs every hour and removes orphans that were uploaded more than 24 hours ago, then deletes the file from disk unless another attachment has the same contents. The day of grace covers an upload whose issue or comment has not been saved yet.
+
+An attachment becomes an orphan when an upload is never used, when every reference to it is edited out, or when everything that linked to it is permanently removed. The Files view of a project lists orphans uploaded by its members and how long each has left, and `GET /api/projects/{id}/attachments/orphans` returns the same list.
+
+## Deleting
+
+The uploader, an administrator, or a `maintainer` on a project the attachment is linked into can delete it. Deleting is immediate, with no trash: the attachment and all its links go, and its file is removed from disk unless another attachment has the same contents. References to it in Markdown stay in the text and no longer load, so edit them out. Uploading and deleting attachments are not recorded in the [activity log](/docs/concepts/comments-and-activity#activity-log).
+
+Deleting the item an attachment is linked from is different. An issue, page or comment in the trash keeps its links, so restoring it brings its attachments back with it. When the retention sweep removes the item for good, its links go too, and an attachment left with none is collected at the next orphan sweep. Deleting a project removes its content at once, so its attachments are collected the same way.

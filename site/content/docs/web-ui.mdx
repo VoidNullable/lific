@@ -1,107 +1,210 @@
 ---
 title: Web UI guide
-description: Task-oriented guide to Lific's dashboard, issue views, pages, plans, and account settings.
+description: How to triage issues, edit them, write pages, run plans, handle files and change settings in the Lific browser app.
 ---
 
-The web UI is the browser workspace for Lific. Use it for visual triage, Markdown editing, project navigation, and account administration; use the [CLI](/docs/cli), [REST API](/docs/rest-api), or [MCP](/docs/mcp) when you need scripts or agents.
+The web UI is the browser app built into the Lific server. Open the server's address and sign in, and you work on the same data the [CLI](/docs/cli), the [REST API](/docs/rest-api) and [MCP](/docs/mcp) see. There is nothing to install and nothing syncs to your machine: the page talks to your instance over HTTP and a WebSocket.
 
-## Start with My Work
+Every view has its own link, so you can paste or bookmark any of them: `/APP/issues`, `/APP/board`, `/APP/issues/APP-42`, `/APP/pages/7`, `/APP/plans/2`.
 
-The home dashboard groups active issues by project and provides recently viewed items, pinned pages, an activity digest, and quick actions. Use it as the jump-off point for work that spans several projects.
+## Find your way around
 
-The activity digest carries a rate indicator. It seeds from the last 24 hours of activity you can see, then counts realtime events as they arrive, and it reports the shortest window that has enough events: updates per second, minute, hour, or day.
+**Home** (`/`) gathers My active issues, Recently viewed, Pinned pages and Recent activity from every project you can see.
 
-## Navigate project work
+The sidebar lists your projects. Expand one to reach its sections: **Overview**, **Issues**, **Board**, **Graph**, **Modules**, **Pages**, **Files**, **Plans**, **Activity** and **Insights**. Under the active section it also lists the items you opened recently in that section.
 
-Each project keeps its own navigation state. Issue tabs are All, Recent, Open, and Closed; page tabs are Browse, Recent, Drafts, and Archived; plan tabs are Active, Done, Archived, and All; and module tabs are Active, Backlog, Archive, and All. Count badges show the current totals, and the selected tab persists per project and resource area.
+Sidebar order is personal. Right-click a project or group for **Move up** and **Move down**, to move the project into a group or out of one, or to start a new group. None of this changes anybody else's sidebar. Drag the sidebar's edge to resize it, or collapse it with the control beside the Lific wordmark (`Cmd/Ctrl+\`). This browser remembers both.
 
-The sidebar shows recent items for the active section and deliberately excludes transient search results and items from unrelated sections. Its width is resizable and persists in the browser. On desktop it can also be collapsed out of the way from the control beside the Lific wordmark, and the topbar then carries the control that brings it back.
+Issue, page, plan and module lists have sub-tabs with counts. Lific remembers the tab you last used in each project:
 
-Project ordering is personal: moving a project changes your sidebar without rearranging other users' projects. Project and group action menus include move-up and move-down commands. Desktop expansion controls are separate from destination links, so a link can open in another tab. On mobile, selecting a project opens its navigation pane; Back returns to the project list before dismissing the drawer.
+| List | Sub-tabs |
+| --- | --- |
+| Issues | All, Recent, Open, Closed |
+| Pages | Browse, Recent, Drafts, Archived |
+| Plans | Active, Done, Archived, All |
+| Modules | Active, Backlog, Archive, All |
 
 ## Triage issues
 
-Open a project's issue list to:
+**Issues** shows the list and **Board** shows the same issues in columns. Switching between them keeps your filters and search.
 
-- switch between All, Recent, Open, and Closed sub-tabs;
-- filter by status, priority, module, or label;
-- search, sort, group, and choose list density;
-- save a named view for your own filters, grouping, sorting, layout, swimlanes, and hidden statuses; and
-- switch between list and board layouts.
+Filter by status, priority, module or label, type in the search box, then choose the sort, grouping and row density. The right-hand panel counts the current issues by priority and by module. Click a row there to toggle that filter.
 
-Board views support status or priority swimlanes, collapsible columns, and hidden columns. On small screens, the board snaps to a usable column at a time. Select an issue to open its peek panel without losing your place in the list.
+To keep an arrangement, save it as a named view. A view stores the layout (list or board), the four filters, the search text, the sort, the grouping, the density, the board's swimlanes and its hidden columns. Views are yours alone and belong to one project. Star one to make it your default: it is applied the first time you open that project in a browser tab. A dot means the current view has unsaved changes.
 
-Use row selection controls for bulk actions. The desktop sub-tab strip has a select-all control, and Ctrl/Cmd+A selects visible list rows while the list owns the shortcut. Clicking a title or identifier opens the issue; clicking elsewhere on a row does not navigate. Export selected issues as one Markdown file, including canonical metadata and comments, up to 16 MiB. A failed export reports an error rather than saving a partial file.
+On the board, split the columns into swimlanes by module or by priority, collapse columns you are not using, and hide statuses you do not want to see. Drag a card to another column to change its status, or to another lane to change its module or priority; a toast offers **Undo**. The `+` on a column header opens the new-issue form with that status filled in. `C` opens the same form from the list or the board.
+
+### Select and act on several issues
+
+Tick a row's checkbox, `Cmd/Ctrl`-click the row, or press `X` on the focused row to select it. `Shift`-click and `Shift+J`/`Shift+K` extend the selection, and `Ctrl/Cmd+A` selects every visible row. On desktop the sub-tab strip also has a select-all control.
+
+The bulk bar then sets the status, priority or module of every selected issue at once, with a single Undo for the whole change. It can also add a label, and delete the issues after you confirm. **Export** downloads the selected issues as one Markdown file with their metadata and comments. If that file would be larger than 16 MiB, the export stops with an error instead of saving part of it.
+
+### Open, peek and delete
+
+Clicking an issue's title or identifier opens it. Clicking elsewhere on a row does not navigate, so selecting rows never loses your place. To look without leaving the list, press `Space` on the focused row, long-press it on a touch screen, or `Cmd/Ctrl`-click a card on the board. The peek panel lets you change status, priority and module; it shows read-only controls if you can only view the project.
+
+Deleting an issue removes it from the list straight away and shows a toast with **Undo**. The delete is sent only when that toast closes, so Undo never has to recover anything. If the request then fails, the issue comes back and the toast says why. A deleted issue stays in the server's trash for the retention period (30 days by default), but the web UI has no trash view. A maintainer restores it with `POST /api/issues/{id}/restore`; see [Issues](/docs/concepts/issues).
 
 ## Edit an issue
 
-The issue editor supports Markdown preview, a formatting toolbar, issue-reference autocomplete, Mermaid diagrams, code-block copy, labels, modules, dates, relations, comments, and attachments. Use the keyboard shortcut help or command palette when you do not remember a shortcut.
+The issue view puts the description on the left and the fields on the right: Status, Priority, Module and Labels, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. Relation chips show the other issue's current status and change when it does. `Shift`-click a chip to preview that issue instead of opening it.
 
-The status chip in the issue topbar is a picker, not a badge: select it to change status without opening the sidebar field.
+The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
 
-Linked issue chips show their current status and refresh as it changes. Duplicate relations display both **Duplicate of** and **Duplicated by** links.
+Start and target dates are not shown or editable in the browser. Set them through the [CLI](/docs/cli), the [REST API](/docs/rest-api) or [MCP](/docs/mcp).
 
-Changes can be undone from the UI. Deletes use a deferred undo window, so confirm the item and use Undo immediately if the deletion was accidental.
+### The Markdown editor
+
+Issue descriptions and pages use the same editor. Choose **Edit**, or press `E`, to switch from the rendered view to the Markdown source. **Preview**, **Save** or `Cmd/Ctrl+S` saves and switches back; `Esc` or **Cancel** throws the draft away. The editor keeps the text you were reading at the same height on screen when it switches, so the page does not jump.
+
+- The toolbar inserts bold, italic, headings, bulleted, numbered and task lists, inline code, code blocks, links and quotes. `Cmd/Ctrl+B`, `Cmd/Ctrl+I` and `Cmd/Ctrl+Shift+K` cover bold, italic and links.
+- Type part of an identifier, such as `APP-`, to get suggestions. `APP-12`, `APP-DOC-3` and `APP-PLAN-2` render as links, and hovering an issue link shows a summary card.
+- Code blocks get a copy button, and `mermaid` code blocks render as diagrams.
+- Select text in a rendered description to copy it or quote it into a comment.
+
+### Link issues in the graph
+
+The issue view shows relations but cannot create or remove them. Use **Graph** for that, or the CLI, API or MCP.
+
+Graph has two views. **Linked** draws the issues that have at least one relation, arranged by their `blocks` chains. **Unlinked** lays out the rest in a grid so you can connect them. Closed issues are hidden until you turn on **Closed issues**.
+
+To add a relation, drag from the dot on a card's right edge onto another card, then choose which way it blocks, "relates to" or "duplicates". Click a line to reverse its direction or remove it. Viewers see the graph without these controls. The layout is recalculated on every visit; card positions are not saved.
 
 ## Discuss in comments
 
-Comments on issues and pages are threaded in one list. Your own comments carry an actions menu with Edit and Delete; the menu appears only on comments you wrote. Editing opens the comment in place with the same composer, and an edited comment is marked `edited`, with the exact time in the label's tooltip.
+Issues and pages have one comment thread each. Comments are Markdown and can carry attachments. Type `@` to mention someone.
 
-Each comment has a stable anchor link next to its author, so you can point someone at one comment rather than the whole thread. In Markdown, `#42` becomes a link to comment 42 on the current issue or page, and `LIF-25#comment-42` links to a comment on another issue. Both are skipped inside code spans and code blocks.
+Only your own comments show an actions menu, with **Edit** and **Delete**. An edited comment is marked `edited`; hover the label for the exact time.
 
-A long thread opens on up to 50 of its most recent comments, in reading order, with a "Load older comments" control above them. A response-byte budget can make a page shorter. The comment count next to the heading shows a trailing `+` while older comments are still unloaded, so it never reads as a total it is not.
+Each comment has a link next to its author, so you can send someone one comment instead of the whole thread. In Markdown, `#42` links to comment 42 on the same issue or page, and `APP-25#comment-42` links to a comment elsewhere. Neither becomes a link inside code.
 
-Opening a link to a comment further back loads the pages between automatically and scrolls to it. The automatic search covers up to 250 older comments. Past that it stops, so a link to a comment that was deleted, or one buried thousands of comments deep, cannot walk an entire thread on its own; use "Load older comments" to keep going by hand.
+A long thread opens on its newest comments, with **Load older comments** above them. While older comments are not loaded, the count beside the heading ends in `+`. Opening a link to an older comment loads the comments in between and scrolls to it. If the comment is very far back, or was deleted, it stops after a few hundred; keep going with **Load older comments**.
 
-## Work with pages and plans
+## Write pages
 
-Pages can be project-scoped or workspace-scoped. Browse, Recent, Drafts, and Archived page sub-tabs provide stable homes for each lifecycle state. Move project pages into folders with drag-and-drop on desktop or the Move-to-folder picker on touch devices; a page and its folder must belong to the same project.
+[Pages](/docs/concepts/pages) are Markdown documents. Each has a status (draft, active, complete or archived) that you set from the status picker. **Browse** shows the page tree, **Drafts** and **Archived** collect pages with those statuses, and **Recent** sorts by last update.
 
-Plans organize nested steps. Link a step to an issue when the step should follow that issue's lifecycle. Plan lists provide Active, Done, Archived, and All sub-tabs. Comments and activity are available on issues and pages, while plan activity records plan and step changes.
+Put project pages in folders by dragging a page onto a folder on desktop, or with the move-to-folder picker on a touch screen. A page and its folder must be in the same project. **Pin** keeps a page at the top of the page list and puts it on Home.
 
-Labels and modules are managed from the project structure controls. Labels are project-scoped and can be attached to issues and pages; workspace pages do not use project labels.
+Pages use the Markdown editor described above and have their own comments and activity. Workspace pages belong to no project, have no folders or labels, and only an administrator can edit them.
 
-## Navigate and personalize
+## Work with plans
 
-The command palette searches actions and content and highlights matching result text. Deep links let you share or bookmark an issue, page, or plan directly.
+A [plan](/docs/concepts/plans) is a checklist of steps, nested as deeply as you like, for work that spans several sessions. Open a plan to add steps and sub-steps, tick them off, write a note on a step, or delete a step (which deletes its sub-steps too). Set the plan's status to active, done or archived from its sidebar.
 
-For a project already loaded in the browser, the palette searches its local issue and page index first. Sparse results trigger server full-text search, whose matches appear below the local results. Context menus and other overlays take ownership of their shortcuts while open.
+Use **link** on a step to attach an issue. The two stay in step: ticking the step marks the issue `done`, marking the issue `done` ticks the step, and reopening the issue unticks it. **Anchor issue** in the sidebar names the issue the plan breaks down; when that issue is marked `done`, the plan is archived.
 
-Identifiers can be copied wherever you meet them: a copy control sits in the breadcrumb trail, on board cards, and in the issue peek panel, and list rows offer the same action in their context menu. The controls are ordinary buttons, so they are reachable by keyboard, and they flip to a check mark once the identifier is on the clipboard.
+Plans keep an activity history but have no comments. The web UI cannot reorder or move steps; use the CLI, API or MCP for that.
 
-Appearance settings include accent color, density, font scale, and reduced motion. Choose Light, Dark or System in Settings or the navigation theme menu. Theme controls share the current preference and follow changes from another tab. Profile edits update the navigation account display without a reload. Keyboard shortcuts are listed in the shortcut help panel.
+## Files and attachments
 
-## Transfer or publish a project
+Attach a file wherever you can write: drag it onto the editor or comment box, paste it, or use the attach button. Each upload shows as a chip while it runs. A failed upload shows the server's reason and a **Retry** button.
 
-A project lead or instance admin can download a complete archive from the project overview. An instance admin imports it through **New project**. This transfers history and linked files into a new private project, rather than producing the human-readable Markdown export. See [project archives](/docs/project-archives) for limits and reference reports.
+- **Large images.** When an image is very large in pixels, or close to the instance's upload limit (10 MiB by default), its chip offers to resize it in the browser before it is sent.
+- **Screenshots.** Pasting an image shows **Annotate before upload?** for a few seconds. Accept it to crop, draw arrows, rectangles and freehand lines, or redact part of the image before it uploads. Redaction replaces the pixels in the uploaded file, so the original content is not recoverable from it. If you ignore the offer, the image uploads unchanged.
+- **Alt text.** You are prompted for alt text after an image uploads.
+- **Voice notes and photos.** In browsers that can record audio, the microphone button beside **Attach** records a voice note and uploads it. On a phone, **Attach** opens a menu with **Files**, **Camera** and **Record voice**.
+- **Long pastes.** Pasting more than 60 lines or 6,000 characters offers to attach the text as a file instead. `Enter` attaches it, `Esc` pastes it inline.
 
-The overview's **Public view** panel lets a lead or instance admin publish the project's current issues, pages, comments and linked files. Anonymous readers get the usual browsing views without editing controls. Existing content becomes public too, so review it before confirming publication. [Public projects](/docs/public-projects) explains what is included and how to unpublish.
+Attachments open in place instead of downloading when Lific has a viewer for them: images, video, audio, text and source code, diffs and patches, CSV and TSV tables, JSON, zip archives and SQLite databases. Other files, including PDFs, appear as a download chip.
 
-## Accounts and administration
+**Files** lists every attachment in the project. Filter by type (All, Images, Video, Audio, Text, PDF, Archives, Other) or by uploader, and sort by newest, largest or name. The header shows how many files the project holds and their total size. Expand a row to see which issues, pages and comments use the file and jump to them. The uploader, a maintainer or an administrator can delete a file; the confirmation says how many references it will break.
 
-From account settings, manage your profile, password, active sessions, and connected tools. Instance settings control signups, browser auto-login, authorization enforcement, and login messaging. Project settings manage members and their viewer, maintainer, or lead roles; the last lead cannot be removed or demoted.
+**Pending cleanup**, collapsed below the list, shows uploads by project members that were never attached to anything, with the time left before the server deletes them.
 
-### Changing your password revokes more than your sessions
+## Keyboard and command palette
 
-Both destructive actions in account settings are full account recoveries. They revoke every session, API key, OAuth session, and connected tool belonging to your account and to the tools it owns:
+Press `?` to see every shortcut, grouped into Global, Issue list, Board, Peek panel, Command palette and Markdown editor. The most useful:
 
-- **Change password** signs you out on every other device and leaves you signed in here on a fresh session. The page states this next to the button, and re-reads your connected tools afterwards so they show as disconnected.
-- **Sign out everywhere and revoke access** does the same and mints no replacement, so it signs out this browser too. It asks for confirmation inline before running, and stays put if the request fails, so a network error does not sign you out of a session that is still valid.
+| Keys | Action |
+| --- | --- |
+| `Cmd/Ctrl+K` or `Cmd/Ctrl+P` | Open the command palette |
+| `Cmd/Ctrl+\` | Collapse or expand the sidebar |
+| `?` | Show all shortcuts |
+| `J` / `K` or arrow keys | Move down or up the issue list |
+| `Home` / `End` | Jump to the first or last row |
+| `Enter` / `Space` | Open or peek the focused issue |
+| `X`, `Shift+J/K`, `Ctrl/Cmd+A` | Select the row, extend the selection, select all |
+| `S` / `Shift+S` | Open the status picker, or cycle status |
+| `P` / `Shift+P` | Open the priority picker, or cycle priority |
+| `M` | Open the module picker |
+| `C` | New issue |
+| `/` | Focus search |
+| `Esc` | Clear focus or selection, or close what is open |
 
-Reconnect each tool afterwards from the Connected tools section, or with `lific connect`, and replace any API key a script depends on. Restart a running MCP client after reconnecting it; it will not pick up a new credential on its own.
+Shortcuts do not fire while you are typing in a field. The peek panel, command palette, shortcut list, context menus and the mobile navigation drawer take over the keyboard while they are open.
 
-### Some actions ask you to confirm your password
+The command palette finds things by identifier or by text:
 
-Connecting a tool, creating an account, granting instance admin, restoring a deactivated account, changing instance settings, adding a project member, and raising a member's project role all leave lasting access behind, so the server requires a sign-in from the last 15 minutes. A tab left open for longer than that is asked to confirm: the connect dialog, the Members roster and a project's member list each grow a single password field that names the waiting action, the action resumes with its inputs intact once you confirm, and a wrong password leaves everything where it was. On an instance with `web_auto_login` there is usually no password to confirm, since the session refreshes silently; if that is refused, the password prompt appears instead. Either way the refresh only ever produces a session for the account already signed in, never for the instance's first admin.
+- `APP156`, `app 156` and `APP-156` go straight to that issue.
+- `app doc 3` or `APP-DOC-3` opens that page.
+- A bare number such as `156` looks for that issue number in every project.
+- Anything else searches the current project's issues and pages as you type, along with project, module and folder names, and adds full-text results from the server when there are few local matches.
 
-Signing out of a device, demoting an admin, deactivating an account, lowering a project role, removing a project member, and refusing a device connection request never ask. They only take access away, which is what you want to be fast while dealing with a compromise.
+On an issue or page, the palette also offers actions for it, such as setting its status or renaming it.
 
-Use the connected-tools and API-key controls to review which agents can access the instance. Prefer user-owned bot identities for agents that should follow project membership. See [self-hosting](/docs/self-hosting) and the [REST authorization notes](/docs/rest-api) for operator-level access rules.
+A copy control sits beside identifiers in the breadcrumb trail, on board cards and in the peek panel; list rows have the same action in their right-click menu. It shows a check mark once the identifier is on your clipboard.
 
-Connected Tools provides templates for OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code, and Zed. **Add custom or named connection** supports other HTTP MCP clients and separate identities for multiple agents or machines. Give each connection its own ID, such as `codex-laptop`; disconnecting it leaves your other connections intact. The CLI [connect](/docs/connect) flow also supports Gemini CLI, Windsurf, Goose, and Crush, with detection and per-client file writes.
+## Run a project
 
-## Mobile and realtime behavior
+**Overview** is the project's home page. Everyone sees its progress, a "Needs attention" list of open issues and recent activity. A lead can also change the project's name, icon and description, change its lead, manage members and their viewer, maintainer or lead roles, import issues from GitHub, and delete the project. Maintainers manage labels here; modules are managed in **Modules**. [Projects](/docs/concepts/projects#members-and-roles) explains what each role can do. You can also file the project into one of your sidebar groups. **Export** in the top bar downloads the project as Markdown for reading.
 
-Lific includes a PWA manifest and icons, so supported browsers can add the site to a phone or desktop home screen and open it in a standalone window. Installation does not provide offline editing or replica synchronization; the app still connects to the Lific server for data.
+Two more panels appear only for the project's lead or an instance administrator, even when project permissions are off:
 
-Loaded project lists use a shared browser read model kept current by realtime events. Tabs can share one WebSocket through Web Locks, and reconnecting clients resume by sequence cursor or backfill missed changes. Other views refresh their affected state when needed. After a reconnect or resync, wait for the view to catch up before continuing an edit.
+- **Public view** publishes the project's current issues, pages, comments and their files to anyone with the link. See [Public projects](/docs/public-projects).
+- **Project archive** downloads a full copy of the project, with its history, for moving it to another instance. See [Project archives](/docs/project-archives).
+
+**Activity** is the project's full change history. Each entry shows who made the change and whether it came from the web, API, MCP or CLI. Click a person or tool in the side panel to show only their changes, and expand an entry for exact local and UTC times and the old and new values.
+
+**Insights** charts issues created against issues closed per week, breaks the project's issues down by status, priority and module, and lists who made the most changes.
+
+## Accounts, connected tools and settings
+
+Settings has an **Account** tab for everyone and an **Instance** tab for administrators.
+
+**Account** holds your display name, appearance, password, connected tools and sign-out. Appearance covers accent color, density, font size, reduced motion and the Light, Dark or System theme. The theme is also in the sidebar's theme menu, and a change in one tab applies to your other open tabs.
+
+**Instance** holds:
+
+- the instance name shown on the sign-in screen;
+- **Sign-ups**: **Open** lets anyone create an account, **Closed** means only an administrator can;
+- which email domains may sign up (blank allows any);
+- how long sessions last, and a message for the sign-in screen;
+- **Single-user mode**, which can skip web sign-in and sign every visitor in as the administrator. Only use it on a private instance; see [Self-hosting](/docs/self-hosting#authentication);
+- **Project permissions**: when on, only a project's members can see or edit it. Add yourself as lead of your projects before turning it on.
+
+The same tab lists every account. From there an administrator creates accounts, makes or removes administrators, and deactivates or restores accounts.
+
+### Connect an AI tool
+
+**Connected tools** on the Account tab writes an MCP configuration for one tool at a time. It has templates for OpenCode, Cursor, Claude Code, Claude Desktop, Codex, Pi, VS Code and Zed, and **Add custom or named connection** for any other HTTP MCP client. Give each connection its own name, such as "Codex on my laptop", so its activity is labeled correctly and disconnecting it leaves your other tools connected. [`lific connect`](/docs/connect) on the command line supports more clients, including Gemini CLI, Windsurf, Goose and Crush.
+
+### Change your password or sign out everywhere
+
+Both actions revoke every session, API key, OAuth token and connected tool that belongs to your account or to the tools it owns.
+
+- **Change password** signs you out on every other device and keeps this browser signed in with a new session.
+- **Sign out everywhere and revoke access** does the same, but signs this browser out too. It asks you to confirm first. If the request fails, you stay signed in.
+
+Afterwards, reconnect each tool from Connected tools or with `lific connect`, replace any API key a script uses, and restart running MCP clients. They do not pick up new credentials by themselves.
+
+### When Lific asks for your password again
+
+Actions that give someone lasting access need a sign-in from the last 15 minutes: connecting a tool, creating an account, making someone an administrator, restoring a deactivated account, changing instance settings, adding a project member and raising someone's project role. If your sign-in is older, a password field appears next to the action. Confirm, and the action continues with what you entered; a wrong password changes nothing. With single-user mode on, the session is usually refreshed without asking.
+
+Actions that only take access away never ask: signing out, removing an administrator, deactivating an account, lowering a project role, removing a member and refusing a device login.
+
+## On a phone
+
+A browser that supports installing web apps can add Lific to your home screen and open it in its own window. It still needs a connection to your server; there is no offline mode.
+
+- Selecting a project opens its sections. **Back**, including the phone's back button, returns to the project list before closing the menu.
+- The board shows one column at a time; swipe between them.
+- Less-used list controls (saved views, sort and display) move into one menu.
+- Move pages with the move-to-folder picker instead of dragging.
+- Opening a link to an issue, page, plan or module as the first page puts its list behind it, so Back goes to the list instead of leaving the app.
+
+## Staying current
+
+Lists, boards and open items update live as other people and agents make changes. Tabs in the same browser share one connection. After a dropped connection, Lific catches up on what it missed; let the view refresh before you continue an edit.

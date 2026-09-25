@@ -1,50 +1,85 @@
 ---
 title: Installation
-description: Install Lific from a GitHub release, crates.io, or source.
+description: Get the lific binary from a GitHub release, from crates.io with Cargo, or by building the source tree.
 ---
 
-The Cargo package is named `lific`.
+Lific is one executable. Download a prebuilt binary if you want it running in under a minute, or install it with Cargo if you already have a Rust toolchain. Either way you get the same program with the web UI built in.
 
-## GitHub release binaries
+| Way in | What you need | Good when |
+| --- | --- | --- |
+| Release binary | Nothing. The download runs as it is. | You want the fastest path, or the machine has no Rust toolchain. |
+| `cargo install lific` | Rust 1.88 or later, and a few minutes to compile. | You already use Cargo, or your platform has no release binary. |
+| Source build | A checkout, plus [devenv](https://devenv.sh/), or [Bun](https://bun.sh) and Cargo. | You are changing Lific itself, or you want to build the exact tree you are reading. |
 
-Release binaries are published on [GitHub Releases](https://github.com/VoidNullable/lific/releases). Each release includes `sha256sums.txt` for checksum verification.
+A container image is not published anywhere, but the repository's Dockerfile builds one. [Self-hosting](/docs/self-hosting#containers) covers it.
 
-| Platform | Release file |
+## Download a release binary
+
+Every release publishes five binaries and a `sha256sums.txt` on the [releases page](https://github.com/VoidNullable/lific/releases).
+
+| Platform | File |
 | --- | --- |
 | Linux x86_64 | `lific-linux-x86_64` |
 | Linux aarch64 | `lific-linux-aarch64` |
-| macOS x86_64 | `lific-macos-x86_64` |
-| macOS aarch64 | `lific-macos-aarch64` |
+| macOS Intel | `lific-macos-x86_64` |
+| macOS Apple silicon | `lific-macos-aarch64` |
 | Windows x86_64 | `lific-windows-x86_64.exe` |
 
-Download the file for your platform. Compare it with the matching entry in `sha256sums.txt`. On Unix systems, make the downloaded file executable and place it in a directory on your `PATH`.
+On any other operating system or architecture, use Cargo.
+
+On Linux, download the binary and the checksum file, verify the download, then put it on your `PATH`:
 
 ```bash
+curl -LO https://github.com/VoidNullable/lific/releases/latest/download/lific-linux-x86_64
+curl -LO https://github.com/VoidNullable/lific/releases/latest/download/sha256sums.txt
+sha256sum --ignore-missing -c sha256sums.txt
 chmod +x lific-linux-x86_64
-./lific-linux-x86_64 --help
+sudo mv lific-linux-x86_64 /usr/local/bin/lific
 ```
 
-On Windows, put `lific-windows-x86_64.exe` somewhere on your `PATH` and rename it to `lific.exe`. [Windows](/docs/windows) covers that platform in full, including WSL 2.
+macOS has no `sha256sum`. Download the same way, then check with `shasum`:
+
+```bash
+shasum -a 256 --ignore-missing -c sha256sums.txt
+```
+
+`--ignore-missing` tells both tools to check only the file you downloaded, instead of failing on the four binaries you did not. The line for your file should end in `OK`.
+
+A binary downloaded with `curl` runs as it is. The macOS binaries are not signed, so if you download one with a browser instead, macOS refuses to open it until you clear the quarantine flag the browser set: `xattr -d com.apple.quarantine lific-macos-aarch64`.
+
+On Windows, compare the hash in PowerShell:
+
+```powershell
+$expected = (Select-String -Path sha256sums.txt -Pattern 'lific-windows-x86_64\.exe').Line.Split(' ')[0]
+$actual   = (Get-FileHash lific-windows-x86_64.exe -Algorithm SHA256).Hash
+if ($actual -ieq $expected) { "checksum ok" } else { "checksum MISMATCH" }
+```
+
+Then rename the file to `lific.exe` and put it in a directory on your `PATH`. [Windows](/docs/windows) covers the rest of that platform, including keeping the server running.
+
+A mismatch means the file is not the one that was released. Delete it and download it again rather than running it.
 
 ## Install with Cargo
-
-Install the crate from crates.io with Cargo.
 
 ```bash
 cargo install lific
 ```
 
-Confirm that the binary is available.
+The package on crates.io carries the prebuilt web UI, so you do not need Bun and you get the same browser interface the release binaries have. Compiling takes several minutes and needs Rust 1.88 or later; install Rust from [rustup.rs](https://rustup.rs) if `cargo` is missing. On Windows, Cargo also needs the Visual Studio C++ build tools, which [Windows](/docs/windows#or-install-with-cargo) explains.
+
+Cargo puts the binary in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows), which rustup has already added to your `PATH`.
+
+## Check the install
 
 ```bash
 lific --version
 ```
 
+If the shell cannot find `lific`, the directory you put it in is not on your `PATH`.
+
 ## Build from source
 
-Source builds use the repository's [devenv](https://devenv.sh/) environment.
-Release artifacts always include the web UI; the task graph builds it before
-the Rust binary.
+Source builds run through the repository's [devenv](https://devenv.sh/) environment, which pins the Rust toolchain, Bun and the cross-compilation tools. The web UI is compiled into the binary, so every build task builds the frontend into `web/dist` before Cargo runs.
 
 ```bash
 git clone https://github.com/VoidNullable/lific
@@ -55,11 +90,31 @@ devenv shell
 devenv tasks run lific:debug-build
 ```
 
-For a Linux release artifact:
+That writes `target/debug/lific`.
+
+Release binaries use the `dist` Cargo profile and a devenv profile per operating system. These are the commands the release workflow runs:
 
 ```bash
 devenv --profile release-linux tasks run lific:release:x86_64-unknown-linux-gnu
+devenv --profile release-linux tasks run lific:release:aarch64-unknown-linux-gnu
+devenv --profile release-darwin tasks run lific:release:x86_64-apple-darwin
+devenv --profile release-darwin tasks run lific:release:aarch64-apple-darwin
+devenv --profile release-windows-msvc tasks run lific:release:x86_64-pc-windows-msvc
 ```
 
-Use `release-darwin` with an Apple target for macOS builds. The debug binary
-and release artifacts are written beneath `target/`.
+Each writes `target/<target-triple>/dist/lific` (`lific.exe` for Windows). The two Linux targets and the Windows target build on Linux; the macOS targets need a Mac.
+
+### Without devenv
+
+Plain Cargo works too, but you have to build the frontend first:
+
+```bash
+cd web && bun install && bun run build && cd ..
+cargo build --release
+```
+
+A release build stops with an error when `web/dist/index.html` is missing or empty, because a release binary that serves no web UI is a broken release binary. A debug build only warns, and the resulting binary serves no embedded UI, which is what you want while running the Vite dev server against it. The build also warns when `web/src` is newer than `web/dist`, meaning the embedded UI no longer matches the frontend source.
+
+## Next
+
+You have a binary, not yet an instance. [Quickstart](/docs/quickstart) creates the database and your account, starts the server, and connects your AI tools.

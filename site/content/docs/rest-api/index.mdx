@@ -1,160 +1,250 @@
 ---
 title: REST API
-description: Base URL, authentication, common response formats, and shared data shapes.
+description: How to get a token and make a first call, what each credential and role may do, and how errors, edit conflicts and paging behave across Lific's HTTP API.
 ---
 
-## Base URL
+Every Lific server answers JSON over HTTP on the same address as its web UI. The web UI is built on this API, so anything you can do in the browser you can script. The API needs a running server; for direct database access without one, use the [CLI](/docs/cli).
 
-All REST paths are relative to the Lific server URL.
+## Call it
 
-```text
-https://your-server.example/api
-```
+Paths in this reference are complete: they already start with `/api`, `/public/api`, `/oauth` or `/.well-known`. Put your server's address in front of them, the same address you open in a browser. There is no version prefix.
 
-The examples use `https://your-server.example` and the project identifier `LIF`.
-
-## Authentication
-
-Most endpoints require an `Authorization` header with the `Bearer` scheme.
+Sign in to get a token, then send it as a bearer token:
 
 ```bash
-curl https://your-server.example/api/projects \
-  -H "Authorization: Bearer <API_KEY>"
-```
+LIFIC=https://lific.example.com
 
-API keys use the `lific_sk` prefix. Session tokens use the `lific_sess_` prefix. OAuth access tokens use the `lific_at_` prefix. All three are accepted in a Bearer header by the REST authentication middleware.
-
-`GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/auto-login` do not pass through the Bearer middleware. `POST /api/auth/logout` passes through the middleware and requires a valid Bearer credential. A session token deletes that session; any valid credential clears the browser session cookie and returns a successful logout response.
-
-`GET /api/events/ws` is not Bearer authenticated. It requires a valid `lific_token` cookie containing a session token. `GET /api/attachments/{id}` also accepts that session cookie for browser downloads. Other attachment requests require a Bearer header.
-
-## Authorization by endpoint family
-
-When `authz_enforced` is enabled, REST handlers use the following minimum roles. Administrators bypass project membership checks.
-
-| Operation family | Minimum access |
-| --- | --- |
-| Project content reads, issue/page/plan reads, search, and activity | `viewer` on the relevant project |
-| Issue/page/plan/comment content mutations, relations, plan-step links, modules, labels, and folders | `maintainer` on the relevant project; cross-project operations require it in both projects |
-| Project settings, membership/role changes, and project deletion | `lead` on the project |
-| Workspace-level page reads/mutations | Workspace rules; mutations require an administrator |
-| Attachment upload | Any authenticated user; the resulting attachment is private until linked or otherwise authorized |
-| Linked attachment list/download | `viewer` on an owning project; an unlinked attachment is readable only by its uploader or an administrator |
-| Attachment deletion | The uploader, a project `maintainer` on an owning project, or an administrator |
-
-Saved views are additionally caller-owned: a member can list or modify only their own views, and every saved-view request requires an authenticated user.
-
-This matrix applies to project-scoped requests made by users and bot identities. Instance administrators and operator-trusted credentials intentionally bypass project membership checks; auth-disabled requests are operator-equivalent, and instance-scoped endpoints have their own authentication rules.
-
-## Content types
-
-JSON request bodies use `Content-Type: application/json`.
-
-```bash
-curl -X POST https://your-server.example/api/issues \
-  -H "Authorization: Bearer <API_KEY>" \
+curl -s -X POST "$LIFIC/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"project_id":1,"title":"Document the REST API"}'
+  -d '{"identity":"alex","password":"correct horse battery"}'
+# {"user":{"id":1,"username":"alex",...},"token":"lific_sess_9f2c...","expires_at":"..."}
+
+TOKEN=lific_sess_9f2c...
+
+curl -s "$LIFIC/api/projects" -H "Authorization: Bearer $TOKEN"
+
+curl -s -X POST "$LIFIC/api/issues" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id":1,"title":"Document the REST API","priority":"high"}'
 ```
 
-`POST /api/attachments` uses `multipart/form-data`. Export and attachment download endpoints return file bytes instead of JSON.
+`GET /api/health` answers the plain text `ok` without a credential, which is enough for a load balancer or an uptime check.
+
+## Get a credential
+
+Every credential goes in the same header: `Authorization: Bearer <token>`.
+
+| Credential | Looks like | How you get one | Lasts |
+| --- | --- | --- | --- |
+| Session token | `lific_sess_...` | The `token` field of [`POST /api/auth/login`](/docs/rest-api/identity#post-apiauthlogin) or signup. | The instance's session lifetime, 30 days unless an administrator changed it. |
+| API key | `lific_sk-live-...` | [`POST /api/auth/keys`](/docs/rest-api/identity#post-apiauthkeys) from a recent session, or `lific key create` on the server. | Until revoked. |
+| Connected-tool key | `lific_sk-live-...` | [`POST /api/auth/bots`](/docs/rest-api/identity#post-apiauthbots). It acts as a bot you own, so the activity log names the tool. | Until disconnected. |
+| OAuth access token | `lific_at_...` | The [OAuth flow](/docs/rest-api/oauth). Normally an MCP client runs it for you. | 30 days. There are no refresh tokens. |
+
+Use a session token for a person at a keyboard and an API key for a script. An agent should normally connect through [MCP](/docs/mcp) rather than calling REST directly.
+
+Login also sets an HttpOnly cookie named `lific_token` holding the same session token. The REST API ignores that cookie everywhere except three places: `GET /api/attachments/{id}` (so a browser `<img>` tag can load an attachment, and only when the request has no `Authorization` header), the realtime socket at [`GET /api/events/ws`](/docs/rest-api/sync#get-apieventsws), which accepts nothing else, and the OAuth consent pages. Every other request needs the header, including requests from a browser.
+
+These routes need no credential at all: `GET /api/health`, `GET /api/instance`, `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/auto-login`, the [public read API](/docs/rest-api/public) and the [OAuth and discovery routes](/docs/rest-api/oauth).
+
+Two cases act as the instance's first administrator:
+
+- An API key that is not bound to any user. The key printed on a fresh server's first start and keys made with `lific key create` without a user are like this. Minting one takes shell access to the server, so Lific trusts it. Audit them with `lific key list`.
+- A request with no credential on an instance running with `[auth] required = false`. A credential that is present but invalid is still refused with `401`, so a broken client configuration shows up as an error.
+
+### Which credentials an endpoint accepts
+
+Most endpoints accept any valid credential and then check the caller's [role](#roles). Three rules narrow that.
+
+**A recent browser session.** Endpoints that hand out lasting access require a session token in the `Authorization` header that was created in the last 15 minutes. An API key, an OAuth token, an older session and the cookie all get `403 recent authentication required`, and nothing is written. The endpoints are:
+
+- `POST /api/auth/keys` and `POST /api/auth/bots`
+- `PATCH /api/instance/settings`
+- `POST /api/users`, `POST /api/users/{id}/promote` and `POST /api/users/{id}/reactivate`
+- `POST /api/projects/{id}/members`, and `PATCH /api/projects/{id}/members/{user_id}` when it raises a role
+- `PUT /api/projects/{id}` when it sets `lead_user_id` to a user
+- `POST /api/projects` when it names somebody other than the caller as lead
+
+Approving an OAuth connection in the browser follows the same rule. A tab that has been open for a while can get a fresh session for the same account from [`POST /api/auth/me/refresh`](/docs/rest-api/identity#post-apiauthmerefresh) without signing out.
+
+**A browser session of any age.** `POST /api/auth/me/refresh` and the three [project archive](/docs/rest-api/export#project-archives) routes accept only a session token. API keys, unbound operator keys and OAuth tokens get `403`.
+
+**Not an OAuth token.** An OAuth token belongs to a tool acting for a person, so it cannot manage credentials or accounts. Lific answers these with `403` and a plain-text reason: API key and connected-tool routes (`/api/auth/keys`, `/api/auth/bots` and everything under them), `PATCH /api/auth/me`, `POST /api/auth/me/password`, `POST /api/auth/me/refresh`, `DELETE /api/auth/me/sessions`, `POST /api/users` and everything under `/api/users/`. `GET /api/auth/me` and `GET /api/users` stay open to it.
+
+## Roles
+
+A role is held on one project. Each role includes everything below it. The [projects concept page](/docs/concepts/projects#members-and-roles) describes them in full.
+
+| Role | In short |
+| --- | --- |
+| `viewer` | Read the project, write comments, keep personal saved views. |
+| `maintainer` | Create, edit, delete and restore issues, pages and plans; link issues; manage modules, labels and folders. |
+| `lead` | Project settings, membership, publishing, repository bindings, GitHub import, deleting the project. |
+| Administrator | A flag on the account, not a project role. Everything in every project, plus workspace pages and instance settings. |
+
+A connected tool or OAuth client acts with the access of the person who owns it and never more. An operation that touches two projects, such as linking issues across them, needs the role in both.
+
+Each endpoint in this reference names the minimum role it checks. That is the rule when the instance setting `authz_enforced` is on, which is the default for new installs. With it on, a caller without the role gets `403`, and a project they cannot read is simply missing from lists, search and cross-project reads rather than appearing as an error.
+
+With `authz_enforced` off, which is how an instance upgraded from a version before project membership starts:
+
+- Endpoints that need `viewer` or `maintainer` accept any authenticated caller.
+- Endpoints that need `lead` accept the project's primary lead, any `lead` member or an administrator. A project with no lead can only be changed by an administrator.
+- Module, label and folder changes need `lead` instead of `maintainer`.
+- Deleting a project needs an administrator.
+- Workspace pages (pages with no project) are open to every caller. With enforcement on they are administrator-only, for reads as well as writes.
+
+`GET /api/projects/{id}/my-role` tells a client which role it holds and whether enforcement is on.
+
+## Requests
+
+Send JSON bodies with `Content-Type: application/json`. Unknown fields are ignored. Request bodies are capped at 2 MiB unless an endpoint says otherwise; the attachment upload, project archive upload, GitHub import and OAuth routes each set their own limit.
+
+Every fixed size, rate and concurrency limit is collected on [Limits](/docs/limits).
+
+In update bodies, some fields can be cleared. For those, leaving the field out keeps the current value and sending `null` clears it. Each endpoint marks which fields work this way.
+
+Numeric ids appear in paths. Issues, pages, plans and projects also have readable identifiers such as `APP-42`, `APP-DOC-3`, `APP-PLAN-2` and `APP`; the `resolve` endpoints turn one into the full record. Identifiers are matched without regard to case.
+
+Most timestamps are UTC strings in SQLite's format, such as `2026-07-14 12:00:00`.
+
+## Concurrent edits and `expected_seq`
+
+Issues, pages and comments carry `seq`, a counter shared by every issue, page and comment on the instance. Every write to a row moves its `seq` above every value handed out so far. A new comment also moves its issue's or page's `seq`, because it changes what a reader of that issue or page sees.
+
+By default the last write wins. To avoid overwriting somebody else's change, send the `seq` you last read as `expected_seq` in `PUT /api/issues/{id}` or `PUT /api/pages/{id}`. If the row has changed since, Lific writes nothing and answers `409` with the record as it now stands:
+
+```json
+{
+  "error": "APP-42 has changed since seq 118 (current seq 121); re-read it, merge your change, and retry",
+  "code": "update_conflict",
+  "current": { "id": 42, "identifier": "APP-42", "seq": 121, "title": "...", "...": "..." }
+}
+```
+
+`current` has the same shape as the `GET` response, so a client can merge and retry without another request.
 
 ## Errors
 
-Handlers return JSON errors with an `error` string.
+Handlers answer failures with a JSON object carrying one `error` string, and a status that says what kind of failure it was:
 
 ```json
-{
-  "error": "issue 999 not found"
-}
+{ "error": "issue 999 not found" }
 ```
 
-The common error statuses are `400` for invalid requests, `403` for forbidden requests, `404` for missing resources, `409` for conflicts, and `500` for internal failures. Authentication middleware can return `401` as plain text with a `WWW-Authenticate` header.
+| Status | Meaning |
+| --- | --- |
+| `400` | The request is invalid: a bad value, a missing field, an unknown status. Rate-limited sign-in, signup, password change, session refresh and repository binding changes also answer `400`, with a message that says how many seconds to wait. |
+| `401` | No credential, or one that is invalid, expired or revoked. Comes from the authentication layer as **plain text**, not JSON, with a `WWW-Authenticate: Bearer resource_metadata="..."` header that points OAuth clients at the discovery document. |
+| `403` | Authenticated but not allowed, including `recent authentication required`. The refusal of an OAuth token on an account route is plain text. |
+| `404` | The record does not exist, is in the trash, or is hidden from you in a way that must not reveal that it exists. |
+| `405` | The path exists but not with that method. |
+| `409` | A conflict: a duplicate name, removing the last lead, a GitHub import already running, or an `expected_seq` mismatch (see above). |
+| `413` | The request or its result is larger than Lific accepts. The message names the limit. |
+| `415`, `422` | The body is not JSON, or does not have the expected shape. These come from the request parser as plain text. |
+| `429` | A shared slot is taken: exports, project archives, the public read API's rate limit. Carries `Retry-After: 30`. The realtime socket's connection limit also answers `429`, without the header. |
+| `500` | Something broke on the server. The body says only `internal server error`; the detail is in the server log. |
+| `503` | Temporarily unable, and the same request will work shortly. Carries `Retry-After: 2`. Seen when a backup or restore holds the attachment store, when the public read API is busy, and when a trusted proxy's client-identity headers do not verify. |
 
-An endpoint that requires an authenticated user, such as saved views or project groups, answers a request that carries no user identity with `403` and this body:
+The OAuth endpoints follow the OAuth specifications instead: `{"error": "invalid_grant", "error_description": "..."}`, where `error` is a machine-readable code and `error_description` is optional. The consent pages under `/oauth` are HTML for a person, not JSON.
 
-```json
-{
-  "error": "authentication required"
-}
-```
+## Lists and paging
 
-## Pagination and lists
+Most list endpoints return a bare JSON array with no total and no cursor. A few return an object instead; each endpoint says which.
 
-Most collection endpoints return JSON arrays. Activity endpoints return an object with `items` and `has_more`; board, insights, and count endpoints return objects with their documented fields. Array responses do not include total counts or cursor metadata.
+| Endpoint family | Default `limit` | Maximum | Notes |
+| --- | --- | --- | --- |
+| Issues, plans, project files | 50 | 500 | `limit` and `offset`. |
+| Search | 20 | 500 | `offset` stops at 100,000. |
+| Activity feeds | 50 | 200 | Returns `items` and `has_more`. |
+| Comments | 50 | 500 | Paging information is in response headers. See [comments](/docs/rest-api/work#comments). |
+| Pages | everything | 500 | Paginated only when `limit` or `offset` is given. |
+| Delta sync changes | 5,000 | 50,000 | Cursor-based. See [delta sync](/docs/rest-api/sync#delta-sync). |
 
-`issues`, `plans`, and `search` default to `limit=50`, `limit=50`, and `limit=20` respectively. Their limits are clamped to `1..=500`. Activity feeds default to `limit=50` and clamp to `1..=200`; they return `has_more`. Comment lists default to `limit=50` and clamp to `1..=500`. Page lists apply pagination when `limit` or `offset` is supplied, with a maximum limit of `500`.
+A `limit` below 1 counts as 1 and a negative `offset` counts as 0. `GET /api/plans` also supports keyset paging with `before_id` when `order_by=id`.
 
-Every `offset` is floored at `0`. A comment list array is a page, not a thread: it carries no total and no `has_more`, so a full page can be the end of the thread or the start of the next one. Request the page after it to find out.
+## Shared shapes
 
-Comment lists also accept an optional keyset cursor, `before_created_at` plus `before_id`, which pages backwards from a comment the client has already seen without the drift an `offset` suffers when the thread is written to mid-read. See [comment endpoints](/docs/rest-api/work) for its rules.
-
-`GET /api/plans` supports keyset paging only when `order_by=id`. Pass `before_id` with that ordering. Other paginated endpoints use `limit` and `offset`.
-
-## Shared response shapes
+These records appear across many endpoints. Other shapes are described with the endpoint that returns them.
 
 ### Project
 
-`Project` fields are `id` (integer), `name` (string), `identifier` (string), `description` (string), `emoji` (string or null), `lead_user_id` (integer or null), `sort_order` (integer), `created_at` (string), and `updated_at` (string).
+`id`, `name`, `identifier`, `description` (Markdown), `emoji` (a literal emoji, a `lucide:Name` reference, or null), `lead_user_id` (integer or null), `sort_order`, `is_public`, `created_at` and `updated_at`. In a project list, `sort_order` is the project's position in the caller's own sidebar order.
 
 ```json
 {
   "id": 1,
   "name": "Lific",
-  "identifier": "LIF",
+  "identifier": "APP",
   "description": "",
   "emoji": null,
   "lead_user_id": 1,
   "sort_order": 0,
   "created_at": "2026-07-14 12:00:00",
-  "updated_at": "2026-07-14 12:00:00"
+  "updated_at": "2026-07-14 12:00:00",
+  "is_public": false
 }
 ```
 
 ### Issue
 
-`Issue` fields are `id` (integer), `project_id` (integer), `sequence` (integer), `identifier` (string), `title` (string), `description` (string), `status` (string), `priority` (string), `module_id` (integer or null), `sort_order` (number), `start_date` (string or null), `target_date` (string or null), `created_at` (string), `updated_at` (string), and `labels` (string array). When set, `source` appears on create, update, and single-issue responses. Issue list responses omit `source`. `GET /api/issues/{id}` and `GET /api/issues/resolve/{identifier}` populate relation arrays: `blocks`, `blocked_by`, `relates_to`, `duplicates`, and `duplicated_by`.
+`id`, `project_id`, `sequence` (the number in the identifier), `identifier`, `title`, `description`, `status` (`backlog`, `todo`, `active`, `done` or `cancelled`), `priority` (`urgent`, `high`, `medium`, `low` or `none`), `module_id`, `sort_order` (a number), `start_date`, `target_date`, `created_at`, `updated_at`, `seq` and `labels` (label names).
+
+`source` appears only on an issue that came from an import, such as `github:owner/repo#12`. Single-issue responses add relation arrays when they have entries: `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`, each a list of identifiers. An empty relation array is left out.
 
 ```json
 {
-  "id": 1,
+  "id": 7,
   "project_id": 1,
-  "sequence": 1,
-  "identifier": "LIF-1",
+  "sequence": 3,
+  "identifier": "APP-3",
   "title": "Document the REST API",
   "description": "",
-  "status": "backlog",
-  "priority": "none",
+  "status": "active",
+  "priority": "high",
   "module_id": null,
-  "sort_order": 0,
+  "sort_order": 1000.0,
   "start_date": null,
   "target_date": null,
   "created_at": "2026-07-14 12:00:00",
-  "updated_at": "2026-07-14 12:00:00",
-  "labels": []
+  "updated_at": "2026-07-15 09:30:00",
+  "seq": 118,
+  "labels": ["docs"],
+  "blocked_by": ["APP-2"]
 }
 ```
 
-### Page and comment
+### Page
 
-`Page` fields are `id` (integer), `project_id` (integer or null), `sequence` (integer or null), `identifier` (string), `folder_id` (integer or null), `title` (string), `content` (string), `sort_order` (number), `status` (string), `pinned` (boolean), `created_at` (string), `updated_at` (string), and `labels` (string array).
+`id`, `project_id` (null for a workspace page), `sequence`, `identifier` (`APP-DOC-1`, or `DOC-1` for a workspace page), `folder_id`, `title`, `content` (Markdown), `sort_order`, `status` (`draft`, `active`, `complete` or `archived`), `pinned`, `created_at`, `updated_at`, `seq` and `labels`. Workspace pages have no labels.
 
-`Comment` fields are `id` (integer), `issue_id` (integer or null), `page_id` (integer or null), `user_id` (integer), `author` (string), `author_display_name` (string), `content` (string), `created_at` (string), and `updated_at` (string).
+### Comment
 
-### Project resources
+`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at` and `seq`.
 
-`Module` fields are `id` (integer), `project_id` (integer), `name` (string), `description` (string), `status` (string), `emoji` (string or null), `created_at` (string), and `updated_at` (string).
+### Module, label and folder
 
-`Label` fields are `id` (integer), `project_id` (integer), `name` (string), and `color` (string).
-
-`Folder` fields are `id` (integer), `project_id` (integer), `parent_id` (integer or null), `name` (string), and `sort_order` (number).
+- **Module:** `id`, `project_id`, `name`, `description`, `status` (`backlog`, `planned`, `active`, `paused`, `done` or `cancelled`), `emoji`, `created_at`, `updated_at`.
+- **Label:** `id`, `project_id`, `name`, `color` (a hex string such as `#6B7280`).
+- **Folder:** `id`, `project_id`, `parent_id`, `name`, `sort_order`.
 
 ### Delete responses
 
-Endpoints that delete a resource return this JSON shape unless the endpoint reference states otherwise.
+Unless an endpoint says otherwise, a successful delete answers `{"deleted": true}`.
 
-```json
-{
-  "deleted": true
-}
-```
+## Reference
+
+| Page | Covers |
+| --- | --- |
+| [Accounts and access](/docs/rest-api/identity) | Instance settings, signing in, sessions, API keys, connected tools, user administration. |
+| [Projects](/docs/rest-api/projects) | Projects, sidebar groups, membership, saved views, board and insights, project activity, GitHub import. |
+| [Issues, pages and plans](/docs/rest-api/work) | Issues, relations, the trash, comments, pages, plans, modules, labels and folders. |
+| [Attachments](/docs/rest-api/attachments) | Uploading, downloading, previews and the project file list. |
+| [Search, sync and realtime](/docs/rest-api/sync) | Search, the delta sync endpoints and the realtime WebSocket. |
+| [Exports and archives](/docs/rest-api/export) | Markdown, JSON and ZIP exports, and whole-project archives. |
+| [Repositories and commits](/docs/rest-api/repositories) | Repository bindings and closing issues from commit messages. |
+| [Public read API](/docs/rest-api/public) | The anonymous, read-only routes for a published project. |
+| [OAuth and discovery](/docs/rest-api/oauth) | Client registration, authorization, device login, tokens and metadata. |
+
+The MCP endpoint, `/mcp`, is served by the same process and takes the same bearer credentials. It is documented under [MCP](/docs/mcp).

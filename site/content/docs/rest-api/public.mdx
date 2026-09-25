@@ -1,0 +1,64 @@
+---
+title: Public read API
+description: The anonymous, read-only routes that serve a published project, what they leave out, and the limits that protect the instance from them.
+---
+
+When a lead publishes a project (`PUT /api/projects/{id}` with `"is_public": true`), its current issues, pages, comments and attachments can be read by anyone, with no account and no credential, under `/public/api/projects/{project}`. `{project}` is the project identifier, in any case. [Public projects](/docs/public-projects) covers what publishing exposes and how to review a project first.
+
+Each route mirrors a private one: the same JSON shapes and the same comment paging headers, with `/api` replaced by the public prefix. That lets a client built for the private API read a public project by changing its base path and dropping the token.
+
+## What it leaves out
+
+- The project's `lead_user_id` is null.
+- An issue has no `source`, and its relation arrays list only issues in the same project.
+- A comment keeps `author_display_name` but not `user_id` or the `author` username. The `author` filter on comment lists is ignored, so it cannot be used to test whether a username exists.
+- An attachment has no `uploader_id`.
+- `/changes` contains no comment rows, and its cursor counts only this project's writes.
+- Plans, activity, members, users, saved views, search, the realtime socket and every write are not available at all.
+
+Items in the trash are not served.
+
+## One answer for "no"
+
+A private project, a project that does not exist, a project unpublished a moment ago, an item in the trash, an attachment from another project, a non-numeric id and a path that matches no route all answer the same JSON `404`, `{"error": "not found"}`. Only `GET` is served; other methods are `405`. Unpublishing takes effect on the next request.
+
+Every response, errors included, carries `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cross-Origin-Resource-Policy: same-origin`, so nothing public outlives an unpublish in a cache.
+
+## Routes
+
+All are `GET` and take no credential. Replace `…` with `/public/api/projects/{project}`.
+
+| Route | Mirrors | Returns |
+| --- | --- | --- |
+| `/public/api/projects/{project}` | `GET /api/projects/{id}` | The `Project`. |
+| `…/index` | `GET /api/projects/{id}/index` | Every live issue and page as summary rows, and a cursor. |
+| `…/changes` | `GET /api/projects/{id}/changes` | Changes above `since`, with `limit`. No comment rows. |
+| `…/modules`, `…/labels`, `…/folders` | `GET /api/modules?project_id=` and the others | The project's structure. |
+| `…/issues/resolve/{identifier}` | `GET /api/issues/resolve/{identifier}` | One issue. An identifier from another project is `404`. |
+| `…/issues/{id}` | `GET /api/issues/{id}` | One issue by id. |
+| `…/issues/{id}/comments` | `GET /api/issues/{issue_id}/comments` | Comments, with the same query parameters and `x-comment-*` headers. |
+| `…/pages/{id}` | `GET /api/pages/{id}` | One page with its content. |
+| `…/pages/{id}/comments` | `GET /api/pages/{page_id}/comments` | Comments on the page. |
+| `…/attachments?entity_type=&entity_id=` | `GET /api/attachments` | Attachments on a live issue, page or comment in the project. An unknown `entity_type` is `404`. |
+| `…/attachments/{id}` | `GET /api/attachments/{id}` | The file, streamed, with the same type, disposition and sandbox headers as the private route. No byte ranges. |
+| `…/attachments/{id}/thumbnail` | `GET /api/attachments/{id}/thumbnail` | The WebP thumbnail. |
+| `…/attachments/{id}/preview` | `GET /api/attachments/{id}/preview` | The archive or database preview. |
+
+```bash
+curl "$LIFIC/public/api/projects/APP/issues/resolve/APP-12"
+```
+
+## Limits
+
+These routes carry no credential, so they are bounded to keep anonymous traffic from crowding out signed-in users:
+
+| Limit | Value | When exceeded |
+| --- | --- | --- |
+| Requests per client address | 240 per minute | `429`, `Retry-After: 30` |
+| Requests in progress, whole instance | 4 | `503`, `Retry-After: 2` |
+| Attachment downloads in progress | 4 | `503`, `Retry-After: 2` |
+| Thumbnail or preview being generated | 1 at a time | `503`, `Retry-After: 2` |
+| Largest file a thumbnail or preview is generated from | 32 MiB | `404`. A thumbnail made earlier is still served. |
+| Download | Ends after 15 seconds without progress, or 5 minutes in total | The connection is closed. |
+
+Behind a reverse proxy, set [`trusted_proxies`](/docs/configuration#server) so the per-address limit sees visitors rather than the proxy. A request from a trusted proxy whose client-identity headers fail to verify is `503`.

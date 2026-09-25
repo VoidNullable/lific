@@ -1,220 +1,119 @@
 ---
-title: Repository bindings and git hooks
-description: Associate a checkout with a Lific project, give stdio agents that context, and close issues from explicitly invoked git hooks or CI jobs.
+title: Repository bindings
+description: Tie a git checkout to a Lific project so agents working in it find their project without being told, locally or against a remote server.
 ---
 
-`lific bind` associates the repository containing your current directory with a
-project. A stdio MCP agent launched from that checkout can then omit the project
-on supported tools. The server stores repository aliases, never your checkout's
-directory path, and never runs git on your machine.
+A repository binding records that a git repository belongs to a Lific project. An agent that starts `lific mcp` inside a bound checkout then works in that project by default, so you do not have to name the project in every prompt.
 
-Git-hook automation is separate. A closing reference in a commit message changes
-nothing until you invoke `lific git-hook` or its HTTP endpoint.
+A binding stores two identities derived from the repository, never your checkout's path, so every clone of the same repository resolves to the same project without being bound again. The server never runs git on your machine; the `lific` command computes the identities locally and sends them.
+
+Closing issues from commit messages is a separate feature. See [Git hooks](/docs/git-hooks).
 
 ## Bind a checkout
 
-Run these commands from inside the repository, using an initialized local
-instance:
+From anywhere inside the repository:
 
-```shell
-lific bind PRO
-lific bind
-lific bind --json
+```bash
+lific bind APP
 ```
 
-The first command binds to an existing project. The next two inspect the binding
-without changing it. If you want to create the project when it does not exist:
+That binds the repository to the existing project `APP`. To create the project at the same time, add `--create`. The new project is named after its identifier; rename it later in the web UI or with `lific project update`.
 
-```shell
-lific bind PRO --create
+```bash
+lific bind APP --create
 ```
 
-The new project's initial name is its identifier. Rename it afterwards in the
-web UI or with `lific project update`. Select the intended database with the
-ordinary global `--config` or `--db` option; a binding does not select an instance
-for you. Local database commands run with the authority of the operator who
-holds that database file.
+Run `lific bind` with no project to see what the checkout resolves to. It changes nothing, which makes it the quickest way to ask "which project is this?":
+
+```text
+This repository is bound to APP (App).
+
+  remote  v1:github.com/example/app (matches this binding)
+  root    v1:a96d132749268ec285739f51445b73b0c6268c8b (matches this binding)
+```
+
+`bind` uses the instance your configuration selects, like every other command. Pass `--config` or `--db` to pick another one. Against a local database it acts with the full authority of whoever holds the database file.
 
 ## Use a remote server
 
-Authenticate with the remote instance, then bind from the local checkout:
+When the tracker runs on another machine, sign in to it once, then bind through the HTTP backend. No local database is needed.
 
-```shell
+```bash
 lific login --url https://tracker.example.com
-lific --backend http --url https://tracker.example.com bind PRO
-lific --backend http --url https://tracker.example.com bind --json
+lific --backend http --url https://tracker.example.com bind APP
 ```
 
-The remote commands need no local database. They compute the aliases locally
-and send them to the selected server. Binding requires project lead or admin
-authority through the server's authorization checks. The credential used by
-your agent must also be able to read the bound project.
+Binding a repository, and removing or merging bindings, needs the project's lead role or an instance administrator. The account your agent uses also needs to be able to read the project, or the binding is invisible to it.
 
-For repository-aware remote MCP, configure your client to launch this local
-stdio command from the checkout:
+An MCP client connected straight to the server's `/mcp` URL cannot use a binding, because the server cannot see the client's working directory. Have the client launch a local stdio proxy from the checkout instead:
 
-```shell
+```bash
 lific mcp --remote --url https://tracker.example.com
 ```
 
-Use the server's base URL, without `/mcp`. The proxy appends the endpoint and
-reuses CLI credentials, including stored login credentials or an API key supplied
-through `LIFIC_API_KEY`. Credentialed connections to non-loopback hosts require
-HTTPS. A rejected credential or unreachable server produces a JSON-RPC error
-for the call; it does not switch to a local database.
+Give the server's base URL, without `/mcp`; the proxy adds it. The proxy computes the checkout's identity locally and forwards every call to the server, authenticated with the same credentials the CLI uses: `LIFIC_API_KEY` if it is set, otherwise the token `lific login` stored. It refuses to send a credential over plain `http://` to any host but your own machine. If the server rejects the credential or cannot be reached, the call fails with an error; the proxy never falls back to a local database.
 
-`lific connect --url` configures clients using a local initialized instance. It
-does not provision a remote-only account. Use the manual launch command above
-when no local database exists. See [Connect agents](/docs/connect) for generated
-client configuration and [MCP](/docs/mcp) for direct HTTP authentication.
+`lific connect` writes client configurations from a local instance and does not set up this remote form for you. Add the command above to your client's MCP configuration by hand; [Connect agents](/docs/connect) shows where each client keeps it. To reach several servers through one stdio connection, use [multi-instance MCP](/docs/mcp/multi-instance).
 
-A client connected directly to the remote HTTP endpoint cannot supply checkout
-context automatically: the server cannot inspect the client's working directory.
-For several servers behind one stdio connection, use
-[multi-instance MCP](/docs/mcp/multi-instance).
+## How a repository is identified
 
-## How repository identity works
+`lific bind` asks git for up to two identities, called aliases:
 
-Lific asks git for up to two aliases:
-
-| Kind | Identity |
+| Alias | Value |
 | --- | --- |
-| `remote` | The normalized `origin` URL, prefixed with `v1:`. |
+| `remote` | The `origin` remote's URL, normalized and prefixed with `v1:`. |
 | `root` | The root commit of HEAD's first-parent history, prefixed with `v1:`. |
 
-Remote normalization removes transport syntax, credentials and a trailing
-`.git`, and lowercases the host. Repository path case and explicit ports remain
-significant. SSH and HTTPS URLs for the same host and path can therefore match.
-Local filesystem paths and `file://` remotes do not produce a remote alias.
+Normalizing the remote removes the transport, any credentials and a trailing `.git`, and lowercases the host name. The path's case and an explicit port are kept. So `git@github.com:Example/App.git` and `https://github.com/Example/App` give the same alias, `v1:github.com/Example/App`. A local path or a `file://` remote gives no remote alias.
 
-A shallow clone omits the root alias because its oldest visible commit may be
-a shallow boundary. An empty repository has no root alias either. A checkout
-with neither usable alias cannot be bound; add a hosted `origin` or create a
-commit in a non-shallow repository first.
+A shallow clone gives no root alias, because its oldest visible commit is not the real root. A repository with no commits has none either. A checkout with neither alias cannot be bound: add an `origin` remote that names a host, or make a commit in a full clone.
 
-Moving a checkout does not change these identities. Another clone can resolve
-the existing binding when its aliases match. Forks can share a root commit, so
-an alias is a lookup key, not proof of repository ownership or a grant of project
-access. Resolution only reports projects the caller can see under the instance's
-authorization policy.
+Moving a checkout changes neither alias. Forks usually share a root commit with the original, so an alias is a lookup key, not proof that a repository belongs to anyone, and a binding grants no access. Resolution only ever reports projects the caller is allowed to see.
 
-Reads never accumulate aliases. If the remote changes but the root still
-matches, the repository can keep resolving without recording the new remote.
-Run `lific bind PRO` explicitly to add the currently presented aliases after
-reviewing them. Repository bindings do not transfer in
-[project archives](/docs/project-archives).
+Resolving never records new aliases. If you change `origin` and the root commit still matches, the repository keeps resolving but the new remote is not stored. Run `lific bind APP` again to add it. Bindings do not travel in [project archives](/docs/project-archives).
 
 ## Which tools use the binding
 
-Local stdio and the remote stdio proxy resolve repository context at startup.
-Launch them from the intended checkout and restart the MCP process after
-changing a binding. The initialization instructions report whether the session
-has a bound project. A missing or conflicting binding does not choose a project
-for you; pass explicit projects while diagnosing it.
+`lific mcp` and `lific mcp --remote` work out the binding once, when they start, from the directory they were started in. Start them from the checkout, and restart the MCP client after you change a binding. When a project is bound, the initialization instructions the agent receives name it. When the checkout matches two different bindings, no project is assumed and the session starts unbound; run `lific bind` in the checkout to see the conflict.
 
-| Tool | When an omitted `project` uses the binding |
+With a bound project, an omitted `project` argument means the bound project on these tools:
+
+| Tool | When the binding fills in `project` |
 | --- | --- |
-| `list_issues`, `create_issue`, `get_board`, `create_plan` | Whenever the session has a bound project. |
-| `list_resources` | Only for `resource_type` values `issue`, `plan`, `module`, `label` and `folder`. |
+| `list_issues`, `create_issue`, `get_board`, `create_plan` | Always. |
+| `list_resources` | For `resource_type` `issue`, `plan`, `module`, `label` and `folder`. |
 
-An explicit project always wins. These defaults do not narrow `search`, make
-`create_page` stop creating workspace pages, or narrow `list_resources` for
-pages. Tools taking a resource identifier still need that identifier. Destructive
-tools do not gain an implicit project, and a binding never increases permissions.
+An explicit `project` always wins. Everything else keeps its unbound meaning: `search` still searches every project, `create_page` without a project still creates a workspace page, and `list_resources` for pages still lists every project's pages. Tools that take an identifier such as `APP-42` still need it, and bulk updates and deletes never pick up an implicit project. A binding never raises anyone's permissions.
 
 ## Diagnose or remove a binding
 
-`lific bind --json` reports `resolution` as `none`, `one` or `conflict`, alongside
-the presented aliases. `project` is populated for `one`; `projects` lists
-candidates for `conflict`. Each alias reports whether it matched. An unmatched
-alias alongside a resolved project is normal when only the other alias is stored.
-
-If no binding appears, check the selected instance, the agent's working
-directory, its project access and whether git is installed. A caller without
-visibility cannot distinguish an inaccessible binding from no binding.
-
-If aliases point to different bindings, the CLI refuses to reassign them
-silently. Inspect the REST binding records, then delete an incorrect binding or
-merge them deliberately:
-
-| Route | Purpose |
-| --- | --- |
-| `POST /api/repos/resolve` | Resolve an `aliases` array of objects with `kind` and `value`. Visible matches include binding IDs. |
-| `POST /api/repos/bind` | Bind a `project` identifier and an `aliases` array. Existing aliases on another binding are refused. |
-| `GET /api/projects/{id}/bindings` | List a project's bindings and their identities, with project read access. |
-| `DELETE /api/repos/bindings/{id}` | Remove a binding with lead or admin authority on its project. |
-| `POST /api/repos/merge` | Move aliases from binding ID `from` into binding ID `into`, with lead or admin authority on both projects. |
-
-`from` and `into` are numeric binding IDs, not project IDs. Merging bindings does
-not merge project contents. The destination binding survives; the source binding
-is removed. After correcting the records, rerun `lific bind` and restart the agent.
-
-## Close issues from git or CI
-
-The parser recognizes `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
-`resolve`, `resolves` and `resolved`, followed by whitespace and an issue
-identifier. Matching is case-insensitive. Repeat the keyword for each issue:
-
-```text
-Fixes PRO-42. Closes PRO-43.
-```
-
-A bare mention such as `see PRO-42` does nothing. Repeated references are
-deduplicated. There is no branch or repository-binding filter: the identifiers
-in the messages select the issues, subject to the caller's permissions.
-
-Preview an existing message without writing:
-
-```shell
-git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook --dry-run
-```
-
-For local post-commit automation, put this in the repository's configured
-`post-commit` hook and make the hook executable. Use your actual server address
-and ensure the hook process can read the intended CLI credentials:
-
-```sh
-#!/bin/sh
-git log -1 --format=%B | lific --backend http --url https://tracker.example.com git-hook
-```
-
-Respect any existing `core.hooksPath` and existing hooks rather than overwriting
-them. A post-commit failure does not undo the commit; inspect the error and rerun
-the command after fixing access. For a local tracker, replace the HTTP options
-with an explicit database or configuration path.
-
-In CI, select the exact commits you intend to process:
-
-```shell
-lific --backend http --url https://tracker.example.com git-hook --range origin/master..HEAD --dry-run
-```
-
-Remove `--dry-run` only after checking the preview. The range is passed to
-`git log`; choose the base and head for your CI event and fetch the required
-history first. The example range can be empty after a fetch moves `origin/master`
-to `HEAD`. Run write-enabled automation only for trusted commits, using a
-credential scoped to the projects that job should update.
-
-The stdin form also works in a `commit-msg` hook as `lific git-hook < "$1"`, but
-it writes before the commit is guaranteed to succeed. Use post-commit or a CI
-step after your acceptance checks when closure should follow completed work.
-
-The equivalent HTTP endpoint is `POST /api/git-hook`:
+`lific bind --json` reports what the checkout resolves to:
 
 ```json
 {
-  "messages": ["Fixes PRO-42. Closes PRO-43."],
-  "dry_run": true
+  "resolution": "one",
+  "project": { "id": 1, "identifier": "APP", "name": "App" },
+  "projects": [],
+  "aliases": [
+    { "kind": "remote", "value": "v1:github.com/example/app", "matched": true },
+    { "kind": "root", "value": "v1:a96d132749268ec285739f51445b73b0c6268c8b", "matched": true }
+  ],
+  "created": false
 }
 ```
 
-CLI JSON and HTTP responses contain `closed` and `skipped`; a dry run uses
-`would_close` instead of `closed`. Skipped entries report `not found`,
-`already closed`, or, over HTTP, `forbidden` for a visible issue the caller may
-not update. Issues already done or cancelled remain unchanged. Invisible issues
-are reported as not found. HTTP checks maintainer authority on each issue;
-local database writes use operator authority.
+`resolution` is `none`, `one` or `conflict`. `project` is set only for `one`, and `projects` lists the candidates only for `conflict`. Each alias says whether it matched. An unmatched alias next to a resolved project is normal when only the other alias was stored.
 
-Closures use ordinary status updates, including content history, status
-transitions and live notifications. Inspect the per-issue results rather than
-assuming every reference closed successfully.
+If the agent reports no binding, check that it started in the checkout, that it uses the instance you bound, that its account can read the project, and that git is installed. An account that cannot see a project gets the same answer as if no binding existed.
+
+When the two aliases point at different bindings, `lific bind` refuses to move them silently. Look at the records over the REST API, then delete the wrong binding or merge the two:
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/repos/resolve` | Resolve an `aliases` array of `{ "kind", "value" }` objects. Matches you can see include their binding IDs. |
+| `POST /api/repos/bind` | Bind a `project` identifier to an `aliases` array. Aliases that belong to another binding are refused. Needs lead or administrator. |
+| `GET /api/projects/{id}/bindings` | List a project's bindings and their aliases. Needs read access to the project. |
+| `DELETE /api/repos/bindings/{id}` | Remove a binding. Needs lead or administrator on its project. |
+| `POST /api/repos/merge` | Move the aliases of binding `from` into binding `into`. Needs lead or administrator on both projects. |
+
+`from` and `into` are numeric binding IDs, not project IDs. Merging moves aliases between bindings; it does not merge the projects. The `into` binding survives and the `from` binding is removed. Afterwards, run `lific bind` to confirm the result and restart the agent.

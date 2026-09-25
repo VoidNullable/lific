@@ -1,0 +1,192 @@
+---
+title: Limits
+description: Every fixed limit in Lific that a person, script or agent can run into, what it applies to, and what happens when it is exceeded.
+---
+
+Lific bounds anything a caller controls: request sizes, page sizes, how fast one address can try passwords, how much an archive may expand to. The numbers are built into the binary and cannot be changed in `lific.toml`. This page lists them so that a refusal is never a surprise.
+
+Some limits refuse the request with an error that names the limit. Others quietly clamp the value you asked for, which is noted where it happens. A `429` or `503` from Lific carries a `Retry-After` header unless the table says otherwise.
+
+## Request size
+
+| Limit | Value | Applies to | When exceeded |
+| --- | --- | --- | --- |
+| Request body | 2 MiB | Every REST request, unless listed below | `413` |
+| Attachment upload request | 64 MiB | `POST /api/attachments` (the file itself is limited to 10 MiB, see [Attachments](#attachments)) | `413` |
+| Project archive upload request | 129 MiB | `POST /api/project-archives` | `413` |
+| GitHub import request | 16 KiB | `POST /api/projects/{id}/import/github` | `413` |
+| OAuth request body | 64 KiB | `/oauth/*` routes | `413` |
+
+The 2 MiB ceiling also decides the largest issue description or page you can save over REST, since the text travels in the request body.
+
+## Content
+
+| Limit | Value | Applies to | When exceeded |
+| --- | --- | --- | --- |
+| Comment body | 256 KiB | Creating a comment, everywhere | `400` (MCP: `Error:` text). A comment already larger than this from before the limit existed can be edited, but not made longer. |
+| Mentions in one comment | 256 distinct `@username`s | Comments | Refused with `400`. Lific does not notify the first 256 and drop the rest. |
+| Attachment references in one body | 256 distinct attachments | Issue descriptions, pages and comments | Refused with `400`, because linking only some of them would unlink attachments the text still uses. |
+| Project identifier | 1 to 5 characters: uppercase letters or digits, starting with a letter. `DOC` is reserved. | Creating a project | `400` |
+| Password | 8 to 1,024 bytes | Signup, `lific user create`, password changes | `400` |
+| Instance name | 60 characters | Instance settings | `400` |
+| Login message | 280 characters | Instance settings | `400` |
+| Session lifetime | 1 to 365 days (default 30) | Instance settings | `400` |
+| Attachment alt text | 1,000 characters | Editing an attachment | `400` |
+| Saved view configuration | 8 KiB | Saved views | `400` |
+
+## Pages of results
+
+These never cause an error. A larger value is lowered to the cap, and a zero or negative limit becomes 1. When more results exist, the response says so and gives the offset for the next page.
+
+| Where | Default | Cap |
+| --- | --- | --- |
+| REST issue, plan and page lists | 50 (page lists return everything when you pass neither `limit` nor `offset`) | 500 |
+| REST and CLI comment lists | 50 | 500 |
+| REST and MCP activity feeds | 50 over REST, 30 for `get_activity` | 200 |
+| Search (REST, MCP and `lific search`) | 20 | 500 |
+| Search offset | none | 100,000 |
+| MCP `list_issues` | 50 | 500 |
+| MCP `list_resources` | 100 for issues and pages, 50 for plans | 500 |
+| MCP `list_comments` | 50 | 500 |
+| MCP `get_issue` comments | the 3 most recent (`include_comments=recent`) | 500 most recent (`all`) |
+| MCP `get_attachment` text | 200 lines | 500 lines |
+| `lific issue list` | 50 | 500 |
+| Project insights `weeks` | 12 | 52 |
+
+A page of comments is also limited to about 2 MiB of response, counted after JSON encoding. A thread of long comments therefore returns fewer rows than you asked for, with a pointer to the next page. A short page does not mean the thread has ended.
+
+Two MCP tools work on a fixed batch rather than pages. `get_board` shows at most 500 issues and says when older ones are left out. `bulk_update` changes at most 500 matching issues in one call.
+
+## Search
+
+| Limit | Value | When exceeded |
+| --- | --- | --- |
+| Query length, normal mode | 4 KiB | `400` |
+| Query length, `literal` mode | 256 bytes | `400` |
+| Records matched in `literal` mode | 10,000 | `400`, asking you to narrow the query |
+| Attachment text indexed for search | Text files up to 512 KiB | Larger files are found by filename only |
+
+## Attachments
+
+| Limit | Value | Applies to | When exceeded |
+| --- | --- | --- | --- |
+| File size | 10 MiB | Uploads over REST, the web UI and the MCP `upload_attachment` tool | `400` (MCP: `Error:` text) |
+| Upload rate | 30 uploads per 10 minutes per user | REST uploads, including the web UI | `403` |
+| Thumbnail source | 50 megapixels | Thumbnail generation | The upload succeeds without a thumbnail |
+| ZIP preview | First 200 entries | Attachment previews | The listing is marked truncated |
+
+Uploads are also checked against an allowlist of file types, read from the file's contents rather than its name. The [MCP tool reference](/docs/mcp/tools) lists the types.
+
+## Sign-in and rate limits
+
+Rate limits count requests per client address, and some also per account. Behind a reverse proxy, set [`trusted_proxies`](/docs/configuration#server) so Lific sees each visitor's address instead of the proxy's.
+
+| Limit | Value | Counted per | When exceeded |
+| --- | --- | --- | --- |
+| Failed sign-ins | 5 per 15 minutes | Client address, and separately per username or email | `400` with the number of seconds to wait. Successful sign-ins do not count. |
+| Re-entering your password before a sensitive action | 5 per 15 minutes | Client address, and separately per account | `400` with the wait. Successful confirmations do not count. |
+| Password changes | 5 per 15 minutes | Client address, and separately per account | `400` with the wait. Successful changes do not count. |
+| Signups | 5 per 15 minutes | Client address, and separately per email | `400` with the wait. Every attempt counts. |
+| OAuth client registrations | 10 per hour | Client address | `429` |
+| OAuth device authorizations (`lific login`) | 10 per hour | Client address | `429` |
+| Repository binding changes | 30 per hour | User | `400` with the wait |
+| Public project reads | 240 per minute | Client address | `429` |
+
+A request from a trusted proxy that carries an invalid `X-Lific-Client-IP` and `X-Lific-Proxy-Secret` pair gets `503` on these routes. See [Configuration](/docs/configuration#server).
+
+## Concurrency
+
+These limit how many expensive operations run at once on the whole instance. A request over the limit is refused immediately rather than queued.
+
+| Limit | Value | When exceeded |
+| --- | --- | --- |
+| Markdown exports in progress over REST and MCP | 2 | `429` (MCP: `Error:` text) |
+| Browser project archive exports and imports in progress | 1 | `429` |
+| GitHub imports from the web UI | 1 per project, 4 per instance | `409` |
+| Public project requests in progress | 4 | `503` |
+| Public attachment downloads in progress | 4 | `503` |
+| Public thumbnail and preview generation | 1 at a time, from files up to 32 MiB | `503` when busy. A larger file gets `404` for a thumbnail that has not been made yet, and for a preview. |
+| Realtime connections | 16 per user, 1,024 per instance | `429`, without `Retry-After` |
+
+A realtime connection is also closed if its client sends messages over 16 KiB, or more than 64 messages in 10 seconds. The web UI never does either.
+
+## Exports
+
+These apply to Markdown exports from the web UI, REST, the MCP `export` tool and `lific export`. Each is checked before or while the export is built, and an export that would exceed one is refused with `400` rather than written partially.
+
+| Limit | Value |
+| --- | --- |
+| Files in one export | 10,000 |
+| Comments on one issue | 1,000 |
+| Comments in one project export | 100,000 |
+| One exported file | 8 MiB |
+| Whole export, uncompressed | 128 MiB |
+| Metadata entries in one export | 50,000 |
+| Download stalls | The download ends after 30 seconds without progress, or after 30 minutes in total |
+
+When `lific export project` runs with `--backend http`, it unpacks the server's ZIP with its own limits: 10,000 entries and 512 MiB once expanded.
+
+Exporting several issues at once from the web UI stops at 16 MiB and shows an error instead of saving a partial file.
+
+## Project archives
+
+A [project archive](/docs/project-archives) made or read by the CLI works with the local database, so it gets larger limits than one uploaded or downloaded through the browser. An archive over a limit is refused with `413` in the browser and an error naming the limit in the CLI.
+
+| Limit | CLI | Browser |
+| --- | --- | --- |
+| Archive file (compressed) | 2 GiB | 128 MiB |
+| Archive contents once expanded | 2 GiB plus 80 MiB | 256 MiB |
+| Project data (the manifest) | 64 MiB | 16 MiB |
+| One attachment | 256 MiB | 64 MiB |
+| All attachments together | 2 GiB | 192 MiB |
+| Distinct attachments | 10,000 | 2,000 |
+| Rows across all tables | 200,000 | 50,000 |
+
+A browser upload must finish within 120 seconds and may not stall for more than 20.
+
+## Restoring backups
+
+`lific restore` checks an archive's expanded size before it writes anything, so an archive from someone else cannot fill the disk. An archive over a limit is refused. `--allow-large` raises the limits for an archive you made yourself; every other check still runs.
+
+| Limit | Default | With `--allow-large` |
+| --- | --- | --- |
+| Database file | 512 MiB | 16 TiB |
+| One attachment | 64 MiB | 16 TiB |
+| Everything together | 1 GiB | 16 TiB |
+| Entries in the archive | 10,000 | 10 million |
+| Manifest | 1 MiB | 64 MiB |
+
+`lific dump` and the automatic backups have no size limit.
+
+## Imports and git hooks
+
+| Limit | Value | When exceeded |
+| --- | --- | --- |
+| GitHub issues in one import | 10,000 | `413` from the web UI, an error from the CLI |
+| Comments on one GitHub issue | 1,000 | `413` / error |
+| One response from GitHub | 8 MiB | `413` / error |
+| Imported text in total | 128 MiB | `413` / error |
+| Commit messages in one `git-hook` request | 500 | `400` |
+| Issue references in one `git-hook` request | 500 | `400` |
+
+Without a token, GitHub itself allows 60 requests an hour, which a large repository can use up.
+
+## OAuth
+
+| Limit | Value | When exceeded |
+| --- | --- | --- |
+| Access token lifetime | 30 days | The client must sign in again. Lific issues no refresh tokens. |
+| Device code lifetime (`lific login`) | 15 minutes | The code expires and the login has to start over |
+| Device code polling | Every 5 seconds at most | Polling faster is answered with `slow_down` |
+| Client name | 128 bytes, no control characters | `400` |
+| Redirect URIs per client | 8, each up to 2,048 bytes | `400` |
+| Registered clients | 1,024 per instance, 4 MiB in total | `429` until old ones are removed |
+| Pending device codes | 1,024 per instance | `429` |
+
+A registered client that has never been used is removed after 7 days, which frees room for new registrations.
+
+## Multiple instances
+
+`lific mcp --instances` has its own limits on its configuration file, the number of instances, response sizes and timeouts. [Multiple instances](/docs/mcp/multi-instance#limits) lists them.
+
+The CLI's HTTP backend gives up on a request after 30 seconds.

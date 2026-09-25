@@ -1,0 +1,129 @@
+---
+title: OAuth and discovery
+description: The OAuth 2.1 routes Lific serves for MCP clients and the CLI, including discovery metadata, client registration, browser approval, device login, tokens and revocation.
+---
+
+Lific is its own OAuth authorization server. MCP clients and `lific login` use it to get an access token without anyone copying a key by hand. Most people never call these routes directly; this page is for building or debugging a client. The [MCP overview](/docs/mcp#oauth-21) describes the flow from the user's side.
+
+What Lific supports:
+
+- One scope, `mcp`, which grants the access of the approving person through a connected-tool account.
+- The authorization-code grant with PKCE (`S256` only), and the device authorization grant.
+- Public clients only. Lific issues no client secrets, and the token endpoint's only authentication method is `none`.
+- Access tokens (`lific_at_...`) that last 30 days. There are no refresh tokens; when a token expires, the client runs the flow again.
+
+An access token works as a bearer token on `/mcp` and the REST API, except the [account and credential routes](/docs/rest-api#which-credentials-an-endpoint-accepts).
+
+None of these routes goes through the normal authentication layer. Approval requires a browser session in the `lific_token` cookie (or a session bearer token) that signed in within the last 15 minutes, because approving creates a lasting credential. An API key or OAuth token can never approve anything.
+
+Errors from the JSON routes follow the OAuth specifications: `{"error": "<code>", "error_description": "<text>"}`, with `error_description` sometimes absent. The approval pages are HTML. Request bodies are capped at 64 KiB.
+
+Clients that drop the `/oauth` prefix are also served: `/register`, `/authorize`, `/device_authorization`, `/device`, `/token` and `/revoke` behave exactly like their `/oauth/...` counterparts.
+
+## Discovery
+
+The issuer is `public_url` when it is set. Without it, Lific uses the address the request came in on if that host is one of its own loopback names, and otherwise its bind address. Set [`public_url`](/docs/configuration#server) for any deployment behind a proxy, or clients will be pointed at the wrong address.
+
+### GET `/.well-known/oauth-protected-resource`
+
+### GET `/.well-known/oauth-protected-resource/mcp`
+
+Protected-resource metadata. Returns `resource` (the issuer followed by `/mcp`), `authorization_servers` (the issuer), `scopes_supported` (`["mcp"]`) and `bearer_methods_supported` (`["header"]`). A `401` from the API points at the `/mcp` form in its `WWW-Authenticate` header.
+
+### GET `/.well-known/oauth-authorization-server`
+
+Authorization-server metadata: `issuer`, the `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, `revocation_endpoint` and `device_authorization_endpoint` (all under `/oauth`), and the supported scopes, response types (`code`), response modes (`query`), grant types, token endpoint authentication method (`none`) and PKCE method (`S256`).
+
+## Registering a client
+
+### POST `/oauth/register`
+
+Dynamic client registration. No credential. JSON body:
+
+| Field | Meaning |
+| --- | --- |
+| `redirect_uris` | Required unless the client asks only for the device grant. At most 8, each an absolute `http` or `https` URL of at most 2,048 characters with no fragment. `http://localhost/...` is allowed. |
+| `client_name` | Shown on the approval page. At most 128 bytes. Default `MCP Client`. |
+| `grant_types` | Default `["authorization_code"]`. A client that only needs device login sends `["urn:ietf:params:oauth:grant-type:device_code"]` and no redirect URIs. |
+| `response_types` | Default `["code"]`. |
+
+Answers `201` with `client_id`, `client_name`, `redirect_uris`, `grant_types`, `response_types` and `token_endpoint_auth_method: "none"`, whatever method the client asked for.
+
+Invalid metadata is `400` with `invalid_redirect_uri` or `invalid_client_metadata`. Each client address may register 10 clients per hour; the next is `429` with `too_many_requests` and a `Retry-After` header. The instance keeps at most 1,024 clients; when full, registration is `429` with `temporarily_unavailable`. A client that has never been used is removed after 7 days.
+
+## Browser approval (authorization code)
+
+### GET `/oauth/authorize`
+
+The consent page a client sends the user's browser to. Query: `client_id`, `redirect_uri` (one of the client's registered URIs), `response_type=code`, `scope=mcp`, `code_challenge` (43 characters) and `code_challenge_method=S256`, plus optional `state`.
+
+Anything else is an HTML `400`. A browser that is not signed in gets an HTML `401` with a link to sign in, after which the user starts the connection again from the client. Otherwise the page names the client, the redirect address, the token lifetime and the approving account, and asks which tool is connecting, so the activity log can name it.
+
+### POST `/oauth/authorize`
+
+The consent form's submission. Form fields: the request parameters above, `csrf_token` from the page, `decision` (`approve` or `deny`), and `tool` (a connected-tool id) or `tool_custom` (a free-text name).
+
+The form token is tied to the session and to the exact request, and expires after 10 minutes; a mismatch is an HTML `403`. A session older than 15 minutes gets a page explaining how to sign in again; nothing is connected.
+
+On approval, the browser is redirected to `redirect_uri` with `code` and `state`. The code works once, for 10 minutes. On denial, it is redirected with `error=access_denied` and `state`, and no code exists.
+
+## Device login
+
+For a client with no browser of its own, such as `lific login` on a server.
+
+### POST `/oauth/device_authorization`
+
+Starts a device login. No credential. Body, as a form or JSON: `client_id` (a registered client) and optional `scope`, which must be `mcp` if present.
+
+Returns `device_code` (secret, for the client), `user_code` (eight letters shown as `XXXX-XXXX`, for the person), `verification_uri` (the `/oauth/device` page), `verification_uri_complete` (the same with the code filled in), `scope`, `expires_in` (900 seconds) and `interval` (5 seconds).
+
+A missing `client_id` is `400 invalid_request`, an unknown one `400 invalid_client`, and another scope `400 invalid_scope`. Each client address may start 10 device logins per hour, and at most 1,024 may be pending on the instance; both answer `429`.
+
+### GET `/oauth/device`
+
+The page where the person types the code. Query: optional `user_code` to fill it in.
+
+### POST `/oauth/device`
+
+The page's form. The first submission, with `user_code`, `csrf_token` and `decision=approve`, looks up the code and shows a confirmation page naming the client and the approving account. The second, carrying that page's `confirmation_token` and optionally `tool` or `tool_custom`, approves it. `decision=deny` refuses the login at either step, and needs a signed-in session of any age rather than a recent one.
+
+An unknown, expired or already used code is an HTML `400`.
+
+## Tokens
+
+### POST `/oauth/token`
+
+Exchanges a grant for an access token. Form-encoded body (`application/x-www-form-urlencoded`).
+
+For an authorization code: `grant_type=authorization_code`, `code`, `code_verifier`, `client_id` and `redirect_uri`, which must match the ones used to get the code.
+
+For device login: `grant_type=urn:ietf:params:oauth:grant-type:device_code` and `device_code`. Poll no faster than `interval`.
+
+Returns:
+
+```json
+{
+  "access_token": "lific_at_...",
+  "token_type": "Bearer",
+  "expires_in": 2592000,
+  "scope": "mcp"
+}
+```
+
+Errors are `400` with an OAuth `error` code:
+
+| `error` | Meaning |
+| --- | --- |
+| `unsupported_grant_type` | Any other grant, including `refresh_token`. |
+| `invalid_request` | A required field is missing. |
+| `invalid_grant` | The code or device code is unknown, expired or used, the client or redirect URI does not match, PKCE fails, or the approving account has since been deactivated or deleted. |
+| `authorization_pending` | Device login: not yet approved. Keep polling. |
+| `slow_down` | Device login: polled faster than `interval`. |
+| `access_denied` | Device login: the person refused. |
+| `expired_token` | Device login: the 15 minutes ran out. Start again. |
+
+A token is bound to the connected-tool account created or reused at approval. A password change, signing out everywhere or disconnecting the tool revokes it, and it stops working while its owner is deactivated.
+
+### POST `/oauth/revoke`
+
+Revokes an access token. Form body: `token`, and an optional `token_type_hint` that is ignored. The request itself must carry `Authorization: Bearer` with a session token or an OAuth access token; an API key is not accepted here, and without a valid credential the answer is `401`. Answers `200` whether or not the token existed, so it cannot be used to test tokens.

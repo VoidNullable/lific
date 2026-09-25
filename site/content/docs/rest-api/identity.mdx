@@ -1,23 +1,25 @@
 ---
-title: Identity and instance
-description: Instance settings, browser sessions, API keys, connected tools, and users.
+title: Accounts and access
+description: Instance settings, signing in and out, sessions, API keys, connected tools and user administration over REST.
 ---
+
+These endpoints manage who can reach the instance and with what. Read [Get a credential](/docs/rest-api#get-a-credential) first: several of them accept only a recent browser session, and none of the account routes accept an OAuth token.
 
 ## Instance
 
+### GET `/api/health`
+
+Answers the plain text `ok` with status `200`. No credential. Use it for health checks; it does not touch the database.
+
 ### GET `/api/instance`
 
-Returns public instance metadata for an authentication screen. This endpoint has no path or query parameters. It has no request body.
+What a sign-in screen needs before anyone is signed in. No credential.
 
-Response: an object with `allow_signup` (boolean), `has_users` (boolean), `instance_name` (string), `login_message` (string), and `web_auto_login` (boolean).
-
-```bash
-curl https://your-server.example/api/instance
-```
+Returns `allow_signup` (boolean), `has_users` (whether any human account exists yet), `instance_name`, `login_message` and `web_auto_login`. `web_auto_login` is also `true` when the server runs with `[auth] required = false`, because that is the signal the web UI uses to sign in without a form.
 
 ```json
 {
-  "allow_signup": true,
+  "allow_signup": false,
   "has_users": true,
   "instance_name": "Lific",
   "login_message": "",
@@ -27,62 +29,42 @@ curl https://your-server.example/api/instance
 
 ### GET `/api/instance/settings`
 
-Returns the complete instance settings object. Requires an administrator. This endpoint has no path or query parameters. It has no request body.
+The full instance settings. **Administrator.**
 
-Response: an object with `allow_signup` (boolean), `instance_name` (string), `signup_email_domains` (string array), `session_lifetime_days` (integer), `login_message` (string), `web_auto_login` (boolean), and `authz_enforced` (boolean).
+Returns `allow_signup`, `instance_name`, `signup_email_domains` (string array; empty allows any domain), `session_lifetime_days`, `login_message`, `web_auto_login` and `authz_enforced`. This reports the stored `web_auto_login` flag, not the combined value `/api/instance` shows.
 
 ### PATCH `/api/instance/settings`
 
-Updates supplied instance settings. Requires an administrator, and **requires a recent browser session**: a `lific_sess_` token created within the last 15 minutes. API keys and OAuth tokens get `403 recent authentication required` and nothing is written.
+Changes any of the settings above. Every field is optional. **Administrator, from a recent browser session**, for every change rather than a chosen few, because several of these fields widen who can reach the instance. The administrator check and the write happen in one transaction. Returns the full settings object.
 
-The rule covers **every** patch, not a subset. Several of these fields widen who can reach the instance: `allow_signup` opens registration, `signup_email_domains` widens who may use it, `web_auto_login` hands an admin session to anyone who loads the page, and `authz_enforced: false` removes project-scoped authorization. Gating only the "expanding" direction of each would mean a per-field rule to re-derive every time a field is added, and one miss reopens the hole. The authorization check and the write are one transaction.
-
-Request body fields are `allow_signup` (boolean), `instance_name` (string), `signup_email_domains` (string array), `session_lifetime_days` (integer), `login_message` (string), `web_auto_login` (boolean), and `authz_enforced` (boolean). Every field is optional.
-
-Response: the complete instance settings object.
+Turning `web_auto_login` on is refused with `400` when the instance is reachable from outside the machine (a non-loopback bind address, or a `public_url` that is not local), since it hands an administrator session to anyone who loads the page. Changing `authz_enforced` tells every connected realtime client to refetch.
 
 ```bash
-curl -X PATCH https://your-server.example/api/instance/settings \
-  -H "Authorization: Bearer <SESSION_TOKEN>" \
+curl -X PATCH "$LIFIC/api/instance/settings" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"instance_name":"Lific"}'
+  -d '{"instance_name":"Acme tracker","allow_signup":false}'
 ```
 
-```json
-{
-  "allow_signup": true,
-  "instance_name": "Lific",
-  "signup_email_domains": [],
-  "session_lifetime_days": 30,
-  "login_message": "",
-  "web_auto_login": false,
-  "authz_enforced": false
-}
-```
-
-## Sessions and profiles
+## Sessions and your account
 
 ### POST `/api/auth/signup`
 
-Creates a non-admin user and a session. This endpoint has no path or query parameters.
+Creates an account and signs it in. No credential.
 
-Request body fields are `username` (string), `email` (string), `password` (string), and `display_name` (string, optional).
+Body: `username`, `email`, `password` (at least 8 characters) and optional `display_name`. Refused with `400` when signup is closed or the email's domain is not in `signup_email_domains`.
 
-Response: an authentication result with `user` and `token` fields. `user` contains `id` (integer), `username` (string), `email` (string), `display_name` (string), and `is_admin` (boolean). `token` and `expires_at` are strings.
+The first account on an instance with no users becomes its administrator. Every later signup creates an ordinary account.
+
+Returns the same shape as login, and sets the `lific_token` cookie. Attempts are rate-limited per source address and per email address; over the limit answers `400` with the seconds to wait.
 
 ### POST `/api/auth/login`
 
-Authenticates a user by username or email and creates a session. This endpoint has no path or query parameters.
+Signs in with a username or email and a password. No credential.
 
-Request body fields are `identity` (string) and `password` (string).
+Body: `identity` (username or email) and `password`.
 
-Response: the same authentication result as signup.
-
-```bash
-curl -X POST https://your-server.example/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"identity":"alex","password":"example-password"}'
-```
+Returns `user` (`id`, `username`, `email`, `display_name`, `is_admin`), `token` (the session token to send as a bearer token) and `expires_at`. Also sets the `lific_token` cookie, which the REST API uses only in the [few places listed](/docs/rest-api#get-a-credential).
 
 ```json
 {
@@ -90,211 +72,145 @@ curl -X POST https://your-server.example/api/auth/login \
     "id": 1,
     "username": "alex",
     "email": "alex@example.com",
-    "display_name": "alex",
+    "display_name": "Alex",
     "is_admin": false
   },
-  "token": "lific_sess_example",
-  "expires_at": "2026-08-13T12:00:00Z"
+  "token": "lific_sess_9f2c...",
+  "expires_at": "2026-08-13 12:00:00"
 }
 ```
 
+A wrong password or unknown user answers `400` without saying which. Attempts are limited to 5 per 15 minutes per source address and, separately, per identity. A successful sign-in gives its attempt back, so only failures use up the budget. Over the limit, the answer is `400` with the number of seconds to wait.
+
 ### POST `/api/auth/auto-login`
 
-Creates a session for the first admin when single-user auto-login is enabled. This endpoint has no path or query parameters. It has no request body.
-
-Response: an authentication result. The `user` object has `id` (integer), `username` (string), `display_name` (string), and `is_admin` (boolean).
+Signs in as the first administrator with no password. No credential. Works only when the instance has `web_auto_login` on or runs with `[auth] required = false`; otherwise `403`. Meant for a single-user instance on one machine. Returns the login shape without `email`, and sets the cookie.
 
 ### POST `/api/auth/logout`
 
-Deletes the session named by the Bearer header when the token is a session token. It clears the browser session cookie.
-
-This endpoint has no path or query parameters. It has no request body. Response: `{ "logged_out": true }`.
+Ends the session named in the `Authorization` header and clears the cookie. Any credential is accepted; only a session token is deleted. Returns `{"logged_out": true}`.
 
 ### GET `/api/auth/me`
 
-Returns the user associated with the Bearer credential. This endpoint has no path or query parameters. It has no request body.
-
-Response: an object with `id` (integer), `username` (string), `email` (string), `display_name` (string), and `is_admin` (boolean).
+The account behind the credential: `id`, `username`, `email`, `display_name`, `is_admin`. For a connected tool's key this is the tool's bot account, not its owner.
 
 ### PATCH `/api/auth/me`
 
-Updates the authenticated user's profile. This endpoint has no path or query parameters.
-
-Request body fields are `display_name` (string, optional) and `email` (string, optional). Response: the same user object as `GET /api/auth/me`.
+Updates your own `display_name` and `email`. Both optional. Returns the same shape as `GET /api/auth/me`. Not available to OAuth tokens.
 
 ### POST `/api/auth/me/password`
 
-Verifies the current password, changes it, locks the account down, and creates one replacement session. This endpoint has no path or query parameters.
+Changes your password and locks the account down. Body: `current_password` and `new_password`. Not available to OAuth tokens.
 
-The lockdown covers the authenticated user **and every connected-tool bot they own**, in the same write as the password change:
+In the same write as the password change, for you **and every connected tool you own**:
 
-- every session is deleted, including the one that made this request;
-- every active API key is revoked;
-- every active OAuth access token is revoked;
-- every OAuth authorization code that was issued but not yet exchanged is burned;
-- every OAuth device approval that was granted but not yet collected is denied.
+- every session is deleted, including the one making this request;
+- every active API key and OAuth access token is revoked;
+- every OAuth authorization code not yet exchanged, and every device approval not yet collected, is cancelled.
 
-Not affected: unbound operator API keys (they belong to no account), other users' credentials, the bot identities themselves (they survive as disconnected and can be reconnected), and registered OAuth clients.
+Unbound operator API keys, other people's credentials, the bot accounts themselves and registered OAuth clients are untouched.
 
-Rate-limited per account and per source address, on a budget of its own separate from login and from session refresh. Both password hashes run before anything is written, so an attempt reserves its slot up front; a change that commits refunds it, while a wrong current password or a rejected new one does not. Over the limit answers `400` with a retry hint.
+Returns `ok`, `token` and `expires_at`. `token` is a new session and the only credential that still works afterwards, so store it before the next request. It is also set as the cookie. Reconnect your tools and replace any API keys your scripts used.
 
-Request body fields are `current_password` (string) and `new_password` (string). Response: an object with `ok` (boolean), `token` (string), and `expires_at` (string).
-
-`token` is the replacement session, and it is the only credential that still works after this call. A client must store it before its next request. The same token is also set as the session cookie.
-
-Connected tools have to be reconnected afterwards, and any script holding an API key for this account needs a new one.
+Rate-limited per account and per source address on a budget of its own. A wrong current password spends from it; a successful change gives the attempt back. Over the limit answers `400` with the seconds to wait.
 
 ### POST `/api/auth/me/refresh`
 
-Swaps the presented browser session for a fresh one, **for the same account**. This is how the recent-authentication requirement on granting endpoints is satisfied from a tab that has been open a while. It has no path or query parameters.
+Swaps the session you present for a new one on the same account, which is how a tab that has been open for a while meets the [recent-session rule](/docs/rest-api#which-credentials-an-endpoint-accepts) without signing out. **Session token only**, of any age.
 
-Requires a live `lific_sess_` bearer token belonging to the authenticated caller. API keys, OAuth tokens and unauthenticated requests are refused.
+Body: `password`. It may be left out only when the instance signs in without a password (`web_auto_login` on, or `[auth] required = false`).
 
-Request body field: `password` (string, optional). It is **required** unless the instance signs in without one (`web_auto_login` enabled, or `[auth] required = false`), in which case it may be omitted.
+Exactly one session is replaced: the one presented. Your other sessions keep working. If any check fails, nothing changes and the old token and cookie still work. Returns the login shape and sets the cookie. The account is always the caller's, never the first administrator's.
 
-A password-bearing refresh is rate-limited per account and per source address, on its own budget separate from login's. Wrong passwords spend from it; a successful confirmation refunds what it took, so confirming repeatedly and correctly never locks you out. Over the limit answers `400` with a retry hint. A passwordless refresh does no expensive work and is not limited. The password is verified against the stored hash, and that hash is re-checked inside the transaction that mints the session, so a password changed mid-request cannot be used.
-
-Exactly one session is deleted: the one presented. Every other session the account holds is untouched, which is what separates this from `POST /api/auth/me/password`. Nothing is written and no cookie is set unless every check passes, so a failure leaves the existing token and cookie working.
-
-Response: the same shape as `POST /api/auth/login` (`user`, `token`, `expires_at`), plus `Set-Cookie`. The `user` is always the caller. Unlike `POST /api/auth/auto-login`, this can never return a session for the instance's first admin, or for any account other than the one already signed in.
+Password attempts are rate-limited per account and per source address on their own budget; a correct password gives its attempt back.
 
 ```bash
-curl -X POST https://your-server.example/api/auth/me/refresh \
-  -H "Authorization: Bearer <SESSION_TOKEN>" \
+curl -X POST "$LIFIC/api/auth/me/refresh" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"password":"your-current-password"}'
+  -d '{"password":"correct horse battery"}'
 ```
 
 ### DELETE `/api/auth/me/sessions`
 
-Signs out everywhere and revokes access. Runs exactly the same lockdown as `POST /api/auth/me/password` (see the list above) and mints no replacement, then clears the browser session cookie. This endpoint has no path or query parameters. It has no request body.
-
-Response: `{ "revoked": true }`. The credential used to make the call is dead when it returns.
+Signs out everywhere. Runs the same lockdown as a password change and issues no replacement, then clears the cookie. Returns `{"revoked": true}`. The credential that made the call no longer works. Not available to OAuth tokens.
 
 ## API keys
 
+An API key acts as the account that created it, with that account's roles. Not available to OAuth tokens.
+
 ### GET `/api/auth/keys`
 
-Lists API keys owned by the authenticated user. This endpoint has no path or query parameters. It has no request body.
-
-Response: an array of objects with `id` (integer), `name` (string), `created_at` (string), `expires_at` (string or null), and `revoked` (boolean).
+Your keys: an array of `id`, `name`, `created_at`, `expires_at` (string or null) and `revoked`. The key itself is never shown again after creation.
 
 ### POST `/api/auth/keys`
 
-Creates an API key and assigns it to the authenticated user. This endpoint has no path or query parameters.
+Creates a key bound to you. **Recent browser session.** An API key cannot create another key, so a leaked key cannot make itself a spare that survives revocation. To create one without a browser, run `lific key create` on the server.
 
-**Requires a recent browser session.** The `Authorization` header must carry a `lific_sess_` session token created within the last 15 minutes. API keys, OAuth tokens, and the session cookie are all refused with `403 recent authentication required`. An API key that could mint another API key would survive the account lockdown that revoked it, so a leaked key cannot be used to make a spare.
+Body: `name`. Key names are unique across the instance. A name held by an active key is refused with `400`. A name held only by a revoked key can be reused by the same owner.
 
-The session is revalidated inside the same transaction that stores the key, so a key cannot be created behind a session that a concurrent password change or sign-out-everywhere has already revoked.
-
-To create a key without a browser, use `lific key create` on the server, which writes to the database directly.
-
-Key names are unique across the instance, and reuse is scoped to the owner. An **active** key of the same name is refused with `400`. A name held only by a **revoked** key is reusable, but only by the same owner the revoked key had, so a name freed by your own revocation can be claimed again while another account's stays reserved and untouched.
-
-Request body field: `name` (string). Response: an object with `name` (string) and `key` (string). The response is the only response that includes the plaintext key.
-
-```bash
-curl -X POST https://your-server.example/api/auth/keys \
-  -H "Authorization: Bearer <SESSION_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"documentation-client"}'
-```
+Returns `name` and `key`. This response is the only time the key is shown.
 
 ```json
-{
-  "name": "documentation-client",
-  "key": "lific_sk-live-example"
-}
+{ "name": "nightly-report", "key": "lific_sk-live-..." }
 ```
 
 ### DELETE `/api/auth/keys/{id}`
 
-Revokes an API key. Path parameter: `id` (integer key ID). It has no query parameters or request body.
-
-Response: `{ "revoked": true }`.
+Revokes a key. You can revoke your own keys; an administrator can revoke anyone's. Returns `{"revoked": true}`.
 
 ## Connected tools
 
+A connected tool is a bot account owned by you, with its own API key. It acts with your access, and the activity log names the tool. OAuth connections create the same kind of bot. Not available to OAuth tokens.
+
 ### GET `/api/auth/bots`
 
-Lists connected tool bots owned by the authenticated user. This endpoint has no path or query parameters. It has no request body.
-
-Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `owner_id` (integer or null), `created_at` (string), and `connected` (boolean). `connected` is true when the bot has a live credential, either an active API key or an active OAuth token.
+Your connected tools: `id`, `username`, `display_name`, `owner_id`, `created_at`, `tool_id` and `connected`. `connected` is true while the bot holds a live API key or OAuth token.
 
 ### POST `/api/auth/bots`
 
-Creates or reconnects a bot for a supported tool. This endpoint has no path or query parameters.
+Connects a tool and returns its key. **Recent browser session.**
 
-**Requires a recent browser session**, on the same terms as `POST /api/auth/keys`: a `lific_sess_` token created within the last 15 minutes, revalidated inside the transaction that creates the bot and its key. API keys and OAuth tokens get `403 recent authentication required`.
+Body: `tool` and optional `display_name`. `tool` is a connection id of 1 to 48 letters, digits, hyphens or underscores. The ids `opencode`, `cursor`, `claude-code`, `claude`, `codex`, `pi`, `vscode` and `zed` get a readable default name; any other id is a custom connection named after itself unless you pass `display_name` (1 to 80 characters).
 
-The bot lookup, the already-connected check, and the key insert are one transaction, so a refused or failed connect leaves neither a half-created bot nor a key without a bot. Reconnecting a tool that already holds a live credential is refused, and its live credential is left alone; disconnect it first.
+A tool that already holds a live credential is refused with `400`; disconnect it first. A tool whose credential was revoked reconnects under the same bot account.
 
-A tool whose credential was revoked, by a disconnect or by an account lockdown, reconnects normally: the bot identity is reused, and because the reconnect is the same bot claiming its own name back, the revoked key's name is released for the new key.
-
-Request body field: `tool` (string). Supported values are `opencode`, `cursor`, `claude-code`, `claude`, `codex`, `pi`, `vscode`, and `zed`.
-
-Response: an object with `bot` and `key`. `bot` has `id` (integer), `username` (string), and `display_name` (string). `key` and `tool` are strings.
+Returns `bot` (`id`, `username`, `display_name`), `key` and `tool`. The key is shown only here.
 
 ### POST `/api/auth/bots/{id}/disconnect`
 
-Revokes active keys for a connected bot. Path parameter: `id` (integer bot user ID). It has no query parameters or request body.
-
-Response: `{ "disconnected": true }`.
+Revokes the tool's API keys and OAuth tokens. The bot account and its history stay. Yours, or any if you are an administrator. Returns `{"disconnected": true}`.
 
 ### DELETE `/api/auth/bots/{id}`
 
-Deletes a connected bot. Path parameter: `id` (integer bot user ID). It has no query parameters or request body.
-
-Response: the standard delete response.
+Deletes the bot account. Same ownership rule. Returns `{"deleted": true}`.
 
 ## Users
 
 ### GET `/api/users`
 
-Lists non-bot users for selection controls. This endpoint has no path or query parameters. It has no request body.
+Every human account, for pickers: `id`, `username`, `display_name`, `is_admin`, `is_active` and `created_at`. Any authenticated caller. Deactivated accounts are included so an administrator can find them again; filter on `is_active` when choosing someone to assign.
 
-Response: an array of objects with `id` (integer), `username` (string), `display_name` (string), `is_admin` (boolean), `is_active` (boolean), and `created_at` (string). Deactivated accounts stay in the list so an administrator can find and restore them; filter on `is_active` when the list is used to choose someone to assign work to.
+The four account changes below are **administrator** only, and none is available to OAuth tokens. Those that grant access also need a recent browser session; those that only take access away do not, so an administrator containing a compromise with an API key is not slowed down. Each returns the user in the shape above.
 
 ### POST `/api/users`
 
-Creates a local account. Administrators only.
+Creates an account. **Recent browser session.**
 
-**Requires a recent browser session**, on the same terms as `POST /api/auth/keys`: a `lific_sess_` token created within the last 15 minutes, revalidated inside the transaction that creates the account. API keys and OAuth tokens get `403 recent authentication required`. Creating an account, especially an admin one, leaves access behind that a lockdown on somebody else's credentials cannot revoke, so it carries the same rule credential minting does.
-
-Request body fields: `username` (string, required), `password` (string, required, at least 8 characters), `email` (string, optional, defaults to `{username}@local`), `display_name` (string, optional), and `is_admin` (boolean, optional, defaults to false). This endpoint never creates a bot; connected tools come from `POST /api/auth/bots` and the OAuth flow.
-
-Response: the created user, in the same shape `GET /api/users` returns.
+Body: `username`, `password` (at least 8 characters), and optional `email` (defaults to `username@local`), `display_name` and `is_admin` (defaults to false). This never creates a bot.
 
 ### POST `/api/users/{id}/promote`
 
-Grants instance administrator to a user. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
-
-**Requires a recent browser session**, exactly like `POST /api/users`, and for the same reason: an admin grant survives any lockdown aimed at the credential that made it. API keys and OAuth tokens get `403 recent authentication required`.
-
-Response: the updated user.
+Makes the account an administrator. **Recent browser session.**
 
 ### POST `/api/users/{id}/demote`
 
-Revokes instance administrator from a user. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
-
-Deliberately does **not** require a recent session, and neither does `deactivate`. Both only ever reduce access, so neither can be used to persist it, and they are what an administrator reaches for while containing a compromise.
-
-Responds `409 Conflict` when the target is the last administrator who can still sign in, and `400 Bad Request` when the target is a bot identity.
-
-Response: the updated user.
+Removes administrator. `409` when this is the last administrator who can still sign in; `400` for a bot account.
 
 ### POST `/api/users/{id}/deactivate`
 
-Switches an account off. Administrators only. Path parameter: `id` (integer user ID). It has no query parameters or request body.
-
-The account keeps everything it authored; its sessions are deleted and its API keys and OAuth tokens are revoked, so it can no longer authenticate. Responds `409 Conflict` when the target is the last administrator who can still sign in, and `400 Bad Request` when the target is a bot identity.
-
-Response: the updated user.
+Switches an account off. Everything it wrote stays. Its sessions are deleted and its own API keys and OAuth tokens are revoked. Its connected tools' credentials are refused for as long as the account is off, and its open realtime sockets are closed. `409` for the last administrator who can still sign in; `400` for a bot account.
 
 ### POST `/api/users/{id}/reactivate`
 
-Restores a deactivated account. Administrators only, and **requires a recent browser session**, like `POST /api/users` and `promote`. Restoring an account expands access, and it is the direct undo of the containment action, so an API key must not be able to perform it. Path parameter: `id` (integer user ID). It has no query parameters or request body.
-
-Credentials revoked at deactivation are not restored; the user signs in again and mints new ones.
-
-Response: the updated user.
+Switches an account back on. **Recent browser session**, because it undoes a containment step. The account's own revoked credentials are not restored; the person signs in again. Its connected tools' credentials work again.

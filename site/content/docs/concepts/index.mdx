@@ -1,31 +1,40 @@
 ---
 title: Concepts
-description: An overview of the Lific data model.
+description: A map of Lific's data model, the identifiers that name each piece, who can change what, and what happens when something is deleted.
 ---
 
-Lific organizes work around projects. A project contains issues, modules, labels, folders, pages, plans, and project members.
+Almost everything in Lific lives inside a [project](/docs/concepts/projects). A project owns its issues, pages and plans, the modules and labels used to sort them, the folders its pages sit in, and the list of people allowed to see any of it.
 
-Issues record individual work items. Pages store Markdown documentation. Plans store nested step trees. A plan can reference issues without turning them into sub-issues.
+- An [issue](/docs/concepts/issues) is one piece of work. Issues are flat: there are no sub-issues. They can block, duplicate or relate to each other, across projects too.
+- A [page](/docs/concepts/pages) is Markdown documentation. Project pages sit in folders; workspace pages belong to no project.
+- A [plan](/docs/concepts/plans) is a tree of steps, which is where hierarchy lives. A step can mirror an issue, so finishing the issue checks the step off.
+- A [module](/docs/concepts/modules-and-labels) is an area of a project, and an issue belongs to at most one. A [label](/docs/concepts/modules-and-labels) is a tag, and an issue or project page can carry any number.
+- A [comment](/docs/concepts/comments-and-activity) belongs to exactly one issue or one page. The [activity log](/docs/concepts/comments-and-activity#activity-log) records every change to all of the above.
+- An [attachment](/docs/concepts/attachments) is an uploaded file that an issue, page or comment links to from its Markdown.
 
 ## Identifiers
 
-Lific uses human-readable identifiers for issues, pages, and plans.
+Issues, pages and plans have short identifiers built from the project's identifier, so you can type them into a prompt or paste them into a commit message.
 
-| Resource | Example identifier |
-| --- | --- |
-| Issue | `LIF-42` |
-| Project page | `LIF-DOC-3` |
-| Workspace page | `DOC-3` |
-| Plan | `LIF-PLAN-2` |
+| Thing | Identifier | The number counts within |
+| --- | --- | --- |
+| Issue | `APP-42` | Issues in project `APP` |
+| Project page | `APP-DOC-3` | Pages in project `APP` |
+| Workspace page | `DOC-3` | Pages outside every project |
+| Plan | `APP-PLAN-2` | Plans in project `APP` |
+| Comment | `7` | The whole instance. Link to one with `#comment-7` on its issue or page. |
+| Attachment | `12` | The whole instance. Bodies reference it as `/api/attachments/12`. |
 
-The project identifier supplies the prefix for project-scoped resources. The number is a sequence within the relevant project or workspace scope.
+A project identifier is one to five characters: an uppercase letter, then uppercase letters or digits. `DOC` is reserved for workspace pages. The project half of an identifier is matched without case, so `app-42` finds `APP-42`; the `DOC` and `PLAN` parts must be written in capitals.
 
-## Shared structure
+Modules, labels and folders have no identifier. Tools refer to them by name within a project. Label names are unique within a project; module and folder names are not, so give them distinct names if you address them by name.
 
-Modules and labels are project-scoped. Issues can belong to one module and can have multiple labels. Project pages can also have multiple labels.
+## Who can change what
 
-Folders organize pages inside a project. Folders can contain child folders. Workspace-level pages do not belong to a project and cannot be placed in folders.
+Access is granted per project. Each member holds one role, `viewer`, `maintainer` or `lead`, and instance administrators pass every project check. Whether roles are enforced at all is the instance setting `authz_enforced`, which is on for new installs. [Members and roles](/docs/concepts/projects#members-and-roles) explains the roles and what changes when enforcement is off. Each concept page lists the role its own operations need.
 
-Comments belong to exactly one issue or one page. Comments can contain `@username` mentions.
+## Deleting
 
-Lific records mutations in an activity log. Activity entries preserve the affected resource, the action, the timestamp, and available actor information.
+Issues, pages and comments go to the trash. They vanish from lists, search, boards and public projects at once, and a maintainer can restore an issue or page, with its comments, for 30 days. After that the retention sweep removes them for good. `trash_days` in the [`[retention]`](/docs/configuration#retention) section sets the window.
+
+Everything else is deleted immediately, with no trash: projects, plans and plan steps, modules, labels, folders and attachments. What each deletion takes with it is described on the page for that thing. None of this replaces a [backup](/docs/self-hosting#backups).

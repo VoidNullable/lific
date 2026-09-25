@@ -1,75 +1,65 @@
 ---
 title: Self-hosting
-description: Run Lific as a service, manage backups, and expose an authenticated HTTPS endpoint.
+description: "Run Lific for a team: sign-in mode, the server process, reverse proxies and TLS, accounts, backups, and day-to-day operation."
 ---
 
-Lific runs as one process. The process opens the configured SQLite database and stores attachment blobs in an `attachments` directory beside that database.
+A Lific instance is one process and one SQLite database. Attachments live in an `attachments` directory beside the database, and automatic backups in a `backups` directory beside it as well. Nothing else holds state, so moving an instance means moving those files and pointing a new process at them.
 
-## Run in the foreground
+This page covers running that process for other people. For a tracker only you use, [Quickstart](/docs/quickstart) is enough. Every setting named here is listed in [Configuration](/docs/configuration).
 
-Use `lific start` to run the HTTP server in the foreground.
+## Choose how people sign in
 
-```shell
+`lific init` asks this once, on a fresh instance, and the answer decides most of what follows.
+
+| Mode | What `init` writes | Use it for |
+| --- | --- | --- |
+| Passwords | `[auth] required = true`. Your bind host is left as it is. You pick an administrator password. | Any instance someone else can reach. |
+| Login-free | `[auth] required = false`, `[server] host = "127.0.0.1"`, browser auto-login on, and an administrator with no password. | One person on one machine. |
+
+For a team, choose passwords. Login-free mode treats every request that carries no credential as the administrator, so anyone who can reach the port runs the instance. Lific refuses to start in login-free mode when the instance looks reachable from elsewhere; see [Authentication](#authentication) for the exact rule.
+
+Pass the choice as flags to skip the prompts: `--auth-mode passwords --name "Ada Lovelace"`, plus `--password` or a password on standard input.
+
+## Run the server
+
+```bash
 lific start --config /etc/lific/lific.toml
 ```
 
-The server provides the REST API, the `/mcp` endpoint, OAuth routes, and the embedded web UI when web assets were included at build time.
+`start` serves the web UI, the REST API, the `/mcp` endpoint and the OAuth routes in the foreground until it receives a shutdown signal. `--host` and `--port` override the configured values for one run.
 
-The process user needs read and write access to the database directory. It also needs write access to the backup directory when automatic backups are enabled.
+`start` does not create a database. Set the instance up first with `lific init`, using the configuration the server will run with. Containers are the one exception, with their [own bootstrap](#containers).
 
-`start` requires an existing database. Initialize it with `lific init --no-service` using the intended configuration before starting a new service. For container first boot, use the explicit bootstrap path below.
+The process needs read access to the configuration file and write access to the directory holding the database. That directory also receives `attachments/` and, by default, `backups/`.
 
-## Containers
+### As a user service
 
-Build the supplied image from the source checkout:
+On a machine where Lific runs under your own login, `lific init` installs a service and starts it unless you pass `--no-service`. `lific service` manages it afterwards:
 
-```shell
-docker build -t lific .
-```
-
-Set `LIFIC_INIT_ADMIN_NAME` and `LIFIC_INIT_ADMIN_PASSWORD` in the environment used to launch the container, then pass those variable names to Docker:
-
-```shell
-docker run --name lific -p 127.0.0.1:3456:3456 \
-  -v lific-data:/data \
-  -e LIFIC_INIT_ADMIN_NAME \
-  -e LIFIC_INIT_ADMIN_PASSWORD \
-  lific
-```
-
-The image runs `lific --db /data/lific.db start --init-if-missing` as a non-root user. A fresh named volume receives the writable `/data` directory prepared by the image. For a host bind mount, create the directory first and grant the container user (UID 65532) write access. The database, attachments and default backups all live under `/data`; retain the volume across container replacements.
-
-First boot requires both admin variables. Bootstrap creates the password-protected administrator with authentication required, signup closed and browser auto-login off. It does not print an operator API key. If bootstrap is interrupted after creating the database but before creating its administrator, starting again with the same variables completes setup. An initialized instance retains its existing administrator and settings; these variables are not a password-reset mechanism and can be omitted on later starts.
-
-The explicit flag also works outside the supplied image, but it requires a deliberately selected config/database path and an existing writable parent directory. It will not create a missing mount directory or use an unconfigured relative database default. For an HTTPS deployment, supply the appropriate `server.public_url`, CORS origins and trusted proxy settings in a [configuration file](/docs/configuration), then follow the reverse-proxy guidance below.
-
-## Use the built-in service command
-
-`lific init` installs and starts a supported user service unless `--no-service` is passed.
-
-```shell
-lific init
+```bash
 lific service status
-```
-
-On a fresh install, `lific init` also asks how you want to sign in and creates the first administrator with that choice. For a self-hosted instance that other people reach, take the `passwords` mode: it keeps `[auth] required = true` and leaves your bind host alone. The `login-free` alternative writes `[auth] required = false` and pins `[server] host` to `127.0.0.1`, which is the right shape for a single-operator machine and the wrong shape for a server. Pass `--auth-mode passwords` with `--name` and `--password` to make the choice non-interactively.
-
-On Linux, `lific service install` writes a systemd user unit. On macOS, it writes a LaunchAgent. The Linux service installation attempts to enable user lingering so the service can continue after logout.
-
-On Windows, `lific service` commands report that no supported service manager was found. [Windows](/docs/windows) documents the Task Scheduler and WSL 2 alternatives.
-
-```shell
-lific service install
 lific service restart
 lific service stop
 lific service uninstall
 ```
 
-The built-in service command uses the current Lific binary and the selected configuration file. Its working directory is the directory containing that configuration file.
+On Linux this is a systemd user unit at `~/.config/systemd/user/lific.service`, restarted on failure. Lific also runs `loginctl enable-linger` so the service keeps running after you log out; if that fails, `init` says so, and the server stops at logout until you enable lingering yourself. On macOS it is a LaunchAgent at `~/Library/LaunchAgents/dev.lific.plist`. Windows has no supported service manager, and every `lific service` command says so; see [Windows](/docs/windows#keep-it-running-with-task-scheduler).
 
-## Generic systemd system service
+The service runs the `lific` binary you installed it with, with the configuration file you selected, and its working directory is that file's directory. A relative `database.path` resolves against the configuration file's directory in any case, never against the directory you ran a command from.
 
-The following example is for an operator-managed system service. It uses a dedicated `lific` user and a configuration file outside a user home directory.
+### As a system service
+
+On a shared server, run Lific as its own system user, with the configuration outside anyone's home directory. Create the user, then give it a configuration directory and a data directory it owns:
+
+```bash
+sudo install -d -o lific -g lific -m 700 /etc/lific /var/lib/lific
+sudo -u lific lific --config /etc/lific/lific.toml --db /var/lib/lific/lific.db \
+  init --no-service --auth-mode passwords --name "Ada Lovelace"
+```
+
+Run `init` as the `lific` user so the files it creates belong to that user. Because `/etc/lific/lific.toml` does not exist yet, `init` writes it with `database.path = "/var/lib/lific/lific.db"`, creates the database and your administrator, and asks for the password. `--no-service` stops it from installing a user service for `lific`. Edit the configuration afterwards for the settings in the rest of this page.
+
+Then write a unit such as this to `lific.service` in the system unit directory, reload systemd, and enable and start it:
 
 ```ini
 [Unit]
@@ -81,6 +71,7 @@ User=lific
 Group=lific
 ExecStart=/usr/local/bin/lific start --config /etc/lific/lific.toml
 WorkingDirectory=/var/lib/lific
+UMask=0077
 Restart=on-failure
 RestartSec=2
 
@@ -88,29 +79,114 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-Save the unit as `lific.service` in the systemd system unit directory. Reload systemd after saving it. Enable and start the unit through the system service manager.
+### Containers
 
-The configured database and backup directories must be writable by the `lific` user. The configuration file must be readable by that user.
+The repository ships a Dockerfile. It exists mainly so MCP directories can build and check Lific, and it works as a deployment too. No image is published, so build it yourself:
+
+```bash
+docker build -t lific .
+docker run --name lific -p 127.0.0.1:3456:3456 \
+  -v lific-data:/data \
+  -e LIFIC_INIT_ADMIN_NAME \
+  -e LIFIC_INIT_ADMIN_PASSWORD \
+  lific
+```
+
+The two `-e` flags pass through variables you have already set in your shell, so the password stays out of the command line. The image runs `lific --db /data/lific.db start --init-if-missing` as the non-root user 65532 and listens on port 3456. The database, attachments and backups all live under `/data`, so keep that volume across container replacements. A new named volume inherits the writable `/data` the image prepares. For a bind mount, create the host directory first and give user 65532 write access to it.
+
+`--init-if-missing` is the only way to create a database other than `lific init`, and it refuses rather than guessing:
+
+- It refuses when nothing chose the database path. An explicit `--config` or `--db`, or a configuration file that was found, counts. The built-in relative default does not, so the flag never leaves a stray `lific.db` in whatever directory the process started in.
+- It refuses when the database's directory does not exist, rather than creating it. A missing directory is what a volume that failed to mount looks like, and writing into the container's own filesystem would lose everything on the next restart.
+- It refuses when that directory is not writable by the process.
+- It refuses to create a database without an administrator. Set both `LIFIC_INIT_ADMIN_NAME` (the display name) and `LIFIC_INIT_ADMIN_PASSWORD`. Setting only one is an error.
+
+An instance that booted with no users would have open signup, would make its first visitor the administrator, and would print an operator API key into the container log. So first boot creates the administrator, closes signup whatever `[auth] allow_signup` says, leaves browser auto-login off and keeps authentication required. It prints no API key. Create keys afterwards from inside the container, for example `docker exec lific lific --db /data/lific.db key create --name ci --user ada-lovelace`, or connect tools from the web UI.
+
+Once the database exists, the two variables are ignored and you can drop them. They are not a way to reset a password. The one exception is a database that was created but never got its administrator, which is what a crash during first boot leaves behind. The next start with both variables set finishes the setup; without them, it refuses to serve an instance nobody can administer.
+
+`--init-if-missing` works outside the image under the same rules.
+
+## Reach it over HTTPS
+
+Lific speaks plain HTTP on `[server] host` and `[server] port`, `0.0.0.0:3456` by default, which is every network interface. It does not terminate TLS. Put a reverse proxy in front of it (nginx, Caddy, Tailscale Serve or Funnel, a CDN), bind Lific to loopback so only the proxy can reach it, and tell Lific the address people actually use:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+public_url = "https://lific.example.com"
+cors_origins = ["https://lific.example.com"]
+trusted_proxies = ["127.0.0.1"]
+```
+
+`public_url` does several jobs:
+
+- It is the OAuth issuer that MCP clients discover, and the base of the MCP URL `lific connect` writes.
+- Its host name is added to the hosts the `/mcp` endpoint accepts. Without it, `/mcp` accepts only requests whose `Host` header is `localhost`, `127.0.0.1` or `::1`, and refuses a proxy that forwards your public host name, or a client that reaches the server by its LAN address.
+- It is the base of issue links in CLI and MCP output.
+- Its scheme decides whether the session cookie is marked `Secure`. An `https://` URL, or none, keeps `Secure` on. An explicit `http://` URL turns it off, because browsers drop `Secure` cookies over plain HTTP and the OAuth approval page would stop working.
+
+`cors_origins = []` allows every browser origin. List your origins once a browser page on another site needs to call the API.
+
+The proxy must pass `/api/events/ws` through as a WebSocket, including the `Upgrade` and `Connection` headers, with an idle timeout long enough to hold the connection open. If pages work but changes made in another tab or by an agent never appear until you reload, check this first.
+
+### Client addresses behind a proxy
+
+Lific rate-limits sign-in, signup, session refresh, password changes, OAuth client registration, device authorization and public project reads by client address. Behind a proxy, every request arrives from the proxy's address, so Lific has to be told which peers may speak for someone else. `server.trusted_proxies` lists those IP addresses or CIDR ranges. The default is empty, which means every client of an undeclared proxy shares one rate-limit bucket. An invalid entry stops the server at startup.
+
+Forwarding headers from any other peer are ignored. For a trusted peer, Lific reads all `X-Forwarded-For` values as one chain, walks it right to left, skips the addresses in `trusted_proxies`, and uses the first address that is not a trusted proxy. `X-Real-IP` is read only when there is no `X-Forwarded-For` at all, and a malformed or entirely trusted chain falls back to the proxy's own address. List every proxy layer you run, and nothing else. If your proxy sets `X-Real-IP` rather than appending to `X-Forwarded-For`, make sure it overwrites any value the client sent.
+
+If you cannot control the whole chain, for example because a CDN in front of your proxy appends its own entries, the proxy can send the client address directly instead. Set a long random `LIFIC_TRUSTED_PROXY_SECRET` in the server's environment, and have the proxy send two headers on every request:
+
+| Header | Value |
+| --- | --- |
+| `X-Lific-Client-IP` | The client's address, as a bare IP. |
+| `X-Lific-Proxy-Secret` | The same value as `LIFIC_TRUSTED_PROXY_SECRET`. |
+
+Lific honors the pair only from a peer in `trusted_proxies`. When a trusted peer sends either header and the pair does not check out (the secret is wrong, one header is missing, or the server has no secret set), the rate-limited routes above answer `503` instead of falling back to the proxy's address. Other routes ignore the headers. The proxy must remove any copies of both headers the client sent. Because the server accepts one secret at a time, rotating it means changing the server and the proxy back to back, and sign-in fails with `503` in between.
 
 ## Authentication
 
-REST and MCP requests use bearer credentials by default. Lific supports API keys and OAuth access tokens.
+Keep `[auth] required = true` on any instance other people can reach. Every REST and MCP request then carries `Authorization: Bearer <credential>`, where the credential is an API key, an OAuth access token, or the session token the web UI holds. [Public projects](/docs/public-projects) are the only anonymous exception: a project lead or administrator can publish one project's current issues, pages, comments and linked files for anyone to read.
 
-Create an API key from the host running Lific.
+Create API keys on the machine running Lific:
 
-```shell
-lific key create --name automation
+```bash
+lific key create --name ci --user ada-lovelace
+lific key create --name nightly-report --user ada-lovelace --expires 2027-01-01
 ```
 
-The plaintext key is shown once. Use it in an `Authorization: Bearer <key>` request header.
+The key is printed once. A key assigned to a user acts as that user, with that user's project roles. A key created without `--user` is unbound: it acts as the first administrator and ignores project membership entirely, so review those with `lific key list`. [Connect agents](/docs/connect) creates one key per AI tool for you, and the OAuth routes let MCP clients sign in without a key.
 
-Lific also exposes OAuth authorization, token, registration, revocation, and device authorization routes when it runs with `lific start`. Set `server.public_url` to the public base URL so OAuth metadata advertises the URL clients use.
+`lific start` refuses to boot, rather than warn, in two cases:
 
-Keep `required = true` and `web_auto_login = false` whenever other people can reach Lific. Startup checks both the bind host and `server.public_url`. A public URL blocks passwordless access even behind a loopback bind. An undeclared proxy cannot be detected, so passing the check does not prove the deployment is private.
+- `[auth] required = false` while the instance is reachable from beyond this machine.
+- Browser auto-login is turned on in the instance settings under the same condition, because it hands every visitor an administrator session.
 
-## Automatic backups
+"Reachable" means `server.host` is not a loopback address, or `server.public_url` is set to something that is not loopback or a private network. Private means a private, link-local or unique-local IP address, or a name ending in `.localhost`, `.local`, `.internal`, `.home.arpa` or `.lan`. A public DNS name counts as public even when it resolves to a private address, and that includes a Tailscale name such as `host.tailnet.ts.net`. The check reads only your configuration. A proxy you have not told Lific about is invisible to it, so passing the check does not prove the instance is private.
 
-Automatic backups are enabled by default.
+If `server.mcp_path_token` is set, `/mcp/<token>` answers without any other credential; the path itself is the secret. It exists for MCP clients whose OAuth support is broken. Use a long random value and serve it only over HTTPS.
+
+## Accounts and access
+
+Signup is open on an instance created with `lific init`: anyone who can reach the server can make an ordinary account. `[auth] allow_signup` only sets the starting value the first time Lific opens the database. After that the stored instance setting wins, so change it in the web UI (Settings, then Instance) or with the CLI, not in the TOML file. A container bootstrapped with `--init-if-missing` starts with signup closed.
+
+```bash
+lific instance set --signups false
+lific instance set --signup-domains "example.com"
+lific user create --username grace --email grace@example.com --admin
+lific user promote --username grace
+lific user demote --username grace
+```
+
+`--signup-domains` limits self-registration to a comma-separated list of email domains, and an empty string allows any. `user create` prompts for the password when you leave out `--password`. `--admin` and `user promote` make someone an instance administrator, who can see and change everything; `user demote` takes it away. The same actions are in the web UI's Instance tab.
+
+Project membership is a separate switch, the Instance tab's **Project permissions** or `lific instance set --authz-enforced true`. With it on, every REST and MCP call checks the caller's role in the project, reads included, and a new account sees nothing until someone adds it to a project, with `lific member add --project APP --user grace --role maintainer` or the project's Members settings. Administrators and unbound API keys bypass the check. It is on for an instance that had no users when its settings were first written, which includes instances created with `lific init`. An instance upgraded from an older release keeps it off until you turn it on; [Upgrading](/docs/upgrading#authorization-rollout) explains how to roll it out. [Projects](/docs/concepts/projects#members-and-roles) describes the three roles.
+
+## Backups
+
+Automatic backups are on by default:
 
 ```toml
 [backup]
@@ -120,70 +196,69 @@ interval_minutes = 60
 retain = 24
 ```
 
-The backup directory is `backups` beside the database by default. An absolute `backup.dir` is used directly. A relative `backup.dir` resolves beside the database file.
+A relative `dir` resolves against the database's directory, and an absolute one is used as written. After startup the server waits five seconds, writes the first backup, then writes one every `interval_minutes`, keeping the newest `retain`. The defaults keep a day of hourly backups. `interval_minutes = 0` or `retain = 0` is treated as a mistake: Lific logs a warning and uses the default. To turn backups off, set `enabled = false`.
 
-After startup, the backup task waits five seconds and creates a backup. It then runs at `backup.interval_minutes`. The task creates the backup directory when needed.
+Each backup is one archive named `<database name>_YYYYMMDD_HHMMSS.tar.gz`, such as `lific_20260101_120000.tar.gz`, readable only by its owner on Linux and macOS. It holds:
 
-Each backup is a timestamped gzip-compressed tar archive. The name uses the database file stem and the form `<stem>_YYYYMMDD_HHMMSS.tar.gz`.
+| Entry | Contents |
+| --- | --- |
+| `lific.db` | A consistent copy of the database, taken with SQLite's online backup while the server keeps serving. |
+| `attachments/` | Every attachment file, named by content hash. |
+| `manifest.json` | The Lific version, schema version, time, database size, and attachment count and size. |
 
-Each archive contains these entries.
+The archive covers everything in the database: every project, account, API key, setting and audit record. It does not include `lific.toml`, so keep a copy of that yourself. An interrupted backup leaves staging files behind, which the next cycle removes.
 
-- `lific.db`, a consistent SQLite snapshot created with `VACUUM INTO`.
-- `attachments/`, containing each completed attachment blob.
-- `manifest.json`, containing Lific version, schema version, timestamp, and size metadata.
+`[backup] audit_retention_days` is unrelated to the archives. It is unset by default, which keeps audit history forever; set it to delete audit records older than that many days at the end of each backup cycle.
 
-On Unix, completed archives use owner-only `0600` permissions. The backup task retains the newest `backup.retain` matching archives and removes older matching archives. It also counts legacy `.db` backup artifacts during rotation.
+### Manual backup and restore
 
-Failed backup staging files are cleaned immediately, and the automatic backup task removes stale staging artifacts left by interrupted runs.
+`lific dump` writes the same archive on demand, and is just as safe to run while the server is up:
 
-## Manual backup and restore
-
-`lific dump` writes the same archive format as the automatic backup task. It can run while the server is running because the database snapshot uses `VACUUM INTO`.
-
-```shell
+```bash
 lific dump
 lific dump --out /var/backups/lific
-lific dump --out /var/backups/lific/manual.tar.gz
+lific dump --out /var/backups/lific/before-upgrade.tar.gz
 ```
 
-The `--out` value may be a target file or an existing directory. Without `--out`, Lific writes the archive to the current directory.
+`--out` takes a file name or an existing directory. Without it, the archive goes in the current directory. External backup tools can copy the automatic `backups` directory, or run `lific dump` first and copy its archive.
 
-Stop the Lific server before restoring an archive.
+Stop the server before you restore. `lific restore` writes to the database path your configuration names, or to `--db`, and restoring underneath a running server corrupts it. Lific warns when a live write-ahead log next to the database suggests the server is still running.
 
-```shell
+```bash
 lific restore /var/backups/lific/lific_20260101_120000.tar.gz
 lific restore /var/backups/lific/lific_20260101_120000.tar.gz --force
 ```
 
-Without `--force`, restore refuses to overwrite an existing database. With `--force`, Lific checkpoints the existing database when possible and moves it to a timestamped `.pre-restore-<timestamp>` path. Restore validates the archive before extraction. It refuses archives with a schema newer than the running Lific binary. It stages extraction before replacing the database and attachment directory.
+Restore checks the archive before it touches anything. The manifest and database must be present, attachment entries must be plain content hashes that match their contents, the database must pass an integrity check, and its schema must not be newer than the running binary. The files are unpacked into a staging directory and moved into place, so a failed restore leaves your current data as it was.
 
-An external backup system can copy the automatic backup directory. It can also call `lific dump` before copying the resulting archive.
+Without `--force`, restore refuses to replace an existing database. With `--force`, the current database is moved aside to `lific.db.pre-restore-<timestamp>` and kept. The current `attachments` directory is replaced by the archive's and is not kept, so take a `lific dump` first if you might want it back. Start the server afterwards; if the archive came from an older release, its migrations run on startup.
 
-To move just one project between instances, use [project archives](/docs/project-archives). They preserve project content and history but create a new private project without copying source accounts, credentials or membership. A project archive does not replace an instance backup for rollback after a schema upgrade. See [upgrading](/docs/upgrading) before replacing a running binary.
+Restore also caps the unpacked size, so a hostile archive cannot fill the disk before validation rejects it: 512 MiB of database, 64 MiB per attachment, 1 GiB in total and 10,000 entries. A large instance can produce archives beyond that. `--allow-large` accepts them; use it only for an archive you made yourself. Every other check still runs.
 
-## Expose Lific through HTTPS
+To move one project to another instance, use a [project archive](/docs/project-archives) instead. It carries the project's content and history but not accounts, credentials or membership, and it is no substitute for a full backup when an upgrade goes wrong. Read [Upgrading](/docs/upgrading) before you replace a running binary.
 
-Lific listens directly on `server.host` and `server.port`. A reverse proxy can terminate HTTPS and forward requests to this listener. Tailscale Serve or Tailscale Funnel can also provide an HTTPS entry point.
+### The trash is not a backup
 
-Set `server.public_url` to the URL that browsers and MCP clients use. This value is the OAuth issuer. `lific connect` derives its remote MCP URL from this value.
+Deleting an issue, page or comment moves it to the trash. It disappears from lists, search, boards and public projects at once, a maintainer can restore it for 30 days, and then it is removed for good. Change the window with `[retention] trash_days`, or set it to `0` to keep deleted items until you remove them yourself.
 
-```toml
-[server]
-host = "127.0.0.1"
-port = 3456
-public_url = "https://lific.example.com"
-cors_origins = ["https://lific.example.com"]
-trusted_proxies = []
-```
+The trash undoes a mistaken delete. Projects, plans, modules, labels and folders are deleted immediately and never go to the trash, and the trash does nothing for a lost disk, a failed upgrade or a damaged database. Backups cover those.
 
-When a proxy supplies client IP headers, add only isolated proxy addresses or CIDR ranges to `server.trusted_proxies`. Lific validates this configuration at startup. The default trusts no proxy addresses.
+## Operate it
 
-The proxy must forward `/api/events/ws` as a WebSocket connection, including the `Upgrade` and `Connection` headers, and must allow an idle timeout long enough for the session to remain connected. If ordinary page actions and REST requests work but changes in other tabs or agent writes do not appear live, test the WebSocket Upgrade path and proxy timeout before debugging the application.
+`GET /api/health` answers `200` with the body `ok` and needs no credential. Point a container health check, load balancer or uptime monitor at it.
 
-Lific trusts the proxy, not the header: it accepts client-IP forwarding only from a configured immediate peer, walks `X-Forwarded-For` right-to-left, skips trusted proxy hops, and chooses the first untrusted address. `X-Real-IP` is used only without XFF; malformed or all-trusted chains fall back to the TCP peer.
+Logs go to standard output: the journal under systemd (`journalctl --user -u lific` for the user service), the container log under Docker, and `lific.log` in the configuration's directory for the macOS LaunchAgent. `[log] level` sets the level for Lific's own messages: `trace`, `debug`, `info`, `warn` or `error`. Messages from the libraries Lific is built on are off. The `RUST_LOG` environment variable replaces the whole filter, in the `tracing` filter syntax: `RUST_LOG=lific=debug` is the same as `level = "debug"`, and `RUST_LOG=info` also shows every library's messages at `info`.
 
-`server.cors_origins = []` allows every browser origin. Set explicit origins when the deployment requires a browser origin allowlist.
+Every response carries these headers. A route that sets its own value keeps it; attachment downloads, for example, send a stricter sandboxing `Content-Security-Policy`.
 
-Keep API key and OAuth authentication enabled for an exposed instance. If `server.mcp_path_token` is configured, its `/mcp/<token>` endpoint bypasses normal authentication. Treat that path token as a bearer secret and expose it only through HTTPS.
+| Header | Value |
+| --- | --- |
+| `X-Frame-Options` | `DENY` |
+| `Content-Security-Policy` | `frame-ancestors 'none'; base-uri 'self'; object-src 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `no-referrer` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
 
-[Public projects](/docs/public-projects) provide per-project anonymous reading while normal authentication remains enabled. A lead or instance admin chooses which project's current issues, pages, comments and linked files to publish; publishing does not expose plans, audit history or the member roster.
+Browsers therefore refuse to show Lific inside a frame on any page, including your own sites. Do not strip these headers at the proxy. To show Lific's data inside another application, use the [REST API](/docs/rest-api).
+
+`lific doctor` checks the configuration, the database, the running server, OAuth discovery and a real MCP round trip, and exits with a nonzero status when something is wrong. Run it after any configuration change.

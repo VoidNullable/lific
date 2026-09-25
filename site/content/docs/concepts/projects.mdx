@@ -1,68 +1,95 @@
 ---
 title: Projects
-description: Projects, identifiers, membership, and project visibility.
+description: What a project holds, how its identifier is built, what each member role can do, and what deleting a project destroys.
 ---
 
-A project is the scope for issues, modules, labels, folders, pages, plans, and membership.
+A project holds a body of work: its [issues](/docs/concepts/issues), [pages](/docs/concepts/pages), [plans](/docs/concepts/plans), [modules and labels](/docs/concepts/modules-and-labels), page folders, and each member's saved views. It is also where access is decided. A role is something you hold on one project, not on the instance.
 
-Projects can also be filed into named groups that organize the sidebar. A group belongs to the user who created it: it is not shared, other members never see it, and filing a project into a group changes nothing about the project itself. A group lists only the projects its owner can still see, so losing access to a project removes it from the listing without unfiling it. Filing a project the user cannot view is refused.
+Any signed-in user can create a project and becomes its lead. Naming somebody else as the lead when creating it requires a browser session signed in within the last 15 minutes, because that gives another account standing access.
 
-## Project fields
+## Fields
 
-A project has a name, identifier, description, optional icon, optional primary lead, creation time, and update time.
+| Field | What it holds |
+| --- | --- |
+| `name` | The display name. Required. |
+| `identifier` | The prefix of every issue, page and plan identifier in the project. See [Identifier](#identifier). |
+| `description` | Markdown describing the project. |
+| `emoji` | The icon shown in the sidebar and project switcher: a literal emoji, or a Lucide icon written `lucide:Rocket`. |
+| `lead_user_id` | The primary lead. See [The primary lead](#the-primary-lead). |
+| `is_public` | Whether the anonymous public view serves this project. Off until a lead turns it on. See [Public projects](/docs/public-projects). |
+| `created_at`, `updated_at` | Set by Lific. |
 
-The identifier is unique. It is used to construct issue, page, and plan identifiers.
+The order of projects in the sidebar belongs to each person. Reordering your list never moves anyone else's.
 
-Project identifiers follow these rules:
+## Identifier
 
-- They contain one to five characters.
-- The first character is an uppercase ASCII letter.
-- Remaining characters are uppercase ASCII letters or digits.
-- `DOC` is reserved for workspace page identifiers.
+An identifier is one to five characters: an uppercase ASCII letter, then uppercase ASCII letters or digits. `APP`, `LIF` and `PRO2` are valid; `pro`, `2FA` and `TOOLKIT` are not. `DOC` is refused because workspace pages use it as their prefix.
 
-For example, a project with identifier `LIF` can have issue `LIF-42`, page `LIF-DOC-3`, and plan `LIF-PLAN-2`.
+Identifiers are unique on the instance without regard to case, so `APP` and `app` cannot both exist. For the same reason, lookups ignore case: `app-42` finds `APP-42`.
+
+A lead can change the identifier later. Lific builds every issue, page and plan identifier from the current project identifier when it reads them, so renaming `APP` to `WEB` turns `APP-42` into `WEB-42` everywhere at once. References already written in commit messages, other trackers or chat still say `APP-42` and no longer resolve, and a published project's public address changes with it. Pick the identifier early and leave it alone.
 
 ## Members and roles
 
-Project membership connects one user to one project role. The roles are ordered from lowest to highest access.
+A membership is one user, one project and one role. Roles are ordered, and each includes everything the roles below it can do.
 
-| Role | Permission level |
+| Role | What it adds |
 | --- | --- |
-| `viewer` | Read project resources and create/read comments. |
-| `maintainer` | Viewer access plus issue/page/plan content mutations, issue relations and plan-step links, and project structure mutations such as modules, labels, and folders. |
-| `lead` | Maintainer access plus project settings, membership/role management, and project deletion. |
-| administrator | Bypasses project membership checks. Workspace-level administrative actions still require administrator access. |
+| `viewer` | Read the project and everything in it, write comments, and keep personal saved views. |
+| `maintainer` | Create, edit, delete and restore issues, pages and plans; link issues; manage plan steps; create, rename and delete modules, labels and folders. |
+| `lead` | Edit the project's settings, including its identifier and primary lead; add, remove and change members; publish or unpublish it; bind repositories; run a GitHub import; export a project archive; delete the project. |
 
-A project can have a primary lead. Setting a primary lead also creates or updates that user's `lead` membership. A project can have more than one member with the `lead` role.
+An instance administrator is not a project role. It is a flag on the account, and it passes every project check whether or not the administrator is a member. Only administrators can use workspace pages (while enforcement is on), change instance settings, and import project archives.
 
-The system prevents removal or demotion of the last `lead` member. Another member must become a lead first.
+Adding a member, or raising a member's role, requires a browser session signed in within the last 15 minutes. Lowering a role or removing a member does not, so a lead can shut out a compromised account from any client straight away.
 
-## Visibility and authorization
+A connected agent acts with the access of the person who connected it. It can never do more than its owner can, and an agent owned by an administrator has administrator access.
 
-Project-scoped authorization is controlled by the instance setting `authz_enforced`.
+An operation that touches two projects needs the role in both. Linking `APP-1` to `LIB-4` takes `maintainer` on `APP` and on `LIB`, and so does checking off a plan step in `APP` that mirrors an issue in `LIB`.
 
-When enforcement is enabled, a user must be a project member with a sufficient role to access project content. Viewer access is used for reads. Maintainer access is used for content, structure, relation, and plan-step mutations. Lead access is used for project settings, membership, and deletion. Administrators pass project access checks. Workspace-level page mutations require an administrator; project-page mutations use the containing project's role.
+`GET /api/projects/{id}/my-role` tells a client what the caller holds: the effective role, whether enforcement is on, and whether the caller is an administrator. Any member can call it, so a client can decide which controls to show without reading the member list.
 
-Operations that touch two projects, such as linking issues or attaching an issue to a plan step, require the required role in both projects. API clients can inspect their effective role with `GET /api/projects/{id}/my-role`.
+### The primary lead
 
-When enforcement is disabled, membership rows do not create default-deny visibility. Interfaces retain their legacy permission behavior.
+`lead_user_id` names one member as the primary lead. Setting it also gives that user a `lead` membership. A project can have several `lead` members; only one is primary.
 
-Connected tool accounts use the access of their owning user.
+Lific refuses, with `409`, to remove or demote the only `lead` member of a project. Promote someone else first. If you remove the member who is the primary lead, `lead_user_id` moves to another remaining lead, or is cleared if there is none.
 
-## Repository context, transfer and publication
+### When membership is enforced
 
-A [repository binding](/docs/repository-bindings) lets a stdio MCP session use
-the checkout's project when supported tools omit it. Bindings are lookup keys;
-they do not grant project membership or select a different server.
+The instance setting `authz_enforced` decides whether roles are checked. An administrator changes it in instance settings or with `lific instance set --authz-enforced`, and it applies from the next request, without a restart. `lific instance info` shows the current value.
 
-[Project archives](/docs/project-archives) copy a project to a new private
-destination with its content, linked files and history. Memberships, credentials,
-saved views and repository bindings do not transfer. Importing does not delete
-the source or merge into an existing project.
+A new install starts with it **on**. An instance upgraded from a version older than project membership starts with it **off**, so nothing that used to work stops working when the upgrade lands.
 
-[Public projects](/docs/public-projects) expose current issues, pages, comments
-and linked files through a separate anonymous read surface. Publication is off
-by default and includes content written before it was enabled. Plans, content
-history and account records stay outside that surface. It does not change the
-ordinary API's authentication policy or make an otherwise open instance safe to
-expose to the Internet.
+With enforcement on, access is denied unless granted. A non-member gets `403` on every read and write in the project, and the project is left out of project lists, search results and cross-project listings rather than showing up as an error.
+
+With enforcement off, the checks fall back to the older rules:
+
+- Anyone who can authenticate can read the project and do everything the `maintainer` row lists, except that creating, renaming and deleting modules, labels and folders still needs a lead.
+- Lead actions need the primary lead, a `lead` member or an administrator. A project with no lead can only be changed by an administrator.
+- Deleting a project needs an administrator, even for the project's lead.
+- Workspace pages are open to everyone.
+
+A credential that authenticates without naming a user acts as the first administrator. That covers API keys created at the server's shell (`lific key create`, and the key `lific start` creates on first run) and local stdio MCP sessions. Minting one requires access to the server, so Lific treats it as the operator's own. Review them with `lific key list`.
+
+## Sidebar groups
+
+You can file projects into named groups to organize your sidebar. Groups are private: nobody else sees them, and filing a project changes nothing about the project. A project sits in at most one of your groups. A group lists only projects you can still see, so losing access to a project removes it from view without unfiling it, and you cannot file a project you cannot see.
+
+## Deleting a project
+
+Deleting a project is immediate and permanent. Projects have no trash. The delete removes every issue, page, plan, comment, module, label, folder, saved view, membership and repository binding in the project, including anything in its trash.
+
+Attachments are not deleted with it; they lose the links that pointed at them. An attachment with no links left is removed by the [orphan sweep](/docs/concepts/attachments#orphans) within the hour, unless it was uploaded less than a day ago.
+
+With enforcement on, a `lead` can delete the project. With it off, only an administrator can. The permission is checked again inside the transaction that deletes, so a lead removed a moment earlier cannot slip one through.
+
+The only way back from a mistaken delete is a backup, so take one first. See [Backups](/docs/self-hosting#backups).
+
+## Moving, publishing and binding
+
+A [repository binding](/docs/repository-bindings) lets an agent working in a git checkout find its project without being told. A binding only answers "which project is this checkout". It grants no access and points at no other server. Creating or removing one takes `lead` on the project.
+
+A [project archive](/docs/project-archives) copies a project, with its content, attachments and history, into a new private project on another instance. Memberships, credentials, saved views and repository bindings do not travel with it. Importing never merges into an existing project and never deletes the source.
+
+[Publishing a project](/docs/public-projects) serves its current issues, pages, comments and attachments on a separate read-only surface that needs no sign-in, including everything written before you published. Plans, edit history and account records stay private. Publishing changes nothing about how the rest of the API authenticates, and it does not make an otherwise open instance safe to put on the Internet.

@@ -28,7 +28,7 @@ Separate instances never synchronize or merge. If you need a project somewhere e
 
 **Running it for a team.** Read [Self-hosting](/docs/self-hosting) for deployment, accounts and backups, [Configuration](/docs/configuration) for every setting, and [Upgrading](/docs/upgrading) before you install a new version.
 
-**Building on it.** The [MCP tools](/docs/mcp/tools), [REST API](/docs/rest-api) and [CLI](/docs/cli) references list every operation with its parameters.
+**Building on it.** The [MCP tools](/docs/mcp/tools), [REST API](/docs/rest-api) and [CLI](/docs/cli) references list every operation with its parameters. [Git hooks](/docs/git-hooks) closes issues from commit messages.
 
 **Learning the model.** [Concepts](/docs/concepts) explains projects, issues, pages, plans and how they relate.
 
@@ -44,4 +44,4 @@ A few conventions hold across the MCP tools and are worth knowing before your fi
 - List results are paged. When more exist, the output ends with the `offset` to pass on the next call.
 - Call `list_issues` with `workable=true` to get open issues whose blockers are all done.
 
-The [MCP overview](/docs/mcp) covers transports and authentication, and the [tool reference](/docs/mcp/tools) documents every parameter.
+[Working with Lific as an agent](/docs/mcp/agents) expands on these conventions. The [MCP overview](/docs/mcp) covers transports and authentication, the [tool reference](/docs/mcp/tools) documents every parameter, and [Limits](/docs/limits) lists every size and rate limit you can run into.

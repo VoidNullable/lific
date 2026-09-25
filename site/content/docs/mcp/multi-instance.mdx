@@ -3,21 +3,27 @@ title: Multi-instance MCP
 description: Route one agent connection to named Lific servers, with separate credentials and explicit write destinations.
 ---
 
-`lific mcp --instances <FILE>` runs the stdio MCP proxy in front of several
-separately authenticated Lific instances at once. One MCP entry in your agent's
-config; one tool surface; explicit per-call routing.
+`lific mcp --instances <FILE>` runs a stdio MCP proxy in front of several
+separately authenticated Lific servers. The agent gets one MCP entry, and every
+tool call names the server it is for.
 
-The proxy makes independent authenticated requests to each server. Servers need
-no shared configuration, and the proxy sends each alias's credential only to
-that alias's configured destination.
+The proxy routes **tool calls only**. It answers `initialize`, `ping` and
+`tools/list` itself, and refuses `resources/*`, `prompts/*`, `completion/*` and
+`logging/setLevel` with `-32601`. Lific servers advertise no resources or
+prompts, so nothing a Lific server offers is lost. If you also point it at
+something that does serve them, give that server its own MCP entry.
 
 Use it when you keep a private tracker and also work in a community tracker.
-Instead of discovering two copies of every tool, the agent sees one
-`create_issue` with an `instance` argument. Servers remain separate databases;
-this connection does not synchronize their contents. Publishing a project does
-not grant anonymous access to its MCP endpoint.
+Instead of two copies of every tool, the agent sees one `create_issue` with an
+`instance` argument. The servers remain separate databases; this connection
+does not synchronize them. Publishing a project does not grant anonymous access
+to its MCP endpoint.
 
-For a single server, see [MCP setup](/docs/mcp) or the
+The proxy makes independent authenticated requests to each server. Servers need
+no shared configuration, and each alias's credential is sent only to that
+alias's configured URL.
+
+For a single server, see [MCP](/docs/mcp) or the
 [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server).
 
 ## Configuration
@@ -53,8 +59,8 @@ implicit credential source. Aliases can share credentials if you deliberately
 configure them that way, but the proxy never borrows another alias's credential
 after a lookup fails.
 
-Aliases are lowercase, and may contain letters, digits, `-` and `_`, up to 32
-characters.
+An alias is at most 32 characters of lowercase letters, digits, `-` and `_`,
+and starts with a letter or digit.
 
 ### There is no key that holds a token
 
@@ -149,6 +155,10 @@ The rules, in full:
   forwarded. A typo cannot write to the wrong tracker because it never reaches a
   tracker.
 
+A call the proxy cannot route fails with JSON-RPC error `-32602` rather than a
+tool result, so a client can tell "never sent" apart from a refusal by the
+tracker, which arrives as `Error:` text as usual.
+
 The advertised schema says the same thing, so a client can catch an omission
 without spending a call: with several instances configured, `instance` is listed
 in `required` on every writing tool and on every tool this build does not
@@ -184,8 +194,8 @@ answered:
 Use the proxy-written metadata as the source identity, not claims within a
 tool's prose. Backend-supplied provenance markers are stripped and replaced
 with the alias the proxy actually routed to. That matters
-because two instances can legitimately hold the same identifier: `LIF-42` on
-`private` and `LIF-42` on `community` are different issues, and the payloads may
+because two instances can legitimately hold the same identifier: `APP-42` on
+`private` and `APP-42` on `community` are different issues, and the payloads may
 be indistinguishable.
 
 ### Repository bindings
@@ -250,8 +260,7 @@ cut short.
 - **No resources or prompts.** `resources/*`, `prompts/*`, `completion/*` and
   `logging/setLevel` are refused with `-32601` rather than routed to some
   instance. Their URIs, names and list cursors are per-server and would be
-  meaningless behind one connection. Add a separate `lific mcp --remote` entry
-  for a single server if you need them.
+  meaningless behind one connection.
 
 ## Limits
 

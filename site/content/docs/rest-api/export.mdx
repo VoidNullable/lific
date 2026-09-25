@@ -1,0 +1,85 @@
+---
+title: Exports and archives
+description: Download issues, pages and projects as Markdown, JSON or ZIP, and move a whole project between instances as an archive.
+---
+
+An **export** is for reading: Markdown files you can keep in a repository or open anywhere. An **archive** is for moving: a project's complete content and history, which another Lific instance can import. Exports cannot be imported.
+
+## Exports
+
+Exports need **viewer** on the project, or an administrator for a workspace page when enforcement is on. Two exports run at a time across the instance; a third is refused with `429` and `Retry-After: 30`. A download that makes no progress for 30 seconds, or runs longer than 30 minutes, is ended. Very large exports are refused with `400` before anything is written; [Limits](/docs/limits#exports) lists the ceilings.
+
+### GET `/api/export/issues/{identifier}`
+
+One issue as Markdown, with its comments. Query: `format`, either `markdown` (default) or `json`. Any other value is `400`.
+
+`markdown` answers `text/markdown; charset=utf-8` as a download named after the file. `json` answers the export bundle described below, holding that one file.
+
+### GET `/api/export/pages/{identifier}`
+
+One page, the same way. `identifier` is `APP-DOC-3`, or `DOC-3` for a workspace page.
+
+### GET `/api/export/projects/{identifier}`
+
+The whole project. Query: `format`, either `zip` (default) or `json`.
+
+`zip` answers `application/zip`, named `<identifier>-export.zip`. `json` answers the bundle: `root` and `files`, where each file has `path` and `content`.
+
+```json
+{
+  "root": "APP",
+  "files": [
+    { "path": "APP/issues/app-1-example.md", "content": "# Example\n" }
+  ]
+}
+```
+
+The bundle is a listing of the ZIP's files, not a stable schema. Expect new files and do not assume a fixed set.
+
+## Project archives
+
+An archive copies one project, with its issues, pages, plans, comments, attachments, history and activity log, into a **new private project** on another instance. Memberships, credentials, saved views and repository bindings do not travel, and an import never merges into an existing project. [Project archives](/docs/project-archives) explains the whole procedure and what to check afterwards.
+
+Because an archive holds a project's full history, including text that was later deleted, these three routes accept **only a browser session token** in the `Authorization` header. API keys, operator keys, OAuth tokens, connected tools, and the first-administrator identity of an instance without authentication all get `403`. The session is checked again at every step, including inside the transaction that reads or writes the project.
+
+One archive export or import runs at a time on the instance; another is `429` with `Retry-After: 30`.
+
+### GET `/api/project-archives`
+
+What the signed-in person may do, and the size limits an archive must fit. Returns:
+
+| Field | Meaning |
+| --- | --- |
+| `can_import` | Whether you may import: true for an administrator. |
+| `max_upload_bytes` | The compressed archive: 128 MiB. |
+| `max_expanded_bytes` | Everything once uncompressed: 256 MiB. |
+| `max_metadata_bytes` | The non-file content: 16 MiB. |
+| `max_blob_bytes` | One attachment: 64 MiB. |
+| `max_blob_total_bytes` | All attachments together: 192 MiB. |
+| `max_rows` | Records of all kinds: 50,000. |
+| `max_blobs` | Attachment files: 2,000. |
+
+An archive can be under every per-item limit and still exceed the total, so check both.
+
+### GET `/api/project-archives/{identifier}`
+
+Downloads the project as `<identifier>.lific.tar.gz` (`application/gzip`). **Lead** on the project, or administrator. The response is never cached. An export that would exceed the limits above is refused rather than cut short.
+
+### POST `/api/project-archives`
+
+Imports an archive as a new project. **Administrator**, even when enforcement is off, because it creates a project and makes you its lead.
+
+Send `multipart/form-data` with exactly one field, named `archive`, holding the file. Any other field, or a second copy, is `400`. An upload over 128 MiB is `413`. An upload that stalls for 20 seconds, or takes longer than two minutes, is `400`.
+
+Answers `201` with:
+
+- `project`: `id`, `identifier` and `is_public`, which is always `false`. Publish it separately, after reviewing it.
+- `report`: `project`, `rows` (how many records of each kind were imported), `blobs`, `external_references` (at most 100 notes about references to things outside the project, such as issues in other projects) and `external_reference_count` (how many there were in total).
+
+The identifier must be free on the destination; an archive for a project whose identifier already exists is refused.
+
+```bash
+curl -X POST "$LIFIC/api/project-archives" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -F "archive=@APP.lific.tar.gz"
+```

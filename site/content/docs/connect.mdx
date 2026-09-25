@@ -3,7 +3,9 @@ title: Connect agents
 description: lific connect detects installed AI tools and writes MCP configuration for them.
 ---
 
-`lific connect` configures AI coding tools to use your Lific server over MCP. It detects the clients installed on your machine and writes a `lific` server entry into each client's MCP configuration. Both the local stdio transport and the remote transport mint a per-tool credential; `--key` reuses one you supply, and `--oauth` writes none at all.
+`lific connect` configures AI coding tools to use your Lific server over MCP. It detects the clients installed on your machine and writes a `lific` server entry into each client's MCP configuration, in one of three forms: local stdio, remote HTTP with an API key, or remote HTTP with OAuth. It knows 11 clients, and can write the OAuth form for 8 of them.
+
+For stdio and remote, `lific connect` mints each client its own credential unless you pass `--key` to reuse one. With `--oauth` it mints nothing, and the client signs in itself.
 
 ```bash
 lific connect
@@ -24,19 +26,23 @@ several servers with separate credentials and explicit write destinations.
 
 ## Supported clients
 
-| Client | Id | Global configuration | Project configuration |
-| --- | --- | --- | --- |
-| OpenCode | `opencode` | `~/.config/opencode/opencode.json` | `./opencode.json` |
-| Claude Code | `claude-code` | `~/.claude.json` | `./.mcp.json` |
-| Claude Desktop | `claude-desktop` | per OS, see below | none |
-| Cursor | `cursor` | `~/.cursor/mcp.json` | `./.cursor/mcp.json` |
-| VS Code | `vscode` | per OS, see below | `./.vscode/mcp.json` |
-| Codex | `codex` | `~/.codex/config.toml` | `./.codex/config.toml` |
-| Zed | `zed` | `~/.config/zed/settings.json` | none |
-| Gemini CLI | `gemini` | `~/.gemini/settings.json` | `./.gemini/settings.json` |
-| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | none |
-| Goose | `goose` | `~/.config/goose/config.yaml` | none |
-| Crush | `crush` | `~/.config/crush/crush.json` | `./crush.json` |
+| Client | Id | Global configuration | Project configuration | `--oauth` | Stdio carries `LIFIC_TOKEN` |
+| --- | --- | --- | --- | --- | --- |
+| OpenCode | `opencode` | `~/.config/opencode/opencode.json` | `./opencode.json` | Yes | Yes |
+| Claude Code | `claude-code` | `~/.claude.json` | `./.mcp.json` | Yes | Yes |
+| Claude Desktop | `claude-desktop` | per OS, see below | none | No | No |
+| Cursor | `cursor` | `~/.cursor/mcp.json` | `./.cursor/mcp.json` | Yes | No |
+| VS Code | `vscode` | per OS, see below | `./.vscode/mcp.json` | Yes | No |
+| Codex | `codex` | `~/.codex/config.toml` | `./.codex/config.toml` | Yes | Yes |
+| Zed | `zed` | `~/.config/zed/settings.json` | none | Yes | No |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` | `./.gemini/settings.json` | Yes | No |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | none | Yes | No |
+| Goose | `goose` | `~/.config/goose/config.yaml` | none | No | No |
+| Crush | `crush` | `~/.config/crush/crush.json` | `./crush.json` | No | No |
+
+With `--oauth`, Claude Desktop, Goose and Crush are skipped with a note, and the rest of the run continues. Claude Desktop's OAuth path is its Settings > Connectors screen, not a configuration file, so add Lific there. Goose and Crush have no confirmed OAuth support; connect them with the default API key mode.
+
+The last column matters for `--stdio`. A client whose MCP schema has no environment field gets the launch command alone, and that session runs as the operator rather than as its own agent.
 
 Claude Desktop global paths: `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `~/.config/Claude/claude_desktop_config.json` on Linux, `%APPDATA%\Claude\claude_desktop_config.json` on Windows.
 
@@ -49,11 +55,11 @@ Every entry is named `lific`. The shape follows each client's own configuration 
 - Codex uses TOML and references the key through `bearer_token_env_var = "LIFIC_API_KEY"`. See [Codex environment variable](#codex-environment-variable) below for the required export step. The key is never written into the file or into your shell startup files.
 - Claude Desktop does not support remote MCP servers natively. Its entry launches `npx -y mcp-remote <url>` with the bearer header as an argument.
 
-In stdio mode, the entry runs `lific --db <absolute-db-path> mcp` and carries the minted token in the client's environment field as `LIFIC_TOKEN`. The field name follows the client: `environment` for OpenCode, `env` for Claude Code and Codex. Clients with no environment field in their MCP schema get the launch command alone, and that session runs as the operator.
+In stdio mode, the entry runs `lific --db <absolute-db-path> mcp` and carries the minted token in the client's environment field as `LIFIC_TOKEN`. The field name follows the client: `environment` for OpenCode, `env` for Claude Code and Codex. The other clients get the launch command alone, as the table above notes.
 
 Writes are merge-preserving. Unrelated keys and sibling MCP server entries remain in place. Only the `lific` entry is inserted or replaced. If an existing configuration file fails to parse, `lific connect` leaves the file unchanged and reports the failure with the entry contents for manual editing.
 
-Re-running `lific connect` is safe and idempotent. It replaces the `lific` entry with current values, rotates that client's credential, and heals an entry that is stale or missing its token. Reconnecting also remembers which tool a client was connected as.
+Re-running `lific connect` is safe and idempotent. It replaces the `lific` entry with current values, rotates that client's credential, and repairs an entry that points at a stale URL or is missing its token. Reconnecting reuses the same bot for that owner and client, even if the owner has been renamed.
 
 ## Non-interactive use
 
@@ -69,7 +75,9 @@ Without a terminal, `--client` is required. `--json` switches the output to JSON
 
 ## Credentials
 
-When `--key` is not supplied, `lific connect` mints one credential per selected client in both remote and stdio mode. The plaintext value is embedded in the written configuration and is not otherwise persisted by connect. On a server with human accounts, the minted key belongs to a bot user named `{tool}-{owner}`, so the connected tool acts as itself and inherits that owner's project access. Use `--user <username>` to select the owner when more than one account exists. Re-running rotates the existing active key for the same tool. Disconnecting or deleting a bot revokes its OAuth tokens as well.
+When `--key` is not supplied, `lific connect` mints one credential per selected client in both remote and stdio mode. The plaintext value is embedded in the written configuration and is not otherwise persisted by connect. On a server with human accounts, the minted key belongs to a bot user named `{tool}-{owner}`, so the connected tool acts as itself and inherits that owner's project access. Re-running rotates the existing active key for the same tool. Disconnecting or deleting a bot revokes its OAuth tokens as well.
+
+The owner is the only human account, or the only administrator when there are several humans. Otherwise pass `--user <username>`. Without it, a remote run fails, and a stdio run warns and writes an entry with no `LIFIC_TOKEN`, which runs as the operator until you reconnect with `--user`. On a server with no human accounts yet, each client gets a plain key named after its id, bound to no user.
 
 `--oauth` mints nothing; the client obtains its own token. Use `--key <key>` to reuse an existing key verbatim instead of minting new ones.
 

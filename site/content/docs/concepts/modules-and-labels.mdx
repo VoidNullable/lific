@@ -1,37 +1,70 @@
 ---
 title: Modules and labels
-description: Project-scoped modules and labels.
+description: How modules divide a project into areas and labels tag issues and pages, what each status and field does, and what deleting or merging them changes.
 ---
 
-Modules and labels are project-scoped resources. An issue can only use a module or label from its own project.
+Modules and labels both sort work inside one project, in different ways. A module answers "which part of the project is this in", so an issue belongs to at most one. A label answers "what kind of thing is this", so an issue or page can carry as many as apply. Neither can be shared between projects, and an issue can only use modules and labels from its own project.
 
 ## Modules
 
-A module groups issues within one project. A module has a name, description, optional icon, status, and timestamps.
+A module is an area of a project, such as `Web UI`, `CLI` or `Billing`, or a stretch of work such as `v2 launch`.
 
-An issue can have one module or no module. Deleting a module removes that module assignment from its issues.
-
-Module statuses are:
-
-| Status | Description |
+| Field | What it holds |
 | --- | --- |
-| `backlog` | A module status. |
-| `planned` | A module status. |
-| `active` | The default module status. |
-| `paused` | A module status. |
-| `done` | A module status. |
-| `cancelled` | A module status. |
+| `name` | Required. Tools that take a module by name match it without case. Names are not unique, so keep them distinct. |
+| `description` | Markdown. |
+| `emoji` | Optional icon: a literal emoji, or a Lucide icon written `lucide:Package`. |
+| `status` | Where the module stands. New modules start `active`. |
+| `created_at`, `updated_at` | Set by Lific. |
+
+Setting an issue's module to one from another project is refused with an error.
+
+### Module status
+
+A module has one of six statuses. Lific stores the status and filters by it, but attaches no behavior: closing a module does not touch its issues, and you can still assign issues to a module that is `done`.
+
+| Status | Use it for | Modules view tab |
+| --- | --- | --- |
+| `backlog` | An area you intend to work on, not yet scheduled. | Backlog |
+| `planned` | Scheduled, not started. | Active |
+| `active` | Being worked on now. | Active |
+| `paused` | Started, then set aside. | Active |
+| `done` | Finished. | Archive |
+| `cancelled` | Will not be done. | Archive |
+
+The web UI's Modules view files each module under the tab shown. Its progress bar counts the module's `done` issues against all issues assigned to it, so a `cancelled` issue counts toward the total without ever counting as done.
+
+### Deleting a module
+
+Deleting a module is immediate; modules have no trash. Its issues stay where they are with no module. The [activity log](/docs/concepts/comments-and-activity#activity-log) records module changes by name, so the history of those issues still shows which module they were in.
 
 ## Labels
 
-A label has a name and color. Label names are unique within a project. The default color is `#6B7280`.
+A label is a name and a color.
 
-Labels can be attached to issues and project pages. A label can be attached to many issues and pages.
+| Field | What it holds |
+| --- | --- |
+| `name` | Required and unique within the project. |
+| `color` | A hex color such as `#EF4444`, used for the label's chip. Defaults to `#6B7280`, a neutral gray. Lific stores the value as sent without checking it. |
 
-When a label is supplied by name, Lific attaches the matching label from the current project. Names that do not match an existing project label are ignored.
+An issue or a project page can carry any number of the project's labels. Workspace pages cannot have labels, because they belong to no project.
 
-Supplying labels during an issue or page update replaces the complete label set. Supplying an empty list clears all labels. Omitting labels leaves the current set unchanged.
+### Setting labels
 
-Deleting a label removes its attachments from issues and pages.
+When you create or update an issue or page, you name its labels, and the list you send becomes its complete label set:
 
-Workspace-level pages do not support labels because labels are project-scoped.
+- Leave `labels` out to keep the current labels.
+- Send `[]` to remove them all.
+- Send a list to replace them. To add one label, send the current labels plus the new one.
+
+Names must match an existing label exactly, including case. A name with no matching label is skipped without an error, so check the result if the label set matters. Create the label first to use a new one.
+
+### Merging and deleting labels
+
+Merging folds one label into another in the same project. Everything that wore the source label wears the target instead, and the source label is deleted. Use it to clean up near-duplicates such as `bug` and `Bug`. It is available over REST as `POST /api/labels/{id}/merge`.
+
+Deleting a label is immediate and removes it from every issue and page that carried it. It cannot be undone.
+
+## Who can change them
+
+Anyone who can read the project can see its modules and labels. Creating, renaming, changing and deleting them takes `maintainer` while [membership is enforced](/docs/concepts/projects#when-membership-is-enforced), and `lead` while it is off. Choosing which module and labels an issue or page has is an edit of that issue or page, so it takes `maintainer`.

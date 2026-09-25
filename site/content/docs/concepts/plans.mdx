@@ -1,45 +1,79 @@
 ---
 title: Plans
-description: Project plans, nested steps, issue mirroring, and anchor issues.
+description: Nested step trees for multi-session work, how step ids differ from positions, and exactly when a step and its mirrored issue update each other.
 ---
 
-A plan is a project-scoped tree of steps. Plans keep hierarchy separate from issues, which remain flat work items.
+A plan is a checklist of steps, nested as deeply as you need, for work that takes more than one sitting. An agent can write its plan at the start of a task, check steps off as it goes, and read the plan back in a later session to see where it stopped.
 
-## Identifiers and statuses
+Plans are where hierarchy lives in Lific. Issues stay flat, with no sub-issues. When a piece of work breaks down into parts that deserve their own issues, the plan holds the structure and its steps point at those issues.
 
-Plans use identifiers in the form `PROJECT-PLAN-SEQUENCE`. For example, the second plan in project `LIF` is `LIF-PLAN-2`.
+## Fields
 
-Each plan has one of these statuses.
-
-| Status | Description |
+| Field | What it holds |
 | --- | --- |
-| `active` | The default plan status. |
-| `done` | A completed plan status. |
-| `archived` | An archived plan status. |
+| `identifier` | `APP-PLAN-2`, numbered within the project. |
+| `title` | Required. |
+| `status` | `active`, `done` or `archived`. New plans start `active`. See [Status](#status). |
+| anchor issue | Optional. The issue this plan breaks down. See [Anchor issue](#anchor-issue). |
+| steps | The tree of steps. |
+| `created_at`, `updated_at` | Set by Lific. |
 
-Plan listings include the total step count and the count of completed steps.
+Plan lists show how many steps each plan has and how many are done.
 
-## Nested steps
+## Steps
 
-A plan has root steps and child steps. Steps can be nested to any depth.
+Each step has a title, an optional Markdown description, a done state, and optionally one issue it mirrors. A step can have child steps, to any depth.
 
-Each step has a title, description, completion state, sibling position, and optional linked issue. Steps can be moved, reordered, reparented, or deleted. Deleting a step also deletes its child subtree.
+A step is identified by its **step id**, a number assigned when the step is created. `get_plan` shows it as `#18`. The id never changes, even when the step moves. Its **position** is its place among its siblings, counting from 0, and it changes whenever steps are added, moved or reordered around it. Tools that change a step, such as `update_plan_step` and `edit_plan_step`, take the step id; pass `step_id: 18` for `#18`, not the step's position in the list.
 
-## Issue mirroring
+You can move a step under another parent in the same plan, or to the root, and set its position among its new siblings. A step cannot move into a different plan, or beneath one of its own descendants. Deleting a step deletes every step beneath it.
 
-A step can link to an issue. The link provides one-way and issue-driven completion behavior.
+`create_plan` accepts the whole tree in one call. `edit_plan_step` replaces one exact string in a step's title or description, like `edit_issue`.
 
-- Marking a linked step done marks its linked issue `done` when the issue is not already done.
-- Marking a linked issue `done` marks every step that references it done in active plans.
-- Changing a linked issue from `done` to another status reopens its referencing steps in active plans.
-- Reopening a step does not reopen its linked issue.
+## Status
 
-Issue-driven step updates apply only to active plans. Done and archived plans do not receive these cascades.
+| Status | Meaning |
+| --- | --- |
+| `active` | In progress. Only active plans follow their issues; see [Mirrored issues](#mirrored-issues). |
+| `done` | Finished. The plan is frozen: its steps no longer change when their issues do. |
+| `archived` | Put away, for instance because its anchor issue was completed. Also frozen. |
 
-When an issue reopens a plan step, Lific records the time of that issue-driven reopening on the step.
+Checking off the last step does not mark the plan `done`. Set that yourself. You can set a plan back to `active` at any time, and it follows its issues again from that point on; changes made while it was frozen are not replayed.
 
-## Anchor issues
+## Mirrored issues
 
-A plan can have an optional anchor issue. The anchor identifies the issue that the plan decomposes.
+A step can point at an issue, in the same project or another one. The step then mirrors that issue. The rule is that the issue's status is the source of truth: completion can flow from a step to its issue, but reopening only ever flows from the issue to its steps.
 
-When an anchor issue changes to `done`, its active plan is archived. Marking a plan `done` does not change the anchor issue.
+| When | What happens |
+| --- | --- |
+| The issue moves to `done` | Every unchecked step that mirrors it, in every active plan, is checked off. |
+| The issue moves out of `done` | Every checked step that mirrors it, in every active plan, is unchecked and marked as reopened by the issue, so it does not look like someone unticked it by hand. |
+| You check off a step that mirrors an open issue | The issue moves to `done`. That in turn checks off other steps mirroring it in active plans and archives plans anchored to it, as above. |
+| You uncheck a step | Nothing happens to the issue. |
+| The issue moves to `cancelled` | Nothing happens to the steps. Only `done` counts. |
+
+Steps in `done` and `archived` plans are never changed by an issue. Checking off a step in a frozen plan still moves its issue to `done`, because that comes from your action on the step, not from the plan following its issues.
+
+The mirror reacts to status changes, not to links. Pointing a step at an issue that is already `done` does not check the step off, and pre-marking a step done in `create_plan` does not close its issue.
+
+Every automatic change is written to the [activity log](/docs/concepts/comments-and-activity#activity-log) as `auto-complete`, `auto-reopen` or `auto-archive`, attributed to whoever changed the issue.
+
+## Anchor issue
+
+A plan can name one anchor issue: the piece of work the plan breaks down, such as a feature issue whose plan lists the steps to build it. When the anchor issue moves to `done`, the plan is archived, if it is active.
+
+This runs one way. Marking a plan `done` or `archived` never changes its anchor issue, and reopening the anchor issue does not bring an archived plan back.
+
+## Deleted issues
+
+When an issue a step mirrors is deleted, it goes to the trash and the link stays, so restoring the issue restores the connection. While the issue is in the trash, checking the step off changes only the step, and a plan whose anchor is in the trash shows no anchor. When the retention sweep removes the issue for good, the links to it are removed too.
+
+## Who can change a plan
+
+Reading a plan takes `viewer` on its project. Creating, editing and deleting plans and steps takes `maintainer`. When a step or anchor points at an issue in another project, attaching that issue, or checking off a step that would close it, also takes `maintainer` on the issue's project.
+
+Plans are private to the project's members. [Publishing a project](/docs/public-projects) does not expose its plans.
+
+## Deleting a plan
+
+Deleting a plan is immediate and permanent, with all its steps. Plans have no trash. The issues its steps pointed at are not affected.

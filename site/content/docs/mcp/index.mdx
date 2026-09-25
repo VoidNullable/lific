@@ -1,92 +1,144 @@
 ---
 title: MCP
-description: Connect an MCP client to a Lific server over Streamable HTTP.
+description: How an MCP client reaches Lific, how each transport authenticates, and the response conventions every tool shares.
 ---
 
-Lific exposes MCP tools for issues, projects, resources, pages, plans, comments, search, and activity history. The server is part of the Lific binary. Lific stores its data in SQLite.
+Lific's MCP server is part of the same binary as the web UI and the REST API, and it reads and writes the same database. An agent connected over MCP can create and triage issues, write pages, keep plans, comment, search, read the activity log and handle attachments. The [tool reference](/docs/mcp/tools) documents all 30 tools, and [Working with Lific as an agent](/docs/mcp/agents) covers the conventions to know before the first call.
 
-This page documents the endpoint and its authentication for manual setup. [Connect agents](/docs/connect) documents `lific connect`, which detects installed AI tools and writes this configuration for you.
+The short version:
 
-For a local command that reaches a remote server without opening a local
-database, use [remote stdio](/docs/repository-bindings#use-a-remote-server).
-Both local and remote stdio can apply a
-[repository binding](/docs/repository-bindings#which-tools-use-the-binding) to
-supported tools. Direct HTTP connections have no checkout context.
+- The HTTP endpoint, `https://your-server.example/mcp`, authenticates every request with a bearer API key or an OAuth 2.1 access token.
+- Local stdio, `lific mcp`, has no transport authentication. The agent's identity is the API key in `LIFIC_TOKEN`, checked again before every tool call.
+- Remote stdio, `lific mcp --remote --url <BASE_URL>`, is a local command that forwards to a server's HTTP endpoint with a bearer credential.
+- A tool that cannot do what you asked returns text starting with `Error:`, not a protocol error.
+- Lists are paged. When more rows exist, the output ends with the `offset` to pass on the next call.
+- Local stdio answers a pre-initialize `server/discover` probe with "method not found" and keeps the session open.
 
-[Multi-instance MCP](/docs/mcp/multi-instance) exposes one tool set backed by
-several named servers. It requires explicit destinations for writes when more
-than one server is configured. This mode routes tools only; use a single-server
-connection for MCP resources or prompts.
+Most people never configure this by hand. [`lific connect`](/docs/connect) detects your AI tools and writes one of these setups for each. This page describes what it writes, and what to write yourself when it does not cover your client.
+
+## Pick a transport
+
+| Transport | The client runs or opens | Authentication | Needs a running server |
+| --- | --- | --- | --- |
+| HTTP | `https://your-server.example/mcp` | Bearer API key or OAuth 2.1, on every request. | Yes |
+| Local stdio | `lific mcp`, which opens the database file directly. | None at the transport. Identity comes from `LIFIC_TOKEN`. | No |
+| Remote stdio | `lific mcp --remote --url <BASE_URL>`, which forwards each request to `<BASE_URL>/mcp`. | `--api-key` or `LIFIC_API_KEY`, else the credential `lific login` stored for that URL. | Yes |
+| Multi-instance stdio | `lific mcp --instances <FILE>`, in front of several servers. | One credential per alias. See [Multi-instance MCP](/docs/mcp/multi-instance). | Yes, each one |
+
+Both single-server stdio forms resolve a [repository binding](/docs/repository-bindings) from the directory the client launches them in, so a few project-scoped tools can omit `project`. A direct HTTP connection has no checkout to inspect and never infers a project. The [tool reference](/docs/mcp/tools#which-tools-use-a-repository-binding) lists the tools that use a binding.
+
+The server advertises the tools capability only. It serves no MCP resources or prompts on any transport.
 
 ## HTTP endpoint
-
-The MCP endpoint is:
 
 ```text
 https://your-server.example/mcp
 ```
 
-The endpoint uses Streamable HTTP. The server is configured for JSON responses. It is not a standalone SSE endpoint.
+The endpoint speaks Streamable HTTP in stateless mode and answers each POST with a JSON response. It is not a standalone SSE endpoint. The server reports MCP protocol version `2025-03-26`.
 
-## API key authentication
+A request must carry a `Host` the server recognizes, as a guard against DNS rebinding: `localhost`, `127.0.0.1`, `::1`, or the hostname of `server.public_url` when that is set. Behind a reverse proxy, set [`server.public_url`](/docs/configuration) to the address agents use, or requests are refused with `403 Forbidden: Host header is not allowed`.
 
-HTTP clients authenticate with a bearer API key in the `Authorization` header. Create a key on the server with `lific key create --name <NAME>`. Lific returns the plaintext key once when it creates the key.
+### API key
 
-Use a configuration shaped like the following. Client-specific field names can differ.
+Create a key with `lific key create --name <NAME>`, or from **Connected Tools** in the web UI. The plaintext value is shown once. Send it as a bearer token:
 
 ```json
 {
   "mcpServers": {
     "lific": {
+      "type": "http",
       "url": "https://your-server.example/mcp",
       "headers": {
-        "Authorization": "Bearer lific_sk-live-your-api-key"
+        "Authorization": "Bearer <API_KEY>"
       }
     }
   }
 }
 ```
 
-## OAuth 2.1 authentication
+Field names differ between clients. `lific connect` knows each one's shape; see [Connect agents](/docs/connect).
 
-Lific supports OAuth 2.1 for the MCP endpoint. The protected-resource metadata is available at `/.well-known/oauth-protected-resource/mcp`. Authorization-server metadata is available at `/.well-known/oauth-authorization-server`.
+### OAuth 2.1
 
-OAuth-capable MCP clients can connect to the endpoint URL and complete the authorization flow without a manually created API key. Lific supports authorization-code flow with S256 PKCE. It also supports device authorization.
+An OAuth-capable client can connect to the endpoint URL with no credential and run the flow itself. A request with no credential gets `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata, `/.well-known/oauth-protected-resource/mcp`. Authorization-server metadata is at `/.well-known/oauth-authorization-server`.
 
-Lific implements dynamic client registration at `/oauth/register`. Clients can register a redirect URI before starting authorization. Registered redirect URIs must be absolute HTTP or HTTPS URLs.
+Lific supports the authorization-code grant with S256 PKCE and the device authorization grant, and implements dynamic client registration at `/oauth/register`. A registered redirect URI must be an absolute `http` or `https` URL. Lific issues no client secrets, so the only token endpoint authentication method it advertises is `none`.
 
-Both grants are approved from a signed-in browser, and only from one: an OAuth access token cannot approve an authorization request or a device code. The browser session must also have signed in within the last 15 minutes, because approving a connection mints a 30-day credential for the tool.
+Both grants are approved from a signed-in browser, and only from a browser: an OAuth access token cannot approve an authorization request or a device code. The browser session must also have signed in within the last 15 minutes, because approving a connection mints a 30-day credential for the tool.
 
-An older session is refused, and the refusal is not resumed for you. Nothing is created. To continue: sign **out** of Lific (revisiting the login page does not help, since the old session is still valid, just old), sign back in, then start the connection again from your MCP client. On an instance that signs in without a password, signing out and reloading is enough. Approval binds the grant to a per-tool bot owned by the approving human, and the token exchange is refused unless the grant names an identity that may still authenticate. A grant that names nobody, which only pre-2.1 rows do, returns `invalid_grant`; so does one whose bot was deleted, whose owner was deactivated, or whose owner ran an account recovery between approval and exchange.
+An older session is refused, and the refusal is not resumed for you. Nothing is created. To continue, sign **out** of Lific (revisiting the login page does not help, since the old session is still valid, just old), sign back in, then start the connection again from your client. On an instance that signs in without a password, signing out and reloading is enough.
 
-## Identity and authorization
+Approval binds the grant to a per-tool bot owned by the approving human, and the token exchange is refused unless the grant names an identity that may still authenticate. A grant that names nobody returns `invalid_grant`; so does one whose bot was deleted, whose owner was deactivated, or whose owner ran an account recovery between approval and exchange.
 
-MCP resolves the caller exactly as REST does, in every auth mode. An agent cannot do more through MCP than the same account can do through the web UI, and the gates read the same resolved identity on both surfaces.
+### Other ways in
 
-Writes made by a connected agent are attributed to that agent in the audit log, not to the operator who connected it. `lific connect` mints a per-tool bot for this, so a tool acts as itself and inherits its owner's project access.
+With `[auth] required = false`, a request that carries no credential runs as the operator. A request that carries an invalid credential is still refused. [Self-hosting](/docs/self-hosting#authentication) explains when Lific refuses to start in that mode.
 
-## stdio sessions and `LIFIC_TOKEN`
+If `server.mcp_path_token` is set, `/mcp/<token>` accepts MCP requests with no other authentication. The path is the credential. It exists for clients whose OAuth flow is broken.
 
-A stdio MCP session has no transport authentication, so it carries its identity in the `LIFIC_TOKEN` environment variable instead. `LIFIC_TOKEN` is an API key. `lific connect --stdio` writes that variable into the client's configuration entry.
+## Local stdio and `LIFIC_TOKEN`
 
-Lific checks it at startup:
+A local stdio session has no transport authentication. Whoever can launch the process can talk to it, so the launch is the trust boundary. The session's identity is the `LIFIC_TOKEN` environment variable, which holds an API key, the same credential the HTTP transport accepts. `lific connect --stdio` writes it into the client's configuration entry.
 
-- **Absent, or valid but not bound to a user:** the session runs as the operator and Lific prints a warning to standard error.
-- **Present and valid:** the session runs as that agent.
-- **Present but invalid**, for example revoked or mistyped: Lific refuses to start. A bad agent credential must not silently fall back to operator access.
+Lific checks it once at startup:
+
+- Absent, or valid but not bound to a user: the session runs as the operator, and Lific prints a warning to standard error.
+- Present and valid: the session runs as that agent.
+- Present but invalid, for example revoked or mistyped: Lific refuses to start. A bad agent credential must not fall back to operator access.
 
 ### Revocation takes effect at the next tool call
 
-The startup check is a fail-fast, not the enforcement point. A stdio session can run for days, so Lific revalidates `LIFIC_TOKEN` before **every** tool call and resolves the caller's identity from that check. Revoking the key, changing the owner's password, signing out everywhere, or deactivating the account stops the agent at its next tool call, and the tool body never runs, so nothing is written.
+The startup check is a fail-fast, not the enforcement point. A stdio session can run for days, so Lific resolves `LIFIC_TOKEN` against the database again before **every** tool call and takes the caller's identity from that check. Revoking the key, changing the owner's password, signing out everywhere, or deactivating the account stops the agent at its next call. The tool never runs, so nothing is written.
 
-The refusal comes back as a failed tool result (`isError: true`) rather than a JSON-RPC protocol error, because the request was well formed and the session is still usable: the agent reads the text, which tells it to run `lific connect` and restart the MCP server. The text does not say why the credential failed; that goes to the server's log.
+The refusal is a tool result flagged `isError: true`, not a JSON-RPC protocol error, because the request was well formed and the session is still usable. The text tells the agent to run `lific connect` and restart the MCP server. It does not say why the credential failed; that goes to the server's log.
 
-A session launched with no `LIFIC_TOKEN` has no credential to revalidate and keeps its operator behavior.
+A session launched with no `LIFIC_TOKEN` has no credential to check and keeps its operator behavior.
 
-`LIFIC_TOKEN` is not the same thing as `LIFIC_API_KEY`. `LIFIC_API_KEY` is the bearer credential for remote HTTP access.
+`LIFIC_TOKEN` is not `LIFIC_API_KEY`. `LIFIC_API_KEY` is the bearer credential for HTTP access, read by remote stdio, Codex and `lific doctor`. See [Connect agents](/docs/connect#lific_api_key-and-lific_token).
 
-## MCP Registry manifest and stdio
+### Discovery probes before `initialize`
 
-The repository includes an MCP Registry manifest in `server.json`. The manifest declares the Cargo package `lific` and a stdio launch command of `lific mcp`. This manifest describes the stdio package transport. It does not configure the HTTP endpoint.
+Some clients send a `server/discover` request before `initialize`. Local stdio answers any pre-initialize request other than `ping` with JSON-RPC error `-32601` (method not found) and keeps the session open, so the client falls back to a normal handshake instead of reading end-of-file. Notifications sent before `initialize` are dropped.
 
-Registry publication is controlled by the registry that consumes the manifest.
+## Remote stdio
+
+`lific mcp --remote --url https://your-server.example` gives a client that only launches commands a way to reach a server. It opens no database. Each request is POSTed to the server's `/mcp` endpoint with the credential, so authentication and revocation work exactly as they do over HTTP. `LIFIC_URL` can stand in for `--url`.
+
+When the server is unreachable, answers with an HTTP error, or rejects the credential, the proxy answers that request with a JSON-RPC error (`-32603`) carrying a readable message, and keeps running. It ends only when the client closes its input. The [remote stdio walkthrough](/docs/repository-bindings#use-a-remote-server) covers binding a checkout through it.
+
+## Response conventions
+
+These hold on every transport.
+
+### Failures are text
+
+A tool that cannot do what you asked returns an ordinary result whose text starts with `Error:`, followed by what went wrong: an unknown identifier, a missing role, an ambiguous edit, a stale `expected_seq`. It is not a JSON-RPC error, so read the text and correct the call. Database and internal faults are reported only as `Error: internal server error`; the detail goes to the server log.
+
+Some failures happen before a tool runs, and those are JSON-RPC errors:
+
+- Arguments that do not fit the tool's schema, such as a missing required parameter, a wrong type, or an unknown parameter to `edit_comment`, return `-32602` (invalid params).
+- The remote stdio proxy returns `-32603` when it cannot reach the server.
+- The multi-instance proxy returns `-32602` for a call it cannot route.
+
+A revoked stdio credential is the one tool result flagged `isError: true`. An unrecognized `resource_type` or `action` in `list_resources`, `manage_resource` or `delete` returns a line naming the accepted values.
+
+### Lists are paged
+
+`list_issues`, `list_comments`, `search`, `get_activity`, and `list_resources` for issues and pages return one page. When more rows exist, the output ends with a line naming the `offset` to pass next, such as `call again with offset=50`. Pass it back with the same filters. `get_attachment` pages a text file the same way, by line.
+
+The plan listing in `list_resources` honors `limit` and `offset` but prints no hint, and `list_attachments` is not paged. The [agent guide](/docs/mcp/agents#page-through-lists) lists each tool's default and cap.
+
+### Responses are bounded
+
+`get_issue` and `list_comments` keep each response within 2 MiB. When the comments would not fit, fewer are returned and the output says the size budget, not the row limit, ended the page.
+
+## Identity and authorization
+
+MCP resolves the caller exactly as REST does, in every auth mode. An agent cannot do more through MCP than the same account can do through the web UI, and both surfaces check the same roles.
+
+Writes by a connected agent are attributed to that agent in the [activity log](/docs/concepts/comments-and-activity#activity-log), not to the operator who connected it, and each entry records `mcp` as the transport. `lific connect` and OAuth approval each mint a per-tool bot for this, so a tool acts as itself and inherits its owner's project access.
+
+## Registry manifest
+
+The repository ships an MCP Registry manifest in `server.json`. It declares the Cargo package `lific` and a stdio launch command of `lific mcp`. The manifest describes the stdio package transport only; it configures no HTTP endpoint.

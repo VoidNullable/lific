@@ -1,0 +1,121 @@
+---
+title: Attachments
+description: Upload files, link them to issues, pages and comments, download them with thumbnails and previews, and list a project's files and pending cleanups.
+---
+
+An attachment is an uploaded file. It becomes part of an issue, page or comment when that item's Markdown references it as `/api/attachments/{id}`, or when the upload names the item directly. The [attachments concept page](/docs/concepts/attachments) covers how links and cleanup work.
+
+Who can do what:
+
+- **Upload:** any signed-in caller.
+- **Read** (list, download, thumbnail, preview, links): **viewer** on any project the file is linked into. A file that is not linked anywhere can be read only by the person who uploaded it and administrators.
+- **Change or delete:** the uploader, an administrator, or a **maintainer** on a project the file is linked into.
+
+An attachment record has `id`, `filename`, `mime`, `size_bytes`, `uploader_id`, `created_at`, `width` and `height` (for PNG, JPEG, GIF and WebP images; otherwise null), `alt_text` and `has_thumbnail`.
+
+## POST `/api/attachments`
+
+Uploads one file as `multipart/form-data`.
+
+| Field | Meaning |
+| --- | --- |
+| `file` | The file. Required. |
+| `entity_type`, `entity_id` | Optional, together: link the file to an `issue`, `page` or `comment` straight away. Linking needs the same role as editing that item: **maintainer** for an issue or page, **viewer** for a comment. |
+
+Files may be at most 10 MiB; a larger one is `400`. Lific decides the type from the file's own bytes, not from the name or the type the client declares, and accepts PNG, JPEG, GIF, WebP, SVG, PDF, plain text, ZIP, MP4, WebM video and audio, Ogg audio, MP3 and SQLite databases. An empty file, an unlisted type or `entity_type` without `entity_id` is `400`.
+
+Each account may upload 30 files per 10 minutes. The 31st is refused with `403`, not `429`.
+
+A file that is never linked is removed by the hourly cleanup once it is a day old. If the attachment store is busy with a backup or restore, the upload is `503` with `Retry-After: 2`; try again.
+
+Returns `id`, `url` (the path to reference in Markdown), `filename`, `mime`, `size`, `width`, `height`, `alt_text` and `has_thumbnail`.
+
+```bash
+curl -X POST "$LIFIC/api/attachments" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@crash.png" \
+  -F "entity_type=issue" \
+  -F "entity_id=42"
+```
+
+```json
+{
+  "id": 17,
+  "url": "/api/attachments/17",
+  "filename": "crash.png",
+  "mime": "image/png",
+  "size": 48213,
+  "width": 1280,
+  "height": 720,
+  "alt_text": null,
+  "has_thumbnail": true
+}
+```
+
+To show it in an issue, put `![crash](/api/attachments/17)` in the description.
+
+## GET `/api/attachments`
+
+The files linked to one item. Query: `entity_type` (`issue`, `page` or `comment`) and `entity_id`, both required. **Viewer** on the item's project. Returns an attachment array.
+
+## GET `/api/attachments/{id}`
+
+The file itself.
+
+This is the one REST route that also accepts the `lific_token` session cookie, and only when the request has no `Authorization` header, so a browser `<img>` or `<video>` tag can load it.
+
+The response uses the stored type, except that SVG is sent as `application/octet-stream`. Images, video and audio are sent `inline`; everything else, SVG included, as a download. Every response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`, so an uploaded file cannot run script on your instance. It may be cached privately for a year, since an id always returns the same bytes.
+
+Single byte ranges are supported (`Range: bytes=0-1023`, `bytes=1024-`, `bytes=-500`), answered with `206`, so media can be seeked. A range outside the file is `416`. A range the server does not handle, such as several ranges at once, gets the whole file with `200`.
+
+## GET `/api/attachments/{id}/thumbnail`
+
+A WebP preview of a raster image, at most 480 pixels on its longer side. Made on first request and kept. `404` when the file is not a PNG, JPEG, GIF or WebP image, or is already small enough that the original serves as its own thumbnail; `has_thumbnail` tells you in advance.
+
+## GET `/api/attachments/{id}/preview`
+
+What is inside an archive or database file, without downloading it. Returns one of:
+
+- `{"kind": "zip", "entries": [...], "total_entries": 1532, "truncated": true}`, where each entry has `name`, `size` and `compressed` as the archive states them. At most 200 entries are listed.
+- `{"kind": "sqlite", "tables": [...]}`, where each table has `name` and `rows`. At most 200 tables.
+- `{"kind": "none"}` for everything else.
+
+The kind is decided from the file's bytes, not its stored type.
+
+## GET `/api/attachments/{id}/links`
+
+Where the file is used, and which other uploads have the same bytes. Returns:
+
+- `entities`: each place that references it, with `entity_type`, `entity_id`, `identifier` (null for a comment) and `title` (for a comment, its first line).
+- `duplicates`: other attachments with identical content, each with `attachment_id`, `filename` and its own `entities`.
+
+Only places in projects you can read are listed. A duplicate used only in projects you cannot read still appears, with an empty `entities`, so it tells you a copy exists without telling you where.
+
+## PATCH `/api/attachments/{id}`
+
+Sets the description screen readers announce. Body: `alt_text`, up to 1000 characters. `null` or an empty string clears it; leaving the field out changes nothing. Returns the attachment record.
+
+## DELETE `/api/attachments/{id}`
+
+Deletes the attachment and its links. The stored bytes are removed once no other attachment shares them. Items that referenced it show a broken reference until edited. Returns `{"deleted": true}`.
+
+## GET `/api/projects/{id}/attachments`
+
+Every file linked anywhere in the project, for a file manager. **Viewer.**
+
+| Parameter | Meaning |
+| --- | --- |
+| `mime_class` | `image`, `video`, `audio`, `text`, `pdf`, `archive` or `other`. |
+| `uploader` | A username. |
+| `entity_type` | Only files linked from an `issue`, `page` or `comment`. |
+| `sort` | `created_at` (default), `size` or `filename`. |
+| `order` | `asc` or `desc`. Defaults to `desc`, except `asc` for `filename`. |
+| `limit`, `offset` | Default 50, at most 500. |
+
+Returns `items`, `has_more`, and `total_count` and `total_bytes` for everything matching the filters, not only this page. Each item has `id`, `filename`, `mime`, `mime_class`, `size_bytes`, `uploader_id`, `uploader`, `uploader_display_name`, `created_at` and `entities`: the places in **this** project that use it, each with `entity_type`, `entity_id`, `identifier`, `title` and `page_id`.
+
+## GET `/api/projects/{id}/attachments/orphans`
+
+Uploads by the project's members that are not linked anywhere and are waiting to be cleaned up. **Viewer.**
+
+Returns `items`, `grace_seconds` (how long an unlinked upload is kept, currently one day) and `total_bytes`. Each item has `id`, `filename`, `mime`, `size_bytes`, `uploader_id`, `uploader`, `uploaded_at`, `age_seconds` and `seconds_until_sweep` (0 means the next hourly sweep removes it).
