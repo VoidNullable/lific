@@ -36,13 +36,28 @@ use config::Config;
 
 // Keep scheduler startup bounded while retaining a multi-threaded runtime for
 // concurrent HTTP/MCP work. The blocking pool remains independently sized.
-const RUNTIME_WORKER_THREADS: usize = 8;
+const MAX_RUNTIME_WORKER_THREADS: usize = 8;
+
+fn bounded_worker_threads(available_parallelism: Option<usize>) -> usize {
+    available_parallelism
+        .unwrap_or(1)
+        .clamp(1, MAX_RUNTIME_WORKER_THREADS)
+}
+
+fn default_worker_threads() -> usize {
+    bounded_worker_threads(
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZeroUsize::get),
+    )
+}
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(RUNTIME_WORKER_THREADS)
-        .enable_all()
-        .build()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        builder.worker_threads(default_worker_threads());
+    }
+    builder.enable_all().build()
 }
 
 #[cfg(test)]
@@ -75,6 +90,16 @@ mod runtime_tests {
                 .expect("blocking pool remains available");
             assert_eq!(result, 4);
         });
+    }
+
+    #[test]
+    fn default_worker_threads_follow_small_machine_parallelism_and_cap_large_values() {
+        assert_eq!(super::bounded_worker_threads(None), 1);
+        assert_eq!(super::bounded_worker_threads(Some(1)), 1);
+        assert_eq!(super::bounded_worker_threads(Some(2)), 2);
+        assert_eq!(super::bounded_worker_threads(Some(4)), 4);
+        assert_eq!(super::bounded_worker_threads(Some(8)), 8);
+        assert_eq!(super::bounded_worker_threads(Some(32)), 8);
     }
 }
 
