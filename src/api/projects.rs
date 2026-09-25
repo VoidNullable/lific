@@ -288,7 +288,7 @@ pub(super) async fn get_board(
     Query(q): Query<BoardQuery>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
-    let issues = with_read(&db, |conn| {
+    let mut issues = with_read(&db, |conn| {
         crate::db::queries::list_issues(
             conn,
             &ListIssuesQuery {
@@ -298,6 +298,7 @@ pub(super) async fn get_board(
             },
         )
     })?;
+    super::retain_visible_relations(&db, &identity, &mut issues)?;
 
     let module_names: std::collections::HashMap<i64, String> = if q.group_by == "module" {
         with_read(&db, |conn| {

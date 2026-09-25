@@ -1577,6 +1577,16 @@ fn visible_project_ids_mcp(
 }
 
 impl LificMcp {
+    /// LIF-488: drop relation identifiers into projects this caller cannot
+    /// view, before any issue row or detail is rendered.
+    fn retain_visible_relations(&self, issues: &mut [models::Issue]) -> Result<(), String> {
+        let visible = visible_project_ids_mcp(&self.db)?;
+        self.read(|conn| {
+            queries::retain_visible_relations(conn, issues, visible.as_ref());
+            Ok(())
+        })
+    }
+
     /// LIF-257: return the self-onboarding nudge iff the DB genuinely has
     /// **zero** projects. Uses the unfiltered `list_projects` (not the
     /// authz-filtered visible set) on purpose: "projects exist but none are
@@ -2030,7 +2040,8 @@ impl LificMcp {
             return Ok("No issues found.".into());
         }
         let has_more = issues.has_more;
-        let issues = issues.items;
+        let mut issues = issues.items;
+        self.retain_visible_relations(&mut issues)?;
         // Resolve module ids to names once for the whole page, so each row can
         // carry its module without a per-issue lookup (GitHub #48).
         let module_names: std::collections::HashMap<i64, String> =
@@ -2083,9 +2094,16 @@ impl LificMcp {
                 "invalid include_comments '{comment_mode}'. Use recent, all, or none."
             ));
         }
+        let visible = visible_project_ids_mcp(&self.db)?;
         let (issue, module_name, rels) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
-            let issue = queries::get_issue(conn, id)?;
+            let mut issue = queries::get_issue(conn, id)?;
+            // LIF-488: before annotation, so no status of a hidden issue is read.
+            queries::retain_visible_relations(
+                conn,
+                std::slice::from_mut(&mut issue),
+                visible.as_ref(),
+            );
             let module_name = match issue.module_id {
                 Some(mid) => {
                     queries::get_module_name(conn, mid).unwrap_or_else(|_| "unknown".into())
@@ -2707,6 +2725,8 @@ impl LificMcp {
             },
             issue.seq,
         );
+        let mut issue = issue;
+        self.retain_visible_relations(std::slice::from_mut(&mut issue))?;
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(
@@ -2905,6 +2925,8 @@ impl LificMcp {
             },
             issue.seq,
         );
+        let mut issue = issue;
+        self.retain_visible_relations(std::slice::from_mut(&mut issue))?;
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(
@@ -2956,6 +2978,7 @@ impl LificMcp {
         // to the cap, which made the warning unreachable.
         let truncated = board.has_more;
         let mut issues = board.items;
+        self.retain_visible_relations(&mut issues)?;
         let group_by = input.group_by.as_deref().unwrap_or("status");
         let include_closed = input.include_closed.unwrap_or(false);
         let is_closed = |i: &models::Issue| i.status.is_closed();
@@ -5408,6 +5431,9 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 
 #[cfg(test)]
 mod input_hardening_tests;
+
+#[cfg(test)]
+mod relation_visibility_tests;
 
 #[cfg(test)]
 mod tests_verification;

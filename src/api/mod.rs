@@ -633,6 +633,20 @@ where
     f(&conn)
 }
 
+/// LIF-488: drop relation identifiers into projects the caller cannot view
+/// before issues are returned. See [`queries::retain_visible_relations`].
+fn retain_visible_relations(
+    db: &DbPool,
+    identity: &Option<crate::resolve_caller::ResolvedIdentity>,
+    issues: &mut [Issue],
+) -> Result<(), LificError> {
+    let visible = crate::authz::visible_project_ids(db, identity)?;
+    with_read(db, |conn| {
+        queries::retain_visible_relations(conn, issues, visible.as_ref());
+        Ok(())
+    })
+}
+
 /// Execute a write operation against the exclusive write connection.
 fn with_write<F, T>(db: &DbPool, f: F) -> Result<T, LificError>
 where

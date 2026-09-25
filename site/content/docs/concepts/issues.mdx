@@ -63,6 +63,8 @@ A `duplicate` relation is also directional. If `LIF-1` duplicates `LIF-2`, `LIF-
 
 Relationships can connect issues in different projects. An issue cannot be linked to itself.
 
+When project-scoped authorization is enforced, every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins, and instances without enforcement, see every relation.
+
 ## Waiting on a person or a date
 
 An issue can also be blocked by something that is not an issue. These blockers are called waits, and there are two kinds.

@@ -145,6 +145,43 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
     Ok(issue)
 }
 
+/// LIF-488: drop relation identifiers (blocks, blocked by, relates to,
+/// duplicates, duplicated by) that name an issue in a project outside
+/// `visible`, so a read never reveals that an issue exists in a project the
+/// caller cannot view. `None` keeps everything: an admin, or an instance
+/// without enforcement. A related issue that no longer resolves is dropped
+/// too. Lookups are cached per identifier, so a board of related issues costs
+/// one resolve per distinct neighbour.
+pub fn retain_visible_relations(
+    conn: &Connection,
+    issues: &mut [Issue],
+    visible: Option<&std::collections::HashSet<i64>>,
+) {
+    let Some(visible) = visible else {
+        return;
+    };
+    let mut project_of: std::collections::HashMap<String, Option<i64>> =
+        std::collections::HashMap::new();
+    for issue in issues.iter_mut() {
+        for relations in [
+            &mut issue.blocks,
+            &mut issue.blocked_by,
+            &mut issue.relates_to,
+            &mut issue.duplicates,
+            &mut issue.duplicated_by,
+        ] {
+            relations.retain(|identifier| {
+                let project = *project_of.entry(identifier.clone()).or_insert_with(|| {
+                    resolve_identifier(conn, identifier)
+                        .and_then(|id| issue_project_id(conn, id))
+                        .ok()
+                });
+                project.is_some_and(|project_id| visible.contains(&project_id))
+            });
+        }
+    }
+}
+
 pub fn issue_project_id(conn: &Connection, id: i64) -> Result<i64, LificError> {
     conn.query_row(
         "SELECT project_id FROM issues WHERE id = ?1 AND deleted_at IS NULL",

@@ -8,7 +8,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{filter_visible, with_read, with_write};
+use super::{filter_visible, retain_visible_relations, with_read, with_write};
 
 pub(super) async fn list_issues(
     State(db): State<DbPool>,
@@ -17,14 +17,19 @@ pub(super) async fn list_issues(
 ) -> Result<Json<Vec<Issue>>, LificError> {
     if let Some(pid) = q.project_id {
         authz::require_role(&db, &identity, pid, Role::Viewer)?;
-        return with_read(&db, |conn| crate::db::queries::list_issues(conn, &q)).map(Json);
+        let mut issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
+        retain_visible_relations(&db, &identity, &mut issues)?;
+        return Ok(Json(issues));
     }
     // Cross-project list: filter instead of denying (LIF-197 scope item 2).
     let visible = authz::visible_project_ids(&db, &identity)?;
-    let issues = with_read(&db, |conn| crate::db::queries::list_issues(conn, &q))?;
-    Ok(Json(filter_visible(issues, &visible, |i| {
-        Some(i.project_id)
-    })))
+    let mut issues = with_read(&db, |conn| {
+        let mut issues = crate::db::queries::list_issues(conn, &q)?;
+        crate::db::queries::retain_visible_relations(conn, &mut issues, visible.as_ref());
+        Ok(issues)
+    })?;
+    issues = filter_visible(issues, &visible, |i| Some(i.project_id));
+    Ok(Json(issues))
 }
 
 pub(super) async fn get_issue(
@@ -32,8 +37,9 @@ pub(super) async fn get_issue(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Issue>, LificError> {
-    let issue = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?;
+    let mut issue = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?;
     authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
 }
 
@@ -47,6 +53,8 @@ pub(super) async fn resolve_issue(
         crate::db::queries::get_issue(conn, id)
     })?;
     authz::require_role(&db, &identity, issue.project_id, Role::Viewer)?;
+    let mut issue = issue;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
 }
 
@@ -88,7 +96,9 @@ pub(super) async fn update_issue(
 ) -> Result<Json<Issue>, LificError> {
     let project_id = with_read(&db, |conn| crate::db::queries::get_issue(conn, id))?.project_id;
     authz::require_role(&db, &identity, project_id, Role::Maintainer)?;
-    commit_issue_update(&db, &realtime, &identity, id, input).map(Json)
+    let mut issue = commit_issue_update(&db, &realtime, &identity, id, input)?;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
+    Ok(Json(issue))
 }
 
 /// The REST editor and commit-message hook share one authorized transaction
@@ -174,6 +184,8 @@ pub(super) async fn restore_issue_handler(
         },
         issue.seq,
     );
+    let mut issue = issue;
+    retain_visible_relations(&db, &identity, std::slice::from_mut(&mut issue))?;
     Ok(Json(issue))
 }
 
@@ -1081,5 +1093,134 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// LIF-488: an issue read never names a related issue in a project the
+    /// caller cannot view, in either relation direction.
+    #[tokio::test]
+    async fn issue_reads_leave_out_relations_to_projects_the_caller_cannot_view() {
+        let (db, admin, _, _, viewer, _, project_id) = setup_membership_test();
+        let [blocker, visible, hidden] = {
+            let conn = db.write().unwrap();
+            let ids = crate::export::seed_hidden_relation(&conn, project_id);
+            let id = |i: &str| crate::db::queries::resolve_identifier(&conn, i).unwrap();
+            crate::db::queries::link_issues(&conn, id(&ids[2]), id(&ids[1]), "blocks").unwrap();
+            ids
+        };
+        let (blocker_id, visible_id) = {
+            let conn = db.read().unwrap();
+            (
+                crate::db::queries::resolve_identifier(&conn, &blocker).unwrap(),
+                crate::db::queries::resolve_identifier(&conn, &visible).unwrap(),
+            )
+        };
+        let identity_of = |user: crate::db::models::User| {
+            Some(crate::resolve_caller::ResolvedIdentity {
+                user: crate::db::models::AuthUser {
+                    id: user.id,
+                    username: user.username,
+                    display_name: user.display_name,
+                    is_admin: user.is_admin,
+                },
+                transport: crate::actor::Transport::Web,
+            })
+        };
+        let reads = |identity: Option<crate::resolve_caller::ResolvedIdentity>| {
+            let db = db.clone();
+            let (blocker, visible) = (blocker.clone(), visible.clone());
+            async move {
+                use axum::Extension;
+                use axum::extract::{Path, Query, State};
+                let json = |value: serde_json::Value| value.to_string();
+                let get =
+                    |id| super::get_issue(State(db.clone()), Extension(identity.clone()), Path(id));
+                let list = |project_id: Option<i64>| {
+                    super::list_issues(
+                        State(db.clone()),
+                        Extension(identity.clone()),
+                        Query(crate::db::models::ListIssuesQuery {
+                            project_id,
+                            ..Default::default()
+                        }),
+                    )
+                };
+                let board_query: super::super::projects::BoardQuery =
+                    serde_json::from_value(serde_json::json!({})).unwrap();
+                vec![
+                    (
+                        "get blocker",
+                        json(serde_json::to_value(get(blocker_id).await.unwrap().0).unwrap()),
+                    ),
+                    (
+                        "get visible",
+                        json(serde_json::to_value(get(visible_id).await.unwrap().0).unwrap()),
+                    ),
+                    (
+                        "resolve",
+                        json(
+                            serde_json::to_value(
+                                super::resolve_issue(
+                                    State(db.clone()),
+                                    Extension(identity.clone()),
+                                    Path(blocker),
+                                )
+                                .await
+                                .unwrap()
+                                .0,
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                    (
+                        "list project",
+                        json(
+                            serde_json::to_value(list(Some(project_id)).await.unwrap().0).unwrap(),
+                        ),
+                    ),
+                    (
+                        "list all",
+                        json(serde_json::to_value(list(None).await.unwrap().0).unwrap()),
+                    ),
+                    (
+                        "board",
+                        json(
+                            super::super::projects::get_board(
+                                State(db.clone()),
+                                Extension(identity.clone()),
+                                Path(project_id),
+                                Query(board_query),
+                            )
+                            .await
+                            .unwrap()
+                            .0,
+                        ),
+                    ),
+                    ("visible id", visible),
+                ]
+            }
+        };
+
+        let scoped = reads(identity_of(viewer)).await;
+        let visible = scoped.last().unwrap().1.clone();
+        for (surface, body) in &scoped[..scoped.len() - 1] {
+            assert!(!body.contains(&hidden), "{surface} leaked {hidden}: {body}");
+        }
+        assert!(
+            scoped[0].1.contains(&visible),
+            "visible relation kept: {}",
+            scoped[0].1
+        );
+
+        let full = reads(identity_of(admin)).await;
+        assert!(
+            full[0].1.contains(&hidden),
+            "admin sees blocks: {}",
+            full[0].1
+        );
+        assert!(
+            full[1].1.contains(&hidden),
+            "admin sees blocked_by: {}",
+            full[1].1
+        );
     }
 }
