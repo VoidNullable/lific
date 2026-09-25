@@ -5,7 +5,11 @@ description: Reference for the MCP tools exposed by Lific.
 
 Lific exposes 30 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
+A parameter a tool does not declare is refused rather than ignored, so a misspelling cannot quietly change the answer. The error is `-32602 Invalid params`, names the unknown key and suggests the closest valid parameter, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``. The same applies inside nested objects such as plan steps.
+
 When MCP is reached over HTTP and its origin is known, issue, project, page, plan, module, and comment references are rendered as Markdown links to their canonical web routes. Comment links include an anchor that scrolls the issue or page thread to that comment. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain references.
+
+Module, label and folder names are matched as sent first. If nothing matches, a name that a client HTML-escaped (`Infra &amp; Ops`) is tried again with `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;` and `&#x27;` decoded, so a name that really contains one of those sequences still matches itself.
 
 ## Issues
 
@@ -46,11 +50,15 @@ The comment trail is bounded in every mode, and each mode reads only the rows it
 
 ### `export`
 
-Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return the markdown content; projects return the exported file paths.
+Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a page (`PRO-DOC-3`), or a whole project (`PRO`). Issues and pages return their markdown.
+
+A project returns the markdown of its issues and pages, one document each, a page of documents at a time. Every document opens with frontmatter naming its identifier. The first line gives the issue, page and document totals and which documents follow; when more remain, the last line gives the `offset` to call with next. A page stops early at 256 KiB of markdown, but always carries at least one document. No file paths are returned. To write a project to disk as files, use `lific export project` from the CLI.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO) |
+| `offset` | `integer` | No | Project only: zero-indexed document offset |
+| `limit` | `integer` | No | Project only: max documents per page (default 20, cap 100) |
 
 ### `create_issue`
 
@@ -114,6 +122,8 @@ Replaces an exact string in an issue title or description.
 | `replace_all` | `boolean` | No | Replace all occurrences (default false) |
 
 When a description edit comes from a client that double-escapes JSON, literal `\n` and `\t` sequences in `old_string` and `new_string` become a real newline or tab before the exact string is matched.
+
+`edit_issue`, `edit_page`, `edit_comment` and `edit_plan_step` also accept the camelCase spellings `oldString`, `newString` and `replaceAll`. The published schema lists only the snake_case names.
 
 ### `get_board`
 

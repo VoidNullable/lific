@@ -1,3 +1,4 @@
+mod arguments;
 pub(crate) mod preinit;
 pub(crate) mod schemas;
 pub(crate) mod tools;
@@ -550,7 +551,8 @@ impl ServerHandler for LificMcp {
 
     /// The one place every MCP tool call passes through, whatever the
     /// transport. The stdio credential check lives here rather than in each
-    /// tool for exactly that reason.
+    /// tool for exactly that reason, and so does the rewrite of an
+    /// unknown-parameter error into a did-you-mean (LIF-474).
     ///
     /// Not an `async fn`: the `rmcp` trait declares an explicit
     /// `MaybeSendFuture` bound on the return type, which the desugared form
@@ -564,10 +566,21 @@ impl ServerHandler for LificMcp {
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
+            let tool = request.name.clone();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             self.dispatch_tool(|| self.tool_router.call(tool_context))
                 .await
+                .map_err(|error| {
+                    let top_level = self.tool_router.get(&tool).map(|tool| {
+                        tool.input_schema
+                            .get("properties")
+                            .and_then(serde_json::Value::as_object)
+                            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    });
+                    arguments::explain_unknown_parameter(&tool, top_level.as_deref(), error)
+                })
         }
     }
 
