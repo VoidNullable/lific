@@ -1,12 +1,15 @@
 use std::{
     cmp::Ordering,
     fmt::{self, Display, Write as _},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use base64::Engine as _;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
+use rmcp::{
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    tool, tool_router,
+};
 
 use crate::{
     authz::filter_visible,
@@ -25,8 +28,12 @@ use super::{LificMcp, current_issue_link_context, sanitize_error};
 pub(crate) const NO_PROJECTS_NUDGE: &str = "No projects exist yet. Create one first: manage_resource(resource_type='project', action='create', name='My Project', identifier='PRO'). Then create issues with create_issue(project='PRO', ...).";
 
 impl LificMcp {
-    pub(crate) fn create_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
-        Self::tool_router()
+    pub(crate) fn shared_tool_router() -> &'static ToolRouter<Self> {
+        // Stateless HTTP creates a handler per request. Share immutable routes so
+        // rmcp's thread-local schema cache doesn't retain a copy on each worker.
+        // Calls still receive the current handler's database and session state.
+        static ROUTER: LazyLock<ToolRouter<LificMcp>> = LazyLock::new(LificMcp::tool_router);
+        &ROUTER
     }
 }
 

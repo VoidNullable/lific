@@ -255,7 +255,7 @@ pub struct LificMcp {
     /// resolution `server.rs` uses for REST's store, so both transports hit
     /// one content-addressed directory.
     store: AttachmentStore,
-    tool_router: ToolRouter<Self>,
+    tool_router: &'static ToolRouter<Self>,
     /// Present only for a stdio session launched with a `LIFIC_TOKEN`. `None`
     /// covers both the HTTP transport (where per-request middleware already
     /// owns identity, and where re-entering [`with_request_context`] here would
@@ -285,7 +285,7 @@ impl LificMcp {
             db: Arc::new(db),
             realtime,
             store,
-            tool_router: Self::create_tool_router(),
+            tool_router: Self::shared_tool_router(),
             stdio_auth: None,
             bound_project: None,
         }
