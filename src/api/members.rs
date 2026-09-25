@@ -863,15 +863,13 @@ mod tests {
         fn fixture() -> Fixture {
             let (db, _admin, lead, _maintainer, viewer, outsider, project_id) =
                 setup_membership_test();
-            let manager = crate::auth::create_key_manager();
             let session = {
                 let conn = db.write().unwrap();
                 crate::db::queries::users::create_session(&conn, lead.id, None)
                     .unwrap()
                     .token
             };
-            let lead_key =
-                crate::auth::create_api_key(&db, &manager, "lead-key", Some(lead.id)).unwrap();
+            let lead_key = crate::auth::create_api_key(&db, "lead-key", Some(lead.id)).unwrap();
             let lead_oauth = {
                 let token = "lific_at_lead".to_string();
                 let hash = crate::auth::sha256_hex(token.as_bytes());
@@ -894,7 +892,6 @@ mod tests {
 
             let auth_state = crate::auth::AuthState {
                 db: db.clone(),
-                manager,
                 public_url: "https://example.com".into(),
                 required: true,
             };

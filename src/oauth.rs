@@ -6009,7 +6009,6 @@ mod tests {
             let f = fixture();
             let auth_state = crate::auth::AuthState {
                 db: f.db.clone(),
-                manager: crate::auth::create_key_manager(),
                 public_url: "https://example.com".into(),
                 required: true,
             };

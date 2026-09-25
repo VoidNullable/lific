@@ -467,12 +467,7 @@ fn resolve_key_source(args: &ConnectArgs, pool: &DbPool) -> Result<KeySource, St
 /// - **Provided:** the verbatim `--key` (no DB writes).
 ///
 /// Returns the plaintext key for that tool.
-fn mint_for_tool(
-    source: &KeySource,
-    spec: &ClientSpec,
-    pool: &DbPool,
-    manager: &crate::auth::ApiKeyManager,
-) -> Result<String, String> {
+fn mint_for_tool(source: &KeySource, spec: &ClientSpec, pool: &DbPool) -> Result<String, String> {
     match source {
         KeySource::Provided(k) => Ok(k.clone()),
         KeySource::Bot { owner_id } => {
@@ -494,14 +489,14 @@ fn mint_for_tool(
             };
             // LIF-391: the key is bound to the bot as it is minted, never
             // created unbound and patched afterwards.
-            mint_or_rotate(pool, manager, &bot_username, Some(bot_id))
+            mint_or_rotate(pool, &bot_username, Some(bot_id))
         }
         KeySource::FreshInstall => {
             // Zero human users: enforcement can't be on (needs an admin to
             // enable), so a plain unassigned key behaves like `lific start`'s
             // first-run default key. Named just `{tool}` — per-tool attribution
             // in the key name even without a human owner.
-            mint_or_rotate(pool, manager, spec.id, None)
+            mint_or_rotate(pool, spec.id, None)
         }
     }
 }
@@ -511,12 +506,7 @@ fn mint_for_tool(
 /// `connect` (e.g. to add another client later) always succeeds with a fresh
 /// plaintext. `user_id` is the owner the key is bound to; `None` mints an
 /// unbound key and, on the rotate path, preserves any existing binding.
-fn mint_or_rotate(
-    pool: &DbPool,
-    manager: &crate::auth::ApiKeyManager,
-    name: &str,
-    user_id: Option<i64>,
-) -> Result<String, String> {
+fn mint_or_rotate(pool: &DbPool, name: &str, user_id: Option<i64>) -> Result<String, String> {
     let existing_key = {
         let conn = pool.read().map_err(|e| e.to_string())?;
         conn.query_row(
@@ -536,10 +526,11 @@ fn mint_or_rotate(
              Revoke it with `lific key revoke --name '{name}'`, then rerun `lific connect` to \
              issue a replacement."
         )),
-        Some((false, false)) => crate::auth::rotate_api_key_bound(pool, manager, name, user_id)
-            .map_err(|e| e.to_string()),
+        Some((false, false)) => {
+            crate::auth::rotate_api_key_bound(pool, name, user_id).map_err(|e| e.to_string())
+        }
         Some((true, _)) | None => {
-            crate::auth::create_api_key(pool, manager, name, user_id).map_err(|e| e.to_string())
+            crate::auth::create_api_key(pool, name, user_id).map_err(|e| e.to_string())
         }
     }
 }
@@ -674,21 +665,7 @@ pub fn run(
     };
     let key_origin = key_source.as_ref().map(|s| s.origin());
 
-    let manager = if needs_minting {
-        Some(crate::auth::create_key_manager())
-    } else {
-        None
-    };
-
-    let outcomes = write_all_clients(
-        &selected,
-        &args,
-        cfg,
-        pool,
-        base,
-        key_source.as_ref(),
-        manager.as_ref(),
-    );
+    let outcomes = write_all_clients(&selected, &args, cfg, pool, base, key_source.as_ref());
 
     // AGENTS.md (LIF-251).
     let agents_md = maybe_write_agents_md(&args, base, stdin_tty)?;
@@ -722,7 +699,6 @@ fn write_all_clients(
     pool: &DbPool,
     base: &PathBase,
     key_source: Option<&KeySource>,
-    manager: Option<&crate::auth::ApiKeyManager>,
 ) -> Vec<ClientOutcome> {
     let mut outcomes = Vec::new();
     for id in selected {
@@ -766,8 +742,8 @@ fn write_all_clients(
 
         // Mint this client's own key (per-tool). Only when a real remote write
         // with minting is happening; stdio/oauth/dry-run supply their own.
-        let this_key = match (key_source, manager) {
-            (Some(source), Some(mgr)) => match mint_for_tool(source, &spec, pool, mgr) {
+        let this_key = match key_source {
+            Some(source) => match mint_for_tool(source, &spec, pool) {
                 Ok(k) => Some(k),
                 Err(e) => {
                     // Minting failed for this tool — record and keep going.
@@ -782,11 +758,7 @@ fn write_all_clients(
                     continue;
                 }
             },
-            // Dry-run placeholder (Provided) with no manager, or provided --key.
-            _ => match key_source {
-                Some(KeySource::Provided(k)) => Some(k.clone()),
-                _ => None,
-            },
+            None => None,
         };
 
         let server = build_server_config(args, cfg, this_key.as_deref().unwrap_or(""));
@@ -1329,10 +1301,8 @@ mod tests {
                 .unwrap()
                 .id
         };
-        let manager = crate::auth::create_key_manager();
         crate::auth::create_api_key_with_expiry(
             pool,
-            &manager,
             "opencode-solo",
             Some(expires_at),
             Some(bot_id),
