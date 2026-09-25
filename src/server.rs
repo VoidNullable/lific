@@ -330,7 +330,12 @@ pub(crate) fn build_app_with_store(
     // Routes behind auth: REST API + MCP
     let mcp_public_url = cfg.server.public_url.clone();
     let mcp_allowed_hosts_for_links = mcp_allowed_hosts.clone();
-    let authed_routes = api::router(pool.clone(), &cfg.server.cors_origins)
+    let authed_routes = api::router_with_attachment_store(
+        pool.clone(),
+        &cfg.server.cors_origins,
+        attachment_store.clone(),
+    );
+    let authed_routes = authed_routes
         .route(
             "/mcp",
             any(move |request: Request<Body>| async move {
@@ -361,7 +366,6 @@ pub(crate) fn build_app_with_store(
         .layer(axum::Extension(realtime.clone()))
         .layer(axum::Extension(login_limiter))
         .layer(axum::Extension(trusted_proxies.clone()))
-        .layer(axum::Extension(attachment_store.clone()))
         .layer(axum::Extension(attachment_config))
         .layer(axum::Extension(attachment_upload_limiter))
         .layer(axum::Extension(crate::config::AuthConfig::from_server(
@@ -1428,6 +1432,7 @@ mod public_surface_tests {
         _store_guard: tempfile::TempDir,
         attachment_id: i64,
         private_issue_id: i64,
+        session_token: String,
     }
 
     /// Auth required, one published project with an issue, a comment and an
@@ -1437,7 +1442,7 @@ mod public_surface_tests {
         let tmp = tempfile::tempdir().expect("attachment tempdir");
         let store = storage::AttachmentStore::new(tmp.path().to_path_buf());
 
-        let (attachment_id, private_issue_id) = {
+        let (attachment_id, private_issue_id, session_token) = {
             let conn = pool.write().unwrap();
             conn.execute(
                 "INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot)
@@ -1523,7 +1528,8 @@ mod public_surface_tests {
             )
             .unwrap();
 
-            (attachment.id, secret.id)
+            let session = db::queries::users::create_session(&conn, 1, None).unwrap();
+            (attachment.id, secret.id, session.token)
         };
 
         let mut cfg = Config::default();
@@ -1545,6 +1551,7 @@ mod public_surface_tests {
             _store_guard: tmp,
             attachment_id,
             private_issue_id,
+            session_token,
         }
     }
 
@@ -1555,6 +1562,19 @@ mod public_surface_tests {
                 Request::builder()
                     .method(method)
                     .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn with_session(app: &Router, token: &str, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", format!("lific_token={token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1593,6 +1613,19 @@ mod public_surface_tests {
                 "{uri} lost its no-store header somewhere in the stack"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_rest_attachment_download_uses_the_scoped_store() {
+        let d = deploy();
+        let response = with_session(
+            &d.app,
+            &d.session_token,
+            &format!("/api/attachments/{}", d.attachment_id),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, "public attachment bytes");
     }
 
     /// Adding the public router loosened nothing: every ordinary API path

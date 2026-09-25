@@ -52,7 +52,28 @@ use crate::error::LificError;
 pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
 
 /// Build the full API router.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
+    router_impl(db, cors_origins, None)
+}
+
+/// Build the authenticated API with the attachment store scoped to the
+/// attachment and project-archive routes that extract it. Applying the store
+/// to the whole router makes axum wrap every route, including MCP and routes
+/// that never touch attachments.
+pub(crate) fn router_with_attachment_store(
+    db: DbPool,
+    cors_origins: &[String],
+    store: crate::storage::AttachmentStore,
+) -> Router {
+    router_impl(db, cors_origins, Some(store))
+}
+
+fn router_impl(
+    db: DbPool,
+    cors_origins: &[String],
+    attachment_store: Option<crate::storage::AttachmentStore>,
+) -> Router {
     Router::new()
         // Public instance metadata for the auth screen (unauthenticated).
         .route("/api/instance", get(auth::instance_info))
@@ -183,23 +204,6 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route(
             "/api/export/projects/{identifier}",
             get(export::export_project),
-        )
-        // Whole-project archives (LIF-467). Browser-session-only, and the
-        // only REST surface that refuses API keys, operator keys and OAuth
-        // tokens outright — see src/api/project_archives.rs. The upload route
-        // raises the transport body limit for itself alone; the handler
-        // enforces the real ceiling by counting bytes as they arrive.
-        .route(
-            "/api/project-archives",
-            get(project_archives::archive_capabilities)
-                .post(project_archives::import_project_archive)
-                .layer(DefaultBodyLimit::max(
-                    project_archives::ARCHIVE_UPLOAD_BODY_LIMIT,
-                )),
-        )
-        .route(
-            "/api/project-archives/{identifier}",
-            get(project_archives::export_project_archive),
         )
         // Issue relations
         .route("/api/issues/link", post(issues::link_issues))
@@ -348,6 +352,50 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
             "/api/projects/{id}/views/{view_id}",
             patch(views::update_view).delete(views::delete_view),
         )
+        // Repo → project bindings (LIF-449). `resolve` is open to any
+        // authenticated caller and visibility-filtered; every mutation is
+        // Lead-or-admin on the bound project and rate limited per user. See
+        // src/api/repo_bindings.rs, design LIF-DOC-27.
+        .route("/api/repos/resolve", post(repo_bindings::resolve_repo))
+        .route("/api/repos/bind", post(repo_bindings::bind_repo))
+        .route("/api/repos/merge", post(repo_bindings::merge_repo_bindings))
+        .route(
+            "/api/repos/bindings/{id}",
+            delete(repo_bindings::delete_repo_binding),
+        )
+        .route(
+            "/api/projects/{id}/bindings",
+            get(repo_bindings::list_project_bindings),
+        )
+        // LIF-5: close the issues a batch of commit messages says it closes.
+        // For CI; `lific git-hook` is the same thing for a local hook.
+        .route("/api/git-hook", post(git_hook::git_hook))
+        // Health
+        .route("/api/health", get(health))
+        .merge(attachment_routes(attachment_store))
+        .with_state(db)
+        .layer(Extension(cors_origins.to_vec()))
+}
+
+fn attachment_routes(store: Option<crate::storage::AttachmentStore>) -> Router<DbPool> {
+    let routes = Router::new()
+        // Whole-project archives (LIF-467). Browser-session-only, and the
+        // only REST surface that refuses API keys, operator keys and OAuth
+        // tokens outright — see src/api/project_archives.rs. The upload route
+        // raises the transport body limit for itself alone; the handler
+        // enforces the real ceiling by counting bytes as they arrive.
+        .route(
+            "/api/project-archives",
+            get(project_archives::archive_capabilities)
+                .post(project_archives::import_project_archive)
+                .layer(DefaultBodyLimit::max(
+                    project_archives::ARCHIVE_UPLOAD_BODY_LIMIT,
+                )),
+        )
+        .route(
+            "/api/project-archives/{identifier}",
+            get(project_archives::export_project_archive),
+        )
         // Attachments (LIF-262) — image + file uploads on issues, comments,
         // and pages. The upload route carries its own larger DefaultBodyLimit
         // (overriding the global 2 MB) so multipart uploads up to the
@@ -388,29 +436,12 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route(
             "/api/projects/{id}/attachments/orphans",
             get(attachments::list_project_orphans),
-        )
-        // Repo → project bindings (LIF-449). `resolve` is open to any
-        // authenticated caller and visibility-filtered; every mutation is
-        // Lead-or-admin on the bound project and rate limited per user. See
-        // src/api/repo_bindings.rs, design LIF-DOC-27.
-        .route("/api/repos/resolve", post(repo_bindings::resolve_repo))
-        .route("/api/repos/bind", post(repo_bindings::bind_repo))
-        .route("/api/repos/merge", post(repo_bindings::merge_repo_bindings))
-        .route(
-            "/api/repos/bindings/{id}",
-            delete(repo_bindings::delete_repo_binding),
-        )
-        .route(
-            "/api/projects/{id}/bindings",
-            get(repo_bindings::list_project_bindings),
-        )
-        // LIF-5: close the issues a batch of commit messages says it closes.
-        // For CI; `lific git-hook` is the same thing for a local hook.
-        .route("/api/git-hook", post(git_hook::git_hook))
-        // Health
-        .route("/api/health", get(health))
-        .with_state(db)
-        .layer(Extension(cors_origins.to_vec()))
+        );
+
+    match store {
+        Some(store) => routes.layer(Extension(store)),
+        None => routes,
+    }
 }
 
 async fn events_ws(
