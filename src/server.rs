@@ -472,6 +472,8 @@ pub(crate) fn build_app_with_store(
         //    clients send (`mcp-protocol-version`, `mcp-session-id`,
         //    `last-event-id` for SSE resumption).
         //
+        // The internal CORS layer inside `api::router()` still runs for
+        // /api/* but is effectively shadowed by this outer one.
         .layer(build_global_cors(&cfg.server.cors_origins))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         // Gzip/brotli compression for text responses. The embedded
