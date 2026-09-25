@@ -8,6 +8,10 @@ use tokio::time::{self, Duration, Instant};
 use tracing::{trace, warn};
 
 const EVENT_BUFFER: usize = 256;
+/// Revocations are a wake-up signal, not a durable event log. If a socket
+/// falls behind this one-slot stream, the receive loop revalidates its session
+/// and therefore still fails closed for the revoked account.
+const REVOCATION_BUFFER: usize = 1;
 /// The realtime protocol accepts only heartbeats and bounded
 /// `activity.baseline.request` messages from clients. These small limits leave
 /// room for control frames while bounding tungstenite's pre-handler buffers
@@ -199,7 +203,7 @@ impl RealtimeHub {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        let (revocations, _) = broadcast::channel(capacity);
+        let (revocations, _) = broadcast::channel(REVOCATION_BUFFER);
         Self {
             tx,
             revocations,
@@ -1698,6 +1702,21 @@ mod tests {
         let mut rx = hub.revocations.subscribe();
         hub.revoke_user(42);
         assert_eq!(rx.try_recv().unwrap(), 42);
+    }
+
+    #[test]
+    fn a_burst_of_revocations_uses_the_lag_revalidation_path() {
+        let hub = RealtimeHub::new();
+        let mut rx = hub.revocations.subscribe();
+
+        hub.revoke_user(1);
+        hub.revoke_user(2);
+
+        assert_eq!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(1))
+        );
+        assert_eq!(rx.try_recv().unwrap(), 2);
     }
 
     #[test]
