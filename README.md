@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **30 MCP tools in 6,335 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **30 MCP tools in 6,753 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -66,7 +66,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
-- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
+- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Pass `since` to read forward from where you stopped. Every agent's work is attributed (more below).
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
 - **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
@@ -201,7 +201,7 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 ## MCP tools
 
-All 30, in 6,335 tokens:
+All 30, in 6,753 tokens:
 
 | Family | Tools |
 |--------|-------|

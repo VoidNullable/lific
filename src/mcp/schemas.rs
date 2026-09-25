@@ -78,6 +78,10 @@ pub struct GetIssueInput {
 pub struct GetActivityInput {
     #[schemars(description = "Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO)")]
     pub identifier: String,
+    #[schemars(
+        description = "Only entries strictly after this ISO date or datetime (UTC unless offset given), oldest-first"
+    )]
+    pub since: Option<String>,
     #[schemars(description = "Max entries (default 30, cap 200)")]
     pub limit: Option<i64>,
     #[schemars(description = "Zero-indexed offset for paging")]

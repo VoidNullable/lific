@@ -386,8 +386,11 @@ Reads audit history for an issue, page, or project.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed |
+| `since` | `string` | No | Only entries strictly after this ISO date or datetime, returned oldest first. Omit it for the newest-first feed. |
 | `limit` | `integer` | No | Max entries (default 30, cap 200) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
+
+Audit timestamps are stored in UTC with one-second resolution, and `since` is read on the same clock. A bare date such as `2026-06-01` means midnight UTC. A datetime without an offset is UTC, and one with `Z` or an offset such as `-05:00` is converted to UTC. Fractional seconds are ignored. Entries in the same second as the cursor are excluded, so resuming from the timestamp of the last entry you read also skips anything else written in that second.
 
 Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).
 

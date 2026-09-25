@@ -1565,6 +1565,9 @@ impl LificMcp {
     }
 }
 
+#[cfg(test)]
+mod activity_since_tests;
+
 #[tool_router]
 impl LificMcp {
     #[tool(description = "Search across all issues, pages, and comments by text")]
@@ -1697,7 +1700,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values."
+        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values; pass since to read forward from a timestamp."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
         self.get_activity_inner(input)
@@ -1717,6 +1720,12 @@ impl LificMcp {
             queries::activity::MAX_LIMIT,
         );
         let ident = input.identifier.trim();
+        let since = input
+            .since
+            .as_deref()
+            .map(queries::activity::normalize_since)
+            .transpose()
+            .map_err(|error| error.to_string())?;
 
         // Resolve the identifier shape: page → issue → project. Pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
@@ -1791,16 +1800,26 @@ impl LificMcp {
                 .then_some(scope_identifier.as_str())
         });
         let rendered = self.read(|conn| {
-            let feed = queries::activity::list_activity(conn, scope, Some(limit), Some(offset))?;
+            let feed = queries::activity::list_activity_since(
+                conn,
+                scope,
+                since.as_deref(),
+                Some(limit),
+                Some(offset),
+            )?;
             if feed.items.is_empty() {
                 return Ok((None, 0, feed.has_more));
             }
             let output = try_render(|output| {
-                writeln!(
+                write!(
                     output,
-                    "{} activity entries for {scope_reference}:",
+                    "{} activity entries for {scope_reference}",
                     feed.items.len()
                 )?;
+                match &since {
+                    Some(since) => writeln!(output, " after {since} UTC, oldest first:"),
+                    None => writeln!(output, ":"),
+                }?;
                 feed.items.iter().try_for_each(|activity| {
                     writeln!(
                         output,
@@ -1822,8 +1841,12 @@ impl LificMcp {
             Ok((Some(output), feed.items.len(), feed.has_more))
         })?;
         Ok(match rendered {
-            (None, _, _) if offset == 0 => render_response(|output| {
-                write!(output, "No recorded activity for {scope_reference} yet.")
+            (None, _, _) if offset == 0 => render_response(|output| match &since {
+                Some(since) => write!(
+                    output,
+                    "No activity for {scope_reference} after {since} UTC."
+                ),
+                None => write!(output, "No recorded activity for {scope_reference} yet."),
             }),
             (Some(mut out), _, has_more) => {
                 let result = append_pagination_hint(&mut out, has_more, offset + limit);
@@ -5020,7 +5043,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5076,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -5070,7 +5093,7 @@ mod tests {
         ident.to_string()
     }
 
-    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+    pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: Some(project.into()),
             title: title.into(),
@@ -10843,6 +10866,7 @@ mod tests {
             identifier: "TST".into(),
             limit: Some(50),
             offset: Some(2),
+            ..Default::default()
         }));
         // 5 total (project create + 4 issues) − 2 already seen = 3.
         assert!(next.contains("3 activity entries"), "got: {next}");
