@@ -299,7 +299,10 @@ pub(crate) fn build_app_with_store(
         .with_json_response(true)
         .with_allowed_hosts(mcp_allowed_hosts.clone());
 
-    let mcp_service = StreamableHttpService::new(
+    // rmcp 1.4.0's `Service::call` clones its config on every request. Keep
+    // the service behind an `Arc` so Axum's clone boundary does not copy the
+    // host allowlist (the SDK's `handle` method only needs `&self`).
+    let mcp_service = Arc::new(StreamableHttpService::new(
         move || {
             Ok(mcp::LificMcp::with_realtime(
                 db_for_mcp.clone(),
@@ -308,7 +311,7 @@ pub(crate) fn build_app_with_store(
         },
         Arc::new(LocalSessionManager::default()),
         mcp_config,
-    );
+    ));
 
     // Login rate limiter: 5 attempts per 15 minutes per identity
     let login_limiter = Arc::new(ratelimit::RateLimiter::new(
@@ -738,11 +741,11 @@ fn build_authless_mcp_router(
         .with_stateful_mode(false)
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts);
-    let service = StreamableHttpService::new(
+    let service = Arc::new(StreamableHttpService::new(
         move || Ok(mcp::LificMcp::with_realtime(pool.clone(), realtime.clone())),
         Arc::new(LocalSessionManager::default()),
         config,
-    );
+    ));
     Router::new().route(
         &format!("/mcp/{token}"),
         any(move |request: Request<Body>| async move {
@@ -1507,5 +1510,31 @@ mod authless_mcp_tests {
 
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn authless_path_rejects_unallowlisted_host() {
+        let pool = db::open_memory().unwrap();
+        let token = "the-right-token";
+        let router = build_authless_mcp_router(
+            pool,
+            token,
+            None,
+            vec!["localhost".into()],
+            None,
+            realtime::RealtimeHub::new(),
+        );
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/mcp/{token}"))
+            .header("host", "spoofed.example")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(initialize_body())
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 }
