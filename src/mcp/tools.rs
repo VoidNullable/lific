@@ -402,8 +402,10 @@ fn create_batch_item(
     let module_id = item
         .module
         .as_deref()
-        .map(|name| queries::resolve_module_name(conn, project_id, name))
+        .map(|name| names::module_id(conn, project_id, name))
         .transpose()?;
+    let labels =
+        names::stored_label_names(conn, project_id, item.labels.as_deref().unwrap_or_default())?;
     queries::create_issue(
         conn,
         &models::CreateIssue {
@@ -419,7 +421,7 @@ fn create_batch_item(
             module_id,
             start_date: item.start_date.clone(),
             target_date: item.target_date.clone(),
-            labels: item.labels.clone().unwrap_or_default(),
+            labels,
             source: None,
             attachments,
         },

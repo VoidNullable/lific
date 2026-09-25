@@ -694,3 +694,23 @@ async fn project_export_pages_through_markdown_without_paths() {
         assert!(!output.contains("EXQ/"), "a file path leaked: {output}");
     }
 }
+
+#[test]
+fn create_issue_batch_items_resolve_escaped_module_and_label_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    let result = m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        issues: Some(vec![CreateIssueItem {
+            title: "Batched".into(),
+            module: Some("Infra &amp; Ops".into()),
+            labels: Some(vec!["R&amp;D".into()]),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    }));
+    assert!(result.starts_with("Created"), "got: {result}");
+    let issue = issue_in(&m, "NAM-1");
+    assert!(issue.module_id.is_some(), "module should resolve: {result}");
+    assert_eq!(issue.labels, vec!["R&D".to_string()]);
+}
