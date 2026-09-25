@@ -1860,6 +1860,8 @@ mod tests {
 
         // Turn this row into an unindexed legacy key and re-run migration 053
         // to exercise the same quarantine step as a real database upgrade.
+        // The runner resumes after the highest applied version, so every
+        // later migration is unstamped (and re-applied) with it.
         {
             let conn = pool.write().unwrap();
             conn.execute(
@@ -1867,7 +1869,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute("DELETE FROM _migrations WHERE version = 53", [])
+            conn.execute("DELETE FROM _migrations WHERE version >= 53", [])
                 .unwrap();
         }
         crate::db::migrate::run(&pool.write().unwrap()).unwrap();

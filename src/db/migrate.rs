@@ -261,6 +261,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "revoke unindexed api keys",
         include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
     ),
+    (
+        55,
+        "page revisions",
+        include_str!("../../migrations/055_page_revisions.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -583,7 +588,7 @@ mod tests {
     /// migration `stop`: every earlier migration applied and stamped. The
     /// pool helpers (`db::open_memory`) always run the full set, so this is
     /// the only way to exercise an upgrade path's data handling.
-    fn migrated_up_to(stop: i64) -> Connection {
+    pub(super) fn migrated_up_to(stop: i64) -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(
@@ -1870,5 +1875,53 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(lifecycle(&conn), 1, "a stamp is not a lifecycle event");
+    }
+}
+
+#[cfg(test)]
+mod page_revisions_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+
+    /// LIF-480: pages that exist before migration 055 start their history at
+    /// their current version, so since_seq works on them straight away.
+    #[test]
+    fn page_revisions_upgrade_backfills_each_page_at_its_current_seq() {
+        let conn = migrated_up_to(55);
+        conn.execute_batch(
+            "INSERT INTO projects(id,name,identifier) VALUES (1,'P','PRV');
+             INSERT INTO pages(id,project_id,sequence,title,content) VALUES (1,1,1,'Doc','before');",
+        )
+        .unwrap();
+        let seq: i64 = conn
+            .query_row("SELECT seq FROM pages WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+
+        run(&conn).unwrap();
+
+        let rows = |conn: &rusqlite::Connection| -> Vec<(i64, String)> {
+            let mut statement = conn
+                .prepare("SELECT seq, content FROM page_revisions WHERE page_id = 1 ORDER BY seq")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows(&conn), [(seq, "before".to_string())]);
+
+        conn.execute("UPDATE pages SET content = 'after' WHERE id = 1", [])
+            .unwrap();
+        let now: i64 = conn
+            .query_row("SELECT seq FROM pages WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        // One write can draw more than one seq (the updated_at bump stamps
+        // again); the new version starts at the first of them.
+        let after = rows(&conn);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], (seq, "before".to_string()));
+        assert_eq!(after[1].1, "after");
+        assert!(seq < after[1].0 && after[1].0 <= now);
     }
 }

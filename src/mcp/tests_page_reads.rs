@@ -24,6 +24,7 @@ fn read(m: &LificMcp, identifier: &str, section: Option<&str>, outline: bool) ->
         identifier: identifier.into(),
         section: section.map(Into::into),
         outline: outline.then_some(true),
+        since_seq: None,
     }))
 }
 
@@ -319,4 +320,240 @@ fn an_oversized_page_with_a_huge_outline_drops_deeper_headings_first() {
         outline.contains("  ### Part 300 detail 5 ("),
         "got: {outline}"
     );
+}
+
+// ── LIF-480: get_page(since_seq) ──
+
+fn read_since(m: &LificMcp, identifier: &str, since_seq: i64) -> String {
+    m.get_page(Parameters(GetPageInput {
+        identifier: identifier.into(),
+        since_seq: Some(since_seq),
+        ..Default::default()
+    }))
+}
+
+fn edit(m: &LificMcp, identifier: &str, old: &str, new: &str) {
+    let result = m.edit_page(Parameters(EditPageInput {
+        identifier: identifier.into(),
+        old_string: old.into(),
+        new_string: new.into(),
+        ..Default::default()
+    }));
+    assert!(result.starts_with("Edited "), "got: {result}");
+}
+
+fn revision_count(m: &LificMcp, identifier: &str) -> i64 {
+    m.read(|conn| {
+        let id = queries::resolve_page_identifier(conn, identifier)?;
+        Ok(conn.query_row(
+            "SELECT count(*) FROM page_revisions WHERE page_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?)
+    })
+    .unwrap()
+}
+
+fn numbered_lines(count: usize) -> String {
+    let mut lines = String::new();
+    for n in 1..=count {
+        lines.push_str(&format!("line {n}\n"));
+    }
+    lines
+}
+
+#[test]
+fn since_seq_returns_only_the_changed_hunks_and_the_current_seq() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "DIF");
+    let identifier = seed_page(&m, "DIF", &numbered_lines(30));
+    let created = page_seq(&m, &identifier);
+    edit(&m, &identifier, "line 5\n", "line five\n");
+    let first = page_seq(&m, &identifier);
+    edit(&m, &identifier, "line 25\n", "line twenty-five\n");
+    let now = page_seq(&m, &identifier);
+    assert!(created < first && first < now);
+
+    let result = read_since(&m, &identifier, first);
+
+    assert!(
+        result.contains(&format!(
+            "Content changes since seq {first} (now seq {now}):"
+        )),
+        "got: {result}"
+    );
+    assert!(
+        result.contains("\n-line 25\n+line twenty-five\n"),
+        "got: {result}"
+    );
+    assert!(result.contains("@@ -23,5 +23,5 @@"), "got: {result}");
+    assert!(
+        result.contains(" line 23\n"),
+        "two lines of context: {result}"
+    );
+    assert!(!result.contains("line 22\n"), "no more context: {result}");
+    assert!(
+        !result.contains("line five"),
+        "the earlier edit is not repeated: {result}"
+    );
+    assert!(
+        !result.contains("line 15"),
+        "unchanged content stays out: {result}"
+    );
+
+    // From the page's first version, both edits show.
+    let both = read_since(&m, &identifier, created);
+    assert!(both.contains("-line 5\n+line five\n"), "got: {both}");
+    assert!(
+        both.contains("-line 25\n+line twenty-five\n"),
+        "got: {both}"
+    );
+}
+
+#[test]
+fn since_seq_between_versions_diffs_from_the_version_current_then() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "MID");
+    seed_project(&m, "Other", "OTH");
+    let identifier = seed_page(&m, "MID", &numbered_lines(10));
+    edit(&m, &identifier, "line 2\n", "line two\n");
+    // Seq is instance-wide: a seq read from another entity is a point in
+    // time between this page's versions.
+    let elsewhere = seed_page(&m, "OTH", "unrelated");
+    let between = page_seq(&m, &elsewhere);
+    edit(&m, &identifier, "line 8\n", "line eight\n");
+
+    let result = read_since(&m, &identifier, between);
+    assert!(result.contains("+line eight"), "got: {result}");
+    assert!(!result.contains("line two"), "got: {result}");
+}
+
+#[test]
+fn since_seq_reports_unchanged_content_when_only_metadata_moved() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "SAM");
+    let identifier = seed_page(&m, "SAM", "body\n");
+    let before = page_seq(&m, &identifier);
+    m.update_page(Parameters(UpdatePageInput {
+        identifier: identifier.clone(),
+        title: Some("Renamed".into()),
+        status: Some("active".into()),
+        ..Default::default()
+    }));
+    let now = page_seq(&m, &identifier);
+    assert!(now > before);
+
+    let result = read_since(&m, &identifier, before);
+    assert!(
+        result.ends_with(&format!(
+            "\nContent unchanged since seq {before} (now seq {now}).\n"
+        )),
+        "got: {result}"
+    );
+    assert_eq!(
+        revision_count(&m, &identifier),
+        1,
+        "no row without a content change"
+    );
+}
+
+#[test]
+fn an_unknown_since_seq_falls_back_to_the_full_page_with_a_note() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "FBK");
+    let identifier = seed_page(&m, "FBK", "first\n");
+    let created = page_seq(&m, &identifier);
+    edit(&m, &identifier, "first", "second");
+
+    for unknown in [created - 1, 1_000_000] {
+        let result = read_since(&m, &identifier, unknown);
+        assert!(
+            result.contains(&format!(
+                "Note: seq {unknown} is outside this page's recorded history"
+            )),
+            "got: {result}"
+        );
+        assert!(
+            result.ends_with("follows.\n\nsecond\n\n"),
+            "the normal response follows: {result}"
+        );
+    }
+}
+
+#[test]
+fn since_seq_cannot_be_combined_with_a_section_or_outline() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "CMB");
+    let identifier = seed_page(&m, "CMB", NESTED);
+    let result = m.get_page(Parameters(GetPageInput {
+        identifier,
+        section: Some("Beta".into()),
+        since_seq: Some(1),
+        ..Default::default()
+    }));
+    assert!(
+        result.starts_with("Error: since_seq cannot be combined"),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn page_history_keeps_the_latest_fifty_versions() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "CAP");
+    let identifier = seed_page(&m, "CAP", "version 0\n");
+    let created = page_seq(&m, &identifier);
+    for version in 1..=60 {
+        edit(
+            &m,
+            &identifier,
+            &format!("version {}\n", version - 1),
+            &format!("version {version}\n"),
+        );
+    }
+    assert_eq!(revision_count(&m, &identifier), 50);
+    assert!(read_since(&m, &identifier, created).contains("outside this page's recorded history"));
+}
+
+#[test]
+fn page_history_drops_old_versions_past_the_size_cap() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "SZC");
+    let big = "x".repeat(400_000);
+    let identifier = seed_page(&m, "SZC", &format!("v0\n{big}"));
+    for version in 1..=6 {
+        edit(
+            &m,
+            &identifier,
+            &format!("v{}\n", version - 1),
+            &format!("v{version}\n"),
+        );
+    }
+    // Each version is just over 400,000 characters, so the newest four fit
+    // in 2,000,000 and the older three are dropped.
+    assert_eq!(revision_count(&m, &identifier), 4);
+}
+
+#[test]
+fn page_history_is_deleted_with_the_page() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "DEL");
+    let identifier = seed_page(&m, "DEL", "one\n");
+    edit(&m, &identifier, "one", "two");
+    assert_eq!(revision_count(&m, &identifier), 2);
+    let id = m
+        .read(|conn| queries::resolve_page_identifier(conn, &identifier))
+        .unwrap();
+
+    let conn = m.db.write().unwrap();
+    conn.execute("DELETE FROM pages WHERE id = ?1", [id])
+        .unwrap();
+    let left: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM page_revisions WHERE page_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
 }

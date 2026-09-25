@@ -2800,25 +2800,42 @@ impl LificMcp {
     }
 
     fn get_page_inner(&self, input: GetPageInput) -> Result<String, String> {
-        let (page, folder_name) = self.read(|conn| {
+        let (page, folder_name, before) = self.read(|conn| {
             let id = queries::resolve_page_identifier(conn, &input.identifier)?;
             let page = queries::get_page(conn, id)?;
             let folder_name = match page.folder_id {
                 Some(fid) => Some(queries::get_folder_name(conn, fid)?),
                 None => None,
             };
-            Ok((page, folder_name))
+            let before = match input.since_seq {
+                Some(seq) => queries::page_content_at_seq(conn, id, seq)?,
+                None => None,
+            };
+            Ok((page, folder_name, before))
         })?;
         require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer)?;
         // LIF-479: oversized pages come back as an outline plus their
         // opening; `section` and `outline` read them piece by piece.
-        let body = super::page_reads::page_body(
-            &page.identifier,
-            &page.content,
-            page.seq,
-            input.section.as_deref(),
-            input.outline.unwrap_or(false),
-        )?;
+        // LIF-480: `since_seq` returns only the content diff.
+        let body = match input.since_seq {
+            Some(_) if input.section.is_some() || input.outline.is_some() => {
+                return Err("since_seq cannot be combined with section or outline".into());
+            }
+            Some(since) => super::page_reads::page_changes(
+                &page.identifier,
+                before.as_deref(),
+                &page.content,
+                since,
+                page.seq,
+            )?,
+            None => super::page_reads::page_body(
+                &page.identifier,
+                &page.content,
+                page.seq,
+                input.section.as_deref(),
+                input.outline.unwrap_or(false),
+            )?,
+        };
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             writeln!(

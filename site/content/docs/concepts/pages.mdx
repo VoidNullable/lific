@@ -43,3 +43,5 @@ Each page has a pinned value. The web page list shows pinned pages in a separate
 ## Long pages
 
 Agents read pages through `get_page`, and agent harnesses silently cut off tool output past roughly 50 KB. A page longer than 30,000 characters is therefore returned as its outline, with each section's size, plus the start of its content. The agent then reads the part it needs with `get_page(identifier="LIF-DOC-3", section="Current state")`. The web UI always shows the whole page.
+
+To catch up on a page it read before, an agent passes the `seq` from that read as `get_page(identifier="LIF-DOC-3", since_seq=...)` and gets back only the changed lines. Lific keeps up to 50 recent versions of each page's content for this, and deletes them with the page. Project archives do not include them.

@@ -206,6 +206,10 @@ pub struct GetPageInput {
     pub section: Option<String>,
     #[schemars(description = "Return only the headings, each section's size, and the page seq")]
     pub outline: Option<bool>,
+    #[schemars(
+        description = "A seq from an earlier read: return only the content diff since then, plus the current seq"
+    )]
+    pub since_seq: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

@@ -212,6 +212,9 @@ Gets a page and its content. A page of up to 30,000 characters is returned whole
 | `identifier` | `string` | Yes | Page identifier like LIF-DOC-1 |
 | `section` | `string` | No | Read one section: a heading's text (case-insensitive) or its anchor, such as `current-state`. The section runs from that heading to the next heading of the same or a higher level, so it includes its subsections. When several headings share the text, the response lists each one's anchor. An exact anchor wins over a text match. |
 | `outline` | `boolean` | No | Return only the headings, each with its level and section size in characters, plus the page's `seq`. With `section`, outlines that section. |
+| `since_seq` | `integer` | No | A `seq` from an earlier read. Returns only what changed in the content since then, as a unified diff with two lines of context, plus the current `seq`. Cannot be combined with `section` or `outline`. |
+
+Lific keeps up to 50 recent versions of each page's content, dropping the oldest once they total 2,000,000 characters. When `since_seq` falls outside that history, the response says so and returns the page as a plain read would. Any `seq` works as the starting point, because seq values are shared by all issues, pages and comments on an instance.
 
 Only ATX headings (`#` to `######`) count, and lines inside fenced code blocks are never headings. Anchors follow GitHub's rules: lowercase, punctuation dropped, spaces as hyphens, and `-1`, `-2` appended to repeats.
 

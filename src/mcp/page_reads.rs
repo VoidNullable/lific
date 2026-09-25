@@ -391,3 +391,57 @@ fn write_section(
         writeln!(out, "\n{}", body.trim_end())
     }
 }
+
+/// What `get_page(since_seq=...)` prints after the page header (LIF-480):
+/// a unified diff of the content between `since` and now, with two lines of
+/// context around each change. `before` is `None` when `since` is outside
+/// the page's recorded history; the full read follows a note saying so.
+pub(crate) fn page_changes(
+    identifier: &str,
+    before: Option<&str>,
+    content: &str,
+    since: i64,
+    seq: i64,
+) -> Result<String, String> {
+    let Some(before) = before else {
+        let body = page_body(identifier, content, seq, None, false)?;
+        return Ok(format!(
+            "Note: seq {since} is outside this page's recorded history (its latest 50 versions), so the full page follows.\n{body}"
+        ));
+    };
+    let mut out = String::new();
+    let rendered = if before == content {
+        writeln!(
+            out,
+            "\nContent unchanged since seq {since} (now seq {seq})."
+        )
+    } else {
+        write_diff(&mut out, before, content, since, seq)
+    };
+    rendered.map_err(|error| format!("failed to format response: {error}"))?;
+    Ok(out)
+}
+
+fn write_diff(out: &mut String, before: &str, after: &str, since: i64, seq: i64) -> fmt::Result {
+    let diff = similar::TextDiff::from_lines(before, after);
+    let hunks = diff.unified_diff().context_radius(2).to_string();
+    let total = char_len(&hunks);
+    let shown = prefix(&hunks, PAGE_READ_BUDGET);
+    // A fence longer than any backtick run in the diff, since page content
+    // often carries its own code fences.
+    let longest = shown.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    writeln!(
+        out,
+        "\nContent changes since seq {since} (now seq {seq}):\n{fence}diff\n{shown}{fence}"
+    )?;
+    if shown.len() < hunks.len() {
+        writeln!(
+            out,
+            "[Diff truncated at {} of {} chars. Read the changed sections with section= instead.]",
+            Chars(char_len(shown)),
+            Chars(total)
+        )?;
+    }
+    Ok(())
+}
