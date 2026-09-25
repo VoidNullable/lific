@@ -1921,6 +1921,8 @@ mod tests {
 
     #[test]
     fn parse_connect_defaults() {
+        // `--url` reads LIFIC_URL, which other tests set under this lock.
+        let _env = test_env::EnvGuard::cleared(&["LIFIC_URL"]);
         let cli = Cli::try_parse_from(["lific", "connect"]).unwrap();
         match cli.command {
             Command::Connect {
