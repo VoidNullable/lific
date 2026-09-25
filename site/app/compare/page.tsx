@@ -58,7 +58,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: "How many context tokens does an issue tracker's MCP server cost?",
-    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on August 22, 2026 at v2.7.0: 6,335 tokens (30 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
+    a: "Measured against each server's tools/list output with tiktoken o200k_base on July 14, 2026: beads 2,871 tokens (15 tools), Gitea 6,676 (53 tools), a Vikunja community server 7,213 (53 tools), and Plane 30,105 (139 tools). Lific was measured the same way on September 25, 2026 at v2.10.0: 6,715 tokens (30 tools). MCP client guidance recommends budgeting tool definitions to roughly 1 to 5 percent of the context window, which is 2k to 10k tokens on a 200k model.",
   },
 ];
 
@@ -478,7 +478,7 @@ export default function Compare() {
                   <>
                     30 tools: issues, nestable plans, pages, comments,
                     attachments, search, audit history. The whole surface costs
-                    about 6.3k tokens of context (measured below).
+                    about 6.7k tokens of context (measured below).
                   </>,
                 ],
               },
@@ -601,8 +601,8 @@ export default function Compare() {
             So we measured, on {STAMP}: each server launched over stdio,
             asked for its tool list, schemas tokenized. Numbers below are what
             an agent pays before it reads a single line of your code. Lific&apos;s
-            own row was measured again the same way on August 22, 2026, against
-            v2.7.0; the other rows are the {STAMP} figures.
+            own row was measured again the same way on September 25, 2026, against
+            v2.10.0; the other rows are the {STAMP} figures.
           </Body>
           <ComparisonTable
             caption="Measured tool counts and tool-schema token costs of each tracker's MCP server"
@@ -618,11 +618,11 @@ export default function Compare() {
                 lific: true,
                 cells: [
                   <>
-                    Built in: <Cmd>lific mcp</Cmd> (v2.7.0)
+                    Built in: <Cmd>lific mcp</Cmd> (v2.10.0)
                   </>,
                   <>30</>,
-                  <>6,335 tokens</>,
-                  <>3.2%</>,
+                  <>6,715 tokens</>,
+                  <>3.4%</>,
                 ],
               },
               {
@@ -848,7 +848,7 @@ export default function Compare() {
                 head: "A small context bill.",
                 body: (
                   <>
-                    About 6.3k tokens for the full 30-tool surface, roughly
+                    About 6.7k tokens for the full 30-tool surface, roughly
                     one long file read, so connecting the tracker doesn&apos;t
                     crowd out the actual work.
                   </>

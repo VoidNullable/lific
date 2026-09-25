@@ -294,7 +294,7 @@ export default function Home() {
             <Body className="mt-9">
               After the restart, the agent has the whole tracker as MCP tools:
               issues, plans, pages, comments, and search. The full tool
-              surface costs <Em>about 5.8k tokens of context</Em>, roughly one
+              surface costs <Em>about 6.7k tokens of context</Em>, roughly one
               long file read, so it leaves room for the actual work.
             </Body>
             <Body>
@@ -429,9 +429,9 @@ export default function Home() {
               tools show up.
             </Body>
             <Body>
-              Running solo, that&apos;s the whole ceremony. Keys minted from
-              your own shell are <Em>operator-trusted</Em>, and you never make
-              an account.
+              Running solo, that&apos;s the whole ceremony: no signup form, and
+              each AI tool gets <Em>its own key under your account</Em>, so the
+              activity log shows which tool changed what.
             </Body>
           </Reveal>
           <Reveal delay={100} className="mt-9 min-w-0">
