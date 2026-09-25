@@ -25,7 +25,7 @@ use rmcp::transport::streamable_http_server::{
     tower::{StreamableHttpServerConfig, StreamableHttpService},
 };
 use rust_embed::Embed;
-use tower_http::compression::CompressionLayer;
+use tower_http::compression::Compression;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
@@ -455,36 +455,43 @@ pub(crate) fn build_app_with_store(
     // published projects are reachable through it (the flag is checked in the
     // SQL of every read), and only with `GET`.
     let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
-    app.fallback(get(serve_frontend))
-        // Top-level CORS layer.
-        //
-        // This wraps EVERYTHING (REST API, /mcp, OAuth, frontend). Two
-        // things matter here:
-        //
-        // 1. `CorsLayer` intercepts OPTIONS preflight requests and
-        //    short-circuits them with a 204 — they never reach the auth
-        //    middleware. Without this, browser MCP clients like Claude
-        //    Web get their preflight rejected with 401 and the actual
-        //    POST is never sent.
-        //
-        // 2. We expose MCP-specific headers (`mcp-session-id`,
-        //    `www-authenticate`) and accept the request headers MCP
-        //    clients send (`mcp-protocol-version`, `mcp-session-id`,
-        //    `last-event-id` for SSE resumption).
-        //
-        // The internal CORS layer inside `api::router()` still runs for
-        // /api/* but is effectively shadowed by this outer one.
-        .layer(build_global_cors(&cfg.server.cors_origins))
-        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
-        // Gzip/brotli compression for text responses. The embedded
-        // frontend ships a ~1 MB JS bundle that was previously served
-        // raw — uncompressed it took ~6-9s to transfer over the
-        // tailnet, blocking first paint (and everything behind it).
-        // CompressionLayer's DefaultPredicate already skips SSE
-        // (text/event-stream — so MCP streaming is untouched), gRPC,
-        // already-compressed images, and bodies under 32 bytes.
-        .layer(CompressionLayer::new())
-        .layer(middleware::from_fn(add_security_headers))
+    with_compression(
+        app.fallback(get(serve_frontend))
+            // Top-level CORS layer.
+            //
+            // This wraps EVERYTHING (REST API, /mcp, OAuth, frontend). Two
+            // things matter here:
+            //
+            // 1. `CorsLayer` intercepts OPTIONS preflight requests and
+            //    short-circuits them with a 204 — they never reach the auth
+            //    middleware. Without this, browser MCP clients like Claude
+            //    Web get their preflight rejected with 401 and the actual
+            //    POST is never sent.
+            //
+            // 2. We expose MCP-specific headers (`mcp-session-id`,
+            //    `www-authenticate`) and accept the request headers MCP
+            //    clients send (`mcp-protocol-version`, `mcp-session-id`,
+            //    `last-event-id` for SSE resumption).
+            //
+            // The internal CORS layer inside `api::router()` still runs for
+            // /api/* but is effectively shadowed by this outer one.
+            .layer(build_global_cors(&cfg.server.cors_origins))
+            .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+            // Gzip/brotli compression for text responses. The embedded
+            // frontend ships a ~1 MB JS bundle that was previously served
+            // raw — uncompressed it took ~6-9s to transfer over the
+            // tailnet, blocking first paint (and everything behind it).
+            // Compression's DefaultPredicate already skips SSE
+            // (text/event-stream — so MCP streaming is untouched), gRPC,
+            // already-compressed images, and bodies under 32 bytes.
+            .layer(middleware::from_fn(add_security_headers)),
+    )
+}
+
+/// Apply compression once around the completed router instead of asking
+/// `Router::layer` to clone and install a wrapper on every route.
+fn with_compression(app: Router) -> Router {
+    Router::new().fallback_service(Compression::new(app))
 }
 
 /// `lific start`: bring up the HTTP server for `cfg` and serve until a
@@ -1087,6 +1094,106 @@ mod cors_tests {
             expose.contains("www-authenticate"),
             "www-authenticate must be exposed, got: {expose}"
         );
+    }
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY},
+        response::Response,
+        routing::get,
+    };
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        let body = "compression middleware should preserve response semantics ".repeat(4);
+        let sse_body = body.clone();
+        let encoded_body = body.clone();
+        with_compression(
+            Router::new()
+                .route(
+                    "/text",
+                    get(move || {
+                        let body = body.clone();
+                        async move { ([(CONTENT_TYPE, "text/plain")], body) }
+                    }),
+                )
+                .route(
+                    "/sse",
+                    get(move || {
+                        let body = sse_body.clone();
+                        async move { ([(CONTENT_TYPE, "text/event-stream")], body) }
+                    }),
+                )
+                .route(
+                    "/encoded",
+                    get(move || {
+                        let body = encoded_body.clone();
+                        async move {
+                            Response::builder()
+                                .header(CONTENT_TYPE, "text/plain")
+                                .header(CONTENT_ENCODING, "gzip")
+                                .body(Body::from(body))
+                                .unwrap()
+                        }
+                    }),
+                ),
+        )
+    }
+
+    async fn get_response(app: &Router, path: &str, accept_encoding: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(ACCEPT_ENCODING, accept_encoding)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_boundary_negotiates_gzip_and_brotli() {
+        let app = app();
+
+        for encoding in ["gzip", "br"] {
+            let response = get_response(&app, "/text", encoding).await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok()),
+                Some(encoding)
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(VARY)
+                    .and_then(|value| value.to_str().ok()),
+                Some("accept-encoding")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_boundary_skips_sse_and_existing_encoding() {
+        let app = app();
+
+        for path in ["/sse", "/encoded"] {
+            let response = get_response(&app, path, "br, gzip").await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok()),
+                (path == "/encoded").then_some("gzip")
+            );
+        }
     }
 }
 
