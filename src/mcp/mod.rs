@@ -255,7 +255,7 @@ pub struct LificMcp {
     /// resolution `server.rs` uses for REST's store, so both transports hit
     /// one content-addressed directory.
     store: AttachmentStore,
-    tool_router: ToolRouter<Self>,
+    tool_router: &'static ToolRouter<Self>,
     /// Present only for a stdio session launched with a `LIFIC_TOKEN`. `None`
     /// covers both the HTTP transport (where per-request middleware already
     /// owns identity, and where re-entering [`with_request_context`] here would
@@ -285,7 +285,7 @@ impl LificMcp {
             db: Arc::new(db),
             realtime,
             store,
-            tool_router: Self::create_tool_router(),
+            tool_router: Self::shared_tool_router(),
             stdio_auth: None,
             bound_project: None,
         }
@@ -589,6 +589,41 @@ mod tests {
     use http_body_util::BodyExt;
     use rusqlite::params;
     use tower::ServiceExt;
+
+    #[test]
+    fn tool_schemas_are_shared_across_worker_threads() {
+        let pool = crate::db::open_memory().expect("test db");
+        let barrier = std::sync::Barrier::new(4);
+        let handlers = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        LificMcp::new(pool.clone())
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("MCP worker"))
+                .collect::<Vec<_>>()
+        });
+
+        let tools = handlers[0].tool_router.list_all();
+        assert!(!tools.is_empty());
+        for handler in &handlers[1..] {
+            assert!(std::ptr::eq(handlers[0].tool_router, handler.tool_router));
+            assert_eq!(handler.tool_router.list_all(), tools);
+            for tool in &tools {
+                let other = handler.tool_router.get(&tool.name).expect("same tool");
+                assert!(
+                    Arc::ptr_eq(&tool.input_schema, &other.input_schema),
+                    "{} schema was rebuilt on another worker",
+                    tool.name
+                );
+            }
+        }
+    }
 
     // ── LIF-204: OAuth-token user_id -> resolved AuthUser (MCP path) ─────
     //
