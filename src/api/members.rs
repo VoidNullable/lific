@@ -863,7 +863,7 @@ mod tests {
         fn fixture() -> Fixture {
             let (db, _admin, lead, _maintainer, viewer, outsider, project_id) =
                 setup_membership_test();
-            let manager = crate::auth::create_key_manager().unwrap();
+            let manager = crate::auth::create_key_manager();
             let session = {
                 let conn = db.write().unwrap();
                 crate::db::queries::users::create_session(&conn, lead.id, None)

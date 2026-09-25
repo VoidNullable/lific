@@ -14187,7 +14187,7 @@ mod authz_gating_tests {
 
         let auth_state = crate::auth::AuthState {
             db: (*m.db).clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
+            manager: crate::auth::create_key_manager(),
             public_url: "https://example.com".into(),
             required: true,
         };

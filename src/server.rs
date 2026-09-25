@@ -29,7 +29,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
-use api_keys_simplified::ApiKeyManagerV0;
+use crate::auth::ApiKeyManager;
 
 use crate::config::{self, Config};
 use crate::{
@@ -242,7 +242,7 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 pub fn build_app(
     cfg: &Config,
     pool: db::DbPool,
-    manager: ApiKeyManagerV0,
+    manager: ApiKeyManager,
     realtime: realtime::RealtimeHub,
     trusted_proxies: Arc<[ratelimit::IpNetwork]>,
 ) -> Router {
@@ -259,7 +259,7 @@ pub fn build_app(
 pub(crate) fn build_app_with_store(
     cfg: &Config,
     pool: db::DbPool,
-    manager: ApiKeyManagerV0,
+    manager: ApiKeyManager,
     realtime: realtime::RealtimeHub,
     trusted_proxies: Arc<[ratelimit::IpNetwork]>,
     attachment_store: storage::AttachmentStore,
@@ -277,7 +277,7 @@ pub(crate) fn build_app_with_store(
         format!("http://{}:{}", crate::display_host(host), cfg.server.port)
     });
 
-    let manager_ext = Arc::new(manager.clone());
+    let manager_ext = Arc::new(manager);
 
     let auth_state = auth::AuthState {
         db: pool.clone(),
@@ -540,6 +540,13 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let pool = db::open(&cfg.database.path)?;
+    let unsupported_key_formats = auth::unsupported_api_key_format_count(&pool)?;
+    if unsupported_key_formats > 0 {
+        warn!(
+            unsupported_key_formats,
+            "API key records with an unsupported format cannot authenticate. Check `lific key list`; rotate before reuse only for integrations that still need credentials."
+        );
+    }
     info!(path = %cfg.database.path.display(), "database ready");
 
     // Seed the instance-settings row on first run, taking the initial
@@ -584,8 +591,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Key manager for auth
-    let manager =
-        auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
+    let manager = auth::create_key_manager();
 
     // Auto-generate a key if none exist and no human operator exists
     // yet (LIFIC-9: once a human exists we stop auto-minting the
@@ -1275,7 +1281,7 @@ mod public_surface_tests {
         let app = build_app_with_store(
             &cfg,
             pool,
-            auth::create_key_manager().expect("key manager"),
+            auth::create_key_manager(),
             realtime::RealtimeHub::new(),
             trusted_proxies,
             store,

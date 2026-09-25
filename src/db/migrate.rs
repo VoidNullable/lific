@@ -258,7 +258,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         53,
-        "revoke unindexed API keys",
+        "revoke unindexed api keys",
         include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
     ),
 ];
@@ -671,8 +671,11 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(revoked, "unindexed legacy keys are quarantined");
-        assert!(!indexed_revoked, "indexed keys remain eligible");
+        assert!(revoked, "unindexed legacy keys must be rotated");
+        assert!(
+            !indexed_revoked,
+            "indexed keys remain eligible for migration"
+        );
     }
 
     #[test]
