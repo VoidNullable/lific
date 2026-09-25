@@ -105,6 +105,15 @@ fn next_open_step(steps: &[models::PlanStepNode]) -> Option<&models::PlanStepNod
     Some(next_open_step(&step.children).unwrap_or(step))
 }
 
+/// A heading count: `100+` when the scan stopped before the end.
+fn count(total: usize, total_is_floor: bool) -> String {
+    if total_is_floor {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    }
+}
+
 fn is_closed(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
@@ -337,7 +346,10 @@ impl LificMcp {
             })
             .collect();
         Ok(Some(Section {
-            heading: format!("Active plans ({})", plans.len()),
+            heading: format!(
+                "Active plans ({})",
+                count(plans.len(), plans.len() as i64 >= SCAN_LIMIT)
+            ),
             summary: None,
             lines,
             total: plans.len(),
@@ -347,12 +359,13 @@ impl LificMcp {
     }
 
     /// Issues in `project_id` matching `query`, priority first, as
-    /// `(shown, total, total_is_floor)`. `keep` drops rows after the read.
+    /// `(shown, total, total_is_floor)`. Every exclusion belongs in `query`
+    /// (`exclude_statuses` included) so it applies before the scan limit:
+    /// filtering after the read let excluded rows crowd out eligible ones.
     fn briefing_issues(
         &self,
         project_id: i64,
         query: models::ListIssuesQuery,
-        keep: impl Fn(&models::Issue) -> bool,
     ) -> Result<(Vec<models::Issue>, usize, bool), String> {
         let page = self.read(|conn| {
             queries::list_issues_page(
@@ -365,10 +378,9 @@ impl LificMcp {
                 },
             )
         })?;
-        let kept: Vec<models::Issue> = page.items.into_iter().filter(|issue| keep(issue)).collect();
-        let total = kept.len();
+        let total = page.items.len();
         Ok((
-            kept.into_iter().take(ISSUE_LINES).collect(),
+            page.items.into_iter().take(ISSUE_LINES).collect(),
             total,
             page.has_more,
         ))
@@ -384,9 +396,9 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 blocked: Some(true),
+                exclude_statuses: vec![models::Status::Done, models::Status::Cancelled],
                 ..Default::default()
             },
-            |issue| !is_closed(issue.status.as_str()),
         )?;
         if issues.is_empty() {
             return Ok(None);
@@ -440,7 +452,7 @@ impl LificMcp {
             })
             .collect();
         Ok(Some(Section {
-            heading: format!("Blocked ({total})"),
+            heading: format!("Blocked ({})", count(total, total_is_floor)),
             summary: None,
             lines,
             total,
@@ -504,15 +516,18 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 workable: Some(true),
+                exclude_statuses: vec![models::Status::Active],
                 ..Default::default()
             },
-            |issue| issue.status != models::Status::Active,
         )?;
         if issues.is_empty() {
             return Ok(None);
         }
         Ok(Some(Section {
-            heading: format!("Workable, not yet active ({total}), by priority"),
+            heading: format!(
+                "Workable, not yet active ({}), by priority",
+                count(total, total_is_floor)
+            ),
             summary: None,
             lines: issues
                 .iter()
@@ -536,13 +551,12 @@ impl LificMcp {
                 status: Some(models::Status::Active),
                 ..Default::default()
             },
-            |_| true,
         )?;
         if issues.is_empty() {
             return Ok(None);
         }
         Ok(Some(Section {
-            heading: format!("Active ({total})"),
+            heading: format!("Active ({})", count(total, total_is_floor)),
             summary: None,
             lines: issues
                 .iter()

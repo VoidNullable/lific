@@ -651,3 +651,72 @@ fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
     );
     assert!(!next.contains("new CSR-1"), "{next}");
 }
+
+/// Review fix: sections used to read the first 100 rows by priority and only
+/// then drop the ones they exclude, so enough higher-priority excluded rows
+/// hid every eligible issue and the section vanished without a word.
+#[test]
+fn excluded_rows_ahead_of_an_eligible_issue_do_not_hide_it() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Crowd", "CRW");
+    let project_id = m
+        .read(|conn| queries::resolve_project_identifier(conn, "CRW"))
+        .unwrap();
+    m.write(|conn| {
+        let create = |title: String, status, priority| {
+            queries::create_issue(
+                conn,
+                &models::CreateIssue {
+                    project_id,
+                    title,
+                    status,
+                    priority,
+                    ..Default::default()
+                },
+            )
+        };
+        let blocker = create(
+            "Blocker".into(),
+            models::Status::Todo,
+            models::Priority::None,
+        )?;
+        for index in 0..105 {
+            // Active and urgent: ahead of everything workable.
+            create(
+                format!("Busy {index}"),
+                models::Status::Active,
+                models::Priority::Urgent,
+            )?;
+            // Closed but still carrying an open blocker: ahead of the open one.
+            let closed = create(
+                format!("Closed {index}"),
+                models::Status::Done,
+                models::Priority::Urgent,
+            )?;
+            queries::link_issues(conn, blocker.id, closed.id, "blocks")?;
+        }
+        create(
+            "Pick me up".into(),
+            models::Status::Todo,
+            models::Priority::Low,
+        )?;
+        let open = create(
+            "Still stuck".into(),
+            models::Status::Todo,
+            models::Priority::Low,
+        )?;
+        queries::link_issues(conn, blocker.id, open.id, "blocks")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let out = briefing(&m, Some("CRW"), None, &[]);
+    let workable = section(&out, "Workable, not yet active");
+    assert!(workable.contains("Pick me up"), "{workable}");
+    assert!(!workable.contains("Busy"), "{workable}");
+    let blocked = section(&out, "Blocked (1)");
+    assert!(blocked.contains("Still stuck"), "{blocked}");
+    assert!(!blocked.contains("Closed"), "{blocked}");
+    // A count cut short by the scan says so rather than posing as exact.
+    section(&out, "Active (100+)");
+}

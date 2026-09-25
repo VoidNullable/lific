@@ -2022,6 +2022,7 @@ impl LificMcp {
                     order: input.order.clone(),
                     limit: Some(limit),
                     offset: Some(offset),
+                    ..Default::default()
                 },
             )
         })?;

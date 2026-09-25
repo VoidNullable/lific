@@ -268,6 +268,18 @@ pub fn list_issues_page(
         conditions.push(format!("i.status = ?{}", param_values.len() + 1));
         param_values.push(Box::new(status));
     }
+    if !q.exclude_statuses.is_empty() {
+        let placeholders = q
+            .exclude_statuses
+            .iter()
+            .map(|status| {
+                param_values.push(Box::new(status.as_str()));
+                format!("?{}", param_values.len())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        conditions.push(format!("i.status NOT IN ({placeholders})"));
+    }
     if let Some(priority) = q.priority {
         conditions.push(format!("i.priority = ?{}", param_values.len() + 1));
         param_values.push(Box::new(priority));

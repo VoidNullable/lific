@@ -427,7 +427,7 @@ The response opens with the current time and a `since` value to pass next time. 
 - **Key pages**: identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`.
 - **Active** issues, highest priority first.
 
-Sections with nothing to report are left out. Issue sections show up to 8 items, plans up to 5, and each kind of change up to 5. The whole response stays under 6,000 characters. When a section is cut, either by its own limit or to fit that budget, it ends with the number of items left out and the call that lists them all.
+Sections with nothing to report are left out. Issue sections show up to 8 items, plans up to 5, and each kind of change up to 5. The whole response stays under 6,000 characters. When a section is cut, either by its own limit or to fit that budget, it ends with the number of items left out and the call that lists them all. Sections count up to 100 items; a count such as `100+` means there are at least that many.
 
 Access follows `list_issues`: you need at least viewer access to the project.
 

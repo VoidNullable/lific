@@ -479,6 +479,10 @@ pub struct ListIssuesQuery {
     pub order: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Statuses to leave out, applied in SQL before paging so excluded rows
+    /// cannot crowd eligible ones off a page. Internal: not a REST parameter.
+    #[serde(skip)]
+    pub exclude_statuses: Vec<Status>,
 }
 
 /// Per-status issue counts for a project (LIF-161). `total` is the sum of
