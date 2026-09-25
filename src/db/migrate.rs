@@ -256,6 +256,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "user project order",
         include_str!("../../migrations/052_user_project_order.sql"),
     ),
+    (
+        53,
+        "revoke unindexed API keys",
+        include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -638,6 +643,36 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run(&conn).expect("initial migration");
         conn
+    }
+
+    #[test]
+    fn api_key_upgrade_revokes_only_rows_without_an_indexed_id() {
+        let conn = migrated_up_to(53);
+        conn.execute_batch(
+            "INSERT INTO api_keys(name,key_hash,key_id) VALUES
+                ('legacy-null','legacy-hash',NULL),
+                ('indexed','legacy-hash','0123456789abcdef0123456789abcdef');",
+        )
+        .unwrap();
+
+        run(&conn).expect("API-key retirement migration");
+
+        let revoked: bool = conn
+            .query_row(
+                "SELECT revoked FROM api_keys WHERE name = 'legacy-null'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexed_revoked: bool = conn
+            .query_row(
+                "SELECT revoked FROM api_keys WHERE name = 'indexed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(revoked, "unindexed legacy keys are quarantined");
+        assert!(!indexed_revoked, "indexed keys remain eligible");
     }
 
     #[test]

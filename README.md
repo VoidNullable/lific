@@ -278,6 +278,8 @@ lific key list
 
 Prefer per-tool **bot identities** (what `lific connect` mints when you have a user account) over unbound keys: a bot inherits its owner's project access and shows up in the audit log by name.
 
+Legacy API keys without an indexed lookup ID are disabled during upgrade to prevent authentication from scanning every old verifier. `lific key list` marks those rows as `UNSUPPORTED FORMAT`; rotate them before reuse only if the integration still needs a credential.
+
 ## Configuration
 
 <details>
