@@ -848,7 +848,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // PRESENT-but-invalid token is a hard error: a revoked or mistyped
             // agent credential must not silently fall back to higher-privilege
             // operator access (PR #23 review).
-            let manager = auth::create_key_manager()?;
+            let manager = auth::create_key_manager();
             let token_user = match auth::resolve_stdio_token(&pool, &manager) {
                 Ok(Some(user)) => Some(user),
                 Ok(None) => {
@@ -1351,8 +1351,7 @@ async fn cmd_init(
     // we stop auto-minting the unbound "default" key — the operator is a real
     // user now, and keys are minted on demand via `lific key create`.
     let new_key = if auth::should_mint_initial_key(&pool) {
-        let manager =
-            auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
+        let manager = auth::create_key_manager();
         Some(auth::create_api_key(&pool, &manager, "default", None)?)
     } else {
         None

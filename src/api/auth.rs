@@ -1050,7 +1050,7 @@ pub(super) struct CreateKeyRequest {
 pub(super) async fn create_key(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    Extension(manager): Extension<std::sync::Arc<crate::auth::ApiKeyManager>>,
     headers: HeaderMap,
     Json(input): Json<CreateKeyRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -1127,7 +1127,7 @@ pub(super) struct CreateBotRequest {
 pub(super) async fn create_bot(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
-    Extension(manager): Extension<std::sync::Arc<api_keys_simplified::ApiKeyManagerV0>>,
+    Extension(manager): Extension<std::sync::Arc<crate::auth::ApiKeyManager>>,
     headers: HeaderMap,
     Json(input): Json<CreateBotRequest>,
 ) -> Result<Json<serde_json::Value>, LificError> {
@@ -1541,10 +1541,10 @@ mod tests {
         }
 
         fn real_stack(db: &DbPool) -> axum::Router {
-            let manager = crate::auth::create_key_manager().unwrap();
+            let manager = crate::auth::create_key_manager();
             let auth_state = crate::auth::AuthState {
                 db: db.clone(),
-                manager: manager.clone(),
+                manager,
                 public_url: "https://example.com".into(),
                 required: true,
             };
@@ -1600,7 +1600,7 @@ mod tests {
             limiter: Option<std::sync::Arc<crate::ratelimit::RateLimiter>>,
         ) -> Fixture {
             let db = crate::db::open_memory().unwrap();
-            let manager = crate::auth::create_key_manager().unwrap();
+            let manager = crate::auth::create_key_manager();
 
             let (user_id, bot_id, stranger_id, session) = {
                 let conn = db.write().unwrap();
@@ -4582,7 +4582,7 @@ mod tests {
         let app = app_as_user(db.clone(), &admin);
 
         // The victim's key and connected tool.
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let victim_bot = {
             let conn = db.write().unwrap();
             crate::db::queries::users::ensure_bot(&conn, member.id, "zed", "Zed").unwrap()

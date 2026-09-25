@@ -137,11 +137,11 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
 /// there is deliberately no `Debug`, `Display` or accessor for it.
 pub(crate) struct StdioAuth {
     token: String,
-    manager: api_keys_simplified::ApiKeyManagerV0,
+    manager: crate::auth::ApiKeyManager,
 }
 
 impl StdioAuth {
-    pub(crate) fn new(token: String, manager: api_keys_simplified::ApiKeyManagerV0) -> Self {
+    pub(crate) fn new(token: String, manager: crate::auth::ApiKeyManager) -> Self {
         Self { token, manager }
     }
 
@@ -707,7 +707,7 @@ mod tests {
 
         let auth_state = crate::auth::AuthState {
             db: pool.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
+            manager: crate::auth::create_key_manager(),
             public_url: "https://example.com".into(),
             required: true,
         };
@@ -797,7 +797,7 @@ mod tests {
             )
             .unwrap();
         }
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let unbound_key =
             crate::auth::create_api_key(&pool, &manager, "mcp-operator", None).unwrap();
         let project = {
@@ -1031,7 +1031,7 @@ mod tests {
     /// an agent as `LIFIC_TOKEN`.
     fn connected_agent(
         pool: &crate::db::DbPool,
-        manager: &api_keys_simplified::ApiKeyManagerV0,
+        manager: &crate::auth::ApiKeyManager,
     ) -> (crate::db::models::AuthUser, crate::db::models::User, String) {
         // A separate instance admin exists as the operator fallback, so
         // deactivating the owner is not "the last admin" and the agent's
@@ -1113,7 +1113,7 @@ mod tests {
     async fn a_stdio_tool_call_resolves_as_the_agent_the_token_names() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let (owner, bot, token) = connected_agent(&pool, &manager);
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
@@ -1135,7 +1135,7 @@ mod tests {
     async fn revoking_the_token_stops_the_very_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let (_owner, _bot, token) = connected_agent(&pool, &manager);
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
@@ -1189,7 +1189,7 @@ mod tests {
     async fn a_live_credential_dispatches_the_tool_through_the_central_seam() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let (_owner, _bot, token) = connected_agent(&pool, &manager);
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
@@ -1206,7 +1206,7 @@ mod tests {
     async fn an_account_lockdown_stops_the_agents_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let (owner, _bot, token) = connected_agent(&pool, &manager);
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
@@ -1222,7 +1222,7 @@ mod tests {
     async fn deactivating_the_owner_stops_the_agents_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let (owner, _bot, token) = connected_agent(&pool, &manager);
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
 
@@ -1241,7 +1241,7 @@ mod tests {
     async fn an_unbound_key_still_resolves_to_the_operator() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
+        let manager = crate::auth::create_key_manager();
         let admin = seed_user(&pool, "operator", true);
         let token = crate::auth::create_api_key(&pool, &manager, "default", None).unwrap();
         let server = server_for(&pool, Some(StdioAuth::new(token, manager)));

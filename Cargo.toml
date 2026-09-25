@@ -69,7 +69,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 
 # Auth
-api-keys-simplified = "0.5"
+blake3 = "1"
 argon2 = "0.5"
 rand = "0.8"
 # Credential storage for `lific login` (LIF-258). On Linux we use the
@@ -118,7 +118,9 @@ dirs = "6"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+subtle = "2"
 base64 = "0.22"
+zeroize = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

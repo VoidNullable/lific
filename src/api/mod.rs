@@ -1255,26 +1255,14 @@ mod tests {
 
     #[tokio::test]
     async fn presented_invalid_api_key_returns_401() {
-        use api_keys_simplified::{Environment, ExposeSecret, SecureString};
-
         let db = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().expect("key manager");
+        let manager = crate::auth::create_key_manager();
         let valid_key = crate::auth::create_api_key(&db, &manager, "valid-test-key", None)
             .expect("create valid key");
-        let invalid_key = manager
-            .generate(Environment::production())
-            .expect("generate mismatched key")
-            .key()
-            .expose_secret()
-            .to_string();
-        let invalid_key_id = manager.extract_key_id(&SecureString::from(invalid_key.clone()));
+        let invalid_key = crate::auth::generate_api_key_token().unwrap();
+        let invalid_key_id = crate::auth::api_key_id(&invalid_key);
         // Generated before `manager` moves into AuthState below.
-        let never_issued = manager
-            .generate(Environment::production())
-            .expect("generate never-issued key")
-            .key()
-            .expose_secret()
-            .to_string();
+        let never_issued = crate::auth::generate_api_key_token().unwrap();
         let app = crate::api::router(db.clone(), &[])
             .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
@@ -2193,7 +2181,7 @@ mod authz_gating_tests {
 
         let auth_state = crate::auth::AuthState {
             db: db.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
+            manager: crate::auth::create_key_manager(),
             public_url: "https://example.com".into(),
             required: true,
         };

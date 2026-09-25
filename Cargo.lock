@@ -121,29 +121,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "api-keys-simplified"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "410a7b6de93b606c8d501a58231a2efe48ee51460ae5314bb08ca424ebedd18e"
-dependencies = [
- "argon2",
- "base64",
- "blake3",
- "chrono",
- "derive-getters",
- "getrandom 0.3.4",
- "lazy_static",
- "nom",
- "password-hash",
- "regex",
- "secrecy",
- "strum",
- "subtle",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -888,17 +865,6 @@ dependencies = [
  "openssl",
  "sha2",
  "zeroize",
-]
-
-[[package]]
-name = "derive-getters"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74ef43543e701c01ad77d3a5922755c6a1d71b22d942cb8042be4994b380caff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -1791,11 +1757,11 @@ name = "lific"
 version = "2.10.0"
 dependencies = [
  "anyhow",
- "api-keys-simplified",
  "argon2",
  "assert_cmd",
  "axum",
  "base64",
+ "blake3",
  "chrono",
  "clap",
  "clap_complete",
@@ -1826,6 +1792,7 @@ dependencies = [
  "serde_urlencoded",
  "serde_yaml",
  "sha2",
+ "subtle",
  "tar",
  "tempfile",
  "thiserror",
@@ -1838,6 +1805,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "zeroize",
  "zip",
 ]
 
@@ -1979,15 +1947,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nom"
-version = "8.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -2895,15 +2854,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "secrecy"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
 name = "secret-service"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3191,27 +3141,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "subtle"

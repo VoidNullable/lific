@@ -12,8 +12,7 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = term::wants_json(json_flag);
     let pool = db::open(&cfg.database.path)?;
-    let manager =
-        auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
+    let manager = auth::create_key_manager();
 
     match action {
         KeyAction::Create {
@@ -89,7 +88,7 @@ pub fn run(
                         k.created_at,
                         expiry,
                         if k.unsupported_format {
-                            " | UNSUPPORTED FORMAT"
+                            " | UNSUPPORTED FORMAT (rotate before reuse)"
                         } else {
                             ""
                         }
