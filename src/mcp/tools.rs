@@ -989,12 +989,14 @@ fn canonical_project_identifier(
         .map_err(|e| e.to_string())
 }
 
+mod names;
+
 fn resolve_module(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
-    queries::resolve_module_name(conn, project_id, name).map_err(|e| e.to_string())
+    names::module_id(conn, project_id, name).map_err(|e| e.to_string())
 }
 
 fn resolve_folder(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
-    queries::resolve_folder_name(conn, project_id, name).map_err(|e| e.to_string())
+    names::folder_id(conn, project_id, name).map_err(|e| e.to_string())
 }
 
 /// LIF-145 sentinel for a create's simple `Option<String>` icon field: field
@@ -1866,7 +1868,11 @@ impl LificMcp {
                     priority: models::Priority::parse_opt(input.priority.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
-                    label: input.label.clone(),
+                    label: input
+                        .label
+                        .as_deref()
+                        .map(|name| names::stored_label_name(conn, pid, name))
+                        .transpose()?,
                     workable: input.workable,
                     blocked: input.blocked,
                     created_since: input.created_since.clone(),
@@ -2248,7 +2254,11 @@ impl LificMcp {
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
-                    labels: input.labels.clone().unwrap_or_default(),
+                    labels: names::stored_label_names(
+                        conn,
+                        pid,
+                        input.labels.as_deref().unwrap_or_default(),
+                    )?,
                     source: None,
                     attachments,
                 },
@@ -2306,7 +2316,7 @@ impl LificMcp {
             // (unassign module), non-empty = resolve + set.
             let module_id = match &input.module {
                 Some(name) if name.is_empty() => Some(None),
-                Some(name) => Some(Some(queries::resolve_module_name(
+                Some(name) => Some(Some(names::module_id(
                     conn,
                     previous_issue.project_id,
                     name,
@@ -2333,7 +2343,13 @@ impl LificMcp {
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
-                    labels: input.labels.clone(),
+                    labels: input
+                        .labels
+                        .as_deref()
+                        .map(|labels| {
+                            names::stored_label_names(conn, previous_issue.project_id, labels)
+                        })
+                        .transpose()?,
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
                     attachments,
@@ -2432,7 +2448,11 @@ impl LificMcp {
                         priority: models::Priority::parse_opt(input.filter_priority.as_deref())
                             .map_err(crate::error::LificError::BadRequest)?,
                         module_id: filter_module_id,
-                        label: input.filter_label.clone(),
+                        label: input
+                            .filter_label
+                            .as_deref()
+                            .map(|name| names::stored_label_name(conn, pid, name))
+                            .transpose()?,
                         limit: Some(BULK_CAP),
                         ..Default::default()
                     },
@@ -2869,7 +2889,14 @@ impl LificMcp {
                     title: input.title.clone(),
                     content: input.content.clone().unwrap_or_default(),
                     status: input.status.clone().unwrap_or_else(|| "draft".into()),
-                    labels: input.labels.clone().unwrap_or_default(),
+                    labels: match project_id {
+                        Some(pid) => names::stored_label_names(
+                            conn,
+                            pid,
+                            input.labels.as_deref().unwrap_or_default(),
+                        )?,
+                        None => input.labels.clone().unwrap_or_default(),
+                    },
                     attachments,
                 },
             )
@@ -2912,7 +2939,7 @@ impl LificMcp {
                             "page has no project for folder resolution".into(),
                         )
                     })?;
-                    Some(Some(queries::resolve_folder_name(conn, pid, name)?))
+                    Some(Some(names::folder_id(conn, pid, name)?))
                 }
                 None => None,
             };
@@ -2930,7 +2957,12 @@ impl LificMcp {
                     folder_id,
                     status: input.status.clone(),
                     pinned: input.pinned,
-                    labels: input.labels.clone(),
+                    labels: match (input.labels.as_deref(), page_project_id) {
+                        (Some(labels), Some(pid)) => {
+                            Some(names::stored_label_names(conn, pid, labels)?)
+                        }
+                        (labels, _) => labels.map(<[String]>::to_vec),
+                    },
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
                     attachments,
@@ -3106,18 +3138,18 @@ impl LificMcp {
                 require_structure_role_mcp(&self.db, pid)?;
                 let reference = match input.resource_type.as_str() {
                     "module" => self.write(|conn| {
-                        let id = queries::resolve_module_name(conn, pid, &input.identifier)?;
+                        let id = names::module_id(conn, pid, &input.identifier)?;
                         let module = queries::get_module(conn, id)?;
                         queries::delete_module(conn, id)?;
                         Ok(module.name)
                     }),
                     "label" => self.write(|conn| {
-                        let id = queries::resolve_label_name(conn, pid, &input.identifier)?;
+                        let id = names::label_id(conn, pid, &input.identifier)?;
                         queries::delete_label(conn, id)?;
                         Ok(format!("'{}'", input.identifier))
                     }),
                     "folder" => self.write(|conn| {
-                        let id = queries::resolve_folder_name(conn, pid, &input.identifier)?;
+                        let id = names::folder_id(conn, pid, &input.identifier)?;
                         queries::delete_folder(conn, id)?;
                         Ok(format!("'{}'", input.identifier))
                     }),
@@ -3287,8 +3319,16 @@ impl LificMcp {
                     (Some(name), Some(pid)) => Some(resolve_folder(&resolver, pid, name)?),
                     _ => None,
                 };
+                // Workspace pages carry no labels, so only a project listing
+                // has a stored label name to match.
+                let label = match (input.label.as_deref(), project_id) {
+                    (Some(name), Some(pid)) => Some(
+                        names::stored_label_name(&resolver, pid, name).map_err(sanitize_error)?,
+                    ),
+                    (name, _) => name.map(str::to_owned),
+                };
                 drop(resolver);
-                let label = input.label.as_deref();
+                let label = label.as_deref();
                 let status = input.status.as_deref();
                 let order_by = input.order_by.as_deref();
                 let order = input.order.as_deref();
@@ -3604,7 +3644,7 @@ impl LificMcp {
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify label".into());
                 };
-                let lid = self.read(|conn| queries::resolve_label_name(conn, pid, current))?;
+                let lid = self.read(|conn| names::label_id(conn, pid, current))?;
                 let l = self.write(|conn| {
                     queries::update_label(
                         conn,
@@ -3649,7 +3689,7 @@ impl LificMcp {
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify folder".into());
                 };
-                let fid = self.read(|conn| queries::resolve_folder_name(conn, pid, current))?;
+                let fid = self.read(|conn| names::folder_id(conn, pid, current))?;
                 let f = self.write(|conn| {
                     queries::update_folder(
                         conn,

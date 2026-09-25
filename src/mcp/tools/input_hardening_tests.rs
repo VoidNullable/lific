@@ -1,4 +1,5 @@
-//! Agent-input tolerance for the MCP tools: camelCase edit keys (LIF-472).
+//! Agent-input tolerance for the MCP tools: camelCase edit keys (LIF-472)
+//! and HTML-entity-escaped names (LIF-473).
 
 use super::tests::{comment_id_from, mcp, seed_issue, seed_project};
 use super::*;
@@ -130,4 +131,288 @@ fn edit_inputs_still_accept_snake_case_keys() {
         ("a", "b")
     );
     assert_eq!(snake.replace_all, Some(true));
+}
+
+// ── LIF-473: HTML-entity-escaped names ───────────────────────
+
+/// A project holding a module, label and folder whose names need escaping,
+/// plus a label that literally contains an entity.
+fn seed_escapable_names(m: &LificMcp) {
+    seed_project(m, "Names", "NAM");
+    for (resource_type, name) in [
+        ("module", "Infra & Ops"),
+        ("module", "Spare"),
+        ("label", "R&D"),
+        ("label", "Q&A"),
+        ("label", "Q&amp;A"),
+        ("folder", "Specs <draft>"),
+        ("folder", "Spare"),
+    ] {
+        let created = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: resource_type.into(),
+            action: "create".into(),
+            project: Some("NAM".into()),
+            name: Some(name.into()),
+            ..Default::default()
+        }));
+        assert!(created.starts_with("Created"), "got: {created}");
+    }
+}
+
+fn issue_in(m: &LificMcp, identifier: &str) -> models::Issue {
+    m.read(|conn| queries::get_issue(conn, queries::resolve_identifier(conn, identifier)?))
+        .unwrap()
+}
+
+fn page_in(m: &LificMcp, identifier: &str) -> models::Page {
+    m.read(|conn| queries::get_page(conn, queries::resolve_page_identifier(conn, identifier)?))
+        .unwrap()
+}
+
+#[test]
+fn issue_writes_resolve_escaped_module_and_label_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    let created = m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        title: "Escaped".into(),
+        module: Some("Infra &amp; Ops".into()),
+        labels: Some(vec!["R&amp;D".into()]),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+    let issue = issue_in(&m, "NAM-1");
+    let module = m.read(|conn| queries::get_module_name(conn, issue.module_id.unwrap()));
+    assert_eq!(module.unwrap(), "Infra & Ops");
+    assert_eq!(issue.labels, vec!["R&D".to_string()]);
+
+    m.update_issue(Parameters(UpdateIssueInput {
+        identifier: "NAM-1".into(),
+        module: Some("Spare".into()),
+        labels: Some(vec![]),
+        ..Default::default()
+    }));
+    let updated = m.update_issue(Parameters(UpdateIssueInput {
+        identifier: "NAM-1".into(),
+        module: Some("infra &amp; ops".into()),
+        labels: Some(vec!["R&amp;D".into()]),
+        ..Default::default()
+    }));
+    assert!(updated.starts_with("Updated"), "got: {updated}");
+    let issue = issue_in(&m, "NAM-1");
+    let module = m.read(|conn| queries::get_module_name(conn, issue.module_id.unwrap()));
+    assert_eq!(module.unwrap(), "Infra & Ops");
+    assert_eq!(issue.labels, vec!["R&D".to_string()]);
+}
+
+#[test]
+fn issue_filters_resolve_escaped_module_and_label_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        title: "Tagged".into(),
+        module: Some("Infra & Ops".into()),
+        labels: Some(vec!["R&D".into()]),
+        ..Default::default()
+    }));
+    seed_issue(&m, "NAM", "Untagged");
+
+    for listing in [
+        m.list_issues(Parameters(ListIssuesInput {
+            project: Some("NAM".into()),
+            module: Some("Infra &amp; Ops".into()),
+            ..Default::default()
+        })),
+        m.list_issues(Parameters(ListIssuesInput {
+            project: Some("NAM".into()),
+            label: Some("R&amp;D".into()),
+            ..Default::default()
+        })),
+    ] {
+        assert!(listing.contains("Tagged"), "got: {listing}");
+        assert!(!listing.contains("Untagged"), "got: {listing}");
+    }
+
+    let bulk = m.bulk_update(Parameters(BulkUpdateInput {
+        project: "NAM".into(),
+        filter_module: Some("Infra &amp; Ops".into()),
+        filter_label: Some("R&amp;D".into()),
+        set_status: Some("done".into()),
+        ..Default::default()
+    }));
+    assert_eq!(bulk, "Updated 1 issue(s)");
+    assert_eq!(issue_in(&m, "NAM-1").status.as_str(), "done");
+
+    let moved = m.bulk_update(Parameters(BulkUpdateInput {
+        project: "NAM".into(),
+        filter_status: Some("backlog".into()),
+        set_module: Some("Infra &amp; Ops".into()),
+        ..Default::default()
+    }));
+    assert_eq!(moved, "Updated 1 issue(s)");
+    assert!(issue_in(&m, "NAM-2").module_id.is_some());
+}
+
+#[test]
+fn page_writes_and_listings_resolve_escaped_folder_and_label_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    let created = m.create_page(Parameters(CreatePageInput {
+        project: Some("NAM".into()),
+        title: "Escaped page".into(),
+        folder: Some("Specs &lt;draft&gt;".into()),
+        labels: Some(vec!["R&amp;D".into()]),
+        ..Default::default()
+    }));
+    assert!(created.starts_with("Created"), "got: {created}");
+    let page = page_in(&m, "NAM-DOC-1");
+    let specs = m
+        .read(|conn| queries::resolve_folder_name(conn, project_id(&m), "Specs <draft>"))
+        .unwrap();
+    assert_eq!(page.folder_id, Some(specs));
+    assert_eq!(page.labels, vec!["R&D".to_string()]);
+
+    m.update_page(Parameters(UpdatePageInput {
+        identifier: "NAM-DOC-1".into(),
+        folder: Some("Spare".into()),
+        labels: Some(vec![]),
+        ..Default::default()
+    }));
+    let updated = m.update_page(Parameters(UpdatePageInput {
+        identifier: "NAM-DOC-1".into(),
+        folder: Some("Specs &lt;draft&gt;".into()),
+        labels: Some(vec!["R&amp;D".into()]),
+        ..Default::default()
+    }));
+    assert!(updated.starts_with("Updated"), "got: {updated}");
+    let page = page_in(&m, "NAM-DOC-1");
+    assert_eq!(page.folder_id, Some(specs));
+    assert_eq!(page.labels, vec!["R&D".to_string()]);
+
+    for (project, folder, label) in [
+        (Some("NAM"), Some("Specs &lt;draft&gt;"), None),
+        (Some("NAM"), None, Some("R&amp;D")),
+    ] {
+        let listing = m.list_resources(Parameters(ListResourcesInput {
+            resource_type: "page".into(),
+            project: project.map(Into::into),
+            folder: folder.map(Into::into),
+            label: label.map(Into::into),
+            ..Default::default()
+        }));
+        assert!(listing.contains("Escaped page"), "got: {listing}");
+    }
+}
+
+fn project_id(m: &LificMcp) -> i64 {
+    m.read(|conn| queries::resolve_project_identifier(conn, "NAM"))
+        .unwrap()
+}
+
+#[test]
+fn manage_resource_updates_resolve_escaped_current_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    for (resource_type, current, renamed) in [
+        ("module", "Infra &amp; Ops", "Platform"),
+        ("label", "R&amp;D", "Research"),
+        ("folder", "Specs &lt;draft&gt;", "Specs"),
+    ] {
+        let updated = m.manage_resource(Parameters(ManageResourceInput {
+            resource_type: resource_type.into(),
+            action: "update".into(),
+            project: Some("NAM".into()),
+            current_name: Some(current.into()),
+            name: Some(renamed.into()),
+            ..Default::default()
+        }));
+        assert!(updated.starts_with("Updated"), "{resource_type}: {updated}");
+        assert!(updated.contains(renamed), "{resource_type}: {updated}");
+    }
+}
+
+#[test]
+fn delete_resolves_escaped_names() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    for (resource_type, name) in [
+        ("module", "Infra &amp; Ops"),
+        ("label", "R&amp;D"),
+        ("folder", "Specs &lt;draft&gt;"),
+    ] {
+        let deleted = m.delete(Parameters(DeleteInput {
+            resource_type: resource_type.into(),
+            identifier: name.into(),
+            project: Some("NAM".into()),
+        }));
+        assert!(deleted.starts_with("Deleted"), "{resource_type}: {deleted}");
+    }
+    let pid = project_id(&m);
+    m.read(|conn| {
+        assert!(queries::resolve_module_name(conn, pid, "Infra & Ops").is_err());
+        assert!(queries::resolve_label_name(conn, pid, "R&D").is_err());
+        assert!(queries::resolve_folder_name(conn, pid, "Specs <draft>").is_err());
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_name_that_literally_contains_an_entity_matches_itself_first() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    // Both "Q&A" and the literal "Q&amp;A" exist; the literal wins.
+    m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        title: "Literal".into(),
+        labels: Some(vec!["Q&amp;A".into()]),
+        ..Default::default()
+    }));
+    assert_eq!(issue_in(&m, "NAM-1").labels, vec!["Q&amp;A".to_string()]);
+
+    let deleted = m.delete(Parameters(DeleteInput {
+        resource_type: "label".into(),
+        identifier: "Q&amp;A".into(),
+        project: Some("NAM".into()),
+    }));
+    assert!(deleted.starts_with("Deleted"), "got: {deleted}");
+    let pid = project_id(&m);
+    m.read(|conn| {
+        assert!(queries::resolve_label_name(conn, pid, "Q&amp;A").is_err());
+        assert!(queries::resolve_label_name(conn, pid, "Q&A").is_ok());
+        Ok(())
+    })
+    .unwrap();
+
+    // With no literal match left, the same text now falls back to "Q&A".
+    m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        title: "Decoded".into(),
+        labels: Some(vec!["Q&A".into()]),
+        ..Default::default()
+    }));
+    let listing = m.list_issues(Parameters(ListIssuesInput {
+        project: Some("NAM".into()),
+        label: Some("Q&amp;A".into()),
+        ..Default::default()
+    }));
+    assert!(listing.contains("Decoded"), "got: {listing}");
+    assert!(!listing.contains("Literal"), "got: {listing}");
+}
+
+#[test]
+fn an_escaped_name_that_matches_nothing_reports_the_name_as_sent() {
+    let (m, _guard) = mcp();
+    seed_escapable_names(&m);
+    let result = m.create_issue(Parameters(CreateIssueInput {
+        project: Some("NAM".into()),
+        title: "Missing".into(),
+        module: Some("Nope &amp; Nada".into()),
+        ..Default::default()
+    }));
+    assert!(
+        result.contains("module 'Nope &amp; Nada' not found"),
+        "got: {result}"
+    );
 }

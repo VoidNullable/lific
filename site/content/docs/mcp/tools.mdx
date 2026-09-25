@@ -7,6 +7,8 @@ Lific exposes 30 MCP tools. Required parameters use non-optional input fields. O
 
 When MCP is reached over HTTP and its origin is known, issue, project, page, plan, module, and comment references are rendered as Markdown links to their canonical web routes. Comment links include an anchor that scrolls the issue or page thread to that comment. Configure `server.public_url` for deployments behind a proxy; otherwise a direct HTTP `Host` is used only when it matches the configured allowlist. Stdio MCP and direct SQL have no authoritative external hostname, so they keep plain references.
 
+Module, label and folder names are matched as sent first. If nothing matches, a name that a client HTML-escaped (`Infra &amp; Ops`) is tried again with `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;` and `&#x27;` decoded, so a name that really contains one of those sequences still matches itself.
+
 ## Issues
 
 ### `list_issues`
