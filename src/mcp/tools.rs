@@ -5005,7 +5005,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read an attachment by id. Text is returned by line (offset/limit), images as viewable image content, other types as a metadata summary."
+        description = "Read an attachment by id. Text is returned by line (offset/limit), images as viewable image content, and other types as a metadata summary with a download URL when the MCP request origin is known."
     )]
     fn get_attachment(
         &self,
@@ -5067,14 +5067,20 @@ impl LificMcp {
                 ),
             ]);
         }
+        let download_url = current_issue_link_context()
+            .as_deref()
+            .and_then(|context| context.attachment_url(attachment.id))
+            .map_or_else(
+                || format!("/api/attachments/{}", attachment.id),
+                |url| url.to_string(),
+            );
         Ok(vec![Content::text(format!(
-            "attachment {}: {} ({}, {}, sha {}). Binary, download at /api/attachments/{}",
+            "attachment {}: {} ({}, {}, sha {}). Binary, download at {download_url}",
             attachment.id,
             attachment.filename,
             attachment.mime,
             HumanSize(attachment.size_bytes),
-            &attachment.sha256[..attachment.sha256.len().min(12)],
-            attachment.id
+            &attachment.sha256[..attachment.sha256.len().min(12)]
         ))])
     }
 
@@ -13021,6 +13027,49 @@ mod tests {
         );
         assert!(
             text.ends_with(&format!("Binary, download at /api/attachments/{id}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn get_attachment_returns_absolute_download_url_for_http_mcp() {
+        let (m, _guard) = mcp();
+        let (store, _tmp) = attachment_store_tempdir();
+        let m = m.with_attachment_store(store);
+        let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\nbody");
+        let context = crate::links::IssueLinkContext::parse("https://mcp.example.test/lific")
+            .expect("valid HTTP MCP origin");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Tokio runtime");
+        let (id, text) = runtime.block_on(crate::mcp::with_request_context(
+            None,
+            Some(context),
+            || async {
+                let id =
+                    attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+                        filename: "spec.pdf".into(),
+                        content_base64: pdf,
+                        entity: None,
+                        comment_id: None,
+                    })));
+                (
+                    id,
+                    text_of(&m.get_attachment(Parameters(GetAttachmentInput {
+                        attachment_id: id,
+                        offset: None,
+                        limit: None,
+                    }))),
+                )
+            },
+        ));
+
+        assert!(
+            text.ends_with(&format!(
+                "Binary, download at https://mcp.example.test/lific/api/attachments/{id}"
+            )),
             "{text}"
         );
     }
