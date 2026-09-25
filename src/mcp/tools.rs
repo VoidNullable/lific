@@ -4962,6 +4962,9 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 }
 
 #[cfg(test)]
+mod input_hardening_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -5020,7 +5023,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5056,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -5070,7 +5073,7 @@ mod tests {
         ident.to_string()
     }
 
-    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+    pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: Some(project.into()),
             title: title.into(),

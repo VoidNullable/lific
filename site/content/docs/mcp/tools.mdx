@@ -115,6 +115,8 @@ Replaces an exact string in an issue title or description.
 
 When a description edit comes from a client that double-escapes JSON, literal `\n` and `\t` sequences in `old_string` and `new_string` become a real newline or tab before the exact string is matched.
 
+`edit_issue`, `edit_page`, `edit_comment` and `edit_plan_step` also accept the camelCase spellings `oldString`, `newString` and `replaceAll`. The published schema lists only the snake_case names.
+
 ### `get_board`
 
 Gets a board view of issues in a project.

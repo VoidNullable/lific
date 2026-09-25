@@ -242,17 +242,23 @@ pub struct UpdatePageInput {
     pub expected_seq: Option<i64>,
 }
 
+/// LIF-472: the four edit tools also accept `oldString`, `newString` and
+/// `replaceAll`, the spelling agents trained on camelCase edit tools send.
+/// Serde aliases only: the advertised schema stays snake_case.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct EditIssueInput {
     #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[serde(alias = "oldString")]
     pub old_string: String,
     #[schemars(description = "Replacement string (must differ from old_string)")]
+    #[serde(alias = "newString")]
     pub new_string: String,
     #[schemars(description = "Field to edit: 'description' (default) or 'title'")]
     pub field: Option<String>,
     #[schemars(description = "Replace all occurrences (default false)")]
+    #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
 
@@ -261,12 +267,15 @@ pub struct EditPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[serde(alias = "oldString")]
     pub old_string: String,
     #[schemars(description = "Replacement string (must differ from old_string)")]
+    #[serde(alias = "newString")]
     pub new_string: String,
     #[schemars(description = "Field to edit: 'content' (default) or 'title'")]
     pub field: Option<String>,
     #[schemars(description = "Replace all occurrences (default false)")]
+    #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
 
@@ -395,10 +404,13 @@ pub struct EditCommentInput {
     #[schemars(
         description = "Exact string to find in the comment. Must be unique unless replace_all is true. Use with new_string instead of content."
     )]
+    #[serde(alias = "oldString")]
     pub old_string: Option<String>,
     #[schemars(description = "Replacement for old_string (must differ from it)")]
+    #[serde(alias = "newString")]
     pub new_string: Option<String>,
     #[schemars(description = "With old_string: replace all occurrences (default false)")]
+    #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
 
@@ -457,12 +469,15 @@ pub struct EditPlanStepInput {
     )]
     pub step_id: i64,
     #[schemars(description = "Exact string to find. Must be unique unless replace_all is true.")]
+    #[serde(alias = "oldString")]
     pub old_string: String,
     #[schemars(description = "Replacement string")]
+    #[serde(alias = "newString")]
     pub new_string: String,
     #[schemars(description = "Field to edit: 'description' (default) or 'title'")]
     pub field: Option<String>,
     #[schemars(description = "Replace all occurrences (default false)")]
+    #[serde(alias = "replaceAll")]
     pub replace_all: Option<bool>,
 }
 
