@@ -42,6 +42,22 @@ fn render_response(render: impl FnOnce(&mut String) -> fmt::Result) -> String {
     }
 }
 
+struct CountingWriter(usize);
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized response length overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn finish_response(output: String, result: fmt::Result) -> String {
     match result {
         Ok(()) => output,
@@ -51,8 +67,9 @@ fn finish_response(output: String, result: fmt::Result) -> String {
 
 fn encoded_tool_result_bytes(output: &str) -> Result<usize, String> {
     let result = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(output)]);
-    serde_json::to_vec(&result)
-        .map(|bytes| bytes.len())
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, &result)
+        .map(|()| writer.0)
         .map_err(|error| format!("failed to encode response: {error}"))
 }
 
@@ -5455,6 +5472,21 @@ mod tests_waits;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn encoded_tool_result_bytes_matches_small_unicode_and_large_payloads() {
+        let large = "界".repeat(64 * 1024);
+        for output in ["small", "caf\u{e9} \0 😀", large.as_str()] {
+            let result =
+                rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(output)]);
+            let wire = serde_json::to_vec(&result).unwrap();
+            assert_eq!(
+                super::encoded_tool_result_bytes(output).unwrap(),
+                wire.len(),
+                "encoded length changed for a representative payload"
+            );
+        }
+    }
+
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
         let row = format!(
