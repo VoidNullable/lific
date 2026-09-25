@@ -1022,6 +1022,7 @@ impl LificMcp {
     /// | `create_issue` | resolvable | omission is an error today |
     /// | `get_board` | resolvable | omission is an error today |
     /// | `create_plan` | resolvable | omission is an error today |
+    /// | `get_briefing` | resolvable | omission is an error without a binding |
     /// | `list_resources` (issue, plan, module, label, folder) | resolvable | omission is an error today |
     /// | `list_resources` (page) | meaning-preserved | omission lists pages across every project |
     /// | `list_resources` (project) | meaning-preserved | `project` is ignored for this type |
@@ -1056,7 +1057,7 @@ const FALLBACK_RESOURCE_TYPES: [&str; 5] = ["issue", "plan", "module", "label", 
 /// machine, and has nothing but the tool name and arguments to go on.
 pub(crate) fn project_fallback_applies(tool: &str, resource_type: Option<&str>) -> bool {
     match tool {
-        "list_issues" | "create_issue" | "get_board" | "create_plan" => true,
+        "list_issues" | "create_issue" | "get_board" | "create_plan" | "get_briefing" => true,
         "list_resources" => {
             resource_type.is_some_and(|kind| FALLBACK_RESOURCE_TYPES.contains(&kind))
         }
@@ -1652,6 +1653,10 @@ impl LificMcp {
     }
 }
 
+#[cfg(test)]
+mod activity_since_tests;
+mod briefing;
+
 #[tool_router]
 impl LificMcp {
     #[tool(description = "Search across all issues, pages, and comments by text")]
@@ -1791,7 +1796,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values."
+        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values; pass since to read forward from a timestamp."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
         self.get_activity_inner(input)
@@ -1811,6 +1816,12 @@ impl LificMcp {
             queries::activity::MAX_LIMIT,
         );
         let ident = input.identifier.trim();
+        let since = input
+            .since
+            .as_deref()
+            .map(queries::activity::normalize_since)
+            .transpose()
+            .map_err(|error| error.to_string())?;
 
         // Resolve the identifier shape: page → issue → project. Pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
@@ -1885,16 +1896,26 @@ impl LificMcp {
                 .then_some(scope_identifier.as_str())
         });
         let rendered = self.read(|conn| {
-            let feed = queries::activity::list_activity(conn, scope, Some(limit), Some(offset))?;
+            let feed = queries::activity::list_activity_since(
+                conn,
+                scope,
+                since.as_deref(),
+                Some(limit),
+                Some(offset),
+            )?;
             if feed.items.is_empty() {
                 return Ok((None, 0, feed.has_more));
             }
             let output = try_render(|output| {
-                writeln!(
+                write!(
                     output,
-                    "{} activity entries for {scope_reference}:",
+                    "{} activity entries for {scope_reference}",
                     feed.items.len()
                 )?;
+                match &since {
+                    Some(since) => writeln!(output, " after {since} UTC, oldest first:"),
+                    None => writeln!(output, ":"),
+                }?;
                 feed.items.iter().try_for_each(|activity| {
                     writeln!(
                         output,
@@ -1916,8 +1937,12 @@ impl LificMcp {
             Ok((Some(output), feed.items.len(), feed.has_more))
         })?;
         Ok(match rendered {
-            (None, _, _) if offset == 0 => render_response(|output| {
-                write!(output, "No recorded activity for {scope_reference} yet.")
+            (None, _, _) if offset == 0 => render_response(|output| match &since {
+                Some(since) => write!(
+                    output,
+                    "No activity for {scope_reference} after {since} UTC."
+                ),
+                None => write!(output, "No recorded activity for {scope_reference} yet."),
             }),
             (Some(mut out), _, has_more) => {
                 let result = append_pagination_hint(&mut out, has_more, offset + limit);
@@ -1925,6 +1950,14 @@ impl LificMcp {
             }
             (None, _, _) => "No activity entries in this range.".into(),
         })
+    }
+
+    #[tool(
+        description = "Call first when resuming a project: active plans with next steps, blocked, workable and active issues, key pages (metadata only) and, with since, what changed. Bounded to about 6,000 characters."
+    )]
+    fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
+        self.get_briefing_inner(input)
+            .unwrap_or_else(error_response)
     }
 
     #[tool(
@@ -11193,6 +11226,7 @@ mod tests {
             identifier: "TST".into(),
             limit: Some(50),
             offset: Some(2),
+            ..Default::default()
         }));
         // 5 total (project create + 4 issues) − 2 already seen = 3.
         assert!(next.contains("3 activity entries"), "got: {next}");
@@ -12898,11 +12932,12 @@ mod tests {
     #[test]
     fn the_fallback_classification_matches_the_documented_table() {
         // Every row of the table on `project_or_bound`, in order.
-        let resolvable: [(&str, Option<&str>); 9] = [
+        let resolvable: [(&str, Option<&str>); 10] = [
             ("list_issues", None),
             ("create_issue", None),
             ("get_board", None),
             ("create_plan", None),
+            ("get_briefing", None),
             ("list_resources", Some("issue")),
             ("list_resources", Some("plan")),
             ("list_resources", Some("module")),

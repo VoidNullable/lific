@@ -3,7 +3,7 @@ title: MCP tools
 description: Reference for the MCP tools exposed by Lific.
 ---
 
-Lific exposes 30 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
+Lific exposes 31 MCP tools. Required parameters use non-optional input fields. Optional parameters can be omitted.
 
 A parameter a tool does not declare is refused rather than ignored, so a misspelling cannot quietly change the answer. The error is `-32602 Invalid params`, names the unknown key and suggests the closest valid parameter, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``. The same applies inside nested objects such as plan steps.
 
@@ -389,6 +389,29 @@ Deletes a comment by its numeric identifier.
 
 ## Search and activity
 
+### `get_briefing`
+
+Summarizes a project for an agent resuming work, in one bounded read. Call it first at the start of a session instead of rebuilding the picture from search, pages, issue lists and plans.
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `project` | `string` | No | Project identifier (e.g. LIF). Optional when the session is bound to a repository. |
+| `since` | `string` | No | ISO date or datetime. Adds a section for what changed strictly after it. Read like `get_activity`'s `since`: UTC unless an offset is given. |
+| `pages` | `string[]` | No | Page identifiers to report on, such as the pages an `AGENTS.md` tells agents to read. At most 10. Without it, the three most recently updated pages are shown. |
+
+The response opens with the current time and a `since` value to pass next time. The sections that follow are built from live records when the call is made. Nothing is stored or summarized by a model.
+
+- **Since the cursor**, only when `since` is given: counts of issues created, issues closed, other status changes and pages edited, followed by the most recent of each. Status changes are net per issue, so an issue moved and moved back is not listed.
+- **Active plans**, with progress and the next open step. The next step is the first unfinished step in tree order, descending into its first unfinished child.
+- **Blocked** issues that are still open, each with the issues that block it and their status. A blocker in a project you cannot view is counted but not named.
+- **Workable, not yet active** issues, highest priority first. Active issues are excluded here because they have their own section.
+- **Key pages**: identifier, title, `seq`, size in characters, and whether the page changed since the cursor (or when it was last updated). Page bodies are never included. A page that does not exist and one you cannot view both read `not found`.
+- **Active** issues, highest priority first.
+
+Sections with nothing to report are left out. Issue sections show up to 8 items, plans up to 5, and each kind of change up to 5. The whole response stays under 6,000 characters. When a section is cut, either by its own limit or to fit that budget, it ends with the number of items left out and the call that lists them all.
+
+Access follows `list_issues`: you need at least viewer access to the project.
+
 ### `search`
 
 Searches issues, pages, and comments by text.
@@ -412,8 +435,11 @@ Reads audit history for an issue, page, or project.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `identifier` | `string` | Yes | What to read history for: an issue identifier (PRO-42), a page identifier (PRO-DOC-3 or DOC-3), or a bare project identifier (PRO) for the whole project's feed |
+| `since` | `string` | No | Only entries strictly after this ISO date or datetime, returned oldest first. Omit it for the newest-first feed. |
 | `limit` | `integer` | No | Max entries (default 30, cap 200) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
+
+Audit timestamps are stored in UTC with one-second resolution, and `since` is read on the same clock. A bare date such as `2026-06-01` means midnight UTC. A datetime without an offset is UTC, and one with `Z` or an offset such as `-05:00` is converted to UTC. Fractional seconds are ignored. Entries in the same second as the cursor are excluded, so resuming from the timestamp of the last entry you read also skips anything else written in that second.
 
 Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).
 

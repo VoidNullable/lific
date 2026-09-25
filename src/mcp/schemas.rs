@@ -86,10 +86,31 @@ pub struct GetIssueInput {
 pub struct GetActivityInput {
     #[schemars(description = "Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO)")]
     pub identifier: String,
+    #[schemars(
+        description = "Only entries strictly after this ISO date or datetime (UTC unless offset given), oldest-first"
+    )]
+    pub since: Option<String>,
     #[schemars(description = "Max entries (default 30, cap 200)")]
     pub limit: Option<i64>,
     #[schemars(description = "Zero-indexed offset for paging")]
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetBriefingInput {
+    #[schemars(
+        description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
+    )]
+    pub project: Option<String>,
+    #[schemars(
+        description = "Also summarize changes after this ISO date or datetime (UTC unless offset given)"
+    )]
+    pub since: Option<String>,
+    #[schemars(
+        description = "Page IDs to report on (e.g. LIF-DOC-1); default: recently updated pages"
+    )]
+    pub pages: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

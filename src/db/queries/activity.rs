@@ -75,11 +75,55 @@ fn project_filter(visible_project_ids: Option<&HashSet<i64>>) -> Option<String> 
     }
 }
 
+/// Normalize a `since` cursor to the stored audit timestamp form.
+///
+/// `audit_log.ts` is SQLite's `datetime('now')`: UTC, second resolution,
+/// `YYYY-MM-DD HH:MM:SS`. A cursor is read on the same clock: a bare date is
+/// midnight UTC, a datetime without an offset is UTC, and a `Z` or `±HH:MM`
+/// offset is converted to UTC. Fractional seconds are dropped, which keeps
+/// "strictly after" exact against second-resolution rows.
+pub fn normalize_since(input: &str) -> Result<String, LificError> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
+    const STORED: &str = "%Y-%m-%d %H:%M:%S";
+    let value = input.trim();
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Ok(date.and_time(NaiveTime::MIN).format(STORED).to_string());
+    }
+    if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
+        return Ok(instant.naive_utc().format(STORED).to_string());
+    }
+    let naive = value.replace('T', " ");
+    ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M"]
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(&naive, format).ok())
+        .map(|instant| instant.format(STORED).to_string())
+        .ok_or_else(|| {
+            LificError::BadRequest(format!(
+                "invalid since '{value}'. Use an ISO date or datetime, e.g. 2026-06-01 or \
+                 2026-06-01T14:30:00Z (UTC unless an offset is given)."
+            ))
+        })
+}
+
 /// List activity newest-first. `limit` is clamped to 1..=200 (default 50).
 /// Fetches limit+1 rows internally to compute `has_more` without a COUNT.
 pub fn list_activity(
     conn: &Connection,
     scope: ActivityScope,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<ActivityFeed, LificError> {
+    list_activity_since(conn, scope, None, limit, offset)
+}
+
+/// [`list_activity`] with an optional cursor. With `since` (already passed
+/// through [`normalize_since`]) only entries strictly after it are returned,
+/// oldest-first, so a caller can page forward from where it left off. Without
+/// it the feed is newest-first, as it always was.
+pub fn list_activity_since(
+    conn: &Connection,
+    scope: ActivityScope,
+    since: Option<&str>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<ActivityFeed, LificError> {
@@ -121,6 +165,19 @@ pub fn list_activity(
         }
     };
 
+    // A cursor filters and orders on the timestamp it is compared against, so
+    // imported history (old `ts`, new `id`) still reads in time order.
+    let (where_clause, order) = match since {
+        Some(since) => {
+            sp.push(Box::new(since.to_string()));
+            (
+                format!("({where_clause}) AND a.ts > ?{}", sp.len()),
+                "a.ts ASC, a.id ASC",
+            )
+        }
+        None => (where_clause, "a.id DESC"),
+    };
+
     let n = sp.len();
     sp.push(Box::new(super::over_fetch(limit)));
     sp.push(Box::new(offset));
@@ -134,7 +191,7 @@ pub fn list_activity(
          FROM audit_log a
          LEFT JOIN users u ON u.id = a.actor_user_id
          WHERE {where_clause}
-         ORDER BY a.id DESC
+         ORDER BY {order}
          LIMIT ?{} OFFSET ?{}",
         n + 1,
         n + 2,
@@ -767,5 +824,158 @@ mod tests {
         assert_eq!(stats[1].top_transport, "web");
         assert_eq!(stats[2].actor_user_id, None, "system bucket last");
         assert_eq!(stats[2].top_transport, "system");
+    }
+}
+
+#[cfg(test)]
+mod since_tests {
+    //! LIF-482: `since` cursors on the activity feed.
+
+    use super::*;
+    use crate::db::models::*;
+    use crate::db::queries;
+
+    fn project(conn: &Connection) -> i64 {
+        queries::create_project(
+            conn,
+            &CreateProject {
+                name: "Cursor".into(),
+                identifier: "CUR".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    fn issue(conn: &Connection, project_id: i64, title: &str) -> Issue {
+        queries::create_issue(
+            conn,
+            &CreateIssue {
+                project_id,
+                title: title.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_cursor_returns_only_later_entries_oldest_first() {
+        let pool = crate::db::open_memory().expect("test db");
+        let conn = pool.write().unwrap();
+        let pid = project(&conn);
+        let first = issue(&conn, pid, "Before one");
+        issue(&conn, pid, "Before two");
+        // Audit timestamps have one-second resolution, so push the first batch
+        // an hour back rather than sleeping across a second boundary.
+        conn.execute("UPDATE audit_log SET ts = datetime('now', '-2 hours')", [])
+            .unwrap();
+        let cursor: String = conn
+            .query_row("SELECT datetime('now', '-1 hour')", [], |row| row.get(0))
+            .unwrap();
+
+        issue(&conn, pid, "After one");
+        queries::update_issue(
+            &conn,
+            first.id,
+            &UpdateIssue {
+                status: Some(Status::Active),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        issue(&conn, pid, "After two");
+
+        let feed = list_activity_since(
+            &conn,
+            ActivityScope::Project(pid),
+            Some(&cursor),
+            Some(50),
+            None,
+        )
+        .unwrap();
+        let summary: Vec<(String, Option<String>)> = feed
+            .items
+            .iter()
+            .map(|entry| (entry.action.clone(), entry.new_value.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("create".to_string(), Some("After one".to_string())),
+                ("update".to_string(), Some("active".to_string())),
+                ("create".to_string(), Some("After two".to_string())),
+            ]
+        );
+        assert!(feed.items.iter().all(|entry| entry.ts > cursor));
+        assert!(!feed.has_more);
+
+        // Paging still works, forward through the same ascending order.
+        let head = list_activity_since(
+            &conn,
+            ActivityScope::Project(pid),
+            Some(&cursor),
+            Some(2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(head.items.len(), 2);
+        assert!(head.has_more);
+        let tail = list_activity_since(
+            &conn,
+            ActivityScope::Project(pid),
+            Some(&cursor),
+            Some(2),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(tail.items.len(), 1);
+        assert_eq!(tail.items[0].new_value.as_deref(), Some("After two"));
+        assert!(!tail.has_more);
+
+        // Without a cursor the feed is newest-first, unchanged.
+        let all = list_activity(&conn, ActivityScope::Project(pid), Some(50), None).unwrap();
+        assert!(all.items.windows(2).all(|pair| pair[0].id > pair[1].id));
+        assert_eq!(all.items.len(), 6, "project + 4 creates + 1 status update");
+    }
+
+    #[test]
+    fn a_cursor_equal_to_an_entry_timestamp_excludes_it() {
+        let pool = crate::db::open_memory().expect("test db");
+        let conn = pool.write().unwrap();
+        let pid = project(&conn);
+        conn.execute("UPDATE audit_log SET ts = '2026-06-01 12:00:00'", [])
+            .unwrap();
+        let feed = list_activity_since(
+            &conn,
+            ActivityScope::Project(pid),
+            Some("2026-06-01 12:00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(feed.items.is_empty(), "strictly after: {:?}", feed.items);
+    }
+
+    #[test]
+    fn cursors_normalize_to_the_stored_utc_form() {
+        for (input, expected) in [
+            ("2026-06-01", "2026-06-01 00:00:00"),
+            ("2026-06-01T14:30", "2026-06-01 14:30:00"),
+            ("2026-06-01 14:30:05", "2026-06-01 14:30:05"),
+            ("2026-06-01T14:30:05.900", "2026-06-01 14:30:05"),
+            ("2026-06-01T14:30:05Z", "2026-06-01 14:30:05"),
+            ("2026-06-01T09:30:05-05:00", "2026-06-01 14:30:05"),
+            ("2026-06-02T01:00:00+02:00", "2026-06-01 23:00:00"),
+        ] {
+            assert_eq!(normalize_since(input).unwrap(), expected, "{input}");
+        }
+        for input in ["", "yesterday", "2026-13-01", "06/01/2026"] {
+            assert!(
+                normalize_since(input).is_err(),
+                "{input} should be rejected"
+            );
+        }
     }
 }

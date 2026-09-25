@@ -77,7 +77,7 @@ lific mcp --instances ~/.config/lific/instances.toml
 - `--url <URL>` selects the base URL for `--remote`; it may also come from `LIFIC_URL`.
 - `--instances <FILE>` routes tools across the named servers in a TOML file. It conflicts with `--remote` and an explicitly passed `--url`. Each alias selects its own credentials. See [multi-instance MCP](/docs/mcp/multi-instance).
 
-Both local stdio and the remote proxy can supply an omitted project when the current checkout is [bound to a project](/docs/repository-bindings). The server retains 30 tools; multi-instance mode adds the proxy's `list_instances` tool and an `instance` selector to the forwarded tools.
+Both local stdio and the remote proxy can supply an omitted project when the current checkout is [bound to a project](/docs/repository-bindings). The server retains 31 tools; multi-instance mode adds the proxy's `list_instances` tool and an `instance` selector to the forwarded tools.
 
 ### init
 

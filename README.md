@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **30 MCP tools in 6,978 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **31 MCP tools in 6,978 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -63,10 +63,11 @@ lific doctor            # green/yellow/red checks: config, database, server,
 
 ## What your agent can now do
 
+- **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
-- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
+- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Pass `since` to read forward from where you stopped. Every agent's work is attributed (more below).
 - **Close with the proof attached.** `update_issue(status="done", evidence="cargo test: 412 passed")` saves the evidence as a verification comment in the same write as the close. `get_issue` marks it `[verification]` and the web UI badges it, so whoever reviews the close can see what was actually checked. If the description has a `- [ ]` task list, `get_issue` and `list_issues` show its progress (`3/5`), and closing with boxes still unchecked says how many.
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
@@ -202,7 +203,7 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 ## MCP tools
 
-All 30, in 6,978 tokens:
+All 31, in 6,978 tokens:
 
 | Family | Tools |
 |--------|-------|
@@ -212,7 +213,7 @@ All 30, in 6,978 tokens:
 | Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
 | Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
 | Attachments | `upload_attachment` · `get_attachment` · `list_attachments` |
-| Search & history | `search` · `get_activity` |
+| Search & history | `get_briefing` · `search` · `get_activity` |
 | Structure | `list_resources` · `manage_resource` · `delete` |
 | Export | `export` (issue, page, or whole project by ID) |
 
@@ -225,7 +226,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
 | **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
 | **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 30 tools, human-readable identifiers, compact schema, session instructions |
+| **MCP interface** | 31 tools, human-readable identifiers, compact schema, session instructions |
 | **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
 | **REST API** | Resource endpoints, search, board view, and relationship/planning operations |
 | **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
