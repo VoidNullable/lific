@@ -300,6 +300,9 @@ pub fn search_results(results: &[SearchResult]) -> String {
         w!(out, "No results found.");
         return out;
     }
+    if results[0].partial_match {
+        w!(out, "{}", crate::db::queries::partial_match_notice(None));
+    }
     w!(out, "{} result(s):\n", results.len());
     for result in results {
         let identifier = result.identifier.as_deref().unwrap_or("?");

@@ -1865,6 +1865,9 @@ export interface SearchResult {
   title: string;
   snippet: string;
   project_id: number | null;
+  /** Present when no result contained every word and this hit came from the
+   *  ranked any-word fallback. */
+  partial_match?: boolean;
 }
 
 export async function search(query: string, projectId?: number) {

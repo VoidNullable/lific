@@ -465,6 +465,8 @@ Searches indexed issues, pages, and comments. Query parameters are `query` (stri
 
 Response: an array of objects with `result_type` (string), `id` (integer), `identifier` (string or null), `title` (string), `snippet` (string), `project_id` (integer or null), and `parent_page_id` (integer). `parent_page_id` is present only when the result is a comment on a page, and it holds the id of that page.
 
+In `fts` mode every word must match. If nothing in the requested scope contains every word, the endpoint returns the hits that contain any of them instead, ranked by relevance, and each of those objects carries `partial_match: true`. The field is absent from ordinary results.
+
 ### GET `/api/health`
 
 Returns the health marker. This endpoint has no path or query parameters. It has no request body.

@@ -379,6 +379,8 @@ Searches issues, pages, and comments by text.
 | `limit` | `integer` | No | Max results (default 20) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more results exist. |
 
+In `fts` mode every word is a required prefix term. When no result in the requested scope contains every word, the search runs again with any word allowed, ranks the hits by relevance (or recency, with `sort=recent`), and opens with `No result contains every word; showing partial matches ranked by relevance.` Paging walks the same partial list. A one-word query and `literal` mode never fall back.
+
 ### `get_activity`
 
 Reads audit history for an issue, page, or project.

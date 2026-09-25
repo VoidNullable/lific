@@ -233,6 +233,8 @@
     route: string;
     score: number;
     remote?: boolean;
+    /** Server hit that contains only some of the query's words. */
+    partial?: boolean;
   };
 
   type SnippetSegment = { text: string; highlighted: boolean };
@@ -334,7 +336,11 @@
       return section.sort((a, b) => b.best - a.best || a.gi - b.gi);
     });
     return groups.map((g) => ({
-      label: g.remote ? `${GROUP_LABEL[g.kind]} (server)` : GROUP_LABEL[g.kind],
+      label: g.remote
+        ? g.rs.some((r) => r.partial)
+          ? `${GROUP_LABEL[g.kind]} (server, partial matches)`
+          : `${GROUP_LABEL[g.kind]} (server)`
+        : GROUP_LABEL[g.kind],
       entries: g.rs.map((r) => ({ r, flatIdx: flatIdx++ })),
     }));
   });
@@ -658,6 +664,7 @@
           route,
           score: 1 - i * 0.03,
           remote: true,
+          partial: r.partial_match === true,
         });
       });
     }

@@ -1634,6 +1634,13 @@ impl LificMcp {
         }
         let link_context = current_issue_link_context();
         Ok(render_response(|output| {
+            if results[0].partial_match {
+                writeln!(
+                    output,
+                    "{}",
+                    queries::partial_match_notice(input.sort.as_deref())
+                )?;
+            }
             writeln!(output, "{} results:", results.len())?;
             results.iter().try_for_each(|result| {
                 let identifier = result.identifier.as_deref().unwrap_or("");
@@ -4962,6 +4969,10 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 }
 
 #[cfg(test)]
+#[path = "tests_search_filing.rs"]
+mod tests_search_filing;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -5020,7 +5031,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5064,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -5070,7 +5081,7 @@ mod tests {
         ident.to_string()
     }
 
-    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+    pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: Some(project.into()),
             title: title.into(),
