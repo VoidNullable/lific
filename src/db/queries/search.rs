@@ -465,6 +465,159 @@ fn row_to_search_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResul
     })
 }
 
+// ── Similar open issues (LIF-477) ────────────────────────────
+
+/// An open issue whose wording overlaps a newly filed issue's title.
+#[derive(Debug)]
+pub struct SimilarIssue {
+    pub identifier: String,
+    pub title: String,
+    pub status: String,
+}
+
+/// Words that say nothing about what an issue is about: English function
+/// words plus the verbs and nouns nearly every issue title opens with.
+const SIMILARITY_STOPWORDS: &[&str] = &[
+    "about", "add", "after", "all", "also", "and", "any", "are", "before", "bug", "but", "can",
+    "cannot", "does", "doesn", "don", "for", "fix", "from", "has", "have", "into", "isn", "issue",
+    "its", "make", "more", "not", "now", "only", "should", "some", "than", "that", "the", "then",
+    "there", "this", "use", "via", "was", "when", "where", "which", "while", "why", "will", "with",
+    "without", "won", "you",
+];
+
+/// At most this many title words take part in the comparison.
+const MAX_SIMILARITY_TERMS: usize = 12;
+/// How many ranked candidates are checked for real overlap.
+const SIMILARITY_CANDIDATES: i64 = 10;
+
+/// The words of `title` worth comparing: lowercased, three characters or
+/// more, not a stopword, first occurrence only.
+fn significant_terms(title: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for word in title
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+    {
+        if word.chars().count() >= 3
+            && !SIMILARITY_STOPWORDS.contains(&word.as_str())
+            && !terms.contains(&word)
+        {
+            terms.push(word);
+        }
+        if terms.len() == MAX_SIMILARITY_TERMS {
+            break;
+        }
+    }
+    terms
+}
+
+/// Up to `limit` open issues in `project_id` that look like duplicates of an
+/// issue titled `title`, best first, never including `exclude_issue_id`.
+///
+/// Candidates come from the same ranked any-word FTS the search fallback
+/// uses (LIF-476), with the title column weighted above the description. A
+/// candidate is kept only if it shares at least two significant words with
+/// `title` (one, when the title has only one) and at least one of them
+/// appears in its own title. That rules out the overlap every tracker has:
+/// two issues that both mention "search" somewhere in a long description.
+pub fn similar_open_issues(
+    conn: &Connection,
+    project_id: i64,
+    title: &str,
+    exclude_issue_id: i64,
+    limit: usize,
+) -> Result<Vec<SimilarIssue>, LificError> {
+    let terms = significant_terms(title);
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(any_term) = fts_expression(&terms.join(" "), Terms::Any, ENTITY_TEXT_COLUMNS) else {
+        return Ok(Vec::new());
+    };
+
+    // bm25 weights follow the column order: title, body, then the metadata
+    // columns the expression never touches.
+    let mut stmt = conn.prepare(
+        "SELECT i.id, p.identifier || '-' || i.sequence, i.title, i.status
+         FROM search_index s
+         JOIN issues i ON i.id = s.entity_id
+         JOIN projects p ON p.id = i.project_id
+         WHERE search_index MATCH ?1
+           AND s.entity_type = 'issue'
+           AND s.project_id = ?2
+           AND i.id != ?3
+           AND i.deleted_at IS NULL
+           AND i.status NOT IN ('done', 'cancelled')
+         ORDER BY bm25(search_index, 4.0, 1.0)
+         LIMIT ?4",
+    )?;
+    let candidates = stmt
+        .query_map(
+            rusqlite::params![
+                any_term,
+                project_id,
+                exclude_issue_id,
+                SIMILARITY_CANDIDATES
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    SimilarIssue {
+                        identifier: row.get(1)?,
+                        title: row.get(2)?,
+                        status: row.get(3)?,
+                    },
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Which candidates match `expression`. Matching goes through the index
+    // rather than Rust string comparison so stemming and prefix rules agree
+    // with the ranking query ("filing" still meets "filed").
+    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let placeholders = vec!["?"; ids.len()].join(", ");
+    let matching_sql = format!(
+        "SELECT s.entity_id FROM search_index s
+         WHERE search_index MATCH ? AND s.entity_type = 'issue'
+           AND s.entity_id IN ({placeholders})"
+    );
+    let mut matching_stmt = conn.prepare(&matching_sql)?;
+    let mut matching = |expression: String| -> Result<HashSet<i64>, LificError> {
+        let mut params = vec![Value::Text(expression)];
+        params.extend(ids.iter().copied().map(Value::Integer));
+        matching_stmt
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+            .collect::<Result<HashSet<i64>, _>>()
+            .map_err(Into::into)
+    };
+
+    let mut shared: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for term in &terms {
+        let Some(expression) = fts_expression(term, Terms::Any, ENTITY_TEXT_COLUMNS) else {
+            continue;
+        };
+        for id in matching(expression)? {
+            *shared.entry(id).or_default() += 1;
+        }
+    }
+    let Some(in_title) = fts_expression(&terms.join(" "), Terms::Any, "title") else {
+        return Ok(Vec::new());
+    };
+    let title_hits = matching(in_title)?;
+
+    let needed = terms.len().min(2);
+    Ok(candidates
+        .into_iter()
+        .filter(|(id, _)| title_hits.contains(id) && shared.get(id).copied().unwrap_or(0) >= needed)
+        .map(|(_, issue)| issue)
+        .take(limit)
+        .collect())
+}
+
 /// Case-insensitive substring path (LIF-304).
 ///
 /// Scans the same corpus as the FTS path — issues (title + description),

@@ -68,6 +68,8 @@ Creates an issue in a project.
 | `start_date` | `string` | No | Start date (ISO 8601 date, e.g. 2026-06-01) |
 | `target_date` | `string` | No | Target/due date (ISO 8601 date, e.g. 2026-06-15) |
 
+After the confirmation line, the response lists up to three open issues in the same project that look like duplicates, one line each under `Similar open issues:`, so you can link or cancel one right away. An issue qualifies when it shares at least two significant title words with the new issue (one, if the new title has only one), at least one of them in its own title. Common words such as "add", "fix" and "the" do not count. Done and cancelled issues are never listed, and the section is omitted when nothing qualifies.
+
 ### `update_issue`
 
 Updates the provided fields of an issue.

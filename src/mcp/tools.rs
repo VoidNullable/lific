@@ -363,6 +363,31 @@ fn issue_reference<'a>(
     reference_with_context(context, ReferenceKind::Issue(identifier))
 }
 
+/// How many possible duplicates `create_issue` names (LIF-477).
+const SIMILAR_ISSUE_LIMIT: usize = 3;
+
+/// Append the possible-duplicates section after a create confirmation, one
+/// line per issue. Writes nothing when there are none.
+fn write_similar_issues(
+    output: &mut String,
+    context: Option<&IssueLinkContext>,
+    similar: &[queries::SimilarIssue],
+) -> fmt::Result {
+    if similar.is_empty() {
+        return Ok(());
+    }
+    write!(output, "\nSimilar open issues:")?;
+    similar.iter().try_for_each(|issue| {
+        write!(
+            output,
+            "\n- {} ({}) {}",
+            issue_reference(context, &issue.identifier),
+            issue.status,
+            issue.title
+        )
+    })
+}
+
 fn project_reference<'a>(
     context: Option<&'a IssueLinkContext>,
     identifier: &'a str,
@@ -2268,6 +2293,14 @@ impl LificMcp {
             },
             issue.seq,
         );
+        // LIF-477: name likely duplicates so the agent can link or cancel one
+        // now. Best effort: the issue already exists, so a failed lookup only
+        // costs the hint.
+        let similar = self
+            .read(|conn| {
+                queries::similar_open_issues(conn, pid, &issue.title, issue.id, SIMILAR_ISSUE_LIMIT)
+            })
+            .unwrap_or_default();
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(
@@ -2275,7 +2308,8 @@ impl LificMcp {
                 "Created {}: {}",
                 issue_reference(context.as_deref(), &issue.identifier),
                 issue.title
-            )
+            )?;
+            write_similar_issues(output, context.as_deref(), &similar)
         }))
     }
 
