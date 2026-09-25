@@ -2792,7 +2792,9 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Get a page by identifier (e.g. LIF-DOC-1). Returns full content.")]
+    #[tool(
+        description = "Get a page by identifier (e.g. LIF-DOC-1). Pages over 30,000 chars return their outline and opening; read the rest by section."
+    )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
         self.get_page_inner(input).unwrap_or_else(error_response)
     }
@@ -2808,6 +2810,15 @@ impl LificMcp {
             Ok((page, folder_name))
         })?;
         require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer)?;
+        // LIF-479: oversized pages come back as an outline plus their
+        // opening; `section` and `outline` read them piece by piece.
+        let body = super::page_reads::page_body(
+            &page.identifier,
+            &page.content,
+            page.seq,
+            input.section.as_deref(),
+            input.outline.unwrap_or(false),
+        )?;
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             writeln!(
@@ -2831,10 +2842,8 @@ impl LificMcp {
                     }
                 )
             })?;
-            (!page.content.is_empty())
-                .then(|| writeln!(output, "\n{}", page.content))
-                .transpose()
-                .map(|_| ())
+            output.push_str(&body);
+            Ok(())
         }))
     }
 
@@ -4962,6 +4971,10 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 }
 
 #[cfg(test)]
+#[path = "tests_page_reads.rs"]
+mod tests_page_reads;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -5020,7 +5033,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5066,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -6809,6 +6822,7 @@ mod tests {
 
         let get = m.get_page(Parameters(GetPageInput {
             identifier: "SFP-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(get.contains("not found"), "got: {get}");
 
@@ -6848,6 +6862,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PG-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Design Doc"), "got: {detail}");
         assert!(detail.contains("# Overview"), "got: {detail}");
@@ -9279,6 +9294,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "EPC-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("new body"), "got: {detail}");
         assert!(!detail.contains("old body"), "got: {detail}");
@@ -9393,6 +9409,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "EPP-DOC-1".into(),
+            ..Default::default()
         }));
         // Title preserved, content edited.
         assert!(
@@ -9506,6 +9523,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PGL-DOC-1".into(),
+            ..Default::default()
         }));
         // get_page emits `Labels: <names>` when non-empty (mirrors get_issue).
         assert!(detail.contains("Labels: design"), "got: {detail}");
@@ -9538,6 +9556,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PUL-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Labels: draft"), "got: {detail}");
         assert!(!detail.contains("design"), "got: {detail}");
@@ -9854,6 +9873,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "DOC-1".into(),
+            ..Default::default()
         }));
         // No `Labels:` line present.
         assert!(!detail.contains("Labels:"), "got: {detail}");
@@ -9889,6 +9909,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(
             detail.contains("Status: active | Folder: Specs"),
@@ -9921,6 +9942,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(
             detail.contains("Status: draft | Folder: none"),
@@ -13141,6 +13163,7 @@ mod authz_gating_tests {
         let denied_page = as_user(&non_member, || {
             m.get_page(Parameters(GetPageInput {
                 identifier: "MEM-DOC-1".into(),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied_page), "got: {denied_page}");
@@ -13154,6 +13177,7 @@ mod authz_gating_tests {
         let allowed_page = as_user(&viewer, || {
             m.get_page(Parameters(GetPageInput {
                 identifier: "MEM-DOC-1".into(),
+                ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed_page), "got: {allowed_page}");

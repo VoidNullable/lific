@@ -200,6 +200,12 @@ pub struct UnlinkIssuesInput {
 pub struct GetPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
+    #[schemars(
+        description = "Read one section: heading text (case-insensitive) or its anchor (e.g. current-state), with its subsections"
+    )]
+    pub section: Option<String>,
+    #[schemars(description = "Return only the headings, each section's size, and the page seq")]
+    pub outline: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

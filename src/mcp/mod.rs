@@ -1,3 +1,4 @@
+pub(crate) mod page_reads;
 pub(crate) mod preinit;
 pub(crate) mod schemas;
 pub(crate) mod tools;

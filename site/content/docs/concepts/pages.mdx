@@ -39,3 +39,7 @@ Project pages can have labels from their project. Workspace-level pages do not s
 Supplying labels during a page update replaces the page's complete label set. Omitting labels leaves the current labels unchanged.
 
 Each page has a pinned value. The web page list shows pinned pages in a separate section above the folder tree. Pinning does not change the page's folder or status.
+
+## Long pages
+
+Agents read pages through `get_page`, and agent harnesses silently cut off tool output past roughly 50 KB. A page longer than 30,000 characters is therefore returned as its outline, with each section's size, plus the start of its content. The agent then reads the part it needs with `get_page(identifier="LIF-DOC-3", section="Current state")`. The web UI always shows the whole page.
