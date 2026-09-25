@@ -1311,6 +1311,89 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// From PR #80. CORS is no longer applied here (the global layer in
+    /// `server.rs` is the only one, see `production_cors_covers_all_route_surfaces`),
+    /// so this keeps the part that still guards the API router itself: routes,
+    /// state and the 404 fallback survive the final layers.
+    #[tokio::test]
+    async fn api_router_preserves_routes_and_fallback() {
+        let app = super::router(
+            crate::db::open_memory().unwrap(),
+            &["https://example.com".to_string()],
+        )
+        .layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            required: false,
+            secure_cookies: false,
+        }))
+        .layer(axum::Extension(
+            None::<crate::resolve_caller::ResolvedIdentity>,
+        ));
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("origin", "https://example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let instance = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/instance")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(instance.status(), StatusCode::OK);
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/issues/1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let fallback = app
+            .fallback(|| async { StatusCode::IM_A_TEAPOT })
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (issue.status(), fallback.status()),
+            (StatusCode::NOT_FOUND, StatusCode::IM_A_TEAPOT),
+            "numeric path extraction and application fallback must remain intact",
+        );
+    }
+
     #[tokio::test]
     async fn presented_invalid_api_key_returns_401() {
         let db = crate::db::open_memory().expect("test db");
