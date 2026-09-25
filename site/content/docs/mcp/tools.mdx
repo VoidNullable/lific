@@ -599,7 +599,7 @@ Reads one attachment.
 | `offset` | `integer` | No | Text only: zero-based first line. |
 | `limit` | `integer` | No | Text only: lines to return. Default 200, capped at 500. |
 
-Text files are returned in line ranges. Use the returned offset to read the next range. PNG, JPEG, GIF and WebP are returned as MCP image content. Other files are returned as embedded resources over stdio or when no HTTP origin is available. HTTP requests with a validated origin return an absolute download URL, using the configured public URL or an allowlisted `Host`. The download endpoint checks the caller's permission to read the attachment.
+Text files are returned in line ranges. Use the returned offset to read the next range. PNG, JPEG, GIF and WebP are returned as MCP image content. Other files arrive as base64 resources over stdio, including remote and multi-instance proxies; clients can decode the blob to save the file. Direct HTTP MCP requests with a validated origin return an absolute download URL, using the configured public URL or an allowlisted `Host`. Without an origin, HTTP also returns the embedded resource. The download endpoint checks the caller's permission to read the attachment.
 
 Reading takes `viewer` in any project the attachment is linked into. An attachment linked nowhere has no project to check, so only its uploader or an administrator can read it.
 

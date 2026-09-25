@@ -2062,6 +2062,62 @@ async fn an_oversized_backend_response_is_refused_without_buffering_it() {
 }
 
 #[tokio::test]
+async fn attachment_call_accepts_embedded_bytes_larger_than_the_normal_response_limit() {
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+
+    let seen = Arc::new(Mutex::new(None::<String>));
+    async fn mcp(
+        State(seen): State<Arc<Mutex<Option<String>>>>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        *seen.lock().unwrap() = headers
+            .get("x-lific-mcp-inline-attachment")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "attachment://42",
+                    "mimeType": "application/zip",
+                    "blob": "AAAA".repeat(MAX_RESPONSE_BYTES / 4 + 1),
+                },
+            }] },
+        }))
+    }
+
+    let app = axum::Router::new()
+        .route("/mcp", post(mcp))
+        .with_state(Arc::clone(&seen));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let transport = http_backends(&[("private", &format!("http://{address}"), None)]);
+
+    let result = transport
+        .call(
+            "private",
+            call("get_attachment", serde_json::json!({ "attachment_id": 42 })),
+        )
+        .await
+        .expect("the attachment should fit its response limit");
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert!(
+        result["result"]["content"][0]["resource"]["blob"]
+            .as_str()
+            .unwrap()
+            .len()
+            > MAX_RESPONSE_BYTES
+    );
+    assert_eq!(seen.lock().unwrap().as_deref(), Some("1"));
+    task.abort();
+}
+
+#[tokio::test]
 async fn a_malformed_backend_response_becomes_an_error_carrying_the_request_id() {
     let broken = MockServer::start(Behaviour::Malformed).await;
     let transport = http_backends(&[("private", &broken.base_url, Some("a-token-value"))]);
