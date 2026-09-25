@@ -512,7 +512,8 @@ fn significant_terms(title: &str) -> Vec<String> {
 }
 
 /// Up to `limit` open issues in `project_id` that look like duplicates of an
-/// issue titled `title`, best first, never including `exclude_issue_id`.
+/// issue titled `title`, best first, never including `exclude_issue_ids` (the
+/// new issue itself, or a whole batch filed together).
 ///
 /// Candidates come from the same ranked any-word FTS the search fallback
 /// uses (LIF-476), with the title column weighted above the description. A
@@ -524,7 +525,7 @@ pub fn similar_open_issues(
     conn: &Connection,
     project_id: i64,
     title: &str,
-    exclude_issue_id: i64,
+    exclude_issue_ids: &[i64],
     limit: usize,
 ) -> Result<Vec<SimilarIssue>, LificError> {
     let terms = significant_terms(title);
@@ -537,39 +538,40 @@ pub fn similar_open_issues(
 
     // bm25 weights follow the column order: title, body, then the metadata
     // columns the expression never touches.
-    let mut stmt = conn.prepare(
+    let excluded = if exclude_issue_ids.is_empty() {
+        String::new()
+    } else {
+        let placeholders = vec!["?"; exclude_issue_ids.len()].join(", ");
+        format!("AND i.id NOT IN ({placeholders})")
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT i.id, p.identifier || '-' || i.sequence, i.title, i.status
          FROM search_index s
          JOIN issues i ON i.id = s.entity_id
          JOIN projects p ON p.id = i.project_id
-         WHERE search_index MATCH ?1
+         WHERE search_index MATCH ?
            AND s.entity_type = 'issue'
-           AND s.project_id = ?2
-           AND i.id != ?3
+           AND s.project_id = ?
+           {excluded}
            AND i.deleted_at IS NULL
            AND i.status NOT IN ('done', 'cancelled')
          ORDER BY bm25(search_index, 4.0, 1.0)
-         LIMIT ?4",
-    )?;
+         LIMIT ?"
+    ))?;
+    let mut params = vec![Value::Text(any_term), Value::Integer(project_id)];
+    params.extend(exclude_issue_ids.iter().copied().map(Value::Integer));
+    params.push(Value::Integer(SIMILARITY_CANDIDATES));
     let candidates = stmt
-        .query_map(
-            rusqlite::params![
-                any_term,
-                project_id,
-                exclude_issue_id,
-                SIMILARITY_CANDIDATES
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    SimilarIssue {
-                        identifier: row.get(1)?,
-                        title: row.get(2)?,
-                        status: row.get(3)?,
-                    },
-                ))
-            },
-        )?
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                SimilarIssue {
+                    identifier: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                },
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     if candidates.is_empty() {
         return Ok(Vec::new());

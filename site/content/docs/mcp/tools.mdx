@@ -54,12 +54,12 @@ Exports as Markdown, dispatching on identifier shape: an issue (`PRO-42`), a pag
 
 ### `create_issue`
 
-Creates an issue in a project.
+Creates an issue in a project, or several at once.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `project` | `string` | Yes | Project identifier (e.g. LIF) |
-| `title` | `string` | Yes | Issue title |
+| `title` | `string` | Unless `issues` is given | Issue title |
 | `description` | `string` | No | Markdown description |
 | `status` | `string` | No | Status: backlog, todo, active, done, cancelled (default: backlog) |
 | `priority` | `string` | No | Priority: urgent, high, medium, low, none (default: none) |
@@ -67,8 +67,11 @@ Creates an issue in a project.
 | `labels` | `string[]` | No | Label names to attach |
 | `start_date` | `string` | No | Start date (ISO 8601 date, e.g. 2026-06-01) |
 | `target_date` | `string` | No | Target/due date (ISO 8601 date, e.g. 2026-06-15) |
+| `issues` | `object[]` | No | Create up to 50 issues in one call. Each item takes `title` (required) and the optional fields above except `project`. |
 
-After the confirmation line, the response lists up to three open issues in the same project that look like duplicates, one line each under `Similar open issues:`, so you can link or cancel one right away. An issue qualifies when it shares at least two significant title words with the new issue (one, if the new title has only one), at least one of them in its own title. Common words such as "add", "fix" and "the" do not count. Done and cancelled issues are never listed, and the section is omitted when nothing qualifies.
+To file a burst of issues, pass `issues` instead of `title`. Only `project` may accompany it; the other top-level fields are rejected rather than merged into the items. The batch is one transaction: if any item is invalid (an unknown module, a bad status, a missing title), no issue is created and the error names the item, for example `Not found: issues[1]: module 'Nonexistent' not found in project`. The response lists every new identifier, one per line in item order. Unknown label names are ignored, as they are for a single issue.
+
+After the confirmation line, the response lists up to three open issues in the same project that look like duplicates, one line each under `Similar open issues:`, so you can link or cancel one right away. In a batch the hint shrinks to identifiers on the item's own line, as in `- LIF-8: Title (similar open: LIF-3)`, and issues from the same batch are never listed as each other's duplicates. An issue qualifies when it shares at least two significant title words with the new issue (one, if the new title has only one), at least one of them in its own title. Common words such as "add", "fix" and "the" do not count. Done and cancelled issues are never listed, and the section is omitted when nothing qualifies.
 
 ### `update_issue`
 
