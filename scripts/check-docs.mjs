@@ -16,7 +16,11 @@ function checkSiteNavigation(directory, label = "docs") {
     return;
   }
   const meta = JSON.parse(read(metaPath));
+  const listed = new Set();
   for (const page of meta.pages ?? []) {
+    // Fumadocs sidebar separators ("---Guides---") group entries; they name no page.
+    if (/^---/.test(page)) continue;
+    listed.add(page);
     const file = join(directory, `${page}.mdx`);
     const folder = join(directory, page);
     if (existsSync(file)) continue;
@@ -25,6 +29,14 @@ function checkSiteNavigation(directory, label = "docs") {
       continue;
     }
     errors.push(`${label}: navigation entry ${page} has no MDX page or child meta.json`);
+  }
+  // An explicit page list hides anything it omits, so every page must be listed.
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const name = entry.isDirectory() ? entry.name : entry.name.replace(/\.mdx$/, "");
+    const isPage = entry.isDirectory() || entry.name.endsWith(".mdx");
+    if (isPage && !listed.has(name)) {
+      errors.push(`${label}: ${name} exists but is missing from meta.json, so it is not in the sidebar`);
+    }
   }
 }
 
