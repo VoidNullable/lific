@@ -45,7 +45,7 @@ Format 1 includes explicit columns from these tables:
 
 - `projects`, `modules`, `labels`, `folders`
 - `issues`, `pages`, `plans`, `plan_steps`, `comments`
-- `issue_labels`, `page_labels`, `issue_relations`, `page_issue_links`
+- `issue_labels`, `page_labels`, `issue_relations`, `issue_waits`, `page_issue_links`
 - `attachments`, `attachment_links`
 - project-content `audit_log` entries and `status_transitions`
 
@@ -63,6 +63,11 @@ the destination. Historical references to files no longer linked to the project
 follow this rule too. Absolute attachment URLs retain their original address and
 are reported for manual review. Other prose and URLs are retained as written;
 this command does not crawl links or sanitize private text.
+
+A wait on a person travels by username and binds to the destination account
+with the same username. When no active account has that name, the wait is
+reported and left out. Date waits transfer as written. Archives written before
+waits existed have no `issue_waits` table and still import.
 
 Cross-project database relations are reported and omitted. Optional external
 parent/anchor references are cleared. Neighboring projects are never pulled in.

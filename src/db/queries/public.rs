@@ -15,6 +15,8 @@
 //! step every value passes through before it leaves this module:
 //!
 //! * a project's `lead_user_id` is dropped;
+//! * an issue's waits (user and date blockers, LIF-484) are dropped from
+//!   every issue and sync row: they name accounts and carry private notes;
 //! * an issue's `source` (import provenance) is dropped, and every relation
 //!   identifier naming an issue outside this project is filtered out, so a
 //!   public issue never names a private one;
@@ -80,6 +82,9 @@ fn names_project(project: &str, identifier: &str) -> bool {
 /// in-project graph a reader is entitled to stays intact.
 pub fn scrub_issue(project: &Project, issue: &mut Issue) {
     issue.source = None;
+    // LIF-484: waits name accounts and carry private notes. The public view
+    // shows none of them, not even a marker.
+    issue.waits.clear();
     for relations in [
         &mut issue.blocks,
         &mut issue.blocked_by,
@@ -150,7 +155,10 @@ pub fn public_index(conn: &Connection, project: &Project) -> Result<IndexSnapsho
              )",
         )?
         .query_row(params![project.id], |row| row.get(0))?;
-    let (issues, pages) = super::changes::index_rows(conn, project.id)?;
+    let (mut issues, pages) = super::changes::index_rows(conn, project.id)?;
+    for issue in &mut issues {
+        issue.waits.clear();
+    }
     Ok(IndexSnapshot {
         cursor,
         issues,
@@ -170,6 +178,11 @@ pub fn public_changes(
     limit: i64,
 ) -> Result<ChangesPage, LificError> {
     let mut page = super::changes::list_changes(conn, project.id, since, limit)?;
+    for change in &mut page.changes {
+        if let Change::Issue(issue) = change {
+            issue.waits.clear();
+        }
+    }
     page.changes.retain(|change| match change {
         Change::Issue(_) | Change::Page(_) => true,
         Change::Comment(_) => false,

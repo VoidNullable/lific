@@ -302,6 +302,73 @@ pub struct Issue {
     /// the target of a 'duplicate' link).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicated_by: Vec<String>,
+    /// LIF-484: user and date blockers, populated on every issue read (single
+    /// and list). Empty on the public surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<IssueWait>,
+}
+
+/// LIF-484: what a wait is waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitKind {
+    User,
+    Date,
+}
+
+/// LIF-484: a wait's standing on a given day. Only `Holding` blocks.
+///
+/// A user wait is always `Holding` until cleared. A date wait is `Holding`
+/// before its earliest day, `Due` from the earliest day through the latest,
+/// and `Overdue` after the latest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitState {
+    Holding,
+    Due,
+    Overdue,
+}
+
+/// LIF-484: a blocker that is a person or a window of days rather than an
+/// issue. `state` is computed against the server's local day at read time;
+/// a client holding the row across midnight should recompute it from
+/// `earliest`/`latest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWait {
+    pub id: i64,
+    pub issue_id: i64,
+    pub kind: WaitKind,
+    /// The account waited on (`kind = user`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// First day the wait stops blocking, `YYYY-MM-DD` (`kind = date`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest: Option<String>,
+    /// Last expected day; equal to `earliest` for a single day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    pub state: WaitState,
+    pub created_at: String,
+}
+
+/// LIF-484: a new wait. Exactly one of `user` or `from` is set; `until`
+/// only accompanies `from` and defaults to it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CreateWait {
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One edge in a project's issue-relation graph (LIF-363). Produced in bulk
@@ -1155,6 +1222,10 @@ pub struct IssueChange {
     /// Label names, resolved in one grouped query per page rather than one
     /// query per row.
     pub labels: Vec<String>,
+    /// LIF-484: user and date blockers, one grouped query per page. Adding
+    /// or clearing one advances the issue's seq, so a replica sees it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<IssueWait>,
 }
 
 /// A live page in the sync stream. `identifier` is the `PRO-DOC-7` form

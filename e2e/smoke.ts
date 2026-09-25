@@ -32,6 +32,7 @@ import { join, resolve } from "node:path";
 import { checkDiscordFeedback } from "./discord-feedback";
 import { checkPaletteSearch } from "./palette-search";
 import { checkDuplicateRelations } from "./duplicate-relations";
+import { checkIssueWaits } from "./issue-waits";
 import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -229,6 +230,7 @@ async function main(): Promise<number> {
     // assertions above.
     await checkPaletteSearch(context, base);
     await checkDuplicateRelations(context, base);
+    await checkIssueWaits(context, base, "smoke-operator");
 
     // ---- deep-link back synthesis (LIF-434) ----------------------------
     // A detail view opened as the app's entry point gets a synthesized

@@ -19,6 +19,7 @@ pub(crate) mod settings;
 pub(crate) mod trash;
 pub(crate) mod users;
 pub(crate) mod views;
+pub(crate) mod waits;
 
 /// Repair literal `\n` and `\t` sequences from clients that double-escape JSON.
 ///

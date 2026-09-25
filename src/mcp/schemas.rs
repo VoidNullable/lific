@@ -253,21 +253,35 @@ pub struct GetBoardInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LinkIssuesInput {
-    #[schemars(description = "Source issue ID (e.g. PRO-1)")]
+    #[schemars(description = "Source issue ID (e.g. PRO-1); omit for a wait")]
+    #[serde(default)]
     pub source: String,
     #[schemars(description = "Target issue ID (e.g. PRO-2)")]
     pub target: String,
     #[schemars(description = "Relation type: blocks, relates_to, or duplicate")]
     pub relation_type: String,
+    #[schemars(description = "Wait: username target waits on until cleared")]
+    pub user: Option<String>,
+    #[schemars(description = "Wait: day (YYYY-MM-DD) target stops being blocked")]
+    pub from: Option<String>,
+    #[schemars(description = "Wait: last expected day; overdue after it")]
+    pub until: Option<String>,
+    #[schemars(description = "Wait note")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnlinkIssuesInput {
-    #[schemars(description = "First issue ID")]
+    #[schemars(description = "First issue ID; omit to clear a wait")]
+    #[serde(default)]
     pub source: String,
     #[schemars(description = "Second issue ID")]
     pub target: String,
+    #[schemars(description = "Clear target's wait on this user")]
+    pub user: Option<String>,
+    #[schemars(description = "Clear target's date wait starting this day")]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

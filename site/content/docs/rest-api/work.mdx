@@ -107,6 +107,24 @@ Removes the relation between two issues. This endpoint has no path or query para
 
 Request body fields are `source` (string issue identifier) and `target` (string issue identifier). Response: `{ "unlinked": true }`.
 
+### GET `/api/issues/{id}/waits`
+
+Lists an issue's waits: blockers that are a person or a window of days rather than another issue. Path parameter: `id` (integer issue ID). It has no query parameters or request body. Requires read access to the project.
+
+Each wait has `id`, `issue_id`, `kind` (`user` or `date`), `note`, `state` and `created_at`. A user wait adds `user_id`, `username` and `display_name`. A date wait adds `earliest` and `latest` (`YYYY-MM-DD`). `state` is `holding` (blocks), `due` (from `earliest` through `latest`) or `overdue` (after `latest`), computed on the server's local day when the response was built. Issue responses and the sync rows from `/index` and `/changes` carry the same objects under `waits`.
+
+### POST `/api/issues/{id}/waits`
+
+Adds a wait. Path parameter: `id` (integer issue ID). Requires write access to the project.
+
+Request body fields are `user` (string username), or `from` (string date) with optional `until` (string date, defaults to `from`), plus optional `note` (string, up to 500 characters). Pass `user` or `from`, not both. An unknown or deactivated username and an `until` before `from` return 400; a wait the issue already has returns 409. Response: the new wait.
+
+### DELETE `/api/issues/{id}/waits/{wait_id}`
+
+Clears a wait. Path parameters are `id` (integer issue ID) and `wait_id` (integer). Requires write access to the project. A `wait_id` that belongs to another issue returns 404. Response: `{ "cleared": true }`.
+
+Adding or clearing a wait publishes `issue.updated` for the issue.
+
 ### GET `/api/issues/{id}/activity`
 
 Returns activity for an issue. Path parameter: `id` (integer issue ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).

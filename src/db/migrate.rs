@@ -262,6 +262,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
     ),
     (
+        54,
+        "issue waits",
+        include_str!("../../migrations/054_issue_waits.sql"),
+    ),
+    (
         55,
         "page revisions",
         include_str!("../../migrations/055_page_revisions.sql"),

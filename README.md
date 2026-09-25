@@ -65,6 +65,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 
 - **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
+- **Block on people and dates, not only issues.** `link_issues(target="APP-9", relation_type="blocks", user="blake")` parks an issue until someone clears it; `from="2026-09-28", until="2026-10-02", note="filing office"` parks it until a window opens, then shows it as due and later overdue.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
 - **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Pass `since` to read forward from where you stopped. Every agent's work is attributed (more below).
@@ -209,7 +210,7 @@ All 31, in 6,978 tokens:
 | Family | Tools |
 |--------|-------|
 | Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
-| Relations | `link_issues` · `unlink_issues` |
+| Relations & waits | `link_issues` · `unlink_issues` |
 | Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
 | Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
 | Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |

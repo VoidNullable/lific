@@ -11,6 +11,8 @@
 // the highest seq it has applied; `/changes?since=cursor` returns everything
 // above it, tombstones included.
 
+import type { IssueWait } from "../api";
+
 export type SyncKind = "issue" | "page" | "comment";
 
 /** Mirrors the server's `CommentKind`. */
@@ -39,6 +41,9 @@ export interface IssueRow {
    *  a detail view still fetches the full body. */
   preview: string;
   labels: string[];
+  /** LIF-484: user and date blockers. Omitted when the issue has none; a
+   *  wait added or cleared re-delivers the row at a new seq. */
+  waits?: IssueWait[];
 }
 
 /** A live page row. Note the field the wire shape does NOT carry: no

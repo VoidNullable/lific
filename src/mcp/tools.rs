@@ -225,7 +225,8 @@ impl Display for IssueLine<'_> {
                 },
                 formatter,
             )
-        })
+        })?;
+        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)
     }
 }
 
@@ -1460,6 +1461,19 @@ impl Display for ActivityLine<'_> {
                     activity.old_value.as_deref().unwrap_or("?")
                 )
             ),
+            // LIF-484: user and date blockers.
+            "wait" => write!(
+                formatter,
+                "{} +wait {}",
+                label,
+                activity.new_value.as_deref().unwrap_or("?")
+            ),
+            "unwait" => write!(
+                formatter,
+                "{} -wait {}",
+                label,
+                activity.old_value.as_deref().unwrap_or("?")
+            ),
             other => write!(formatter, "{label} {other}"),
         }
     }
@@ -2165,6 +2179,7 @@ impl LificMcp {
                     }
                 )
             })?;
+            write!(output, "{}", super::waits::WaitLines(&issue.waits))?;
             (!issue.description.is_empty())
                 .then(|| writeln!(output, "\n{}", issue.description))
                 .transpose()
@@ -3059,12 +3074,20 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Link two issues with a relation: blocks, relates_to, or duplicate")]
+    #[tool(
+        description = "Link two issues with a relation: blocks, relates_to, or duplicate. A blocks link with user or from/until instead of source makes target wait on a person or dates."
+    )]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
         self.link_issues_inner(input).unwrap_or_else(error_response)
     }
 
     fn link_issues_inner(&self, input: LinkIssuesInput) -> Result<String, String> {
+        if super::waits::link_is_wait(&input) {
+            return self.link_wait(&input);
+        }
+        if input.source.trim().is_empty() {
+            return Err("source is required, or pass user or from for a blocks wait".into());
+        }
         let (source, target) = self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
@@ -3098,13 +3121,21 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Remove a relation between two issues")]
+    #[tool(
+        description = "Remove a relation between two issues, or clear target's wait by user or from."
+    )]
     fn unlink_issues(&self, Parameters(input): Parameters<UnlinkIssuesInput>) -> String {
         self.unlink_issues_inner(input)
             .unwrap_or_else(error_response)
     }
 
     fn unlink_issues_inner(&self, input: UnlinkIssuesInput) -> Result<String, String> {
+        if super::waits::unlink_is_wait(&input) {
+            return self.unlink_wait(&input);
+        }
+        if input.source.trim().is_empty() {
+            return Err("source is required, or pass user or from to clear a wait".into());
+        }
         let (source, target) = self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
@@ -5380,6 +5411,10 @@ mod tests_search_filing;
 mod tests_page_reads;
 
 #[cfg(test)]
+#[path = "tests_waits.rs"]
+mod tests_waits;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -6820,6 +6855,7 @@ mod tests {
             source: "LNK-01".into(),
             target: "LNK-02".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         assert_eq!(result, "LNK-1 blocks LNK-2");
 
@@ -6834,6 +6870,7 @@ mod tests {
         let result = m.unlink_issues(Parameters(UnlinkIssuesInput {
             source: "LNK-01".into(),
             target: "LNK-02".into(),
+            ..Default::default()
         }));
         assert_eq!(result, "Unlinked LNK-1 and LNK-2");
     }
@@ -6854,11 +6891,13 @@ mod tests {
             source: "REL-2".into(),
             target: "REL-1".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         m.link_issues(Parameters(LinkIssuesInput {
             source: "REL-3".into(),
             target: "REL-1".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         m.update_issue(Parameters(UpdateIssueInput {
             identifier: "REL-2".into(),
@@ -6886,6 +6925,7 @@ mod tests {
             source: "BLK-1".into(),
             target: "BLK-2".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
 
         let result = m.list_issues(Parameters(ListIssuesInput {
@@ -7974,6 +8014,7 @@ mod tests {
             relates_to: vec![],
             duplicates: vec!["T-3".into()],
             duplicated_by: vec!["T-4".into()],
+            waits: vec![],
         };
         crate::mcp::reset_issue_link_context_reads();
         let context = current_issue_link_context();
@@ -11410,6 +11451,7 @@ mod tests {
             source: "TST-1".into(),
             target: "TST-2".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         assert_eq!(linked, "TST-1 blocks TST-2");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
@@ -14222,6 +14264,7 @@ mod authz_gating_tests {
                 source: "MEM-1".into(),
                 target: "OTH-1".into(),
                 relation_type: "relates_to".into(),
+                ..Default::default()
             }))
         });
         assert!(
@@ -14244,6 +14287,7 @@ mod authz_gating_tests {
                 source: "MEM-1".into(),
                 target: "OTH-1".into(),
                 relation_type: "relates_to".into(),
+                ..Default::default()
             }))
         });
         assert!(
