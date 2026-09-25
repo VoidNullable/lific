@@ -416,3 +416,218 @@ fn an_escaped_name_that_matches_nothing_reports_the_name_as_sent() {
         "got: {result}"
     );
 }
+
+// ── LIF-474: unknown parameters are rejected with a suggestion ──
+
+/// A real JSON-line MCP session over an in-memory pipe, so arguments take the
+/// exact path a client's do: rmcp's deserializer, then `call_tool`.
+mod wire {
+    use rmcp::ServiceExt;
+    use rmcp::transport::async_rw::AsyncRwTransport;
+    use serde_json::{Value, json};
+    use std::time::Duration;
+    use tokio::io::WriteHalf;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf};
+    use tokio::time::timeout;
+
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    pub(super) struct Session {
+        input: WriteHalf<DuplexStream>,
+        output: Lines<BufReader<ReadHalf<DuplexStream>>>,
+        next_id: i64,
+    }
+
+    impl Session {
+        pub(super) async fn start(server: crate::mcp::LificMcp) -> Self {
+            let (client, server_end) = tokio::io::duplex(1 << 16);
+            let (reader, writer) = tokio::io::split(server_end);
+            tokio::spawn(async move {
+                if let Ok(running) = server
+                    .serve(AsyncRwTransport::new_server(reader, writer))
+                    .await
+                {
+                    let _ = running.waiting().await;
+                }
+            });
+            let (reader, input) = tokio::io::split(client);
+            let mut session = Self {
+                input,
+                output: BufReader::new(reader).lines(),
+                next_id: 0,
+            };
+            let init = session
+                .request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "input-hardening", "version": "1.0"}
+                    }),
+                )
+                .await;
+            assert_eq!(init["result"]["serverInfo"]["name"], "lific");
+            session
+                .send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+                .await;
+            session
+        }
+
+        async fn send(&mut self, message: Value) {
+            let line = format!("{message}\n");
+            timeout(DEADLINE, self.input.write_all(line.as_bytes()))
+                .await
+                .expect("write completes")
+                .expect("write succeeds");
+        }
+
+        async fn request(&mut self, method: &str, params: Value) -> Value {
+            self.next_id += 1;
+            let id = self.next_id;
+            self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+                .await;
+            let line = timeout(DEADLINE, self.output.next_line())
+                .await
+                .expect("server responds")
+                .expect("read succeeds")
+                .expect("server keeps stdout open");
+            let response: Value = serde_json::from_str(&line).expect("JSON-RPC response");
+            assert_eq!(response["id"], id);
+            response
+        }
+
+        /// `Ok(text)` for a tool result, `Err(message)` for a JSON-RPC error.
+        pub(super) async fn call(
+            &mut self,
+            tool: &str,
+            arguments: Value,
+        ) -> Result<String, String> {
+            let response = self
+                .request("tools/call", json!({"name": tool, "arguments": arguments}))
+                .await;
+            match response.get("error") {
+                Some(error) => Err(error["message"].as_str().unwrap_or_default().to_owned()),
+                None => Ok(response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_misspelled_optional_parameter_names_the_valid_one() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Wire", "WIR");
+    seed_issue(&m, "WIR", "Spelled");
+    let mut session = wire::Session::start(m.clone()).await;
+
+    let error = session
+        .call(
+            "get_issue",
+            json!({"identifier": "WIR-1", "comments": "all"}),
+        )
+        .await
+        .expect_err("an unknown parameter must be refused");
+    assert!(error.contains("`comments`"), "got: {error}");
+    assert!(
+        error.contains("Did you mean `include_comments`?"),
+        "got: {error}"
+    );
+
+    let read = session
+        .call(
+            "get_issue",
+            json!({"identifier": "WIR-1", "include_comments": "all"}),
+        )
+        .await
+        .expect("the valid spelling still works");
+    assert!(read.contains("Spelled"), "got: {read}");
+}
+
+#[tokio::test]
+async fn unknown_fields_in_nested_plan_steps_are_rejected() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Wire", "WIR");
+    let mut session = wire::Session::start(m.clone()).await;
+
+    let error = session
+        .call(
+            "create_plan",
+            json!({"project": "WIR", "title": "Plan", "steps": [{"name": "Step"}]}),
+        )
+        .await
+        .expect_err("a step with an unknown field must be refused");
+    assert!(
+        error.contains("Unknown field `name` in a nested create_plan object"),
+        "got: {error}"
+    );
+    let plans = m.list_resources(Parameters(ListResourcesInput {
+        resource_type: "plan".into(),
+        project: Some("WIR".into()),
+        ..Default::default()
+    }));
+    assert_eq!(plans, "No plans found.");
+}
+
+#[tokio::test]
+async fn camel_case_edit_keys_survive_unknown_field_rejection() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Wire", "WIR");
+    m.create_issue(Parameters(CreateIssueInput {
+        project: Some("WIR".into()),
+        title: "Aliased".into(),
+        description: Some("before".into()),
+        ..Default::default()
+    }));
+    let mut session = wire::Session::start(m.clone()).await;
+
+    let edited = session
+        .call(
+            "edit_issue",
+            json!({"identifier": "WIR-1", "oldString": "before", "newString": "after", "replaceAll": false}),
+        )
+        .await
+        .expect("aliases are known fields");
+    assert!(!edited.starts_with("Error"), "got: {edited}");
+    let issue = m
+        .read(|conn| queries::get_issue(conn, queries::resolve_identifier(conn, "WIR-1")?))
+        .unwrap();
+    assert_eq!(issue.description, "after");
+}
+
+/// The remote stdio proxy fills an omitted `project` from the repository
+/// binding before the call leaves the machine. That injected key must be one
+/// the receiving tool declares, or every bound call would now be refused.
+#[test]
+fn the_bound_project_proxy_only_injects_a_declared_parameter() {
+    let db = crate::db::open_memory().expect("test db");
+    let schemas = LificMcp::new(db).list_tool_schemas();
+    let mut checked = 0;
+    for (tool, schema) in &schemas {
+        for resource_type in [None, Some("issue"), Some("plan"), Some("module")] {
+            if !project_fallback_applies(tool, resource_type) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                schema["properties"].get("project").is_some(),
+                "{tool} receives an injected `project` it does not declare"
+            );
+        }
+    }
+    assert!(checked >= 5, "only {checked} injectable calls inspected");
+}
+
+#[test]
+fn every_tool_input_rejects_unknown_fields() {
+    let db = crate::db::open_memory().expect("test db");
+    for (tool, schema) in LificMcp::new(db).list_tool_schemas() {
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "{tool} would silently ignore a misspelled parameter"
+        );
+    }
+}

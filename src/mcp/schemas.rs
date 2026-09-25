@@ -2,7 +2,12 @@ use rmcp::schemars;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+// LIF-474: every input denies unknown fields, nested ones included, so a
+// misspelled optional parameter fails instead of being silently dropped.
+// `crate::mcp::arguments` rewrites the error to suggest the intended name.
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchInput {
     #[schemars(
         description = "Text to search for across issues, pages, comments, and attachment filenames/contents"
@@ -27,6 +32,7 @@ pub struct SearchInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListIssuesInput {
     #[schemars(
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
@@ -65,6 +71,7 @@ pub struct ListIssuesInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetIssueInput {
     #[schemars(description = "Issue ID like PRO-42 or ADA-7")]
     pub identifier: String,
@@ -75,6 +82,7 @@ pub struct GetIssueInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetActivityInput {
     #[schemars(description = "Issue ID (PRO-42), page ID (PRO-DOC-3), or bare project ID (PRO)")]
     pub identifier: String,
@@ -85,6 +93,7 @@ pub struct GetActivityInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateIssueInput {
     #[schemars(
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
@@ -109,6 +118,7 @@ pub struct CreateIssueInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateIssueInput {
     #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
@@ -137,6 +147,7 @@ pub struct UpdateIssueInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkUpdateInput {
     #[schemars(description = "Project ID (e.g. LIF)")]
     pub project: String,
@@ -163,6 +174,7 @@ pub struct BulkUpdateInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetBoardInput {
     #[schemars(
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
@@ -179,6 +191,7 @@ pub struct GetBoardInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LinkIssuesInput {
     #[schemars(description = "Source issue ID (e.g. PRO-1)")]
     pub source: String,
@@ -189,6 +202,7 @@ pub struct LinkIssuesInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UnlinkIssuesInput {
     #[schemars(description = "First issue ID")]
     pub source: String,
@@ -197,12 +211,14 @@ pub struct UnlinkIssuesInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePageInput {
     #[schemars(description = "Project ID (e.g. LIF). Omit for workspace-level page.")]
     pub project: Option<String>,
@@ -219,6 +235,7 @@ pub struct CreatePageInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
@@ -246,6 +263,7 @@ pub struct UpdatePageInput {
 /// `replaceAll`, the spelling agents trained on camelCase edit tools send.
 /// Serde aliases only: the advertised schema stays snake_case.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditIssueInput {
     #[schemars(description = "Issue ID like PRO-42")]
     pub identifier: String,
@@ -263,6 +281,7 @@ pub struct EditIssueInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditPageInput {
     #[schemars(description = "Page ID like LIF-DOC-1")]
     pub identifier: String,
@@ -280,6 +299,7 @@ pub struct EditPageInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteInput {
     #[schemars(
         description = "Type of thing to delete: issue, page, plan, project, module, label, or folder"
@@ -294,6 +314,7 @@ pub struct DeleteInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListResourcesInput {
     #[schemars(
         description = "Resource type: project, module, label, folder, page, issue, or plan"
@@ -326,6 +347,7 @@ pub struct ListResourcesInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ManageResourceInput {
     #[schemars(description = "Resource type: project, module, label, or folder")]
     pub resource_type: String,
@@ -358,6 +380,7 @@ pub struct ManageResourceInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddCommentInput {
     #[schemars(
         description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
@@ -368,6 +391,7 @@ pub struct AddCommentInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListCommentsInput {
     #[schemars(
         description = "Issue ID (e.g. LIF-1), project page ID (e.g. LIF-DOC-1), or workspace page ID (e.g. DOC-1)"
@@ -415,6 +439,7 @@ pub struct EditCommentInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteCommentInput {
     #[schemars(description = "Comment id (from add_comment or list_comments)")]
     pub comment_id: i64,
@@ -423,6 +448,7 @@ pub struct DeleteCommentInput {
 // ── Plans (LIF-168/169/170/171) ──────────────────────────────
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlanStepInput {
     #[schemars(description = "Step title, short and imperative")]
     pub title: String,
@@ -437,6 +463,7 @@ pub struct PlanStepInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePlanInput {
     #[schemars(
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
@@ -455,12 +482,14 @@ pub struct CreatePlanInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetPlanInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditPlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
@@ -482,6 +511,7 @@ pub struct EditPlanStepInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePlanStepInput {
     #[schemars(description = "Plan ID like LIF-PLAN-3")]
     pub plan: String,
@@ -526,6 +556,7 @@ pub struct UpdatePlanStepInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UploadAttachmentInput {
     #[schemars(description = "File name, e.g. crash-log.txt or screenshot.png")]
     pub filename: String,
@@ -540,6 +571,7 @@ pub struct UploadAttachmentInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetAttachmentInput {
     #[schemars(description = "Attachment id, e.g. 12 for /api/attachments/12")]
     pub attachment_id: i64,
@@ -550,6 +582,7 @@ pub struct GetAttachmentInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListAttachmentsInput {
     #[schemars(
         description = "List attachments on this issue (LIF-42) or page (LIF-DOC-3, DOC-3 for workspace pages)"
@@ -560,6 +593,7 @@ pub struct ListAttachmentsInput {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExportInput {
     #[schemars(
         description = "What to export: an issue ID (PRO-42), a page ID (PRO-DOC-3), or a bare project ID (PRO) for the whole project"
