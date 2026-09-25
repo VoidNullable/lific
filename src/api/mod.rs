@@ -32,6 +32,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use tower::ServiceBuilder;
 use tower_http::cors::{self, CorsLayer};
 
 /// Transport-level body-size ceiling for the multipart upload route only. The
@@ -62,7 +63,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         CorsLayer::new().allow_origin(origins)
     };
 
-    Router::new()
+    let api = Router::new()
         // Public instance metadata for the auth screen (unauthenticated).
         .route("/api/instance", get(auth::instance_info))
         // Admin-only instance settings (authenticated; admin enforced in handler).
@@ -418,6 +419,14 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/git-hook", post(git_hook::git_hook))
         // Health
         .route("/api/health", get(health))
+        .with_state(db);
+
+    // Keep the large route table inside one service. Router::layer rebuilds
+    // its endpoint HashMap for every layer; wrapping the stateful router as a
+    // service keeps the API middleware while avoiding those intermediate
+    // tables. The outer routes preserve the original /api prefix verbatim.
+    let api = ServiceBuilder::new()
+        .layer(Extension(cors_origins.to_vec()))
         .layer(
             cors.allow_methods([
                 axum::http::Method::GET,
@@ -442,8 +451,21 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
                 axum::http::HeaderName::from_static(comments::NEXT_CURSOR_ID_HEADER),
             ]),
         )
-        .with_state(db)
-        .layer(Extension(cors_origins.to_vec()))
+        // The outer wildcard route sets its own MatchedPath before invoking
+        // this service. Drop that wrapper value so the inner router records
+        // the same full API path it did before this composition change.
+        .map_request(|mut request: axum::extract::Request| {
+            request
+                .extensions_mut()
+                .remove::<axum::extract::MatchedPath>();
+            request
+        })
+        .service(api);
+
+    Router::new()
+        .route_service("/api", api.clone())
+        .route_service("/api/", api.clone())
+        .route_service("/api/{*rest}", api)
 }
 
 async fn events_ws(
@@ -1297,6 +1319,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn service_wrapped_router_preserves_api_routes_and_fallback() {
+        let app = super::router(
+            crate::db::open_memory().unwrap(),
+            &["https://example.com".to_string()],
+        )
+        .layer(axum::Extension(crate::config::AuthConfig {
+            allow_signup: true,
+            required: false,
+            secure_cookies: false,
+        }));
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("origin", "https://example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(
+            health.headers().get("access-control-allow-origin").unwrap(),
+            "https://example.com"
+        );
+
+        let instance = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/instance")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(instance.status(), StatusCode::OK);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
