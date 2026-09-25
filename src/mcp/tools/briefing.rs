@@ -11,7 +11,6 @@
 //! sections until the whole response fits [`BUDGET_CHARS`].
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 
 use super::*;
 
