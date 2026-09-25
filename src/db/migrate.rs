@@ -261,6 +261,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "revoke unindexed api keys",
         include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
     ),
+    (
+        54,
+        "issue waits",
+        include_str!("../../migrations/054_issue_waits.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.

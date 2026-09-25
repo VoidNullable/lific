@@ -34,6 +34,8 @@ fn seed(pool: &DbPool, store: &AttachmentStore) {
         INSERT INTO page_labels VALUES(40,4);
         INSERT INTO issue_relations VALUES(30,31,'relates_to'),(30,32,'blocks');
         INSERT INTO page_issue_links VALUES(40,30);
+        INSERT INTO issue_waits(id,issue_id,kind,user_id,note) VALUES(90,30,'user',1,'decide');
+        INSERT INTO issue_waits(id,issue_id,kind,earliest,latest,note) VALUES(91,30,'date','2026-09-28','2026-09-29','office');
         UPDATE issues SET status='done' WHERE id=30;
         UPDATE issues SET deleted_at='2025-02-03 00:00:00' WHERE id=31;
         UPDATE pages SET deleted_at='2025-02-03 00:00:00' WHERE id=41;").unwrap();
@@ -57,7 +59,7 @@ fn seed(pool: &DbPool, store: &AttachmentStore) {
     tx.commit().unwrap();
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest, blobs: &[(&str, &[u8])]) {
+pub(super) fn write_manifest(path: &Path, manifest: &Manifest, blobs: &[(&str, &[u8])]) {
     let gzip =
         flate2::write::GzEncoder::new(File::create(path).unwrap(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);
@@ -982,7 +984,13 @@ fn project_archive_column_types_match_every_static_schema_column() {
             .position(|t| t.name == s.name)
             .unwrap();
         for (index, column) in s.cols().into_iter().enumerate() {
-            let wrong = match types[column].as_str() {
+            // `issue_waits.username` is archive-only text standing in for
+            // `user_id`, which does not travel between instances.
+            let schema_type = match (s.name, column) {
+                ("issue_waits", "username") => "TEXT",
+                _ => types[column].as_str(),
+            };
+            let wrong = match schema_type {
                 "INTEGER" | "REAL" => Value::String("not-a-number".into()),
                 "TEXT" => Value::from(123),
                 other => panic!("unreviewed schema type {}.{column}: {other}", s.name),

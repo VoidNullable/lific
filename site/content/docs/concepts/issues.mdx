@@ -63,10 +63,35 @@ A `duplicate` relation is also directional. If `LIF-1` duplicates `LIF-2`, `LIF-
 
 Relationships can connect issues in different projects. An issue cannot be linked to itself.
 
+## Waiting on a person or a date
+
+An issue can also be blocked by something that is not an issue. These blockers are called waits, and there are two kinds.
+
+| Kind | Blocks until | Example |
+| --- | --- | --- |
+| User | Someone clears the wait | Waiting on `@blake` to decide the schema, or to check on a real device |
+| Date | The first day of its window | Waiting until 2026-09-28..29 for the state filing office |
+
+A user wait names a Lific account. It holds until anyone with write access clears it.
+
+A date wait has an earliest and a latest day, plus an optional note such as "state filing office, 2 to 5 business days". A single date is a window of one day. On a given day a date wait is in one of three states:
+
+| State | When | Blocks? |
+| --- | --- | --- |
+| Waiting | Before the earliest day | Yes |
+| Due to check | From the earliest day through the latest day | No |
+| Overdue | After the latest day | No |
+
+A wait that is due or overdue no longer blocks the issue. It stays on the issue, and the issue list, board and detail view show it as due or overdue until someone clears it. "Today" is the server's local calendar day.
+
+Each issue can wait on a given person once and on a given window once. Clearing a wait removes it. The issue's activity history records both the wait and the clear.
+
+Waits are private. The public view of a published project does not show them.
+
 ## Workable and blocked issues
 
 An issue is workable when it is not `done` or `cancelled` and has no unresolved blockers.
 
-A blocker is unresolved until its status is `done`. A blocker with status `cancelled` still counts as unresolved.
+A blocker is unresolved until its status is `done`. A blocker with status `cancelled` still counts as unresolved. A user wait is unresolved until it is cleared. A date wait is unresolved until its earliest day.
 
-The blocked filter returns issues with at least one unresolved incoming `blocks` relationship. The workable filter excludes those issues.
+The blocked filter returns issues with at least one unresolved incoming `blocks` relationship or unresolved wait. The workable filter excludes those issues.

@@ -23,6 +23,7 @@ mod repo_bindings;
 mod resources;
 mod sync;
 mod views;
+mod waits;
 
 use axum::{
     Router,
@@ -214,6 +215,15 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/issues/unlink", post(issues::unlink_issues))
         // Atomic direction swap for an existing edge (LIF-413)
         .route("/api/issues/reverse", post(issues::reverse_relation))
+        // User and date blockers (LIF-484)
+        .route(
+            "/api/issues/{id}/waits",
+            get(waits::list_waits).post(waits::add_wait),
+        )
+        .route(
+            "/api/issues/{id}/waits/{wait_id}",
+            delete(waits::clear_wait),
+        )
         // Project-wide relation edges (dependency graph — LIF-363)
         .route(
             "/api/projects/{id}/relations",

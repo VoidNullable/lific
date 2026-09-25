@@ -21,7 +21,7 @@ Lists issues in a project with filters and paging.
 | `module` | `string` | No | Filter by module name |
 | `label` | `string` | No | Filter by label name |
 | `workable` | `boolean` | No | Only return issues with no unresolved blockers |
-| `blocked` | `boolean` | No | Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7. |
+| `blocked` | `boolean` | No | Only return issues with at least one unresolved blocker (inverse of workable). Each result lists its blockers as blocked_by:LIF-3,LIF-7, and any waits as waiting_on:@user or waiting_until:DATE. |
 | `created_since` | `string` | No | Only issues created at/after this ISO date or datetime (e.g. 2026-06-01) |
 | `created_until` | `string` | No | Only issues created before this ISO date or datetime (exclusive) |
 | `updated_since` | `string` | No | Only issues updated at/after this ISO date or datetime. Handy for "what changed recently". |
@@ -41,6 +41,8 @@ Gets an issue and its details.
 | `include_comments` | `string` | No | Comment trail: `recent` (default, last 3), `all` (most recent 500), or `none` (count only). |
 
 Relation lines include the related issue's current status, for example `Blocked by: LIF-42 (done)`.
+
+Each wait on the issue gets its own line, for example `Waiting on @blake (decide the schema)`, `Waiting until 2026-09-28..29 (state filing office)`, `Due to check since 2026-09-28, expected by 2026-09-29` or `Overdue since 2026-09-30, expected 2026-09-28..29`. `list_issues` and `get_board` rows carry the compact form: `waiting_on:@blake`, `waiting_until:2026-09-28..29`, `due_since:2026-09-28` or `overdue_since:2026-09-30`.
 
 The comment trail is bounded in every mode, and each mode reads only the rows it renders. `none` loads no comment bodies at all and reports the total. `recent` loads three. `all` loads the most recent 500, the same cap every other comment list uses, and is not a way to retrieve an entire thread: when a thread is longer than that, the header says it is showing the most recent 500 and directs you to `list_comments` for the rest. Every mode prints its comments oldest first.
 
@@ -128,22 +130,30 @@ Gets a board view of issues in a project.
 
 ### `link_issues`
 
-Links two issues with a relation.
+Links two issues with a relation. A `blocks` link can instead make `target` wait on a person or on a window of days: omit `source` and pass either `user`, or `from` with an optional `until`. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `string` | Yes | Source issue identifier (e.g. PRO-1) |
-| `target` | `string` | Yes | Target issue identifier (e.g. PRO-2) |
-| `relation_type` | `string` | Yes | Relation type: blocks, relates_to, or duplicate |
+| `source` | `string` | No | Source issue identifier (e.g. PRO-1). Required unless this is a wait. |
+| `target` | `string` | Yes | Target issue identifier (e.g. PRO-2). For a wait, the issue that waits. |
+| `relation_type` | `string` | Yes | Relation type: blocks, relates_to, or duplicate. A wait must use blocks. |
+| `user` | `string` | No | Username the target waits on until the wait is cleared |
+| `from` | `string` | No | Date (YYYY-MM-DD) the target waits for. It blocks before this day. |
+| `until` | `string` | No | Last expected day of a `from` wait. After it the wait is overdue. Defaults to `from`. |
+| `note` | `string` | No | Note for a user or date wait |
+
+`link_issues(target="LIF-9", relation_type="blocks", from="2026-09-28", until="2026-10-02", note="state filing office")` makes LIF-9 wait for that window. An unknown username, an `until` before `from`, or a wait the issue already has is an error.
 
 ### `unlink_issues`
 
-Removes a relation between two issues.
+Removes a relation between two issues, or clears a wait on `target`.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `string` | Yes | First issue identifier |
-| `target` | `string` | Yes | Second issue identifier |
+| `source` | `string` | No | First issue identifier. Omit to clear a wait. |
+| `target` | `string` | Yes | Second issue identifier, or the issue that waits |
+| `user` | `string` | No | Clear the target's wait on this username |
+| `from` | `string` | No | Clear the target's date waits that start on this day (YYYY-MM-DD) |
 
 ## Projects and resources
 

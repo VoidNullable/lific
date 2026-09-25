@@ -1867,7 +1867,9 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute("DELETE FROM _migrations WHERE version = 53", [])
+            // `run` only applies versions above the highest recorded one, so
+            // every later migration is forgotten too and replays after 053.
+            conn.execute("DELETE FROM _migrations WHERE version >= 53", [])
                 .unwrap();
         }
         crate::db::migrate::run(&pool.write().unwrap()).unwrap();

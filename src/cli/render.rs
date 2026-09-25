@@ -562,6 +562,7 @@ mod tests {
             relates_to: Vec::new(),
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
+            waits: Vec::new(),
         }
     }
 

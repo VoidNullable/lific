@@ -42,6 +42,7 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
                 relates_to: Vec::new(),
                 duplicates: Vec::new(),
                 duplicated_by: Vec::new(),
+                waits: Vec::new(),
             })
         })
         .map_err(|e| match e {
@@ -138,6 +139,8 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Issue, LificError> {
             Ok(format!("{proj}-{seq}"))
         })?
         .collect::<Result<Vec<String>, _>>()?;
+
+    issue.waits = super::waits::list_waits(conn, id)?;
 
     Ok(issue)
 }
@@ -294,6 +297,18 @@ pub fn list_issues_page(
             param_values.push(Box::new(v.replace('T', " ")));
         }
     }
+    // LIF-484: a user wait, or a date wait before its earliest day, blocks
+    // exactly like an open blocking issue. "Today" is the server's local day
+    // (see `waits::today`), bound as a parameter.
+    let holding_wait = if q.workable == Some(true) || q.blocked == Some(true) {
+        param_values.push(Box::new(super::waits::today_text()));
+        format!(
+            "EXISTS (SELECT 1 FROM issue_waits w WHERE w.issue_id = i.id AND {})",
+            super::waits::holding_predicate(&format!("?{}", param_values.len()))
+        )
+    } else {
+        String::new()
+    };
     if q.workable == Some(true) {
         conditions.push(
             "NOT EXISTS (
@@ -306,20 +321,20 @@ pub fn list_issues_page(
             )"
             .to_string(),
         );
+        conditions.push(format!("NOT {holding_wait}"));
         conditions.push("i.status NOT IN ('done', 'cancelled')".to_string());
     }
     if q.blocked == Some(true) {
-        conditions.push(
-            "EXISTS (
+        conditions.push(format!(
+            "(EXISTS (
                 SELECT 1 FROM issue_relations ir
                 JOIN issues b ON b.id = ir.source_id
                 WHERE ir.target_id = i.id
                   AND ir.relation_type = 'blocks'
                   AND b.status != 'done'
                   AND b.deleted_at IS NULL
-            )"
-            .to_string(),
-        );
+            ) OR {holding_wait})"
+        ));
     }
 
     if !conditions.is_empty() {
@@ -395,6 +410,7 @@ pub fn list_issues_page(
             relates_to: Vec::new(),
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
+            waits: Vec::new(),
         })
     })?;
 
@@ -468,6 +484,13 @@ pub fn list_issues_page(
                     issues[idx].blocked_by.push(blocker_ident);
                 }
             }
+        }
+
+        // LIF-484: waits are few and always rendered, so every page carries
+        // them, in one grouped query.
+        let mut waits = super::waits::waits_by_issue(conn, &ids)?;
+        for issue in &mut issues {
+            issue.waits = waits.remove(&issue.id).unwrap_or_default();
         }
     }
 

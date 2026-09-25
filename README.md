@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **30 MCP tools in 6,335 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **30 MCP tools in 6,878 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -64,6 +64,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 ## What your agent can now do
 
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
+- **Block on people and dates, not only issues.** `link_issues(target="APP-9", relation_type="blocks", user="blake")` parks an issue until someone clears it; `from="2026-09-28", until="2026-10-02", note="filing office"` parks it until a window opens, then shows it as due and later overdue.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
 - **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
@@ -201,12 +202,12 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 ## MCP tools
 
-All 30, in 6,335 tokens:
+All 30, in 6,878 tokens:
 
 | Family | Tools |
 |--------|-------|
 | Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
-| Relations | `link_issues` · `unlink_issues` |
+| Relations & waits | `link_issues` · `unlink_issues` |
 | Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
 | Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
 | Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |

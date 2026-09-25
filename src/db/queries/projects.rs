@@ -69,6 +69,7 @@ pub fn list_projects_for_user(conn: &Connection, user_id: i64) -> Result<Vec<Pro
 /// The workable predicate intentionally mirrors `issues::list_issues` exactly:
 /// a blocker is unresolved until its source issue is `done` (a cancelled
 /// blocker therefore continues to block, matching the existing list filter).
+/// A holding user or date wait (LIF-484) blocks here as it does there.
 pub fn project_agent_stats(
     conn: &Connection,
 ) -> Result<HashMap<i64, ProjectAgentStats>, LificError> {
@@ -85,6 +86,10 @@ pub fn project_agent_stats(
                      AND ir.relation_type = 'blocks'
                      AND blocker.status != 'done'
                      AND blocker.deleted_at IS NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM issue_waits w
+                   WHERE w.issue_id = i.id AND (w.kind = 'user' OR w.earliest > ?1)
                )
              GROUP BY i.project_id
          ),
@@ -116,7 +121,7 @@ pub fn project_agent_stats(
          LEFT JOIN active_plans ap ON ap.project_id = p.id
          LEFT JOIN last_activity la ON la.project_id = p.id",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([super::waits::today_text()], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             ProjectAgentStats {
