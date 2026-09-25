@@ -5005,7 +5005,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read an attachment by id. Text is returned by line (offset/limit), images as viewable image content, and other types as a metadata summary with a download URL when the MCP request origin is known."
+        description = "Read an attachment by ID: paged text, inline images, or metadata plus a download URL."
     )]
     fn get_attachment(
         &self,
