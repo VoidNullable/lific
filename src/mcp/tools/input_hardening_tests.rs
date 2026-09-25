@@ -714,3 +714,38 @@ fn create_issue_batch_items_resolve_escaped_module_and_label_names() {
     assert!(issue.module_id.is_some(), "module should resolve: {result}");
     assert_eq!(issue.labels, vec!["R&D".to_string()]);
 }
+
+/// Review follow-up to LIF-475: a relation to an issue in a project the
+/// caller cannot view must not leak that issue's identifier through issue or
+/// project export frontmatter.
+#[tokio::test]
+async fn export_leaves_out_relations_to_projects_the_caller_cannot_view() {
+    let (m, admin, _, _, viewer, _, project_id, _guard) = super::tests::setup_membership_mcp();
+    let [blocker, visible, hidden] = {
+        let conn = m.db.write().unwrap();
+        crate::export::seed_hidden_relation(&conn, project_id)
+    };
+    let export_as = |user: &models::AuthUser, identifier: &str| {
+        let m = m.clone();
+        let user = user.clone();
+        let identifier = identifier.to_owned();
+        async move {
+            crate::mcp::with_request_user(Some(user), || async {
+                m.export(Parameters(ExportInput {
+                    identifier,
+                    ..Default::default()
+                }))
+                .await
+            })
+            .await
+        }
+    };
+
+    for identifier in [blocker.as_str(), "MEM"] {
+        let scoped = export_as(&viewer, identifier).await;
+        assert!(scoped.contains(&visible), "{identifier}: {scoped}");
+        assert!(!scoped.contains(&hidden), "{identifier}: {scoped}");
+        let full = export_as(&admin, identifier).await;
+        assert!(full.contains(&hidden), "{identifier}: {full}");
+    }
+}

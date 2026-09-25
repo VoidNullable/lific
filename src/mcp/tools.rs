@@ -2331,6 +2331,10 @@ impl LificMcp {
             Kind::Project
         };
 
+        // Resolved here, on the request's own task: the identity does not
+        // follow the blocking worker. Relations to issues the caller cannot
+        // see are left out of the frontmatter; pages render none.
+        let visible = visible_project_ids_mcp(&self.db)?;
         let slot = self
             .db
             .acquire_export_slot()
@@ -2338,10 +2342,15 @@ impl LificMcp {
         let this = self.clone();
         let identifier = ident.to_string();
         let (bundle, _slot) = tokio::task::spawn_blocking(move || {
+            let visible = visible.as_ref();
             let bundle = match kind {
-                Kind::Issue => this.read(|conn| crate::export::export_issue(conn, &identifier)),
+                Kind::Issue => {
+                    this.read(|conn| crate::export::export_issue(conn, &identifier, visible))
+                }
                 Kind::Page => this.read(|conn| crate::export::export_page(conn, &identifier)),
-                Kind::Project => this.read(|conn| crate::export::export_project(conn, &identifier)),
+                Kind::Project => {
+                    this.read(|conn| crate::export::export_project(conn, &identifier, visible))
+                }
             }?;
             Ok::<_, String>((bundle, slot))
         })
