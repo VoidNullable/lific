@@ -1701,6 +1701,18 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_revocations_reaches_every_recipient() {
+        let hub = RealtimeHub::new();
+        let mut rx = hub.revocations.subscribe();
+
+        hub.revoke_user(1);
+        hub.revoke_user(2);
+
+        assert_eq!(rx.try_recv().unwrap(), 1);
+        assert_eq!(rx.try_recv().unwrap(), 2);
+    }
+
+    #[test]
     fn revocation_receiver_lag_revalidates_and_closure_fails_closed() {
         assert_eq!(
             revocation_flow(Err(RecvError::Lagged(1)), 42),
