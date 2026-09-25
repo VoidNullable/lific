@@ -340,26 +340,10 @@ pub fn export_issue(
     Ok(bundle)
 }
 
-/// Drop relation identifiers the caller cannot see; see [`VisibleProjects`].
-/// A related issue that no longer resolves is dropped too rather than failing
-/// the whole export.
+/// Drop relation identifiers the caller cannot see; see [`VisibleProjects`]
+/// and [`queries::retain_visible_relations`], which every read surface shares.
 fn retain_visible_relations(conn: &Connection, issue: &mut Issue, visible: VisibleProjects<'_>) {
-    let Some(visible) = visible else {
-        return;
-    };
-    for relations in [
-        &mut issue.blocks,
-        &mut issue.blocked_by,
-        &mut issue.relates_to,
-        &mut issue.duplicates,
-        &mut issue.duplicated_by,
-    ] {
-        relations.retain(|identifier| {
-            queries::resolve_identifier(conn, identifier)
-                .and_then(|id| queries::issue_project_id(conn, id))
-                .is_ok_and(|project_id| visible.contains(&project_id))
-        });
-    }
+    queries::retain_visible_relations(conn, std::slice::from_mut(issue), visible);
 }
 
 /// Test fixture for the relation-visibility checks on every export surface:

@@ -59,6 +59,8 @@ Two issues can be linked in one of three ways. Links may cross projects, but an 
 
 Only `blocks` changes behavior. A duplicate is not closed automatically; set its status yourself.
 
+When project-scoped authorization is enforced, every read leaves out related issues in projects you cannot view: the issue detail, the issue list and board (web, REST and MCP), and exports. There is no placeholder or count, so a hidden relation does not reveal that the other issue exists. Admins, and instances without enforcement, see every relation.
+
 ## Waiting on a person or a date
 
 Some work is blocked by something that is not an issue: a decision someone owes you, or a reply that should arrive next week. Record that as a wait instead of a placeholder issue.
