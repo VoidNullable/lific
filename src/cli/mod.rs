@@ -259,9 +259,10 @@ pub enum Command {
     /// Set up a ready-to-use Lific instance.
     ///
     /// One command, whole story: writes lific.toml (kept if already present),
-    /// creates the database, prints your initial API key, installs a
+    /// creates the database and your administrator account, installs a
     /// background service (systemd user unit on Linux, LaunchAgent on macOS)
-    /// and starts it, then waits until the server answers. Re-running is safe
+    /// and starts it, then waits until the server answers. It creates no API
+    /// key; `lific connect` mints one per AI tool. Re-running is safe
     /// and repairs whatever is missing. Use `--no-service` if you'd rather run
     /// `lific start` in the foreground yourself.
     ///
@@ -377,7 +378,8 @@ pub enum Command {
         scope: String,
 
         /// Write the local stdio form (`lific --db <db> mcp`) instead of a
-        /// remote HTTP server. No API key is needed.
+        /// remote HTTP server. The server does not need to be running; the
+        /// tool's key is passed as `LIFIC_TOKEN`.
         #[arg(long)]
         stdio: bool,
 

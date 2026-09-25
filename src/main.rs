@@ -1068,7 +1068,7 @@ async fn wait_healthy(base_url: &str, timeout: std::time::Duration) -> bool {
 }
 
 /// `lific init`: everything needed to go from nothing to a running, reachable
-/// instance in one command — config, database, initial API key, and a
+/// instance in one command: config, database, the first administrator, and a
 /// background service that survives reboot. Idempotent: re-running repairs
 /// whatever is missing and never overwrites existing config or keys.
 /// LIF-295: where `lific init` roots the instance.
@@ -1350,7 +1350,7 @@ async fn cmd_init(
             mode.web_auto_login(),
         )?;
         info!(operator = %admin.username, mode = mode.as_str(), "created first human admin");
-        Some(admin)
+        Some((admin, mode))
     } else {
         None
     };
@@ -1434,7 +1434,7 @@ async fn cmd_init(
             "config": { "path": config_path.display().to_string(), "created": created_config },
             "database": cfg.database.path.display().to_string(),
             "key": new_key,
-            "admin": created_admin.as_ref().map(|a| serde_json::json!({
+            "admin": created_admin.as_ref().map(|(a, _)| serde_json::json!({
                 "id": a.id,
                 "username": a.username,
                 "display_name": a.display_name,
@@ -1462,10 +1462,16 @@ async fn cmd_init(
         ui::dim(cfg.database.path.display())
     ));
 
-    if let Some(ref admin) = created_admin {
+    if let Some((ref admin, mode)) = created_admin {
+        let how = if mode.passwordless() {
+            "login-free, no password"
+        } else {
+            "signs in with the password you chose"
+        };
         ui::step(format!(
-            "First operator {} created — passwordless mode is on",
-            ui::command(&admin.display_name)
+            "Administrator {} created as {} ({how})",
+            admin.display_name,
+            ui::command(&admin.username),
         ));
     }
 
@@ -1512,11 +1518,17 @@ async fn cmd_init(
         ));
     }
 
+    let open = match &created_admin {
+        Some((_, mode)) if mode.passwordless() => {
+            format!("Open {url} (the browser signs you in)")
+        }
+        Some((admin, _)) => format!("Open {url} and sign in as {}", admin.username),
+        None => format!("Open {url} and sign in"),
+    };
     ui::note(
         "Next steps",
         format!(
-            "1. Open {url} and create your account\n2. {}\n3. {}   {}",
-            ui::command("lific user promote --username <you>"),
+            "1. {open}\n2. {}   {}",
             ui::command("lific connect"),
             ui::dim("# wire up your AI tools"),
         ),
