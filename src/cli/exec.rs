@@ -178,15 +178,18 @@ fn export(
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = pool.read()?;
+    // A local export reads the database file directly, so its operator can
+    // already see every project: relations are not filtered.
     let (bundle, output) = match action {
-        ExportAction::Issue { identifier, output } => {
-            (crate::export::export_issue(&conn, identifier)?, output)
-        }
+        ExportAction::Issue { identifier, output } => (
+            crate::export::export_issue(&conn, identifier, None)?,
+            output,
+        ),
         ExportAction::Page { identifier, output } => {
             (crate::export::export_page(&conn, identifier)?, output)
         }
         ExportAction::Project { project, output } => {
-            (crate::export::export_project(&conn, project)?, output)
+            (crate::export::export_project(&conn, project, None)?, output)
         }
     };
 

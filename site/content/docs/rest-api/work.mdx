@@ -464,6 +464,8 @@ Exports a project. Path parameter: `identifier` (string such as `LIF`). Query pa
 
 It has no request body. Response: ZIP bytes for `format=zip`. For `format=json`, the response is an export bundle with `root` (string) and `files` (array). Each `files` item has `path` (string) and `content` (string). The JSON form is a serialization of the ZIP file list; paths and content are not a versioned request schema, so consumers should tolerate new files and avoid assuming a fixed complete list.
 
+Issue and project exports are scoped to the caller. The `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by` frontmatter lists leave out issues in projects the caller cannot view, with no placeholder or count, so an export does not reveal that those issues exist. Page exports render no relations. The local CLI export (`lific export`, direct SQL) reads the database file and is not filtered.
+
 ```json
 {
   "root": "LIF",
