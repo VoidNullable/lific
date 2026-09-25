@@ -63,7 +63,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         CorsLayer::new().allow_origin(origins)
     };
 
-    let api = Router::new()
+    Router::new()
         // Public instance metadata for the auth screen (unauthenticated).
         .route("/api/instance", get(auth::instance_info))
         // Admin-only instance settings (authenticated; admin enforced in handler).
@@ -419,53 +419,37 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/git-hook", post(git_hook::git_hook))
         // Health
         .route("/api/health", get(health))
-        .with_state(db);
-
-    // Keep the large route table inside one service. Router::layer rebuilds
-    // its endpoint HashMap for every layer; wrapping the stateful router as a
-    // service keeps the API middleware while avoiding those intermediate
-    // tables. The outer routes preserve the original /api prefix verbatim.
-    let api = ServiceBuilder::new()
-        .layer(Extension(cors_origins.to_vec()))
+        // Apply both layers in one pass over the endpoint table. ServiceBuilder
+        // keeps Extension outside CORS, matching the original middleware order.
         .layer(
-            cors.allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PATCH,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
-            // LIF-421: comment paging metadata rides in headers so the body
-            // stays the bare array it always was. A browser cannot read a
-            // response header it was not told about, so a cross-origin web
-            // client would silently fall back to guessing `has_more`.
-            .expose_headers([
-                axum::http::HeaderName::from_static(comments::HAS_MORE_HEADER),
-                axum::http::HeaderName::from_static(comments::NEXT_OFFSET_HEADER),
-                axum::http::HeaderName::from_static(comments::RETURNED_HEADER),
-                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_AT_HEADER),
-                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_ID_HEADER),
-            ]),
+            ServiceBuilder::new()
+                .layer(Extension(cors_origins.to_vec()))
+                .layer(
+                    cors.allow_methods([
+                        axum::http::Method::GET,
+                        axum::http::Method::POST,
+                        axum::http::Method::PATCH,
+                        axum::http::Method::PUT,
+                        axum::http::Method::DELETE,
+                    ])
+                    .allow_headers([
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::header::AUTHORIZATION,
+                    ])
+                    // LIF-421: comment paging metadata rides in headers so the body
+                    // stays the bare array it always was. A browser cannot read a
+                    // response header it was not told about, so a cross-origin web
+                    // client would silently fall back to guessing `has_more`.
+                    .expose_headers([
+                        axum::http::HeaderName::from_static(comments::HAS_MORE_HEADER),
+                        axum::http::HeaderName::from_static(comments::NEXT_OFFSET_HEADER),
+                        axum::http::HeaderName::from_static(comments::RETURNED_HEADER),
+                        axum::http::HeaderName::from_static(comments::NEXT_CURSOR_AT_HEADER),
+                        axum::http::HeaderName::from_static(comments::NEXT_CURSOR_ID_HEADER),
+                    ]),
+                ),
         )
-        // The outer wildcard route sets its own MatchedPath before invoking
-        // this service. Drop that wrapper value so the inner router records
-        // the same full API path it did before this composition change.
-        .map_request(|mut request: axum::extract::Request| {
-            request
-                .extensions_mut()
-                .remove::<axum::extract::MatchedPath>();
-            request
-        })
-        .service(api);
-
-    Router::new()
-        .route_service("/api", api.clone())
-        .route_service("/api/", api.clone())
-        .route_service("/api/{*rest}", api)
+        .with_state(db)
 }
 
 async fn events_ws(
@@ -1322,7 +1306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_wrapped_router_preserves_api_routes_and_fallback() {
+    async fn grouped_middleware_preserves_routes_and_fallback() {
         let app = super::router(
             crate::db::open_memory().unwrap(),
             &["https://example.com".to_string()],
@@ -1331,7 +1315,10 @@ mod tests {
             allow_signup: true,
             required: false,
             secure_cookies: false,
-        }));
+        }))
+        .layer(axum::Extension(
+            None::<crate::resolve_caller::ResolvedIdentity>,
+        ));
 
         let health = app
             .clone()
@@ -1363,6 +1350,7 @@ mod tests {
         assert_eq!(instance.status(), StatusCode::OK);
 
         let missing = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/does-not-exist")
@@ -1372,6 +1360,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let issue = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/issues/1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let fallback = app
+            .fallback(|| async { StatusCode::IM_A_TEAPOT })
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (issue.status(), fallback.status()),
+            (StatusCode::NOT_FOUND, StatusCode::IM_A_TEAPOT),
+            "numeric path extraction and application fallback must remain intact",
+        );
     }
 
     #[tokio::test]
