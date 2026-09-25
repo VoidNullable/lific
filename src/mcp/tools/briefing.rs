@@ -266,19 +266,33 @@ impl LificMcp {
                     ..Default::default()
                 },
             )?;
+            // Each plan with the project of its next step's linked issue: a
+            // step can mirror an issue in another project, and that project
+            // decides whether the identifier may be shown.
             let shown = plans
                 .iter()
                 .take(PLAN_LINES)
-                .map(|plan| queries::plans::get_plan(conn, plan.id))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|plan| {
+                    let plan = queries::plans::get_plan(conn, plan.id)?;
+                    // A deleted issue has no identifier to hide; it is not an
+                    // error for the briefing.
+                    let linked_project = next_open_step(&plan.steps)
+                        .filter(|step| step.issue_identifier.is_some())
+                        .and_then(|step| step.issue_id)
+                        .and_then(|issue_id| queries::get_issue(conn, issue_id).ok())
+                        .map(|issue| issue.project_id);
+                    Ok((plan, linked_project))
+                })
+                .collect::<Result<Vec<_>, crate::error::LificError>>()?;
             Ok((plans, shown))
         })?;
         if plans.is_empty() {
             return Ok(None);
         }
+        let visible: Option<HashSet<i64>> = visible_project_ids_mcp(&self.db)?;
         let lines = shown
             .iter()
-            .map(|plan| {
+            .map(|(plan, linked_project)| {
                 let mut line = format!(
                     "{} {} ({}/{} done)",
                     plan_reference(context, plan),
@@ -290,7 +304,16 @@ impl LificMcp {
                     Some(step) => {
                         let _ = write!(line, ", next: #{} {}", step.id, title(&step.title));
                         if let Some(issue) = &step.issue_identifier {
-                            let _ = write!(line, " [{}]", issue_reference(context, issue));
+                            // Named only when its project is visible, like a
+                            // blocker in `blocked_section`.
+                            let shown = linked_project.is_some_and(|project| {
+                                visible.as_ref().is_none_or(|ids| ids.contains(&project))
+                            });
+                            if shown {
+                                let _ = write!(line, " [{}]", issue_reference(context, issue));
+                            } else {
+                                line.push_str(" [an issue in a project you cannot view]");
+                            }
                         }
                     }
                     None if plan.step_count > 0 => line.push_str(", all steps done"),

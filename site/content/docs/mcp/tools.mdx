@@ -420,7 +420,7 @@ Summarizes a project for an agent resuming work, in one bounded read. Call it fi
 The response opens with the current time and a `since` value to pass next time. The sections that follow are built from live records when the call is made. Nothing is stored or summarized by a model.
 
 - **Since the cursor**, only when `since` is given: counts of issues created, issues closed, other status changes and pages edited, followed by the most recent of each. Status changes are net per issue, so an issue moved and moved back is not listed.
-- **Active plans**, with progress and the next open step. The next step is the first unfinished step in tree order, descending into its first unfinished child.
+- **Active plans**, with progress and the next open step. The next step is the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named.
 - **Due to check**: open issues with a date wait whose window has arrived, most overdue first, each with its wait line (`Overdue since 2026-09-30, expected 2026-09-28..29 (note)`). These no longer block, so this is where the follow-up surfaces.
 - **Blocked** issues that are still open, each with the issues that block it and their status, plus any wait still holding it (`waiting on @blake (note)`, `waiting until 2026-09-28..29`). A blocker in a project you cannot view is counted but not named.
 - **Workable, not yet active** issues, highest priority first. Active issues are excluded here because they have their own section.

@@ -537,3 +537,61 @@ fn briefing_names_holding_waits_as_blockers_and_lists_due_date_waits() {
         "no empty issue-blocker clause: {blocked}"
     );
 }
+
+/// Review fix: a plan step can mirror an issue in another project (an admin
+/// can link across projects), and the next-step line used to print that
+/// issue's identifier to anyone who can view the plan's project.
+#[test]
+fn a_next_step_linked_into_an_invisible_project_is_not_named() {
+    let (m, admin, _lead, _maintainer, viewer, _non_member, project_id, _guard) =
+        setup_membership_mcp();
+    {
+        let conn = m.db.write().unwrap();
+        let foreign = queries::create_project(
+            &conn,
+            &models::CreateProject {
+                name: "Foreign".into(),
+                identifier: "FGN".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hidden = queries::create_issue(
+            &conn,
+            &models::CreateIssue {
+                project_id: foreign.id,
+                title: "Classified step issue".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        queries::plans::create_plan(
+            &conn,
+            &models::CreatePlan {
+                project_id,
+                title: "Cross-project plan".into(),
+                issue_id: None,
+                steps: vec![models::CreatePlanStep {
+                    title: "Mirror it".into(),
+                    description: String::new(),
+                    issue_id: Some(hidden.id),
+                    done: false,
+                    steps: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    let out = as_user(&viewer, || briefing(&m, Some("MEM"), None, &[]));
+    let plans = section(&out, "Active plans (1)");
+    assert!(
+        plans.contains("Mirror it [an issue in a project you cannot view]"),
+        "{plans}"
+    );
+    assert!(!out.contains("FGN-"), "{out}");
+
+    // Someone who can see the linked issue still gets its identifier.
+    let out = as_user(&admin, || briefing(&m, Some("MEM"), None, &[]));
+    assert!(out.contains("Mirror it [FGN-1]"), "{out}");
+}
