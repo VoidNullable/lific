@@ -5270,6 +5270,9 @@ fn declared_mime_for_filename(filename: &str) -> Option<&'static str> {
     match extension.as_str() {
         "svg" => Some("image/svg+xml"),
         "txt" | "log" | "md" | "csv" | "json" => Some("text/plain"),
+        // Legacy HWP shares the OLE signature with other formats, so the
+        // name has to vouch for it, exactly as the REST upload requires.
+        "hwp" => Some("application/x-hwp"),
         _ => None,
     }
 }
@@ -12652,6 +12655,36 @@ mod tests {
             "{listed}"
         );
         assert!(listed.trim_end().ends_with("| ATT-1"), "{listed}");
+    }
+
+    /// REST accepts a legacy HWP file when its name ends in `.hwp`; MCP has no
+    /// declared type of its own, so the name must carry the same vouching.
+    /// Other OLE documents stay refused.
+    #[test]
+    fn upload_attachment_accepts_legacy_hwp_by_name_only() {
+        use base64::Engine as _;
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let ole = base64::engine::general_purpose::STANDARD
+            .encode([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0]);
+
+        let receipt = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "report.hwp".into(),
+            content_base64: ole.clone(),
+            entity: None,
+            comment_id: None,
+        }));
+        assert!(
+            receipt.contains("report.hwp (application/x-hwp"),
+            "{receipt}"
+        );
+
+        let refused = m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "report.doc".into(),
+            content_base64: ole,
+            entity: None,
+            comment_id: None,
+        }));
+        assert!(refused.starts_with("Error:"), "{refused}");
     }
 
     #[test]
