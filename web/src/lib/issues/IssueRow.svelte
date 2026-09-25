@@ -22,6 +22,7 @@
   import { openContextMenu } from "../contextMenuState.svelte"; // LIF-248
   import { copyToClipboard } from "../clipboard";
   import { projectCodeOf } from "../references"; // LIF-248
+  import WaitChip from "./WaitChip.svelte"; // LIF-485
 
   let {
     issue,
@@ -329,6 +330,10 @@
       {/if}
     {/if}
   </div>
+
+  <!-- LIF-485: who or when this issue waits on. Shown at every width:
+       unlike labels, an overdue wait is something to act on. -->
+  <WaitChip waits={issue.waits} />
 
   <!-- Labels. Hidden below sm — secondary metadata that would otherwise
        crush the title on a phone (LIF-229). -->

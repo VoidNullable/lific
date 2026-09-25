@@ -110,6 +110,11 @@
         return `linked ${(a.field ?? "relates_to").replace("_", " ")}`;
       case "unlink":
         return `unlinked ${(a.field ?? "relates_to").replace("_", " ")}`;
+      // LIF-484: user and date blockers. The value is the rendered wait.
+      case "wait":
+        return "started waiting on";
+      case "unwait":
+        return "stopped waiting on";
       default:
         return a.action;
     }
@@ -228,6 +233,10 @@
             {:else if a.action === "link" || a.action === "unlink"}
               <span class="font-mono text-caption text-[var(--accent)]">
                 {a.action === "link" ? a.new_value : a.old_value}
+              </span>
+            {:else if a.action === "wait" || a.action === "unwait"}
+              <span class="text-[var(--text)]">
+                {shortValue(a.action === "wait" ? a.new_value : a.old_value, 60)}
               </span>
             {:else if a.action === "create" && a.entity_type === "comment"}
               <span class="text-[var(--text-faint)] italic">

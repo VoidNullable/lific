@@ -21,6 +21,7 @@
   } from "../lib/api";
   import DocumentDetail from "../lib/DocumentDetail.svelte";
   import LabelEditor from "../lib/LabelEditor.svelte";
+  import WaitEditor from "../lib/issues/WaitEditor.svelte"; // LIF-485
   import ProjectIcon from "../lib/ProjectIcon.svelte";
   import PriorityIcon from "../lib/PriorityIcon.svelte";
   import StatusIcon, { statusCssColor } from "../lib/StatusIcon.svelte";
@@ -974,6 +975,24 @@
         </div>
 
         <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
+
+        <!-- LIF-485: user and date blockers. Viewers see the field only when
+             the issue actually waits on something. -->
+        {#if issue.waits?.length || editable}
+          <WaitEditor
+            issueId={issue.id}
+            projectId={issue.project_id}
+            waits={issue.waits ?? []}
+            {editable}
+            onChange={(next) => {
+              if (!issue) return;
+              issue = { ...issue, waits: next };
+              refreshActivity();
+            }}
+          />
+
+          <div class="border-t border-[var(--border)] -mx-5 px-5 py-0 my-1"></div>
+        {/if}
 
         {#if issue.blocks?.length || issue.blocked_by?.length || issue.relates_to?.length || issue.duplicates?.length || issue.duplicated_by?.length}
           <div class="issue-meta-relations">
