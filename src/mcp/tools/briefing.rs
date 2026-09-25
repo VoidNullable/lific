@@ -105,12 +105,31 @@ fn next_open_step(steps: &[models::PlanStepNode]) -> Option<&models::PlanStepNod
     Some(next_open_step(&step.children).unwrap_or(step))
 }
 
+/// A heading count: `100+` when the scan stopped before the end.
+fn count(total: usize, total_is_floor: bool) -> String {
+    if total_is_floor {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    }
+}
+
 fn is_closed(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
 
 impl LificMcp {
     pub(super) fn get_briefing_inner(&self, input: GetBriefingInput) -> Result<String, String> {
+        self.get_briefing_at(input, Utc::now())
+    }
+
+    /// [`Self::get_briefing_inner`] with the clock passed in, so a test can
+    /// pin the moment the briefing is taken.
+    fn get_briefing_at(
+        &self,
+        input: GetBriefingInput,
+        now: DateTime<Utc>,
+    ) -> Result<String, String> {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
@@ -130,12 +149,16 @@ impl LificMcp {
         let context = context.as_deref();
         let ident = project.identifier.as_str();
 
-        let now = Utc::now();
+        // `since` is strict against one-second timestamps, so the cursor is
+        // one second before this briefing: a change written later in the
+        // briefing's own second is reported next time instead of never. The
+        // price is that this second's changes may be reported twice.
+        let cursor = now - chrono::Duration::seconds(1);
         let mut header = format!(
-            "{} briefing at {} UTC. Resume later with since='{}'.\n",
+            "{} briefing at {} UTC. Resume later with since='{}' (repeats this briefing's last second).\n",
             project_reference(context, ident),
             now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%Y-%m-%dT%H:%M:%SZ"),
+            cursor.format("%Y-%m-%dT%H:%M:%SZ"),
         );
 
         let changes = match &since {
@@ -266,19 +289,33 @@ impl LificMcp {
                     ..Default::default()
                 },
             )?;
+            // Each plan with the project of its next step's linked issue: a
+            // step can mirror an issue in another project, and that project
+            // decides whether the identifier may be shown.
             let shown = plans
                 .iter()
                 .take(PLAN_LINES)
-                .map(|plan| queries::plans::get_plan(conn, plan.id))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|plan| {
+                    let plan = queries::plans::get_plan(conn, plan.id)?;
+                    // A deleted issue has no identifier to hide; it is not an
+                    // error for the briefing.
+                    let linked_project = next_open_step(&plan.steps)
+                        .filter(|step| step.issue_identifier.is_some())
+                        .and_then(|step| step.issue_id)
+                        .and_then(|issue_id| queries::get_issue(conn, issue_id).ok())
+                        .map(|issue| issue.project_id);
+                    Ok((plan, linked_project))
+                })
+                .collect::<Result<Vec<_>, crate::error::LificError>>()?;
             Ok((plans, shown))
         })?;
         if plans.is_empty() {
             return Ok(None);
         }
+        let visible: Option<HashSet<i64>> = visible_project_ids_mcp(&self.db)?;
         let lines = shown
             .iter()
-            .map(|plan| {
+            .map(|(plan, linked_project)| {
                 let mut line = format!(
                     "{} {} ({}/{} done)",
                     plan_reference(context, plan),
@@ -290,7 +327,16 @@ impl LificMcp {
                     Some(step) => {
                         let _ = write!(line, ", next: #{} {}", step.id, title(&step.title));
                         if let Some(issue) = &step.issue_identifier {
-                            let _ = write!(line, " [{}]", issue_reference(context, issue));
+                            // Named only when its project is visible, like a
+                            // blocker in `blocked_section`.
+                            let shown = linked_project.is_some_and(|project| {
+                                visible.as_ref().is_none_or(|ids| ids.contains(&project))
+                            });
+                            if shown {
+                                let _ = write!(line, " [{}]", issue_reference(context, issue));
+                            } else {
+                                line.push_str(" [an issue in a project you cannot view]");
+                            }
                         }
                     }
                     None if plan.step_count > 0 => line.push_str(", all steps done"),
@@ -300,7 +346,10 @@ impl LificMcp {
             })
             .collect();
         Ok(Some(Section {
-            heading: format!("Active plans ({})", plans.len()),
+            heading: format!(
+                "Active plans ({})",
+                count(plans.len(), plans.len() as i64 >= SCAN_LIMIT)
+            ),
             summary: None,
             lines,
             total: plans.len(),
@@ -310,12 +359,13 @@ impl LificMcp {
     }
 
     /// Issues in `project_id` matching `query`, priority first, as
-    /// `(shown, total, total_is_floor)`. `keep` drops rows after the read.
+    /// `(shown, total, total_is_floor)`. Every exclusion belongs in `query`
+    /// (`exclude_statuses` included) so it applies before the scan limit:
+    /// filtering after the read let excluded rows crowd out eligible ones.
     fn briefing_issues(
         &self,
         project_id: i64,
         query: models::ListIssuesQuery,
-        keep: impl Fn(&models::Issue) -> bool,
     ) -> Result<(Vec<models::Issue>, usize, bool), String> {
         let page = self.read(|conn| {
             queries::list_issues_page(
@@ -328,10 +378,9 @@ impl LificMcp {
                 },
             )
         })?;
-        let kept: Vec<models::Issue> = page.items.into_iter().filter(|issue| keep(issue)).collect();
-        let total = kept.len();
+        let total = page.items.len();
         Ok((
-            kept.into_iter().take(ISSUE_LINES).collect(),
+            page.items.into_iter().take(ISSUE_LINES).collect(),
             total,
             page.has_more,
         ))
@@ -347,9 +396,9 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 blocked: Some(true),
+                exclude_statuses: vec![models::Status::Done, models::Status::Cancelled],
                 ..Default::default()
             },
-            |issue| !is_closed(issue.status.as_str()),
         )?;
         if issues.is_empty() {
             return Ok(None);
@@ -403,7 +452,7 @@ impl LificMcp {
             })
             .collect();
         Ok(Some(Section {
-            heading: format!("Blocked ({total})"),
+            heading: format!("Blocked ({})", count(total, total_is_floor)),
             summary: None,
             lines,
             total,
@@ -467,15 +516,18 @@ impl LificMcp {
             project_id,
             models::ListIssuesQuery {
                 workable: Some(true),
+                exclude_statuses: vec![models::Status::Active],
                 ..Default::default()
             },
-            |issue| issue.status != models::Status::Active,
         )?;
         if issues.is_empty() {
             return Ok(None);
         }
         Ok(Some(Section {
-            heading: format!("Workable, not yet active ({total}), by priority"),
+            heading: format!(
+                "Workable, not yet active ({}), by priority",
+                count(total, total_is_floor)
+            ),
             summary: None,
             lines: issues
                 .iter()
@@ -499,13 +551,12 @@ impl LificMcp {
                 status: Some(models::Status::Active),
                 ..Default::default()
             },
-            |_| true,
         )?;
         if issues.is_empty() {
             return Ok(None);
         }
         Ok(Some(Section {
-            heading: format!("Active ({total})"),
+            heading: format!("Active ({})", count(total, total_is_floor)),
             summary: None,
             lines: issues
                 .iter()

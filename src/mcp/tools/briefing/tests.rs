@@ -537,3 +537,186 @@ fn briefing_names_holding_waits_as_blockers_and_lists_due_date_waits() {
         "no empty issue-blocker clause: {blocked}"
     );
 }
+
+/// Review fix: a plan step can mirror an issue in another project (an admin
+/// can link across projects), and the next-step line used to print that
+/// issue's identifier to anyone who can view the plan's project.
+#[test]
+fn a_next_step_linked_into_an_invisible_project_is_not_named() {
+    let (m, admin, _lead, _maintainer, viewer, _non_member, project_id, _guard) =
+        setup_membership_mcp();
+    {
+        let conn = m.db.write().unwrap();
+        let foreign = queries::create_project(
+            &conn,
+            &models::CreateProject {
+                name: "Foreign".into(),
+                identifier: "FGN".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hidden = queries::create_issue(
+            &conn,
+            &models::CreateIssue {
+                project_id: foreign.id,
+                title: "Classified step issue".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        queries::plans::create_plan(
+            &conn,
+            &models::CreatePlan {
+                project_id,
+                title: "Cross-project plan".into(),
+                issue_id: None,
+                steps: vec![models::CreatePlanStep {
+                    title: "Mirror it".into(),
+                    description: String::new(),
+                    issue_id: Some(hidden.id),
+                    done: false,
+                    steps: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    let out = as_user(&viewer, || briefing(&m, Some("MEM"), None, &[]));
+    let plans = section(&out, "Active plans (1)");
+    assert!(
+        plans.contains("Mirror it [an issue in a project you cannot view]"),
+        "{plans}"
+    );
+    assert!(!out.contains("FGN-"), "{out}");
+
+    // Someone who can see the linked issue still gets its identifier.
+    let out = as_user(&admin, || briefing(&m, Some("MEM"), None, &[]));
+    assert!(out.contains("Mirror it [FGN-1]"), "{out}");
+}
+
+/// Review fix: the advertised cursor used to be the briefing's own second,
+/// read back with a strict `>` against one-second timestamps, so a change
+/// written later in that same second was never reported by any briefing.
+#[test]
+fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Cursor", "CSR");
+    issue(&m, "CSR", "Before", "todo", "none");
+    m.write(|conn| {
+        conn.execute_batch(
+            "UPDATE audit_log SET ts = '2026-06-01 11:00:00';
+             UPDATE issues SET created_at = '2026-06-01 11:00:00';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Taken half-way through 12:00:00.
+    let taken_at = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00.500Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let first = m
+        .get_briefing_at(
+            GetBriefingInput {
+                project: Some("CSR".into()),
+                ..Default::default()
+            },
+            taken_at,
+        )
+        .unwrap();
+    let cursor = first
+        .split("Resume later with since='")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .unwrap_or_else(|| panic!("no cursor in {first}"))
+        .to_string();
+
+    // Written after the briefing, in the same second.
+    issue(&m, "CSR", "Same second", "todo", "none");
+    m.write(|conn| {
+        conn.execute(
+            "UPDATE issues SET created_at = '2026-06-01 12:00:00' WHERE title = 'Same second'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let next = briefing(&m, Some("CSR"), Some(&cursor), &[]);
+    assert!(
+        next.contains("new CSR-2"),
+        "cursor {cursor} lost it:\n{next}"
+    );
+    assert!(!next.contains("new CSR-1"), "{next}");
+}
+
+/// Review fix: sections used to read the first 100 rows by priority and only
+/// then drop the ones they exclude, so enough higher-priority excluded rows
+/// hid every eligible issue and the section vanished without a word.
+#[test]
+fn excluded_rows_ahead_of_an_eligible_issue_do_not_hide_it() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Crowd", "CRW");
+    let project_id = m
+        .read(|conn| queries::resolve_project_identifier(conn, "CRW"))
+        .unwrap();
+    m.write(|conn| {
+        let create = |title: String, status, priority| {
+            queries::create_issue(
+                conn,
+                &models::CreateIssue {
+                    project_id,
+                    title,
+                    status,
+                    priority,
+                    ..Default::default()
+                },
+            )
+        };
+        let blocker = create(
+            "Blocker".into(),
+            models::Status::Todo,
+            models::Priority::None,
+        )?;
+        for index in 0..105 {
+            // Active and urgent: ahead of everything workable.
+            create(
+                format!("Busy {index}"),
+                models::Status::Active,
+                models::Priority::Urgent,
+            )?;
+            // Closed but still carrying an open blocker: ahead of the open one.
+            let closed = create(
+                format!("Closed {index}"),
+                models::Status::Done,
+                models::Priority::Urgent,
+            )?;
+            queries::link_issues(conn, blocker.id, closed.id, "blocks")?;
+        }
+        create(
+            "Pick me up".into(),
+            models::Status::Todo,
+            models::Priority::Low,
+        )?;
+        let open = create(
+            "Still stuck".into(),
+            models::Status::Todo,
+            models::Priority::Low,
+        )?;
+        queries::link_issues(conn, blocker.id, open.id, "blocks")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let out = briefing(&m, Some("CRW"), None, &[]);
+    let workable = section(&out, "Workable, not yet active");
+    assert!(workable.contains("Pick me up"), "{workable}");
+    assert!(!workable.contains("Busy"), "{workable}");
+    let blocked = section(&out, "Blocked (1)");
+    assert!(blocked.contains("Still stuck"), "{blocked}");
+    assert!(!blocked.contains("Closed"), "{blocked}");
+    // A count cut short by the scan says so rather than posing as exact.
+    section(&out, "Active (100+)");
+}
