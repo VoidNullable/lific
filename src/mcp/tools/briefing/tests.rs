@@ -595,3 +595,59 @@ fn a_next_step_linked_into_an_invisible_project_is_not_named() {
     let out = as_user(&admin, || briefing(&m, Some("MEM"), None, &[]));
     assert!(out.contains("Mirror it [FGN-1]"), "{out}");
 }
+
+/// Review fix: the advertised cursor used to be the briefing's own second,
+/// read back with a strict `>` against one-second timestamps, so a change
+/// written later in that same second was never reported by any briefing.
+#[test]
+fn a_change_in_the_same_second_as_the_briefing_is_reported_next_time() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Cursor", "CSR");
+    issue(&m, "CSR", "Before", "todo", "none");
+    m.write(|conn| {
+        conn.execute_batch(
+            "UPDATE audit_log SET ts = '2026-06-01 11:00:00';
+             UPDATE issues SET created_at = '2026-06-01 11:00:00';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Taken half-way through 12:00:00.
+    let taken_at = chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00.500Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let first = m
+        .get_briefing_at(
+            GetBriefingInput {
+                project: Some("CSR".into()),
+                ..Default::default()
+            },
+            taken_at,
+        )
+        .unwrap();
+    let cursor = first
+        .split("Resume later with since='")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .unwrap_or_else(|| panic!("no cursor in {first}"))
+        .to_string();
+
+    // Written after the briefing, in the same second.
+    issue(&m, "CSR", "Same second", "todo", "none");
+    m.write(|conn| {
+        conn.execute(
+            "UPDATE issues SET created_at = '2026-06-01 12:00:00' WHERE title = 'Same second'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let next = briefing(&m, Some("CSR"), Some(&cursor), &[]);
+    assert!(
+        next.contains("new CSR-2"),
+        "cursor {cursor} lost it:\n{next}"
+    );
+    assert!(!next.contains("new CSR-1"), "{next}");
+}

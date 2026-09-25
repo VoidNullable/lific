@@ -417,7 +417,7 @@ Summarizes a project for an agent resuming work, in one bounded read. Call it fi
 | `since` | `string` | No | ISO date or datetime. Adds a section for what changed strictly after it. Read like `get_activity`'s `since`: UTC unless an offset is given. |
 | `pages` | `string[]` | No | Page identifiers to report on, such as the pages an `AGENTS.md` tells agents to read. At most 10. Without it, the three most recently updated pages are shown. |
 
-The response opens with the current time and a `since` value to pass next time. The sections that follow are built from live records when the call is made. Nothing is stored or summarized by a model.
+The response opens with the current time and a `since` value to pass next time. That cursor is one second before the briefing, because `since` is strict and timestamps have one-second resolution: a change written later in the briefing's final second is reported by the next briefing instead of being skipped, and changes from that second may be reported twice. The sections that follow are built from live records when the call is made. Nothing is stored or summarized by a model.
 
 - **Since the cursor**, only when `since` is given: counts of issues created, issues closed, other status changes and pages edited, followed by the most recent of each. Status changes are net per issue, so an issue moved and moved back is not listed.
 - **Active plans**, with progress and the next open step. The next step is the first unfinished step in tree order, descending into its first unfinished child. When that step mirrors an issue in a project you cannot view, the issue is not named.
@@ -458,7 +458,7 @@ Reads audit history for an issue, page, or project.
 | `limit` | `integer` | No | Max entries (default 30, cap 200) |
 | `offset` | `integer` | No | Zero-indexed offset for paging. Output appends a hint when more entries exist. |
 
-Audit timestamps are stored in UTC with one-second resolution, and `since` is read on the same clock. A bare date such as `2026-06-01` means midnight UTC. A datetime without an offset is UTC, and one with `Z` or an offset such as `-05:00` is converted to UTC. Fractional seconds are ignored. Entries in the same second as the cursor are excluded, so resuming from the timestamp of the last entry you read also skips anything else written in that second.
+Audit timestamps are stored in UTC with one-second resolution, and `since` is read on the same clock. A bare date such as `2026-06-01` means midnight UTC. A datetime without an offset is UTC, and one with `Z` or an offset such as `-05:00` is converted to UTC. Fractional seconds are ignored. Entries in the same second as the cursor are excluded. To resume after the last entry you read without missing anything written later in its second, pass a cursor one second earlier than its timestamp and expect that second's entries to repeat.
 
 Writes made by a connected agent are attributed to that agent's own identity, not to the person who connected it, and each entry also records the transport the write came through (`mcp` for MCP requests, `web`, `api`, `cli`, or `system` for the others).
 

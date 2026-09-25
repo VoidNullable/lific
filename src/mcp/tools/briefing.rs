@@ -111,6 +111,16 @@ fn is_closed(status: &str) -> bool {
 
 impl LificMcp {
     pub(super) fn get_briefing_inner(&self, input: GetBriefingInput) -> Result<String, String> {
+        self.get_briefing_at(input, Utc::now())
+    }
+
+    /// [`Self::get_briefing_inner`] with the clock passed in, so a test can
+    /// pin the moment the briefing is taken.
+    fn get_briefing_at(
+        &self,
+        input: GetBriefingInput,
+        now: DateTime<Utc>,
+    ) -> Result<String, String> {
         if let Some(nudge) = self.no_projects_nudge() {
             return Ok(nudge);
         }
@@ -130,12 +140,16 @@ impl LificMcp {
         let context = context.as_deref();
         let ident = project.identifier.as_str();
 
-        let now = Utc::now();
+        // `since` is strict against one-second timestamps, so the cursor is
+        // one second before this briefing: a change written later in the
+        // briefing's own second is reported next time instead of never. The
+        // price is that this second's changes may be reported twice.
+        let cursor = now - chrono::Duration::seconds(1);
         let mut header = format!(
-            "{} briefing at {} UTC. Resume later with since='{}'.\n",
+            "{} briefing at {} UTC. Resume later with since='{}' (repeats this briefing's last second).\n",
             project_reference(context, ident),
             now.format("%Y-%m-%d %H:%M:%S"),
-            now.format("%Y-%m-%dT%H:%M:%SZ"),
+            cursor.format("%Y-%m-%dT%H:%M:%SZ"),
         );
 
         let changes = match &since {
