@@ -32,6 +32,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use tower_http::cors::{self, CorsLayer};
 
 /// Transport-level body-size ceiling for the multipart upload route only. The
 /// per-instance `AttachmentConfig.max_bytes` (default 10 MB) is the real limit
@@ -53,6 +54,14 @@ pub use attachments::{AttachmentConfig, AttachmentUploadLimiter};
 
 /// Build the full API router.
 pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new().allow_origin(cors::Any)
+    } else {
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new().allow_origin(origins)
+    };
+
     Router::new()
         // Public instance metadata for the auth screen (unauthenticated).
         .route("/api/instance", get(auth::instance_info))
@@ -409,6 +418,30 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/git-hook", post(git_hook::git_hook))
         // Health
         .route("/api/health", get(health))
+        .layer(
+            cors.allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PATCH,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
+            // LIF-421: comment paging metadata rides in headers so the body
+            // stays the bare array it always was. A browser cannot read a
+            // response header it was not told about, so a cross-origin web
+            // client would silently fall back to guessing `has_more`.
+            .expose_headers([
+                axum::http::HeaderName::from_static(comments::HAS_MORE_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_OFFSET_HEADER),
+                axum::http::HeaderName::from_static(comments::RETURNED_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_AT_HEADER),
+                axum::http::HeaderName::from_static(comments::NEXT_CURSOR_ID_HEADER),
+            ]),
+        )
         .with_state(db)
         .layer(Extension(cors_origins.to_vec()))
 }

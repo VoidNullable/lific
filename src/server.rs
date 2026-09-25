@@ -26,7 +26,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rust_embed::Embed;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
 use crate::config::{self, Config};
@@ -708,7 +708,13 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     } else {
         let origins: Vec<HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
-        layer.allow_origin(origins)
+        assert!(
+            !origins.contains(&HeaderValue::from_static("*")),
+            "Wildcard origin (`*`) cannot be passed to configured cors_origins"
+        );
+        layer.allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origins.contains(origin)
+        }))
     }
 }
 
@@ -1044,7 +1050,10 @@ mod cors_tests {
     /// receive an Access-Control-Allow-Origin header echoing them back.
     #[tokio::test]
     async fn explicit_origins_are_allowlisted() {
-        let app = app_with_cors(&["https://claude.ai".to_string()]);
+        let app = app_with_cors(&[
+            "https://claude.ai".to_string(),
+            "not a valid header value".to_string(),
+        ]);
 
         let req = Request::builder()
             .method(Method::OPTIONS)
@@ -1054,7 +1063,7 @@ mod cors_tests {
             .body(Body::empty())
             .unwrap();
 
-        let res = app.oneshot(req).await.unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
         assert!(res.status().is_success());
         assert_eq!(
             res.headers()
@@ -1062,6 +1071,23 @@ mod cors_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("https://claude.ai")
         );
+
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/mcp")
+            .header("origin", "https://evil.example")
+            .header("access-control-request-method", "POST")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert!(!res.headers().contains_key("access-control-allow-origin"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Wildcard origin (`*`)")]
+    fn configured_wildcard_origin_keeps_rejection() {
+        let _ = build_global_cors(&["*".to_string()]);
     }
 
     /// MCP responses must expose the session id header so the client can
