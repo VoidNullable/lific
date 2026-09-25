@@ -99,7 +99,10 @@ pub struct CreateIssueInput {
         description = "Project ID (e.g. LIF); optional when the session is bound to a repository"
     )]
     pub project: Option<String>,
-    #[schemars(description = "Issue title")]
+    // LIF-478: optional so a batch can omit it; the tool requires it
+    // whenever `issues` is absent.
+    #[serde(default)]
+    #[schemars(description = "Issue title (required unless issues is given)")]
     pub title: String,
     #[schemars(description = "Markdown description")]
     pub description: Option<String>,
@@ -114,6 +117,38 @@ pub struct CreateIssueInput {
     #[schemars(description = "Start date (ISO 8601 date, e.g. 2026-06-01)")]
     pub start_date: Option<String>,
     #[schemars(description = "Target/due date (ISO 8601 date, e.g. 2026-06-15)")]
+    pub target_date: Option<String>,
+    #[schemars(
+        description = "Create up to 50 issues atomically instead: each item takes the fields above except project. Only project may accompany it.",
+        schema_with = "create_issue_items_schema"
+    )]
+    pub issues: Option<Vec<CreateIssueItem>>,
+}
+
+/// The published shape of `CreateIssueInput::issues`: objects that need a
+/// title. The derived item schema would repeat all eight fields in `$defs`
+/// (about 100 tokens on every `tools/list`) to say what the description
+/// already does. Deserialization is still strict: `CreateIssueItem` denies
+/// unknown keys.
+fn create_issue_items_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["array", "null"],
+        "items": { "type": "object", "required": ["title"] }
+    })
+}
+
+/// One issue in a `create_issue` batch (LIF-478). Field meanings match
+/// [`CreateIssueInput`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateIssueItem {
+    pub title: String,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub module: Option<String>,
+    pub labels: Option<Vec<String>>,
+    pub start_date: Option<String>,
     pub target_date: Option<String>,
 }
 

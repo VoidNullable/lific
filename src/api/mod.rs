@@ -736,11 +736,46 @@ async fn search(
     // narrows the search to one project, since a non-member of that project
     // shouldn't be able to probe its existence via a 403 vs. empty-results
     // side channel here.
+    //
+    // LIF-476: when no hit contains every word, the results are the ranked
+    // any-word fallback and each carries `partial_match: true`.
     let visible = crate::authz::visible_project_ids(&db, &identity)?;
     let results = with_read(&db, |conn| {
         queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
     })?;
     Ok(Json(results))
+}
+
+/// LIF-476: the REST search the web palette calls flags fallback hits.
+#[cfg(test)]
+mod search_fallback_tests {
+    use super::test_helpers::{json_get, json_post, parse_json, seed_project, test_app};
+
+    #[tokio::test]
+    async fn rest_search_flags_partial_matches_and_leaves_full_matches_unflagged() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for title in ["Search ranking ignores empty titles", "Search is slow"] {
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": title }),
+            )
+            .await;
+        }
+
+        let full = parse_json(json_get(&app, "/api/search?query=search%20ranking").await).await;
+        let full = full.as_array().unwrap();
+        assert_eq!(full.len(), 1);
+        assert!(full[0].get("partial_match").is_none(), "got: {full:?}");
+
+        let partial =
+            parse_json(json_get(&app, "/api/search?query=ranking%20zeppelin").await).await;
+        let partial = partial.as_array().unwrap();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0]["title"], "Search ranking ignores empty titles");
+        assert_eq!(partial[0]["partial_match"], true);
+    }
 }
 
 // ── Shared test helpers ──────────────────────────────────────

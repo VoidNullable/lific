@@ -3443,6 +3443,7 @@ mod tests {
                 snippet: "Issue comment".into(),
                 project_id: Some(1),
                 parent_page_id: None,
+                partial_match: false,
             },
             crate::db::models::SearchResult {
                 result_type: "comment".into(),
@@ -3452,6 +3453,7 @@ mod tests {
                 snippet: "Page comment".into(),
                 project_id: Some(1),
                 parent_page_id: Some(17),
+                partial_match: false,
             },
         ])
         .unwrap();

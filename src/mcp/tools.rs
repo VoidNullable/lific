@@ -363,6 +363,84 @@ fn issue_reference<'a>(
     reference_with_context(context, ReferenceKind::Issue(identifier))
 }
 
+/// How many possible duplicates `create_issue` names (LIF-477).
+const SIMILAR_ISSUE_LIMIT: usize = 3;
+
+/// Append the possible-duplicates section after a create confirmation, one
+/// line per issue. Writes nothing when there are none.
+fn write_similar_issues(
+    output: &mut String,
+    context: Option<&IssueLinkContext>,
+    similar: &[queries::SimilarIssue],
+) -> fmt::Result {
+    if similar.is_empty() {
+        return Ok(());
+    }
+    write!(output, "\nSimilar open issues:")?;
+    similar.iter().try_for_each(|issue| {
+        write!(
+            output,
+            "\n- {} ({}) {}",
+            issue_reference(context, &issue.identifier),
+            issue.status,
+            issue.title
+        )
+    })
+}
+
+/// Create one `create_issue` batch item on the batch's transaction (LIF-478).
+fn create_batch_item(
+    conn: &rusqlite::Connection,
+    project_id: i64,
+    item: &CreateIssueItem,
+    attachments: models::AttachmentActor,
+) -> Result<models::Issue, crate::error::LificError> {
+    use crate::error::LificError;
+    if item.title.trim().is_empty() {
+        return Err(LificError::BadRequest("title is required".into()));
+    }
+    let module_id = item
+        .module
+        .as_deref()
+        .map(|name| queries::resolve_module_name(conn, project_id, name))
+        .transpose()?;
+    queries::create_issue(
+        conn,
+        &models::CreateIssue {
+            project_id,
+            title: item.title.clone(),
+            description: item.description.clone().unwrap_or_default(),
+            status: models::Status::parse_opt(item.status.as_deref())
+                .map_err(LificError::BadRequest)?
+                .unwrap_or_default(),
+            priority: models::Priority::parse_opt(item.priority.as_deref())
+                .map_err(LificError::BadRequest)?
+                .unwrap_or_default(),
+            module_id,
+            start_date: item.start_date.clone(),
+            target_date: item.target_date.clone(),
+            labels: item.labels.clone().unwrap_or_default(),
+            source: None,
+            attachments,
+        },
+    )
+}
+
+/// Name the batch item a caller-facing error came from, as `issues[i]`, the
+/// path the caller sent it under. Database and internal errors pass through
+/// untouched: they are sanitized to a generic message anyway.
+fn at_batch_item(index: usize, error: crate::error::LificError) -> crate::error::LificError {
+    use crate::error::LificError;
+    let at = |message: String| format!("issues[{index}]: {message}");
+    match error {
+        LificError::NotFound(message) => LificError::NotFound(at(message)),
+        LificError::BadRequest(message) => LificError::BadRequest(at(message)),
+        LificError::Forbidden(message) => LificError::Forbidden(at(message)),
+        LificError::Conflict(message) => LificError::Conflict(at(message)),
+        other => other,
+    }
+}
+
 fn project_reference<'a>(
     context: Option<&'a IssueLinkContext>,
     identifier: &'a str,
@@ -1641,6 +1719,13 @@ impl LificMcp {
         }
         let link_context = current_issue_link_context();
         Ok(render_response(|output| {
+            if results[0].partial_match {
+                writeln!(
+                    output,
+                    "{}",
+                    queries::partial_match_notice(input.sort.as_deref())
+                )?;
+            }
             writeln!(output, "{} results:", results.len())?;
             results.iter().try_for_each(|result| {
                 let identifier = result.identifier.as_deref().unwrap_or("");
@@ -2230,13 +2315,19 @@ impl LificMcp {
         }
     }
 
-    #[tool(description = "Create a new issue in a project")]
+    #[tool(description = "Create a new issue in a project, or several at once with issues")]
     fn create_issue(&self, Parameters(input): Parameters<CreateIssueInput>) -> String {
         self.create_issue_inner(input)
             .unwrap_or_else(error_response)
     }
 
-    fn create_issue_inner(&self, input: CreateIssueInput) -> Result<String, String> {
+    fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
+        if let Some(items) = input.issues.take() {
+            return self.create_issue_batch(input, items);
+        }
+        if input.title.trim().is_empty() {
+            return Err("title is required (or pass issues to create several)".into());
+        }
         let conn = self.read_conn()?;
         let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
@@ -2282,6 +2373,20 @@ impl LificMcp {
             },
             issue.seq,
         );
+        // LIF-477: name likely duplicates so the agent can link or cancel one
+        // now. Best effort: the issue already exists, so a failed lookup only
+        // costs the hint.
+        let similar = self
+            .read(|conn| {
+                queries::similar_open_issues(
+                    conn,
+                    pid,
+                    &issue.title,
+                    &[issue.id],
+                    SIMILAR_ISSUE_LIMIT,
+                )
+            })
+            .unwrap_or_default();
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(
@@ -2289,7 +2394,119 @@ impl LificMcp {
                 "Created {}: {}",
                 issue_reference(context.as_deref(), &issue.identifier),
                 issue.title
-            )
+            )?;
+            write_similar_issues(output, context.as_deref(), &similar)
+        }))
+    }
+
+    /// LIF-478: agents file issues in bursts. The whole batch is one
+    /// transaction, so any invalid item (unknown module, bad status, missing
+    /// title) creates nothing, and the error names the item by its index.
+    ///
+    /// Only `project` applies to the batch; every other top-level field must
+    /// be absent, so there is no merge rule to guess at. The similar-issues
+    /// hint stays, reduced to identifiers on the item's own line: bursts are
+    /// where duplicates of existing work are most likely, but three full
+    /// lines per item would bury the list of what was created. Issues from the
+    /// same batch are never offered as each other's duplicates.
+    fn create_issue_batch(
+        &self,
+        input: CreateIssueInput,
+        items: Vec<CreateIssueItem>,
+    ) -> Result<String, String> {
+        const MAX_ISSUE_BATCH: usize = 50;
+        let has_single_fields = !input.title.is_empty()
+            || input.description.is_some()
+            || input.status.is_some()
+            || input.priority.is_some()
+            || input.module.is_some()
+            || input.labels.is_some()
+            || input.start_date.is_some()
+            || input.target_date.is_some();
+        if has_single_fields {
+            return Err(
+                "with issues, set title and the other fields on each item; only project applies to the whole batch"
+                    .into(),
+            );
+        }
+        if items.is_empty() {
+            return Err("issues is empty; pass at least one item".into());
+        }
+        if items.len() > MAX_ISSUE_BATCH {
+            return Err(format!(
+                "issues holds {} items; the limit is {MAX_ISSUE_BATCH} per call",
+                items.len()
+            ));
+        }
+        let pid = {
+            let conn = self.read_conn()?;
+            resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?
+        };
+        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        let created = self.transaction(|conn| {
+            // Same actor re-check as the single create, once for the batch.
+            let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    create_batch_item(conn, pid, item, attachments)
+                        .map_err(|error| at_batch_item(index, error))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        for issue in &created {
+            self.emit_with_seq(
+                crate::realtime::RealtimeEvent::IssueCreated {
+                    project_id: issue.project_id,
+                    issue_id: issue.id,
+                },
+                issue.seq,
+            );
+        }
+        let batch_ids: Vec<i64> = created.iter().map(|issue| issue.id).collect();
+        let similar: Vec<Vec<queries::SimilarIssue>> = created
+            .iter()
+            .map(|issue| {
+                self.read(|conn| {
+                    queries::similar_open_issues(
+                        conn,
+                        pid,
+                        &issue.title,
+                        &batch_ids,
+                        SIMILAR_ISSUE_LIMIT,
+                    )
+                })
+                .unwrap_or_default()
+            })
+            .collect();
+        let context = current_issue_link_context();
+        Ok(render_response(|output| {
+            write!(output, "Created {} issues:", created.len())?;
+            created
+                .iter()
+                .zip(&similar)
+                .try_for_each(|(issue, similar)| {
+                    write!(
+                        output,
+                        "\n- {}: {}",
+                        issue_reference(context.as_deref(), &issue.identifier),
+                        issue.title
+                    )?;
+                    if similar.is_empty() {
+                        return Ok(());
+                    }
+                    write!(output, " (similar open: ")?;
+                    similar.iter().enumerate().try_for_each(|(i, other)| {
+                        let separator = if i == 0 { "" } else { ", " };
+                        write!(
+                            output,
+                            "{separator}{}",
+                            issue_reference(context.as_deref(), &other.identifier)
+                        )
+                    })?;
+                    write!(output, ")")
+                })
         }))
     }
 
@@ -5080,6 +5297,10 @@ mod tests_verification;
 
 #[cfg(test)]
 mod tests_checklist;
+
+#[cfg(test)]
+#[path = "tests_search_filing.rs"]
+mod tests_search_filing;
 
 #[cfg(test)]
 mod tests {

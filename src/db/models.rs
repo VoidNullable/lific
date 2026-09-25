@@ -982,6 +982,11 @@ pub struct SearchResult {
     pub project_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_page_id: Option<i64>,
+    /// LIF-476: set when no result contained every query word and this hit
+    /// came from the ranked any-word fallback. Omitted from JSON when false,
+    /// so an all-words result serializes exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial_match: bool,
 }
 
 // ── Audit log (LIF-155/156) ──────────────────────────────────
