@@ -1,5 +1,6 @@
 pub(crate) mod activity;
 pub(crate) mod attachments;
+pub(crate) mod briefing;
 pub(crate) mod changes;
 pub(crate) mod comments;
 pub(crate) mod insights;
@@ -18,6 +19,7 @@ pub(crate) mod settings;
 pub(crate) mod trash;
 pub(crate) mod users;
 pub(crate) mod views;
+pub(crate) mod waits;
 
 /// Repair literal `\n` and `\t` sequences from clients that double-escape JSON.
 ///

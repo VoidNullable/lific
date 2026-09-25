@@ -12,8 +12,6 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = term::wants_json(json_flag);
     let pool = db::open(&cfg.database.path)?;
-    let manager =
-        auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
 
     match action {
         KeyAction::Create {
@@ -29,13 +27,7 @@ pub fn run(
             } else {
                 None
             };
-            let key = auth::create_api_key_with_expiry(
-                &pool,
-                &manager,
-                &name,
-                expires.as_deref(),
-                owner,
-            )?;
+            let key = auth::create_api_key_with_expiry(&pool, &name, expires.as_deref(), owner)?;
             let assigned = user;
 
             if json {
@@ -70,6 +62,7 @@ pub fn run(
                             "revoked": k.revoked,
                             "created_at": k.created_at,
                             "expires_at": k.expires_at,
+                            "unsupported_format": k.unsupported_format,
                         })
                     })
                     .collect();
@@ -82,8 +75,16 @@ pub fn run(
                     let status = if k.revoked { "REVOKED" } else { "active" };
                     let expiry = k.expires_at.as_deref().unwrap_or("never");
                     println!(
-                        "  {} | {} | created {} | expires {}",
-                        k.name, status, k.created_at, expiry
+                        "  {} | {} | created {} | expires {}{}",
+                        k.name,
+                        status,
+                        k.created_at,
+                        expiry,
+                        if k.unsupported_format {
+                            " | UNSUPPORTED FORMAT (rotate before reuse)"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
@@ -98,7 +99,7 @@ pub fn run(
             }
         }
         KeyAction::Rotate { name } => {
-            let key = auth::rotate_api_key(&pool, &manager, &name)?;
+            let key = auth::rotate_api_key(&pool, &name)?;
             if json {
                 let out = serde_json::json!({ "name": name, "key": key });
                 println!("{}", serde_json::to_string_pretty(&out)?);

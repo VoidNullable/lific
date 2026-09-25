@@ -34,7 +34,6 @@ struct Instance {
     app: Router,
     store: AttachmentStore,
     realtime: RealtimeHub,
-    manager: api_keys_simplified::ApiKeyManagerV0,
     _store_guard: tempfile::TempDir,
 }
 
@@ -47,10 +46,8 @@ impl Instance {
         let db = crate::db::open_memory().expect("test db");
         let (store, guard) = test_attachment_store();
         let realtime = RealtimeHub::new();
-        let manager = crate::auth::create_key_manager().unwrap();
         let auth_state = crate::auth::AuthState {
             db: db.clone(),
-            manager: manager.clone(),
             public_url: "https://archive.test".into(),
             required,
         };
@@ -64,7 +61,6 @@ impl Instance {
             required,
             secure_cookies: false,
         }))
-        .layer(axum::Extension(Arc::new(manager.clone())))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             crate::auth::require_api_key,
@@ -74,7 +70,6 @@ impl Instance {
             app,
             store,
             realtime,
-            manager,
             _store_guard: guard,
         }
     }
@@ -103,7 +98,7 @@ impl Instance {
     }
 
     fn api_key(&self, name: &str, owner: Option<i64>) -> String {
-        crate::auth::create_api_key(&self.db, &self.manager, name, owner).unwrap()
+        crate::auth::create_api_key(&self.db, name, owner).unwrap()
     }
 
     fn oauth_token(&self, suffix: &str, user_id: i64) -> String {

@@ -107,6 +107,8 @@ const UPDATED_AT: usize = 20;
 /// The body column — `issues.description` or `pages.content`. Read only to
 /// derive [`preview_of`]; never stored on a change row.
 const BODY: usize = 21;
+/// `comments.kind` (migration 056). NULL on issue and page rows.
+const COMMENT_KIND: usize = 22;
 
 const ISSUE_COLUMNS: &str = "'issue' AS kind, i.seq AS seq, (i.deleted_at IS NOT NULL) AS deleted,
             i.id AS id, p.identifier AS project_identifier, i.sequence AS sequence,
@@ -116,7 +118,7 @@ const ISSUE_COLUMNS: &str = "'issue' AS kind, i.seq AS seq, (i.deleted_at IS NOT
             NULL AS folder_id, NULL AS pinned,
             NULL AS issue_id, NULL AS page_id, NULL AS user_id, NULL AS username,
             i.created_at AS created_at, i.updated_at AS updated_at,
-            i.description AS body";
+            i.description AS body, NULL AS comment_kind";
 
 const ISSUE_FROM: &str = "FROM issues i JOIN projects p ON p.id = i.project_id";
 
@@ -128,7 +130,7 @@ const PAGE_COLUMNS: &str = "'page', pg.seq, (pg.deleted_at IS NOT NULL),
             pg.folder_id, pg.pinned,
             NULL, NULL, NULL, NULL,
             pg.created_at, pg.updated_at,
-            pg.content";
+            pg.content, NULL";
 
 const PAGE_FROM: &str = "FROM pages pg JOIN projects p ON p.id = pg.project_id";
 
@@ -140,7 +142,7 @@ const COMMENT_COLUMNS: &str = "'comment', c.seq, (c.deleted_at IS NOT NULL),
             NULL, NULL,
             c.issue_id, c.page_id, COALESCE(c.user_id, -1), COALESCE(c.imported_author, u.username),
             c.created_at, c.updated_at,
-            NULL";
+            NULL, c.kind";
 
 const COMMENT_FROM: &str = "FROM comments c LEFT JOIN users u ON u.id = c.user_id";
 
@@ -174,6 +176,7 @@ fn issue_change(row: &Row) -> rusqlite::Result<IssueChange> {
         updated_at: row.get(UPDATED_AT)?,
         preview: preview_of(&row.get::<_, Option<String>>(BODY)?.unwrap_or_default()),
         labels: Vec::new(),
+        waits: Vec::new(),
     })
 }
 
@@ -209,6 +212,7 @@ fn comment_change(row: &Row) -> rusqlite::Result<CommentChange> {
         username: row.get(USERNAME)?,
         created_at: row.get(CREATED_AT)?,
         updated_at: row.get(UPDATED_AT)?,
+        comment_kind: row.get(COMMENT_KIND)?,
     })
 }
 
@@ -355,11 +359,13 @@ pub fn list_changes(
         })
         .collect();
     let mut issue_labels = labels_by_issue(conn, &issue_ids)?;
+    let mut issue_waits = super::waits::waits_by_issue(conn, &issue_ids)?;
     let mut page_labels = labels_by_page(conn, &page_ids)?;
     for change in &mut changes {
         match change {
             Change::Issue(issue) => {
                 issue.labels = issue_labels.remove(&issue.id).unwrap_or_default();
+                issue.waits = issue_waits.remove(&issue.id).unwrap_or_default();
             }
             Change::Page(page) => {
                 page.labels = page_labels.remove(&page.id).unwrap_or_default();
@@ -420,8 +426,10 @@ pub fn index_rows(
 
     let issue_ids: Vec<i64> = issues.iter().map(|issue| issue.id).collect();
     let mut issue_labels = labels_by_issue(conn, &issue_ids)?;
+    let mut issue_waits = super::waits::waits_by_issue(conn, &issue_ids)?;
     for issue in &mut issues {
         issue.labels = issue_labels.remove(&issue.id).unwrap_or_default();
+        issue.waits = issue_waits.remove(&issue.id).unwrap_or_default();
     }
 
     let page_ids: Vec<i64> = pages.iter().map(|page| page.id).collect();

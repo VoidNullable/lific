@@ -29,8 +29,6 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
-use api_keys_simplified::ApiKeyManagerV0;
-
 use crate::config::{self, Config};
 use crate::{
     actor, api, auth, backup, db, links, mcp, oauth, ratelimit, realtime, resolve_caller, storage,
@@ -242,14 +240,12 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 pub fn build_app(
     cfg: &Config,
     pool: db::DbPool,
-    manager: ApiKeyManagerV0,
     realtime: realtime::RealtimeHub,
     trusted_proxies: Arc<[ratelimit::IpNetwork]>,
 ) -> Router {
     build_app_with_store(
         cfg,
         pool,
-        manager,
         realtime,
         trusted_proxies,
         storage::AttachmentStore::from_db_path(&cfg.database.path),
@@ -259,7 +255,6 @@ pub fn build_app(
 pub(crate) fn build_app_with_store(
     cfg: &Config,
     pool: db::DbPool,
-    manager: ApiKeyManagerV0,
     realtime: realtime::RealtimeHub,
     trusted_proxies: Arc<[ratelimit::IpNetwork]>,
     attachment_store: storage::AttachmentStore,
@@ -277,11 +272,8 @@ pub(crate) fn build_app_with_store(
         format!("http://{}:{}", crate::display_host(host), cfg.server.port)
     });
 
-    let manager_ext = Arc::new(manager.clone());
-
     let auth_state = auth::AuthState {
         db: pool.clone(),
-        manager,
         public_url: issuer.clone(),
         required: cfg.auth.required,
     };
@@ -376,7 +368,6 @@ pub(crate) fn build_app_with_store(
         // LIF-406: the settings update path re-runs the startup reachability
         // guard before it may turn web auto-login on.
         .layer(axum::Extension(Reachability::from_config(cfg)))
-        .layer(axum::Extension(manager_ext))
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth_middleware_wrapper,
@@ -459,8 +450,8 @@ pub(crate) fn build_app_with_store(
     // LIF-465: the anonymous project view. Merged here, *after* the auth
     // middleware has been layered onto `authed_routes`, so it is genuinely
     // outside that middleware rather than carved out of it by path. Nothing in
-    // `api::public` can see an identity extension, an auth config or the API
-    // key manager, because none of them are layered onto this router. Only
+    // `api::public` can see an identity extension or auth config, because
+    // neither is layered onto this router. Only
     // published projects are reachable through it (the flag is checked in the
     // SQL of every read), and only with `GET`.
     let app = app.merge(api::public::router(pool, attachment_store, trusted_proxies));
@@ -540,6 +531,13 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let pool = db::open(&cfg.database.path)?;
+    let unsupported_key_formats = auth::unsupported_api_key_format_count(&pool)?;
+    if unsupported_key_formats > 0 {
+        warn!(
+            unsupported_key_formats,
+            "API key records with an unsupported format cannot authenticate. Check `lific key list`; rotate before reuse only for integrations that still need credentials."
+        );
+    }
     info!(path = %cfg.database.path.display(), "database ready");
 
     // Seed the instance-settings row on first run, taking the initial
@@ -583,10 +581,6 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Key manager for auth
-    let manager =
-        auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
-
     // Auto-generate a key if none exist and no human operator exists
     // yet (LIFIC-9: once a human exists we stop auto-minting the
     // unbound "default" key — keys are minted on demand). The three
@@ -595,7 +589,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     //   2. human present, still no keys → passwordless mode
     //   3. keys exist → plain count
     if auth::should_mint_initial_key(&pool) {
-        let key = auth::create_api_key(&pool, &manager, "default", None)?;
+        let key = auth::create_api_key(&pool, "default", None)?;
         info!("no API keys found, auto-generated initial key");
         print_initial_key(&key);
     } else if !auth::has_any_keys(&pool) {
@@ -638,7 +632,6 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let app = build_app_with_store(
         cfg,
         pool.clone(),
-        manager,
         realtime::RealtimeHub::new(),
         trusted_proxies,
         attachment_store,
@@ -1275,7 +1268,6 @@ mod public_surface_tests {
         let app = build_app_with_store(
             &cfg,
             pool,
-            auth::create_key_manager().expect("key manager"),
             realtime::RealtimeHub::new(),
             trusted_proxies,
             store,

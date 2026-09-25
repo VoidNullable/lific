@@ -388,6 +388,16 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("GET", "/api/issues/resolve/{identifier}"), Gated(Viewer)),
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),
+        (("GET", "/api/issues/{id}/waits"), Gated(Viewer)),
+        (
+            ("GET", "/api/clock"),
+            Exempt("server calendar day and UTC offset for any signed-in caller; no project data"),
+        ),
+        (("POST", "/api/issues/{id}/waits"), Gated(Maintainer)),
+        (
+            ("DELETE", "/api/issues/{id}/waits/{wait_id}"),
+            Gated(Maintainer),
+        ),
         (("POST", "/api/issues/reverse"), Gated(Maintainer)),
         // ── Activity / export (all read-side, Viewer) ──
         (("GET", "/api/issues/{id}/activity"), Gated(Viewer)),
@@ -579,6 +589,7 @@ fn mcp_manifest() -> HashMap<&'static str, Classification> {
     HashMap::from([
         ("search", Filtered),
         ("get_activity", Gated(Viewer)),
+        ("get_briefing", Gated(Viewer)),
         ("list_issues", Gated(Viewer)),
         ("get_issue", Gated(Viewer)),
         ("export", Gated(Viewer)),

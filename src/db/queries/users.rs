@@ -2464,8 +2464,7 @@ mod tests {
             let conn = pool.read().unwrap();
             get_user_by_id(&conn, owner).unwrap().username
         });
-        let manager = crate::auth::create_key_manager().unwrap();
-        let _ = crate::auth::create_api_key(&pool, &manager, &name, Some(bot)).unwrap();
+        let _ = crate::auth::create_api_key(&pool, &name, Some(bot)).unwrap();
 
         let listed = {
             let conn = pool.read().unwrap();

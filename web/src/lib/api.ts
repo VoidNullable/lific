@@ -855,6 +855,62 @@ export interface Issue {
   relates_to?: string[];
   duplicates?: string[];
   duplicated_by?: string[];
+  /** LIF-484: user and date blockers. Absent when the issue has none. */
+  waits?: IssueWait[];
+}
+
+// ── Waits: user and date blockers (LIF-484) ────────────────
+//
+// A wait blocks an issue on a person (until someone clears it) or on a
+// window of days. A date wait blocks before `earliest`, is due to check from
+// `earliest` through `latest`, and is overdue after `latest`. `state` is the
+// server's answer at read time; `lib/issues/waits.ts` recomputes it against
+// today so a row held across midnight does not go stale.
+
+export type WaitKind = "user" | "date";
+export type WaitState = "holding" | "due" | "overdue";
+
+export interface IssueWait {
+  id: number;
+  issue_id: number;
+  kind: WaitKind;
+  user_id?: number;
+  username?: string;
+  display_name?: string;
+  /** YYYY-MM-DD, date waits only. */
+  earliest?: string;
+  /** YYYY-MM-DD, equal to `earliest` for a single day. */
+  latest?: string;
+  note: string;
+  state: WaitState;
+  created_at: string;
+}
+
+export type CreateWaitInput =
+  | { user: string; note?: string }
+  | { from: string; until?: string; note?: string };
+
+export async function addIssueWait(issueId: number, input: CreateWaitInput) {
+  return request<IssueWait>(`/issues/${issueId}/waits`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** `GET /api/clock`: the server's day and UTC offset (minutes east). */
+export interface ServerClock {
+  today: string;
+  utc_offset_minutes: number;
+}
+
+export async function getServerClock() {
+  return request<ServerClock>("/clock");
+}
+
+export async function clearIssueWait(issueId: number, waitId: number) {
+  return request<{ cleared: boolean }>(`/issues/${issueId}/waits/${waitId}`, {
+    method: "DELETE",
+  });
 }
 
 export interface IssueFilters {
@@ -1126,6 +1182,9 @@ export interface Comment {
   content: string;
   created_at: string;
   updated_at: string;
+  /** "verification" marks evidence recorded when the issue was closed.
+   *  Absent from a server too old to send it. */
+  kind?: "comment" | "verification";
 }
 
 // ── Activity / audit log (LIF-156/157) ─────────────────
@@ -1145,7 +1204,7 @@ export interface Activity {
   project_id: number | null;
   issue_id: number | null;
   page_id: number | null;
-  /** create | update | delete | attach | detach | link | unlink */
+  /** create | update | delete | attach | detach | link | unlink | wait | unwait */
   action: string;
   field: string | null;
   old_value: string | null;
@@ -1865,6 +1924,9 @@ export interface SearchResult {
   title: string;
   snippet: string;
   project_id: number | null;
+  /** Present when no result contained every word and this hit came from the
+   *  ranked any-word fallback. */
+  partial_match?: boolean;
 }
 
 export async function search(query: string, projectId?: number) {

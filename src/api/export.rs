@@ -298,9 +298,12 @@ pub(super) async fn export_issue(
         crate::db::queries::issue_project_id(conn, id)
     })?;
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
     let slot = db.acquire_export_slot()?;
     let (bundle, slot) = blocking_export(slot, move || {
-        with_read(&db, |conn| crate::export::export_issue(conn, &identifier))
+        with_read(&db, |conn| {
+            crate::export::export_issue(conn, &identifier, visible.as_ref())
+        })
     })
     .await?;
     single_file_response(
@@ -364,10 +367,13 @@ pub(super) async fn export_project(
         crate::db::queries::resolve_project_identifier(conn, &identifier)
     })?;
     authz::require_role(&db, &identity, project_id, Role::Viewer)?;
+    let visible = authz::visible_project_ids(&db, &identity)?;
     let slot = db.acquire_export_slot()?;
     let format = q.format.unwrap_or_else(|| "zip".into());
     let (bundle, slot) = blocking_export(slot, move || {
-        with_read(&db, |conn| crate::export::export_project(conn, &identifier))
+        with_read(&db, |conn| {
+            crate::export::export_project(conn, &identifier, visible.as_ref())
+        })
     })
     .await?;
     let (prepared, slot) = match format.as_str() {
@@ -674,6 +680,58 @@ mod tests {
         .await
         .expect("dropped responses should release their export slots");
         assert_eq!(retried.status(), StatusCode::OK);
+    }
+
+    /// Review follow-up to LIF-475: REST issue and project exports are
+    /// caller-scoped, so a relation to an issue in a project the caller
+    /// cannot view is left out of the frontmatter.
+    #[tokio::test]
+    async fn export_leaves_out_relations_to_projects_the_caller_cannot_view() {
+        use axum::response::IntoResponse;
+
+        let (db, _, _, _, viewer, _, project_id) = setup_membership_test();
+        let [blocker, visible, hidden] = {
+            let conn = db.write().unwrap();
+            crate::export::seed_hidden_relation(&conn, project_id)
+        };
+        let identity = Some(crate::resolve_caller::ResolvedIdentity {
+            user: crate::db::models::AuthUser {
+                id: viewer.id,
+                username: viewer.username,
+                display_name: viewer.display_name,
+                is_admin: viewer.is_admin,
+            },
+            transport: crate::actor::Transport::Web,
+        });
+        let json = || super::ExportQuery {
+            format: Some("json".into()),
+        };
+
+        let issue = super::export_issue(
+            axum::extract::State(db.clone()),
+            axum::Extension(identity.clone()),
+            axum::extract::Path(blocker),
+            axum::extract::Query(json()),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let project = super::export_project(
+            axum::extract::State(db),
+            axum::Extension(identity),
+            axum::extract::Path("MEM".into()),
+            axum::extract::Query(json()),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        for response in [issue, project] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(body.contains(&visible), "{body}");
+            assert!(!body.contains(&hidden), "{body}");
+        }
     }
 
     #[tokio::test]

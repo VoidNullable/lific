@@ -1,6 +1,9 @@
+mod arguments;
+pub(crate) mod page_reads;
 pub(crate) mod preinit;
 pub(crate) mod schemas;
 pub(crate) mod tools;
+mod waits;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -137,12 +140,11 @@ pub(crate) fn current_auth_user() -> Option<AuthUser> {
 /// there is deliberately no `Debug`, `Display` or accessor for it.
 pub(crate) struct StdioAuth {
     token: String,
-    manager: api_keys_simplified::ApiKeyManagerV0,
 }
 
 impl StdioAuth {
-    pub(crate) fn new(token: String, manager: api_keys_simplified::ApiKeyManagerV0) -> Self {
-        Self { token, manager }
+    pub(crate) fn new(token: String) -> Self {
+        Self { token }
     }
 
     /// Resolve the token against the database as it stands *now*.
@@ -153,7 +155,7 @@ impl StdioAuth {
     /// expired, belonging to a deactivated account or to a bot whose owner was
     /// deactivated), or a database failure, which fails closed.
     fn resolve(&self, db: &DbPool) -> Result<Option<AuthUser>, String> {
-        crate::auth::resolve_api_key_user(db, &self.manager, &self.token)
+        crate::auth::resolve_api_key_user(db, &self.token)
     }
 }
 
@@ -230,7 +232,7 @@ const SERVER_INSTRUCTIONS: &str = "Lific is a local-first issue tracker. Use lis
      Conventions: when you finish work on an issue, mark it done (status='done'). \
      Organize issues into modules; keep each issue a self-contained work item. \
      Prefer edit_issue/edit_page (exact string replacement) over update_issue/update_page for small changes. \
-      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, check for existing plans first: list_resources(resource_type='plan', project='X'), then get_plan(plan='X-PLAN-1') to see where you left off. \
+      Use plans (create_plan/get_plan) for multi-step or multi-session work; steps can mirror issues and stay in sync. On resume, call get_briefing(project='X', since='<last cursor>') first (omit since the first time) for plans' next steps, blocked, workable and active issues, and key pages; get_plan(plan='X-PLAN-1') gives a plan's full tree. \
      Use pages for documentation and design notes.";
 
 /// LIF-452: the one sentence a repository-bound stdio session appends to
@@ -551,7 +553,8 @@ impl ServerHandler for LificMcp {
 
     /// The one place every MCP tool call passes through, whatever the
     /// transport. The stdio credential check lives here rather than in each
-    /// tool for exactly that reason.
+    /// tool for exactly that reason, and so does the rewrite of an
+    /// unknown-parameter error into a did-you-mean (LIF-474).
     ///
     /// Not an `async fn`: the `rmcp` trait declares an explicit
     /// `MaybeSendFuture` bound on the return type, which the desugared form
@@ -565,10 +568,21 @@ impl ServerHandler for LificMcp {
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
+            let tool = request.name.clone();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             self.dispatch_tool(|| self.tool_router.call(tool_context))
                 .await
+                .map_err(|error| {
+                    let top_level = self.tool_router.get(&tool).map(|tool| {
+                        tool.input_schema
+                            .get("properties")
+                            .and_then(serde_json::Value::as_object)
+                            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    });
+                    arguments::explain_unknown_parameter(&tool, top_level.as_deref(), error)
+                })
         }
     }
 
@@ -707,7 +721,6 @@ mod tests {
 
         let auth_state = crate::auth::AuthState {
             db: pool.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
             required: true,
         };
@@ -797,9 +810,7 @@ mod tests {
             )
             .unwrap();
         }
-        let manager = crate::auth::create_key_manager().unwrap();
-        let unbound_key =
-            crate::auth::create_api_key(&pool, &manager, "mcp-operator", None).unwrap();
+        let unbound_key = crate::auth::create_api_key(&pool, "mcp-operator", None).unwrap();
         let project = {
             let conn = pool.write().unwrap();
             crate::db::queries::settings::update(
@@ -849,7 +860,6 @@ mod tests {
 
         let auth_state = crate::auth::AuthState {
             db: pool.clone(),
-            manager,
             public_url: "https://example.com".into(),
             required: true,
         };
@@ -916,9 +926,9 @@ mod tests {
         assert!(instructions.contains("edit_page"));
         assert!(instructions.contains("modules"));
         assert!(instructions.contains("create_plan"));
-        assert!(instructions.contains("check for existing plans"));
-        assert!(instructions.contains("list_resources(resource_type='plan', project='X')"));
-        assert!(instructions.contains("then get_plan(plan='X-PLAN-1') to see where you left off"));
+        // LIF-483: resuming starts with one briefing instead of a plan listing.
+        assert!(instructions.contains("On resume, call get_briefing(project='X', since="));
+        assert!(instructions.contains("get_plan(plan='X-PLAN-1') gives a plan's full tree"));
         assert!(instructions.contains("pages for documentation"));
     }
 
@@ -1031,7 +1041,6 @@ mod tests {
     /// an agent as `LIFIC_TOKEN`.
     fn connected_agent(
         pool: &crate::db::DbPool,
-        manager: &api_keys_simplified::ApiKeyManagerV0,
     ) -> (crate::db::models::AuthUser, crate::db::models::User, String) {
         // A separate instance admin exists as the operator fallback, so
         // deactivating the owner is not "the last admin" and the agent's
@@ -1049,7 +1058,7 @@ mod tests {
             )
             .expect("create bot")
         };
-        let token = crate::auth::create_api_key(pool, manager, "opencode-owner", Some(bot.id))
+        let token = crate::auth::create_api_key(pool, "opencode-owner", Some(bot.id))
             .expect("mint agent key");
         (owner, bot, token)
     }
@@ -1113,9 +1122,8 @@ mod tests {
     async fn a_stdio_tool_call_resolves_as_the_agent_the_token_names() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
-        let (owner, bot, token) = connected_agent(&pool, &manager);
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let (owner, bot, token) = connected_agent(&pool);
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         let identity = observed_identity(&server, &pool)
             .await
@@ -1135,9 +1143,8 @@ mod tests {
     async fn revoking_the_token_stops_the_very_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
-        let (_owner, _bot, token) = connected_agent(&pool, &manager);
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let (_owner, _bot, token) = connected_agent(&pool);
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         assert!(observed_identity(&server, &pool).await.is_ok());
 
@@ -1189,9 +1196,8 @@ mod tests {
     async fn a_live_credential_dispatches_the_tool_through_the_central_seam() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
-        let (_owner, _bot, token) = connected_agent(&pool, &manager);
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let (_owner, _bot, token) = connected_agent(&pool);
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         let (body, ran) = mutating_tool(&pool);
         let result = server.dispatch_tool(body).await.expect("dispatches");
@@ -1206,9 +1212,8 @@ mod tests {
     async fn an_account_lockdown_stops_the_agents_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
-        let (owner, _bot, token) = connected_agent(&pool, &manager);
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let (owner, _bot, token) = connected_agent(&pool);
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         assert!(observed_identity(&server, &pool).await.is_ok());
         {
@@ -1222,9 +1227,8 @@ mod tests {
     async fn deactivating_the_owner_stops_the_agents_next_tool_call() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
-        let (owner, _bot, token) = connected_agent(&pool, &manager);
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let (owner, _bot, token) = connected_agent(&pool);
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         assert!(observed_identity(&server, &pool).await.is_ok());
         {
@@ -1241,10 +1245,9 @@ mod tests {
     async fn an_unbound_key_still_resolves_to_the_operator() {
         let _sguard = crate::mcp::tools::acquire_test_guard();
         let pool = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().unwrap();
         let admin = seed_user(&pool, "operator", true);
-        let token = crate::auth::create_api_key(&pool, &manager, "default", None).unwrap();
-        let server = server_for(&pool, Some(StdioAuth::new(token, manager)));
+        let token = crate::auth::create_api_key(&pool, "default", None).unwrap();
+        let server = server_for(&pool, Some(StdioAuth::new(token)));
 
         let identity = observed_identity(&server, &pool)
             .await

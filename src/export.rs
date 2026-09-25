@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -318,14 +318,89 @@ fn bounded_issue_comments(conn: &Connection, issue_id: i64) -> Result<Vec<Commen
     )
 }
 
-pub fn export_issue(conn: &Connection, identifier: &str) -> Result<ExportBundle, LificError> {
+/// The projects whose issues an export may name in relation frontmatter.
+///
+/// `None` renders every relation: the local CLI export (whoever holds the
+/// database file already has all of it), an admin, or an instance without
+/// authorization enforcement. `Some(ids)` is a caller-scoped export over REST
+/// or MCP: a relation to an issue outside `ids` is left out entirely, with no
+/// placeholder or count, so the export does not reveal that the issue exists.
+/// This is the same "silently absent" rule every other cross-project read
+/// follows (LIF-377).
+pub type VisibleProjects<'a> = Option<&'a HashSet<i64>>;
+
+pub fn export_issue(
+    conn: &Connection,
+    identifier: &str,
+    visible: VisibleProjects<'_>,
+) -> Result<ExportBundle, LificError> {
     let transaction = conn.unchecked_transaction()?;
-    let bundle = export_issue_snapshot(&transaction, identifier)?;
+    let bundle = export_issue_snapshot(&transaction, identifier, visible)?;
     transaction.commit()?;
     Ok(bundle)
 }
 
-fn export_issue_snapshot(conn: &Connection, identifier: &str) -> Result<ExportBundle, LificError> {
+/// Drop relation identifiers the caller cannot see; see [`VisibleProjects`].
+/// A related issue that no longer resolves is dropped too rather than failing
+/// the whole export.
+fn retain_visible_relations(conn: &Connection, issue: &mut Issue, visible: VisibleProjects<'_>) {
+    let Some(visible) = visible else {
+        return;
+    };
+    for relations in [
+        &mut issue.blocks,
+        &mut issue.blocked_by,
+        &mut issue.relates_to,
+        &mut issue.duplicates,
+        &mut issue.duplicated_by,
+    ] {
+        relations.retain(|identifier| {
+            queries::resolve_identifier(conn, identifier)
+                .and_then(|id| queries::issue_project_id(conn, id))
+                .is_ok_and(|project_id| visible.contains(&project_id))
+        });
+    }
+}
+
+/// Test fixture for the relation-visibility checks on every export surface:
+/// in `project_id`, issue A blocks issue B, and A also blocks an issue in a
+/// new project `SEC` with no members. Returns A, B and the hidden identifier.
+#[cfg(test)]
+pub(crate) fn seed_hidden_relation(conn: &Connection, project_id: i64) -> [String; 3] {
+    use crate::db::models::{CreateIssue, CreateProject};
+    let hidden_project = queries::create_project(
+        conn,
+        &CreateProject {
+            name: "Secret".into(),
+            identifier: "SEC".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let issue = |project_id, title: &str| {
+        queries::create_issue(
+            conn,
+            &CreateIssue {
+                project_id,
+                title: title.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let blocker = issue(project_id, "Blocker");
+    let visible = issue(project_id, "Visible");
+    let hidden = issue(hidden_project.id, "Hidden");
+    queries::link_issues(conn, blocker.id, visible.id, "blocks").unwrap();
+    queries::link_issues(conn, blocker.id, hidden.id, "blocks").unwrap();
+    [blocker.identifier, visible.identifier, hidden.identifier]
+}
+
+fn export_issue_snapshot(
+    conn: &Connection,
+    identifier: &str,
+    visible: VisibleProjects<'_>,
+) -> Result<ExportBundle, LificError> {
     let issue_id = queries::resolve_identifier(conn, identifier)?;
     let oversized: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?1 AND deleted_at IS NULL AND (
@@ -344,7 +419,8 @@ fn export_issue_snapshot(conn: &Connection, identifier: &str) -> Result<ExportBu
     ensure_issue_preflight(conn, issue_id, MAX_EXPORT_TOTAL_BYTES as i64)?;
     let project_id = queries::issue_project_id(conn, issue_id)?;
     let project = bounded_project(conn, project_id)?;
-    let issue = queries::get_issue(conn, issue_id)?;
+    let mut issue = queries::get_issue(conn, issue_id)?;
+    retain_visible_relations(conn, &mut issue, visible);
     ensure_text_size("issue title", &issue.title)?;
     ensure_text_size("issue description", &issue.description)?;
     let comments = bounded_issue_comments(conn, issue.id)?;
@@ -402,9 +478,13 @@ fn export_page_snapshot(conn: &Connection, identifier: &str) -> Result<ExportBun
     Ok(bundle.finish())
 }
 
-pub fn export_project(conn: &Connection, identifier: &str) -> Result<ExportBundle, LificError> {
+pub fn export_project(
+    conn: &Connection,
+    identifier: &str,
+    visible: VisibleProjects<'_>,
+) -> Result<ExportBundle, LificError> {
     let transaction = conn.unchecked_transaction()?;
-    let bundle = export_project_snapshot(&transaction, identifier)?;
+    let bundle = export_project_snapshot(&transaction, identifier, visible)?;
     transaction.commit()?;
     Ok(bundle)
 }
@@ -533,6 +613,7 @@ fn ensure_project_preflight(
 fn export_project_snapshot(
     conn: &Connection,
     identifier: &str,
+    visible: VisibleProjects<'_>,
 ) -> Result<ExportBundle, LificError> {
     let project_id = queries::resolve_project_identifier(conn, identifier)?;
     ensure_project_preflight(
@@ -557,7 +638,8 @@ fn export_project_snapshot(
 
     let mut bundle = BundleBuilder::new(project.identifier.clone())?;
     for issue_id in issue_ids {
-        let issue = queries::get_issue(conn, issue_id)?;
+        let mut issue = queries::get_issue(conn, issue_id)?;
+        retain_visible_relations(conn, &mut issue, visible);
         ensure_text_size("issue title", &issue.title)?;
         ensure_text_size("issue description", &issue.description)?;
         let comments = bounded_issue_comments(conn, issue.id)?;
@@ -1101,14 +1183,14 @@ mod tests {
         queries::delete_page(&conn, doomed_page.id).unwrap();
         queries::comments::delete_comment(&conn, doomed_comment.id).unwrap();
 
-        let bundle = export_project(&conn, "EXP").unwrap();
+        let bundle = export_project(&conn, "EXP", None).unwrap();
         assert_eq!(bundle.files.len(), 1, "only the live issue is exported");
         let file = &bundle.files[0];
         assert!(file.path.contains("exp-1-kept"), "got: {}", file.path);
         assert!(!file.content.contains("retracted remark"));
 
         // The single-entity exports 404 rather than rendering a tombstone.
-        assert!(export_issue(&conn, &doomed.identifier).is_err());
+        assert!(export_issue(&conn, &doomed.identifier, None).is_err());
         assert!(export_page(&conn, &doomed_page.identifier).is_err());
     }
 
@@ -1187,7 +1269,7 @@ mod tests {
         )
         .unwrap();
 
-        let bundle = export_project(&conn, "EXP").unwrap();
+        let bundle = export_project(&conn, "EXP", None).unwrap();
         assert_eq!(bundle.root, "EXP");
         assert_eq!(bundle.files.len(), 2);
         assert!(
@@ -1213,6 +1295,36 @@ mod tests {
             issue_file.content.matches("First exported comment").count(),
             1
         );
+    }
+
+    #[test]
+    fn caller_scoped_exports_leave_out_relations_to_hidden_projects() {
+        let db = open_memory().unwrap();
+        let conn = db.write().unwrap();
+        let project = queries::create_project(
+            &conn,
+            &CreateProject {
+                name: "Shown".into(),
+                identifier: "SHO".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let [blocker, visible, hidden] = super::seed_hidden_relation(&conn, project.id);
+        let only_shown = HashSet::from([project.id]);
+
+        for scoped in [
+            export_issue(&conn, &blocker, Some(&only_shown)).unwrap(),
+            export_project(&conn, "SHO", Some(&only_shown)).unwrap(),
+        ] {
+            let text = &scoped.files[0].content;
+            assert!(text.contains(&visible), "{text}");
+            assert!(!text.contains(&hidden), "{text}");
+        }
+        // The hidden side of the relation is not exported at all, and an
+        // unscoped (operator) export still names it.
+        let full = export_issue(&conn, &blocker, None).unwrap();
+        assert!(full.files[0].content.contains(&hidden));
     }
 
     // LIF-136: duplicate relations must appear in exported frontmatter, both
@@ -1247,7 +1359,7 @@ mod tests {
         queries::link_issues(&conn, dup.id, canonical.id, "duplicate").unwrap();
 
         // The single-issue export path populates relations via get_issue.
-        let dup_bundle = export_issue(&conn, "DUP-1").unwrap();
+        let dup_bundle = export_issue(&conn, "DUP-1", None).unwrap();
         let dup_file = &dup_bundle.files[0];
         assert!(
             dup_file.content.contains("duplicates:") && dup_file.content.contains("DUP-2"),
@@ -1260,7 +1372,7 @@ mod tests {
             dup_file.content
         );
 
-        let canonical_bundle = export_issue(&conn, "DUP-2").unwrap();
+        let canonical_bundle = export_issue(&conn, "DUP-2", None).unwrap();
         let canonical_file = &canonical_bundle.files[0];
         assert!(
             canonical_file.content.contains("duplicated_by:")
@@ -1657,7 +1769,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = export_project(&conn, "FLD").unwrap_err();
+        let error = export_project(&conn, "FLD", None).unwrap_err();
         assert!(error.to_string().contains("too many metadata entries"));
     }
 
@@ -1777,7 +1889,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = export_project(&conn, "META").unwrap_err();
+        let error = export_project(&conn, "META", None).unwrap_err();
         assert!(error.to_string().contains("too many metadata entries"));
     }
 

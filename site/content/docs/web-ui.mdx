@@ -50,6 +50,8 @@ Deleting an issue removes it from the list straight away and shows a toast with 
 
 The issue view puts the description on the left and the fields on the right: Status, Priority, Module and Labels, then any relations (Blocked by, Blocks, Related, Duplicate of, Duplicated by), then Created and Updated. Relation chips show the other issue's current status and change when it does. `Shift`-click a chip to preview that issue instead of opening it.
 
+The **Waiting on** field holds blockers that are not issues: a person, or a window of days with an optional note. Choose **Add blocker**, then **Person** or **Dates**. Each one shows whether it is still waiting, due to check or overdue, and its clear button removes it. List rows and board cards show a small marker naming who or when the issue waits on, in red once overdue. See [waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date).
+
 The status chip in the top bar is also a picker, so you can change status from there. Status, priority and module changes show a toast with **Undo**.
 
 Start and target dates are not shown or editable in the browser. Set them through the [CLI](/docs/cli), the [REST API](/docs/rest-api) or [MCP](/docs/mcp).
@@ -75,7 +77,7 @@ To add a relation, drag from the dot on a card's right edge onto another card, t
 
 Issues and pages have one comment thread each. Comments are Markdown and can carry attachments. Type `@` to mention someone.
 
-Only your own comments show an actions menu, with **Edit** and **Delete**. An edited comment is marked `edited`; hover the label for the exact time.
+Only your own comments show an actions menu, with **Edit** and **Delete**. An edited comment is marked `edited`; hover the label for the exact time. A **Verification** badge marks a comment that holds the evidence an agent recorded when it closed the issue.
 
 Each comment has a link next to its author, so you can send someone one comment instead of the whole thread. In Markdown, `#42` links to comment 42 on the same issue or page, and `APP-25#comment-42` links to a comment elsewhere. Neither becomes a link inside code.
 
@@ -140,7 +142,7 @@ The command palette finds things by identifier or by text:
 - `APP156`, `app 156` and `APP-156` go straight to that issue.
 - `app doc 3` or `APP-DOC-3` opens that page.
 - A bare number such as `156` looks for that issue number in every project.
-- Anything else searches the current project's issues and pages as you type, along with project, module and folder names, and adds full-text results from the server when there are few local matches.
+- Anything else searches the current project's issues and pages as you type, along with project, module and folder names, and adds full-text results from the server when there are few local matches. When no server result contains every word, that group is labelled "partial matches" and shows results containing any of them.
 
 On an issue or page, the palette also offers actions for it, such as setting its status or renaming it.
 

@@ -11,7 +11,12 @@
 // the highest seq it has applied; `/changes?since=cursor` returns everything
 // above it, tombstones included.
 
+import type { IssueWait } from "../api";
+
 export type SyncKind = "issue" | "page" | "comment";
+
+/** Mirrors the server's `CommentKind`. */
+export type CommentKind = "comment" | "verification";
 
 /** A live issue row. `labels` carries label NAMES (not ids), matching the
  *  `Issue.labels` shape the list views already filter on. */
@@ -36,6 +41,9 @@ export interface IssueRow {
    *  a detail view still fetches the full body. */
   preview: string;
   labels: string[];
+  /** LIF-484: user and date blockers. Omitted when the issue has none; a
+   *  wait added or cleared re-delivers the row at a new seq. */
+  waits?: IssueWait[];
 }
 
 /** A live page row. Note the field the wire shape does NOT carry: no
@@ -73,6 +81,8 @@ export interface CommentRow {
   username: string;
   created_at: string;
   updated_at: string;
+  /** The comment's own kind; `kind` above is the change discriminator. */
+  comment_kind: CommentKind;
 }
 
 /** A deleted row: identity + stream position, nothing else. `kind` still

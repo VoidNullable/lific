@@ -59,13 +59,36 @@ Two issues can be linked in one of three ways. Links may cross projects, but an 
 
 Only `blocks` changes behavior. A duplicate is not closed automatically; set its status yourself.
 
+## Waiting on a person or a date
+
+Some work is blocked by something that is not an issue: a decision someone owes you, or a reply that should arrive next week. Record that as a wait instead of a placeholder issue.
+
+| Kind | Blocks until | Example |
+| --- | --- | --- |
+| User | Someone clears the wait | Waiting on `@ada-lovelace` to decide the schema |
+| Date | The first day of its window | Waiting for 2026-09-28 to 2026-10-02, "state filing office" |
+
+A date wait has an earliest and a latest day, and a single date is a window of one day. On any given day it is in one of three states:
+
+| State | When | Blocks the issue? |
+| --- | --- | --- |
+| Holding | Before the earliest day | Yes |
+| Due | From the earliest day through the latest day | No, and it is shown as due to check |
+| Overdue | After the latest day | No, and it is shown as overdue |
+
+A due or overdue wait stays on the issue until someone clears it, so the follow-up is not forgotten. A user wait holds until it is cleared. Clearing a wait removes it, and the activity log records both the wait and the clear.
+
+"Today" is the server's local calendar day, for every client. MCP, the REST API and the web UI therefore agree on whether an issue is blocked even when a browser is in another timezone.
+
+An issue can wait on a given person once and on a given window once. A wait's note is at most 500 characters. Waits are private: the public view of a [published project](/docs/public-projects) leaves them out. Add and clear waits in the web UI's **Waiting on** field, with MCP `link_issues` and `unlink_issues`, or through `/api/issues/{id}/waits`.
+
 ## Ready and blocked work
 
 Two filters answer "what can be worked on now" without walking the relation graph yourself. Both exist on the MCP `list_issues` tool and the REST issue list; the CLI has `lific issue list --workable`.
 
-`workable=true` returns issues that are open (not `done` or `cancelled`) and whose blockers are all `done`. A deleted blocker no longer counts.
+`workable=true` returns issues that are open (not `done` or `cancelled`), whose blocking issues are all `done`, and that have no holding wait. A deleted blocker no longer counts.
 
-`blocked=true` returns issues with at least one blocker that is not `done`. It does not look at the issue's own status, so a closed issue with an open blocker still appears.
+`blocked=true` returns issues with at least one blocking issue that is not `done`, or at least one holding wait. It does not look at the issue's own status, so a closed issue with an open blocker still appears.
 
 A blocker that was `cancelled` still blocks. That is deliberate: cancelling the prerequisite does not make the dependent work possible. When the dependency no longer matters, remove the `blocks` relation.
 
@@ -81,4 +104,4 @@ By default the last write wins. To avoid overwriting someone else's change, send
 
 ## Who can change an issue
 
-When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, linking, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.
+When project membership is enforced, reading an issue takes the `viewer` role in its project, and creating, editing, linking, adding or clearing a wait, deleting or restoring one takes `maintainer`. Linking two issues in different projects takes `maintainer` in both. [Projects](/docs/concepts/projects#members-and-roles) describes the roles.

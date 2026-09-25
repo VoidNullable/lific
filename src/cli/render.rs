@@ -300,6 +300,9 @@ pub fn search_results(results: &[SearchResult]) -> String {
         w!(out, "No results found.");
         return out;
     }
+    if results[0].partial_match {
+        w!(out, "{}", crate::db::queries::partial_match_notice(None));
+    }
     w!(out, "{} result(s):\n", results.len());
     for result in results {
         let identifier = result.identifier.as_deref().unwrap_or("?");
@@ -562,6 +565,7 @@ mod tests {
             relates_to: Vec::new(),
             duplicates: Vec::new(),
             duplicated_by: Vec::new(),
+            waits: Vec::new(),
         }
     }
 
@@ -577,6 +581,7 @@ mod tests {
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
             seq: 1,
+            kind: Default::default(),
         }
     }
 

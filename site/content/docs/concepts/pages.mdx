@@ -72,6 +72,14 @@ A pinned page is shown in its own section above the folder tree in the page list
 
 Every page has its own comment thread, including workspace pages. Anyone who can read the page can comment. See [Comments and activity](/docs/concepts/comments-and-activity).
 
+## Long pages
+
+Agent harnesses cut tool output off at roughly 50 KB without saying so. To keep a read from being silently truncated, `get_page` returns a page of up to 30,000 characters whole, and a longer page as its outline (each heading with the size of its section) plus the start of its content. The agent then reads the part it needs, such as `get_page(identifier="APP-DOC-3", section="Current state")`. A section can be long too, for example a log of dated entries with no subheadings, so every cut response ends with the exact call that continues it, with an `offset`. The web UI always shows the whole page.
+
+Creating or editing a page past that size through MCP adds a line to the response suggesting a split, or moving old history to an archive page.
+
+To catch up on a page read earlier, an agent passes the `seq` from that read as `since_seq` and gets back only the changed lines. Lific keeps up to 50 recent versions of each page's content for this, dropping the oldest once they total 2,000,000 characters. The history is removed when the page is purged from the trash, and project archives do not carry it. [`get_page`](/docs/mcp/tools#get_page) documents every option.
+
 ## Deleting and restoring
 
 Deleting a page moves it to the trash, along with its comments. It disappears from lists, search and public projects at once. For the next 30 days, a maintainer (an administrator, for a workspace page) can restore it with `POST /api/pages/{id}/restore`, and the comments come back with it. After that the retention sweep removes it permanently. `trash_days` in the [`[retention]`](/docs/configuration#retention) section sets the window.

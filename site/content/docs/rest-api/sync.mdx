@@ -20,6 +20,8 @@ Searches issues, pages, comments and attachments in every project you can read. 
 
 Returns an array of `result_type`, `id`, `identifier`, `title`, `snippet` and `project_id`. For a comment on a page, `parent_page_id` holds the page's id.
 
+In `fts` mode every word must match. When nothing in the requested scope contains every word and the query has more than one word, the search runs again with any word allowed, ranked by relevance (or recency, with `sort=recent`), and each of those results carries `partial_match: true`. Ordinary results have no `partial_match` field. Paging walks the same partial list. `literal` mode never falls back.
+
 Attachment matches cover file names and the text of small text files. Their relevance cannot be compared with the other results, so in `fts` mode they come after all issue, page and comment matches. An attachment result's `identifier` names an item you can read that uses it, and `title` is the file name.
 
 ```bash
@@ -41,7 +43,7 @@ Rows from both endpoints are summaries. They leave out issue descriptions, page 
 
 Every live issue and page in the project, and the cursor to continue from. **Viewer.**
 
-Returns `cursor`, `issues` and `pages`. Rows in the trash are left out, and comments are not included.
+Returns `cursor`, `issues` and `pages`. Each row has the same fields as the matching `/changes` row below, `waits` included. Rows in the trash are left out, and comments are not included.
 
 The cursor is read before the rows, so a write that lands during the request can appear both in the snapshot and in the next `/changes`. Apply changes as updates keyed by `id` and a duplicate does no harm.
 
@@ -55,9 +57,9 @@ Returns `changes`, `cursor` and `has_more`. `cursor` is the highest `seq` in `ch
 
 Every change has `kind` (`issue`, `page` or `comment`), `seq`, `deleted` and `id`. A change with `deleted: true` carries nothing else: remove your copy. Otherwise it also has:
 
-- **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`
+- **issue:** `identifier`, `title`, `status`, `priority`, `module_id`, `sort_order`, `start_date`, `target_date`, `created_at`, `updated_at`, `preview`, `labels`, and `waits` when the issue has any (see [waits](/docs/rest-api/work#waits))
 - **page:** `identifier`, `title`, `status`, `folder_id`, `pinned`, `created_at`, `updated_at`, `preview`, `labels`
-- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`
+- **comment:** `issue_id`, `page_id`, `user_id`, `username`, `created_at`, `updated_at`, `comment_kind` (`comment` or `verification`; not `kind`, which already names the change type)
 
 A comment belongs to the project of the issue or page it is on.
 

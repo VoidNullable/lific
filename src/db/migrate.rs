@@ -256,6 +256,26 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "user project order",
         include_str!("../../migrations/052_user_project_order.sql"),
     ),
+    (
+        53,
+        "revoke unindexed api keys",
+        include_str!("../../migrations/053_revoke_unindexed_api_keys.sql"),
+    ),
+    (
+        54,
+        "issue waits",
+        include_str!("../../migrations/054_issue_waits.sql"),
+    ),
+    (
+        55,
+        "page revisions",
+        include_str!("../../migrations/055_page_revisions.sql"),
+    ),
+    (
+        56,
+        "comment kind",
+        include_str!("../../migrations/056_comment_kind.sql"),
+    ),
 ];
 
 /// Migrations that rebuild a table other tables reference by foreign key.
@@ -578,7 +598,7 @@ mod tests {
     /// migration `stop`: every earlier migration applied and stamped. The
     /// pool helpers (`db::open_memory`) always run the full set, so this is
     /// the only way to exercise an upgrade path's data handling.
-    fn migrated_up_to(stop: i64) -> Connection {
+    pub(super) fn migrated_up_to(stop: i64) -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(
@@ -638,6 +658,39 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run(&conn).expect("initial migration");
         conn
+    }
+
+    #[test]
+    fn api_key_upgrade_revokes_only_rows_without_an_indexed_id() {
+        let conn = migrated_up_to(53);
+        conn.execute_batch(
+            "INSERT INTO api_keys(name,key_hash,key_id) VALUES
+                ('legacy-null','legacy-hash',NULL),
+                ('indexed','legacy-hash','0123456789abcdef0123456789abcdef');",
+        )
+        .unwrap();
+
+        run(&conn).expect("API-key retirement migration");
+
+        let revoked: bool = conn
+            .query_row(
+                "SELECT revoked FROM api_keys WHERE name = 'legacy-null'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexed_revoked: bool = conn
+            .query_row(
+                "SELECT revoked FROM api_keys WHERE name = 'indexed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(revoked, "unindexed legacy keys must be rotated");
+        assert!(
+            !indexed_revoked,
+            "indexed keys remain eligible for migration"
+        );
     }
 
     #[test]
@@ -775,6 +828,41 @@ mod tests {
             .unwrap();
             assert_eq!(conn.last_insert_rowid(), 43);
         }
+    }
+
+    #[test]
+    fn comment_kind_migration_defaults_existing_rows_without_moving_their_seq() {
+        let conn = migrated_up_to(56);
+        conn.execute_batch(
+            "INSERT INTO users(id,username,email,password_hash) VALUES(1,'owner','owner@test','hash');
+             INSERT INTO projects(id,name,identifier) VALUES(1,'Before','BEF');
+             INSERT INTO issues(id,project_id,sequence,title) VALUES(1,1,1,'Issue');
+             INSERT INTO comments(id,issue_id,user_id,content) VALUES(1,1,1,'Existing');",
+        )
+        .unwrap();
+        let seq_before = count(&conn, "SELECT seq FROM comments WHERE id=1");
+        run(&conn).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM comments WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "comment");
+        assert_eq!(
+            count(&conn, "SELECT seq FROM comments WHERE id=1"),
+            seq_before
+        );
+        conn.execute(
+            "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'Tests pass','verification')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO comments(issue_id,user_id,content,kind) VALUES(1,1,'x','note')",
+                [],
+            )
+            .is_err(),
+            "the CHECK constraint must reject an unknown kind"
+        );
     }
 
     fn stored_checksum(conn: &Connection, version: i64) -> Option<String> {
@@ -1832,5 +1920,53 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(lifecycle(&conn), 1, "a stamp is not a lifecycle event");
+    }
+}
+
+#[cfg(test)]
+mod page_revisions_tests {
+    use super::run;
+    use super::tests::migrated_up_to;
+
+    /// LIF-480: pages that exist before migration 055 start their history at
+    /// their current version, so since_seq works on them straight away.
+    #[test]
+    fn page_revisions_upgrade_backfills_each_page_at_its_current_seq() {
+        let conn = migrated_up_to(55);
+        conn.execute_batch(
+            "INSERT INTO projects(id,name,identifier) VALUES (1,'P','PRV');
+             INSERT INTO pages(id,project_id,sequence,title,content) VALUES (1,1,1,'Doc','before');",
+        )
+        .unwrap();
+        let seq: i64 = conn
+            .query_row("SELECT seq FROM pages WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+
+        run(&conn).unwrap();
+
+        let rows = |conn: &rusqlite::Connection| -> Vec<(i64, String)> {
+            let mut statement = conn
+                .prepare("SELECT seq, content FROM page_revisions WHERE page_id = 1 ORDER BY seq")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows(&conn), [(seq, "before".to_string())]);
+
+        conn.execute("UPDATE pages SET content = 'after' WHERE id = 1", [])
+            .unwrap();
+        let now: i64 = conn
+            .query_row("SELECT seq FROM pages WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        // One write can draw more than one seq (the updated_at bump stamps
+        // again); the new version starts at the first of them.
+        let after = rows(&conn);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], (seq, "before".to_string()));
+        assert_eq!(after[1].1, "after");
+        assert!(seq < after[1].0 && after[1].0 <= now);
     }
 }

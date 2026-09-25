@@ -80,7 +80,7 @@ With a bound project, an omitted `project` argument means the bound project on t
 
 | Tool | When the binding fills in `project` |
 | --- | --- |
-| `list_issues`, `create_issue`, `get_board`, `create_plan` | Always. |
+| `list_issues`, `create_issue`, `get_board`, `create_plan`, `get_briefing` | Always. |
 | `list_resources` | For `resource_type` `issue`, `plan`, `module`, `label` and `folder`. |
 
 An explicit `project` always wins. Everything else keeps its unbound meaning: `search` still searches every project, `create_page` without a project still creates a workspace page, and `list_resources` for pages still lists every project's pages. Tools that take an identifier such as `APP-42` still need it, and bulk updates and deletes never pick up an implicit project. A binding never raises anyone's permissions.

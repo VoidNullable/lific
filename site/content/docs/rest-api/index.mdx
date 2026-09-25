@@ -191,7 +191,7 @@ These records appear across many endpoints. Other shapes are described with the 
 
 `id`, `project_id`, `sequence` (the number in the identifier), `identifier`, `title`, `description`, `status` (`backlog`, `todo`, `active`, `done` or `cancelled`), `priority` (`urgent`, `high`, `medium`, `low` or `none`), `module_id`, `sort_order` (a number), `start_date`, `target_date`, `created_at`, `updated_at`, `seq` and `labels` (label names).
 
-`source` appears only on an issue that came from an import, such as `github:owner/repo#12`. Single-issue responses add relation arrays when they have entries: `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`, each a list of identifiers. An empty relation array is left out.
+`source` appears only on an issue that came from an import, such as `github:owner/repo#12`. Single-issue responses add relation arrays when they have entries: `blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`, each a list of identifiers. An empty relation array is left out. An issue that waits on a person or a date carries `waits`, an array of [`Wait`](/docs/rest-api/work#waits) objects, in lists and single reads; it too is left out when empty.
 
 ```json
 {
@@ -221,7 +221,7 @@ These records appear across many endpoints. Other shapes are described with the 
 
 ### Comment
 
-`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at` and `seq`.
+`id`, `issue_id` or `page_id` (exactly one is set), `user_id`, `author` (username), `author_display_name`, `content` (Markdown), `created_at`, `updated_at`, `seq` and `kind`. `kind` is `comment`, or `verification` for the evidence an agent recorded while closing an issue through MCP `update_issue`. A verification comment otherwise behaves like any other: its author can edit or delete it.
 
 ### Module, label and folder
 
@@ -239,7 +239,7 @@ Unless an endpoint says otherwise, a successful delete answers `{"deleted": true
 | --- | --- |
 | [Accounts and access](/docs/rest-api/identity) | Instance settings, signing in, sessions, API keys, connected tools, user administration. |
 | [Projects](/docs/rest-api/projects) | Projects, sidebar groups, membership, saved views, board and insights, project activity, GitHub import. |
-| [Issues, pages and plans](/docs/rest-api/work) | Issues, relations, the trash, comments, pages, plans, modules, labels and folders. |
+| [Issues, pages and plans](/docs/rest-api/work) | Issues, relations, waits and the server clock, the trash, comments, pages, plans, modules, labels and folders. |
 | [Attachments](/docs/rest-api/attachments) | Uploading, downloading, previews and the project file list. |
 | [Search, sync and realtime](/docs/rest-api/sync) | Search, the delta sync endpoints and the realtime WebSocket. |
 | [Exports and archives](/docs/rest-api/export) | Markdown, JSON and ZIP exports, and whole-project archives. |

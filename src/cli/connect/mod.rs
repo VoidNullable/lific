@@ -53,6 +53,8 @@ pub mod writer;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use rusqlite::OptionalExtension;
+
 use crate::config::Config;
 use crate::db::DbPool;
 
@@ -465,12 +467,7 @@ fn resolve_key_source(args: &ConnectArgs, pool: &DbPool) -> Result<KeySource, St
 /// - **Provided:** the verbatim `--key` (no DB writes).
 ///
 /// Returns the plaintext key for that tool.
-fn mint_for_tool(
-    source: &KeySource,
-    spec: &ClientSpec,
-    pool: &DbPool,
-    manager: &api_keys_simplified::ApiKeyManagerV0,
-) -> Result<String, String> {
+fn mint_for_tool(source: &KeySource, spec: &ClientSpec, pool: &DbPool) -> Result<String, String> {
     match source {
         KeySource::Provided(k) => Ok(k.clone()),
         KeySource::Bot { owner_id } => {
@@ -492,14 +489,14 @@ fn mint_for_tool(
             };
             // LIF-391: the key is bound to the bot as it is minted, never
             // created unbound and patched afterwards.
-            mint_or_rotate(pool, manager, &bot_username, Some(bot_id))
+            mint_or_rotate(pool, &bot_username, Some(bot_id))
         }
         KeySource::FreshInstall => {
             // Zero human users: enforcement can't be on (needs an admin to
             // enable), so a plain unassigned key behaves like `lific start`'s
             // first-run default key. Named just `{tool}` — per-tool attribution
             // in the key name even without a human owner.
-            mint_or_rotate(pool, manager, spec.id, None)
+            mint_or_rotate(pool, spec.id, None)
         }
     }
 }
@@ -509,25 +506,32 @@ fn mint_for_tool(
 /// `connect` (e.g. to add another client later) always succeeds with a fresh
 /// plaintext. `user_id` is the owner the key is bound to; `None` mints an
 /// unbound key and, on the rotate path, preserves any existing binding.
-fn mint_or_rotate(
-    pool: &DbPool,
-    manager: &api_keys_simplified::ApiKeyManagerV0,
-    name: &str,
-    user_id: Option<i64>,
-) -> Result<String, String> {
-    let active_exists = {
+fn mint_or_rotate(pool: &DbPool, name: &str, user_id: Option<i64>) -> Result<String, String> {
+    let existing_key = {
         let conn = pool.read().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT COUNT(*) > 0 FROM api_keys WHERE name = ?1 AND revoked = 0",
+            "SELECT revoked, expires_at IS NOT NULL
+                 AND (datetime(expires_at) IS NULL OR datetime(expires_at) <= datetime('now'))
+             FROM api_keys WHERE name = ?1",
             rusqlite::params![name],
-            |row| row.get::<_, bool>(0),
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
         )
-        .unwrap_or(false)
+        .optional()
+        .map_err(|e| format!("failed to inspect API key '{name}': {e}"))?
     };
-    if active_exists {
-        crate::auth::rotate_api_key_bound(pool, manager, name, user_id).map_err(|e| e.to_string())
-    } else {
-        crate::auth::create_api_key(pool, manager, name, user_id).map_err(|e| e.to_string())
+
+    match existing_key {
+        Some((false, true)) => Err(format!(
+            "API key '{name}' has expired or an invalid expiry and cannot be rotated implicitly. \
+             Revoke it with `lific key revoke --name '{name}'`, then rerun `lific connect` to \
+             issue a replacement."
+        )),
+        Some((false, false)) => {
+            crate::auth::rotate_api_key_bound(pool, name, user_id).map_err(|e| e.to_string())
+        }
+        Some((true, _)) | None => {
+            crate::auth::create_api_key(pool, name, user_id).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -661,24 +665,7 @@ pub fn run(
     };
     let key_origin = key_source.as_ref().map(|s| s.origin());
 
-    let manager = if needs_minting {
-        Some(
-            crate::auth::create_key_manager()
-                .map_err(|e| format!("key manager init failed: {e}"))?,
-        )
-    } else {
-        None
-    };
-
-    let outcomes = write_all_clients(
-        &selected,
-        &args,
-        cfg,
-        pool,
-        base,
-        key_source.as_ref(),
-        manager.as_ref(),
-    );
+    let outcomes = write_all_clients(&selected, &args, cfg, pool, base, key_source.as_ref());
 
     // AGENTS.md (LIF-251).
     let agents_md = maybe_write_agents_md(&args, base, stdin_tty)?;
@@ -712,7 +699,6 @@ fn write_all_clients(
     pool: &DbPool,
     base: &PathBase,
     key_source: Option<&KeySource>,
-    manager: Option<&api_keys_simplified::ApiKeyManagerV0>,
 ) -> Vec<ClientOutcome> {
     let mut outcomes = Vec::new();
     for id in selected {
@@ -756,8 +742,8 @@ fn write_all_clients(
 
         // Mint this client's own key (per-tool). Only when a real remote write
         // with minting is happening; stdio/oauth/dry-run supply their own.
-        let this_key = match (key_source, manager) {
-            (Some(source), Some(mgr)) => match mint_for_tool(source, &spec, pool, mgr) {
+        let this_key = match key_source {
+            Some(source) => match mint_for_tool(source, &spec, pool) {
                 Ok(k) => Some(k),
                 Err(e) => {
                     // Minting failed for this tool — record and keep going.
@@ -772,11 +758,7 @@ fn write_all_clients(
                     continue;
                 }
             },
-            // Dry-run placeholder (Provided) with no manager, or provided --key.
-            _ => match key_source {
-                Some(KeySource::Provided(k)) => Some(k.clone()),
-                _ => None,
-            },
+            None => None,
         };
 
         let server = build_server_config(args, cfg, this_key.as_deref().unwrap_or(""));
@@ -1309,6 +1291,31 @@ mod tests {
         )
         .unwrap()
         .id
+    }
+
+    fn seed_opencode_key(pool: &DbPool, expires_at: &str) -> i64 {
+        let owner_id = seed_user(pool, "solo", true);
+        let bot_id = {
+            let conn = pool.write().unwrap();
+            crate::db::queries::users::ensure_bot(&conn, owner_id, "opencode", "OpenCode")
+                .unwrap()
+                .id
+        };
+        crate::auth::create_api_key_with_expiry(
+            pool,
+            "opencode-solo",
+            Some(expires_at),
+            Some(bot_id),
+        )
+        .unwrap();
+        pool.read()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     #[test]
@@ -1849,6 +1856,123 @@ mod tests {
         assert_ne!(ock1, ock2, "re-run must rotate the opencode key");
         assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
         assert_eq!(active_key_count(&pool, "cursor-solo"), 1);
+    }
+
+    fn assert_expired_key_reconnect_does_not_write_config(stdio: bool) {
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
+        let pool = db::open_memory().unwrap();
+        let existing_key_id = seed_opencode_key(&pool, "2000-01-01T00:00:00Z");
+        let cfg = Config::default();
+        let config_path = b.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let initial_config = if stdio {
+            r#"{ "mcp": { "lific": { "type": "local", "environment": { "LIFIC_TOKEN": "expired" } }, "other": { "type": "remote" } } }"#
+        } else {
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://old/mcp", "headers": { "Authorization": "Bearer expired" } }, "other": { "type": "remote" } } }"#
+        };
+        std::fs::write(&config_path, initial_config).unwrap();
+
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+        a.stdio = stdio;
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+
+        let outcome = &result.outcomes[0];
+        assert!(
+            outcome.action.is_none(),
+            "expired key must not be installed"
+        );
+        let error = outcome
+            .error
+            .as_deref()
+            .expect("expired key must be reported");
+        assert!(error.contains("expired"), "got: {error}");
+        assert!(error.contains("opencode-solo"), "got: {error}");
+        assert!(error.contains("lific key revoke"), "got: {error}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            initial_config
+        );
+        assert_eq!(active_key_count(&pool, "opencode-solo"), 1);
+        let current_key_id = pool
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            current_key_id, existing_key_id,
+            "expired key is not replaced"
+        );
+    }
+
+    #[test]
+    fn run_remote_rejects_expired_tool_key_without_overwriting_config() {
+        assert_expired_key_reconnect_does_not_write_config(false);
+    }
+
+    #[test]
+    fn run_stdio_rejects_expired_tool_key_without_overwriting_config() {
+        assert_expired_key_reconnect_does_not_write_config(true);
+    }
+
+    #[test]
+    fn run_reconnect_rotates_future_expiring_key_and_preserves_expiry() {
+        let guard = tmp();
+        let dir = guard.path();
+        let b = base(dir);
+        let pool = db::open_memory().unwrap();
+        let expires_at = "2999-12-31T23:59:59Z";
+        let old_key_id = seed_opencode_key(&pool, expires_at);
+        let cfg = Config::default();
+        let config_path = b.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{ "mcp": { "lific": { "type": "remote", "url": "http://old/mcp", "headers": { "Authorization": "Bearer stale" } } } }"#,
+        )
+        .unwrap();
+        let mut a = args(&["opencode"], Scope::Global);
+        a.key = None;
+
+        let result = run(&a, &cfg, &pool, &b).unwrap();
+
+        let outcome = &result.outcomes[0];
+        let token = outcome.key.as_deref().expect("future key is returned");
+        assert!(outcome.error.is_none(), "got: {:?}", outcome.error);
+        assert_eq!(outcome.action.as_deref(), Some("updated"));
+        assert!(token.starts_with("lific_sk-live-"));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            written["mcp"]["lific"]["headers"]["Authorization"],
+            format!("Bearer {token}")
+        );
+        let stored_expiry = pool
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT expires_at FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(stored_expiry.as_deref(), Some(expires_at));
+        let new_key_id = pool
+            .read()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM api_keys WHERE name = 'opencode-solo' AND revoked = 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_ne!(new_key_id, old_key_id, "future key was rotated");
     }
 
     // ── reconnect healing, all transports (idempotency) ────────────────────

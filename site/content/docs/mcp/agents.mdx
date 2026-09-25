@@ -1,6 +1,6 @@
 ---
 title: Working with Lific as an agent
-description: "Conventions for an MCP client using Lific: identifiers, edit versus update, triaging workable issues, plans across sessions, paging, errors and attribution."
+description: "Conventions for an MCP client using Lific: resuming with a briefing, identifiers, triaging workable and waiting issues, closing with evidence, edit versus update, long pages, plans, paging, errors and attribution."
 ---
 
 This page is for the agent making the calls. It assumes a working connection; [MCP](/docs/mcp) covers transports and authentication, and the [tool reference](/docs/mcp/tools) lists every parameter. The server sends a shorter version of this guidance in its initialization instructions.
@@ -24,18 +24,41 @@ Pass comment, step and attachment ids as integers: for step `#18`, send `step_id
 
 `get_activity` and `export` accept an issue, page or project identifier and act on whichever shape you pass, so `get_activity` with `APP` reads the whole project's feed.
 
+## Resume with a briefing
+
+Your first call in a session on a known project is `get_briefing(project='APP')`. One response of at most 6,000 characters gives active plans with their next step, date waits that have come due, blocked issues and what blocks them, the top workable and active issues, and the pages you name in `pages` (identifier, `seq` and size, never their bodies). It ends each cut section with the call that lists the rest.
+
+The briefing opens with a `since` cursor. Keep it, and pass it next time: `get_briefing(project='APP', since='2026-09-25T14:02:11Z')` adds a section on what was created, closed, moved and edited since then. For the full record of changes, `get_activity(identifier='APP', since=...)` reads the audit log forward from the same kind of cursor, oldest first.
+
 ## Find the work
 
-Start with `list_resources(resource_type='project')`. Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long since anything happened, so the list already shows where work is waiting.
+When you do not know the project yet, start with `list_resources(resource_type='project')`. Projects are sorted by recent activity, and each row carries its workable-issue count, active-plan count and how long since anything happened, so the list already shows where work is waiting.
 
 Then triage with `list_issues`:
 
-- `workable=true` returns issues that are open (not `done` or `cancelled`) and whose blockers are all `done`. This answers "what can I start now".
-- `blocked=true` returns issues with at least one blocker that is not `done`, and annotates each row with `blocked_by:APP-3,APP-7`. It ignores the issue's own status, so a closed issue with an open blocker still appears.
+- `workable=true` returns issues that are open (not `done` or `cancelled`), whose blockers are all `done`, and that have no wait still holding. This answers "what can I start now".
+- `blocked=true` returns issues with at least one blocker that is not `done`, or a wait still holding, and annotates each row with `blocked_by:APP-3,APP-7` and any wait tokens. It ignores the issue's own status, so a closed issue with an open blocker still appears.
 
 These are independent filters, not opposites. A cancelled blocker still blocks, deliberately: cancelling a prerequisite does not make the dependent work possible. See [ready and blocked work](/docs/concepts/issues#ready-and-blocked-work).
 
+Rows show checklist progress when the description has a Markdown task list (`checklist: 2/5`), so you can see how far an issue got without opening it.
+
+## Park work on a person or a date
+
+When an issue is blocked by something that is not another issue, record it as a wait rather than in a comment, so triage sees it:
+
+- `link_issues(target='APP-9', relation_type='blocks', user='ada-lovelace', note='decide the schema')` holds `APP-9` until someone clears the wait.
+- `link_issues(target='APP-9', relation_type='blocks', from='2026-09-28', until='2026-10-02', note='filing office')` holds it until the 28th. From then it is due to check, and after the 2nd it is overdue. Neither blocks, but rows show `due_since:` or `overdue_since:` and the briefing lists them under **Due to check**.
+
+When the person answers or the date has been dealt with, clear the wait with `unlink_issues(target='APP-9', user='ada-lovelace')` or `unlink_issues(target='APP-9', from='2026-09-28')`. A wait takes `maintainer`, like any other link. [Waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date) explains the states.
+
+## Close with evidence
+
 When you finish an issue, set `status='done'`. That releases the issues it blocks, and checks off any plan step that mirrors it.
+
+Say how you know it is done in the same call: `update_issue(identifier='APP-42', status='done', evidence='cargo test: 412 passed')`. The evidence is saved as a verification comment in the same transaction as the close, and `get_issue` marks it `[verification]`, so whoever reviews the close can see what was actually checked. `evidence` is refused with any other status and on an issue that is already done, and a refusal writes nothing. If the description still has unchecked task items, the close succeeds and the response says how many are left.
+
+To file several issues at once, pass `create_issue(project='APP', issues=[...])`, up to 50 in one transaction. Each new issue's line names open issues that look like duplicates, so link or cancel them before moving on.
 
 ## Edit instead of rewriting
 
@@ -51,13 +74,21 @@ The edit tools share one contract. `old_string` must appear exactly once, or the
 
 By default the last write wins. `update_issue` and `update_page` accept `expected_seq`, a record's change counter, and refuse the update if the record has changed since. The refusal names the current `seq` and summarizes the current state in one line, so you can decide how to merge without another read.
 
-MCP read tools do not print `seq`. You get it from the REST API's issue and page responses, or from a refusal. When you have no `seq`, prefer an exact-string edit: it cannot clobber text it did not match.
+`get_issue` and a plain `get_page` read do not print `seq`. For a page, `get_page` with `outline=true`, `section` or `offset` prints it, and so does `get_briefing` for the pages it lists. The REST API's issue and page responses carry it, and a refusal names it. When you have no `seq`, prefer an exact-string edit: it cannot clobber text it did not match.
+
+## Read long pages a piece at a time
+
+A page over 30,000 characters does not come back whole from `get_page`. You get its outline, with each section's size, and its opening. Read what you need with `get_page(identifier='APP-DOC-3', section='Current state')`, which takes a heading's text or its anchor. A section that is itself over the budget is cut the same way, and every cut response ends with the exact call, `offset` included, that continues it. Nothing is silently dropped.
+
+To catch up on a page you read before, keep its `seq` and pass it back: `get_page(identifier='APP-DOC-3', since_seq=118)` returns only the changed lines as a diff. Lific keeps each page's newest 50 content versions; an older `seq` gets the page as a plain read, with a note.
+
+Writing a page past 30,000 characters works, and the response says readers will now get an outline. Split the page, or move old history to an archive page, when that note appears.
 
 ## Keep plans for work that outlasts a session
 
 A plan is a nested step tree stored in the project, so multi-session work does not depend on your transcript. `create_plan` takes the whole tree in one call. A step with an `issue` mirrors that issue while the plan is active: moving the issue to `done` checks the step, checking the step moves the issue to `done`, and moving the issue out of `done` unchecks it again. `cancelled` does not count. A plan with an `anchor_issue` is archived when that issue moves to `done`.
 
-On resume, look for a plan before re-deriving anything: `list_resources(resource_type='plan', project='APP')`, then `get_plan(plan='APP-PLAN-2')`. The tree shows each step's `#id`, whether it is done and its linked issue. Those ids are what `edit_plan_step` and `update_plan_step` take.
+On resume, `get_briefing` lists active plans with their next step. For the whole tree, or a plan that is not active, use `list_resources(resource_type='plan', project='APP')`, then `get_plan(plan='APP-PLAN-2')`. The tree shows each step's `#id`, whether it is done and its linked issue. Those ids are what `edit_plan_step` and `update_plan_step` take.
 
 `update_plan_step` answers with a short receipt of what changed and the plan's progress. Pass `echo_tree=true` for the whole tree, or call `get_plan`. See [Plans](/docs/concepts/plans).
 
@@ -74,8 +105,10 @@ Lists return one page, not the whole set, because a single comment can be 256 Ki
 | `list_resources`, issues and pages | 100 | 500 | Yes |
 | `list_resources`, plans | 50 | 500 | No: ask for the next page when a full one comes back |
 | `get_attachment`, text lines | 200 | 500 | Yes |
+| `export`, project documents | 20 | 100 | Yes. A page also stops at 256 KiB of Markdown. |
+| `get_page`, characters | 30,000 | 30,000 | Yes: the exact call with `offset`, or read by `section` |
 
-`list_resources` returns every project, module, label or folder at once and ignores `limit` for them. `list_attachments` is not paged.
+`list_resources` returns every project, module, label or folder at once and ignores `limit` for them. `list_attachments` is not paged. `get_briefing` is not paged: its cut sections name the list call that shows everything.
 
 `get_issue` includes the three newest comments by default. `include_comments='none'` gives the count with no bodies, and `include_comments='all'` gives the newest 500 and points at `list_comments` for older ones.
 
@@ -88,7 +121,7 @@ A failed call is a tool result whose text begins with `Error:`, not a protocol e
 - `Forbidden: requires at least 'maintainer' access to this project`: your owner's role in that project is too low for the call.
 - A message that `LIFIC_TOKEN` is no longer valid: the session's credential was revoked. Nothing was written. A person must run `lific connect` and restart the MCP server.
 
-A call whose arguments do not fit the tool's schema, such as a missing required parameter or an unknown parameter to `edit_comment`, is refused before the tool runs with a JSON-RPC `invalid params` error.
+A call whose arguments do not fit the tool's schema is refused before the tool runs with a JSON-RPC `-32602 invalid params` error. That includes a parameter the tool does not declare, on every tool: ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?`` Fix the name and call again; nothing was written.
 
 ## What a bound repository gives you
 
@@ -96,7 +129,7 @@ If the client launched `lific mcp` or `lific mcp --remote` inside a checkout bou
 
 | Tool | Applies |
 | --- | --- |
-| `list_issues`, `create_issue`, `get_board`, `create_plan` | Always |
+| `list_issues`, `create_issue`, `get_board`, `create_plan`, `get_briefing` | Always |
 | `list_resources` | For `resource_type` `issue`, `plan`, `module`, `label` or `folder` |
 
 An explicit `project` always wins. The binding never changes what a call means: `search` still covers every project you can see, `create_page` without `project` still creates a workspace page, and `list_resources` for pages still lists every project's pages. `bulk_update` and `delete` never take it, because a destructive call should name its target. A binding grants no permissions.

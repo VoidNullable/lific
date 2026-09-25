@@ -5,6 +5,7 @@ mod authz;
 #[cfg(test)]
 mod authz_coverage_tests;
 mod backup;
+mod checklist;
 mod cli;
 mod config;
 mod db;
@@ -858,8 +859,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // PRESENT-but-invalid token is a hard error: a revoked or mistyped
             // agent credential must not silently fall back to higher-privilege
             // operator access (PR #23 review).
-            let manager = auth::create_key_manager()?;
-            let token_user = match auth::resolve_stdio_token(&pool, &manager) {
+            let token_user = match auth::resolve_stdio_token(&pool) {
                 Ok(Some(user)) => Some(user),
                 Ok(None) => {
                     // Absent or valid-but-unbound (e.g. a fresh-install
@@ -891,7 +891,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .map(|raw| raw.trim().to_string())
                 .filter(|token| !token.is_empty())
-                .map(|token| mcp::StdioAuth::new(token, manager));
+                .map(mcp::StdioAuth::new);
 
             // LIF-451: a stdio session launched inside a bound repository
             // defaults project-scoped tools to that project. Resolved once,
@@ -1361,9 +1361,7 @@ async fn cmd_init(
     // we stop auto-minting the unbound "default" key — the operator is a real
     // user now, and keys are minted on demand via `lific key create`.
     let new_key = if auth::should_mint_initial_key(&pool) {
-        let manager =
-            auth::create_key_manager().map_err(|e| format!("key manager init failed: {e}"))?;
-        Some(auth::create_api_key(&pool, &manager, "default", None)?)
+        Some(auth::create_api_key(&pool, "default", None)?)
     } else {
         None
     };

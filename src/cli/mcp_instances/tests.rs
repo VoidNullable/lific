@@ -2309,6 +2309,7 @@ fn the_allowlist_is_reads_only_and_every_writing_tool_is_outside_it() {
         "get_page",
         "get_plan",
         "get_activity",
+        "get_briefing",
         "list_comments",
         "list_attachments",
         "get_attachment",

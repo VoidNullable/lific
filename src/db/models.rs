@@ -302,6 +302,73 @@ pub struct Issue {
     /// the target of a 'duplicate' link).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicated_by: Vec<String>,
+    /// LIF-484: user and date blockers, populated on every issue read (single
+    /// and list). Empty on the public surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<IssueWait>,
+}
+
+/// LIF-484: what a wait is waiting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitKind {
+    User,
+    Date,
+}
+
+/// LIF-484: a wait's standing on a given day. Only `Holding` blocks.
+///
+/// A user wait is always `Holding` until cleared. A date wait is `Holding`
+/// before its earliest day, `Due` from the earliest day through the latest,
+/// and `Overdue` after the latest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitState {
+    Holding,
+    Due,
+    Overdue,
+}
+
+/// LIF-484: a blocker that is a person or a window of days rather than an
+/// issue. `state` is computed against the server's local day at read time;
+/// a client holding the row across midnight should recompute it from
+/// `earliest`/`latest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWait {
+    pub id: i64,
+    pub issue_id: i64,
+    pub kind: WaitKind,
+    /// The account waited on (`kind = user`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// First day the wait stops blocking, `YYYY-MM-DD` (`kind = date`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest: Option<String>,
+    /// Last expected day; equal to `earliest` for a single day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    pub state: WaitState,
+    pub created_at: String,
+}
+
+/// LIF-484: a new wait. Exactly one of `user` or `from` is set; `until`
+/// only accompanies `from` and defaults to it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CreateWait {
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One edge in a project's issue-relation graph (LIF-363). Produced in bulk
@@ -412,6 +479,10 @@ pub struct ListIssuesQuery {
     pub order: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Statuses to leave out, applied in SQL before paging so excluded rows
+    /// cannot crowd eligible ones off a page. Internal: not a REST parameter.
+    #[serde(skip)]
+    pub exclude_statuses: Vec<Status>,
 }
 
 /// Per-status issue counts for a project (LIF-161). `total` is the sum of
@@ -891,6 +962,45 @@ pub struct Comment {
     /// pages. See [`Issue::seq`].
     #[serde(default)]
     pub seq: i64,
+    /// LIF-486: `verification` for evidence recorded by closing an issue.
+    #[serde(default)]
+    pub kind: CommentKind,
+}
+
+/// What a comment is (migration 056). The string forms match the column's
+/// CHECK constraint exactly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentKind {
+    #[default]
+    Comment,
+    /// Completion evidence written by `update_issue` alongside a close.
+    Verification,
+}
+
+impl CommentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentKind::Comment => "comment",
+            CommentKind::Verification => "verification",
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for CommentKind {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "comment" => Ok(CommentKind::Comment),
+            "verification" => Ok(CommentKind::Verification),
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl rusqlite::types::ToSql for CommentKind {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -943,6 +1053,11 @@ pub struct SearchResult {
     pub project_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_page_id: Option<i64>,
+    /// LIF-476: set when no result contained every query word and this hit
+    /// came from the ranked any-word fallback. Omitted from JSON when false,
+    /// so an all-words result serializes exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial_match: bool,
 }
 
 // ── Audit log (LIF-155/156) ──────────────────────────────────
@@ -1111,6 +1226,10 @@ pub struct IssueChange {
     /// Label names, resolved in one grouped query per page rather than one
     /// query per row.
     pub labels: Vec<String>,
+    /// LIF-484: user and date blockers, one grouped query per page. Adding
+    /// or clearing one advances the issue's seq, so a replica sees it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<IssueWait>,
 }
 
 /// A live page in the sync stream. `identifier` is the `PRO-DOC-7` form
@@ -1156,6 +1275,8 @@ pub struct CommentChange {
     pub username: String,
     pub created_at: String,
     pub updated_at: String,
+    /// [`Comment::kind`], renamed because `kind` is the change discriminator.
+    pub comment_kind: CommentKind,
 }
 
 /// A deleted row (migration 047). Carries identity, its place in the stream,

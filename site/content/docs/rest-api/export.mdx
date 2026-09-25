@@ -36,6 +36,8 @@ The whole project. Query: `format`, either `zip` (default) or `json`.
 
 The bundle is a listing of the ZIP's files, not a stable schema. Expect new files and do not assume a fixed set.
 
+Issue and project exports are scoped to the caller. An issue's frontmatter lists its relations (`blocks`, `blocked_by`, `relates_to`, `duplicates` and `duplicated_by`), and issues in projects the caller cannot read are left out of those lists with no placeholder or count, so an export does not reveal that they exist. Page exports carry no relations. [`lific export`](/docs/cli) with the local backend reads the database file directly and is not filtered.
+
 ## Project archives
 
 An archive copies one project, with its issues, pages, plans, comments, attachments, history and activity log, into a **new private project** on another instance. Memberships, credentials, saved views and repository bindings do not travel, and an import never merges into an existing project. [Project archives](/docs/project-archives) explains the whole procedure and what to check afterwards.

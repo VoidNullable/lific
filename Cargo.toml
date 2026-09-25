@@ -69,7 +69,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 
 # Auth
-api-keys-simplified = "0.5"
+blake3 = "1"
 argon2 = "0.5"
 rand = "0.8"
 # Credential storage for `lific login` (LIF-258). On Linux we use the
@@ -118,7 +118,9 @@ dirs = "6"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+subtle = "2"
 base64 = "0.22"
+zeroize = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -128,6 +130,9 @@ console = "0.16.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tempfile = "3"
 fs2 = "0.4"
+# Line diffs for get_page(since_seq) (LIF-480). No dependencies with only the
+# `text` feature; 2.x because 3.x needs a newer toolchain than rust-version.
+similar = { version = "2", default-features = false, features = ["text"] }
 
 # SIGPIPE handling for piped CLI output (see main.rs); unix only.
 [target.'cfg(unix)'.dependencies]

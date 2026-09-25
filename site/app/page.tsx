@@ -294,7 +294,7 @@ export default function Home() {
             <Body className="mt-9">
               After the restart, the agent has the whole tracker as MCP tools:
               issues, plans, pages, comments, and search. The full tool
-              surface costs <Em>about 6.7k tokens of context</Em>, roughly one
+              surface costs <Em>about 7.6k tokens of context</Em>, roughly one
               long file read, so it leaves room for the actual work.
             </Body>
             <Body>

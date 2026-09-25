@@ -11,6 +11,8 @@ A comment belongs to exactly one issue or one page, workspace pages included. It
 
 A comment written by a connected agent is authored by that agent, not by the person who connected it.
 
+A comment has a kind: `comment`, or `verification` when it holds the evidence an agent gave while closing an issue with `update_issue(status="done", evidence=...)`. MCP output marks these `[verification]`, and the web UI shows a Verification badge, so whoever reviews the close can see what was checked. Otherwise a verification comment behaves like any other: its author can edit or delete it.
+
 ### Comment ids and links
 
 Every comment has a numeric id, unique across the instance. Tools that edit or delete a comment take this id, and `get_issue` and `list_comments` show it.

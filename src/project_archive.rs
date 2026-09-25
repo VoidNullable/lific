@@ -13,7 +13,9 @@ use crate::db::{self, DbPool};
 use crate::error::LificError;
 use crate::storage::{AttachmentStore, valid_sha256};
 
-const VERSION: u32 = 1;
+/// Format 2 added `comments.kind` (migration 056). Format 1 archives still
+/// import: see [`upgrade_manifest`].
+const VERSION: u32 = 2;
 
 /// One resource profile for a whole export or import.
 ///
@@ -178,7 +180,9 @@ struct Spec {
     columns: &'static str,
     scope: &'static str,
 }
-// This list, including column order, is format v1. No SELECT * and no schema dump.
+// This list, including column order, is format v2. No SELECT * and no schema dump.
+// `page_revisions` (LIF-480) is left out on purpose: its seqs are instance-scoped
+// and mean nothing on the importing instance.
 const SPECS: &[Spec] = &[
     Spec {
         name: "projects",
@@ -222,7 +226,7 @@ const SPECS: &[Spec] = &[
     },
     Spec {
         name: "comments",
-        columns: "id,issue_id,page_id,content,created_at,updated_at,deleted_at,imported_author",
+        columns: "id,issue_id,page_id,content,created_at,updated_at,deleted_at,imported_author,kind",
         scope: "issue_id IN (SELECT id FROM issues WHERE project_id = ?1) OR page_id IN (SELECT id FROM pages WHERE project_id = ?1)",
     },
     Spec {
@@ -239,6 +243,15 @@ const SPECS: &[Spec] = &[
         name: "issue_relations",
         columns: "source_id,target_id,relation_type",
         scope: "source_id IN (SELECT id FROM issues WHERE project_id = ?1) OR target_id IN (SELECT id FROM issues WHERE project_id = ?1)",
+    },
+    // LIF-484. `username` is not a column: the account id means nothing on
+    // another instance, so the wait travels by name and binds to the
+    // destination account of that name on import (see `insert_wait`).
+    // Archives written before this table existed simply lack it.
+    Spec {
+        name: "issue_waits",
+        columns: "id,issue_id,kind,username,earliest,latest,note,created_at",
+        scope: "issue_id IN (SELECT id FROM issues WHERE project_id = ?1)",
     },
     Spec {
         name: "page_issue_links",
@@ -521,6 +534,8 @@ fn read_table(
         if c == "imported_author" {
             let actor = match s.name { "comments" => "user_id", "attachments" => "uploader_id", _ => "actor_user_id" };
             format!("COALESCE(imported_author, (SELECT COALESCE(NULLIF(display_name,''), username) || ' (imported)' FROM users WHERE id = {}.{actor}), 'Unknown author (imported)')", s.name)
+        } else if s.name == "issue_waits" && c == "username" {
+            "(SELECT username FROM users WHERE id = issue_waits.user_id)".to_string()
         } else { c.to_string() }
     }).collect::<Vec<_>>().join(",");
     let sql = format!(
@@ -1042,6 +1057,126 @@ fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Bring a format 1 manifest up to the current format. Format 1 predates
+/// comment kinds, so each of its comment rows is one column short and every
+/// one of them was an ordinary comment. Anything else is left for
+/// [`validate_manifest`] to judge.
+fn upgrade_manifest(m: &mut Manifest) {
+    if m.format_version != 1 {
+        return;
+    }
+    m.format_version = VERSION;
+    for table in m.tables.iter_mut().filter(|t| t.name == "comments") {
+        for row in &mut table.rows {
+            row.push("comment".into());
+        }
+    }
+}
+
+/// Tables added after format v1 shipped. An archive from an older Lific
+/// lacks them, which means "none of these rows", not a damaged archive.
+const OPTIONAL_TABLES: &[&str] = &["issue_waits"];
+
+fn backfill_optional_tables(m: &mut Manifest) {
+    for name in OPTIONAL_TABLES {
+        if !m.tables.iter().any(|t| t.name == *name) {
+            m.tables.push(Table {
+                name: (*name).into(),
+                rows: Vec::new(),
+            });
+        }
+    }
+}
+
+/// An `issue_waits` row must satisfy the table's CHECK and uniqueness rules
+/// before it reaches SQLite, so a bad archive is a 400 and not a failed
+/// statement.
+fn validate_wait_rows(m: &Manifest) -> Result<()> {
+    let s = spec("issue_waits")?;
+    let day = |value: &Value| -> Result<String> {
+        let text = text(value)?;
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .ok()
+            .filter(|_| text.len() == 10)
+            .map(|_| text.to_string())
+            .ok_or_else(|| invalid("invalid wait date"))
+    };
+    let mut seen = BTreeSet::new();
+    for row in m.rows("issue_waits") {
+        let issue = number(s.get(row, "issue_id"))?;
+        let key = match text(s.get(row, "kind"))? {
+            "user" => {
+                if !s.get(row, "earliest").is_null() || !s.get(row, "latest").is_null() {
+                    return Err(invalid("a user wait carries no dates"));
+                }
+                format!("user:{}", text(s.get(row, "username"))?.to_lowercase())
+            }
+            "date" => {
+                if !s.get(row, "username").is_null() {
+                    return Err(invalid("a date wait carries no user"));
+                }
+                let (earliest, latest) = (day(s.get(row, "earliest"))?, day(s.get(row, "latest"))?);
+                if latest < earliest {
+                    return Err(invalid("wait ends before it starts"));
+                }
+                format!("date:{earliest}:{latest}")
+            }
+            _ => return Err(invalid("invalid wait kind")),
+        };
+        if !s.get(row, "note").is_string() {
+            return Err(invalid("invalid type for issue_waits.note"));
+        }
+        if !seen.insert((issue, key)) {
+            return Err(invalid("duplicate wait"));
+        }
+    }
+    Ok(())
+}
+
+/// Insert one imported wait, binding a user wait to the destination account
+/// with the same username. With no such active account there is nobody to
+/// clear it, so the wait is left out and reported rather than invented.
+fn insert_wait(conn: &Connection, row: &Row, external: &mut RewriteState) -> Result<()> {
+    let s = spec("issue_waits")?;
+    let user_id: Option<i64> = match s.get(row, "username").as_str() {
+        None => None,
+        Some(username) => {
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM users WHERE username = ?1 COLLATE NOCASE AND is_active = 1",
+                    [username],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if found.is_none() {
+                external.record(&[
+                    "issue_waits: no active user named ",
+                    username,
+                    " on this instance; wait not imported",
+                ])?;
+                return Ok(());
+            }
+            found
+        }
+    };
+    let value = |name: &str| sql_value(s.get(row, name));
+    conn.execute(
+        "INSERT INTO issue_waits (id, issue_id, kind, user_id, earliest, latest, note, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            value("id")?,
+            value("issue_id")?,
+            value("kind")?,
+            user_id,
+            value("earliest")?,
+            value("latest")?,
+            value("note")?,
+            value("created_at")?,
+        ],
+    )?;
+    Ok(())
+}
+
 fn validate_manifest(m: &Manifest) -> Result<()> {
     if m.external_references.len() > limits().max_rows {
         return Err(too_large("too many external references"));
@@ -1161,6 +1296,12 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
                 if issue.is_null() == page.is_null() {
                     return Err(invalid("comment must have exactly one parent"));
                 }
+                if !matches!(
+                    s.get(row, "kind").as_str(),
+                    Some("comment" | "verification")
+                ) {
+                    return Err(invalid("invalid comment kind"));
+                }
             }
         }
     }
@@ -1241,6 +1382,7 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
     if used.len() != hashes.len() {
         return Err(invalid("unreferenced blob"));
     }
+    validate_wait_rows(m)?;
     let linked: BTreeSet<i64> = m
         .rows("attachment_links")
         .iter()
@@ -1299,13 +1441,15 @@ fn stage(path: &Path) -> Result<Staged> {
                 return Err(metadata_too_large());
             }
             arm_budget_marker();
-            let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
+            let mut m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
                 if budget_marker_tripped() {
                     too_large("manifest exceeds a resource limit")
                 } else {
                     invalid(format!("invalid manifest: {e}"))
                 }
             })?;
+            upgrade_manifest(&mut m);
+            backfill_optional_tables(&mut m);
             validate_manifest(&m)?;
             manifest = Some(m);
         } else {
@@ -1721,7 +1865,12 @@ pub fn import_with(
         let mut external = RewriteState::new(&m.external_references)?;
         for s in SPECS {
             for original in m.rows(s.name) {
-                insert_row(&tx, s, &imported_row(s, original, &maps, &mut external)?)?;
+                let row = imported_row(s, original, &maps, &mut external)?;
+                if s.name == "issue_waits" {
+                    insert_wait(&tx, &row, &mut external)?;
+                } else {
+                    insert_row(&tx, s, &row)?;
+                }
             }
         }
         // Preserve the source timestamp while assigning the destination lead.
@@ -1793,3 +1942,9 @@ pub fn import_with(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod comment_kind_tests;
+
+#[cfg(test)]
+mod waits_tests;

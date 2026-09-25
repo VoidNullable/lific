@@ -3,14 +3,14 @@ title: MCP
 description: How an MCP client reaches Lific, how each transport authenticates, and the response conventions every tool shares.
 ---
 
-Lific's MCP server is part of the same binary as the web UI and the REST API, and it reads and writes the same database. An agent connected over MCP can create and triage issues, write pages, keep plans, comment, search, read the activity log and handle attachments. The [tool reference](/docs/mcp/tools) documents all 30 tools, and [Working with Lific as an agent](/docs/mcp/agents) covers the conventions to know before the first call.
+Lific's MCP server is part of the same binary as the web UI and the REST API, and it reads and writes the same database. An agent connected over MCP can create and triage issues, write pages, keep plans, comment, search, read the activity log and handle attachments. The [tool reference](/docs/mcp/tools) documents all 31 tools, and [Working with Lific as an agent](/docs/mcp/agents) covers the conventions to know before the first call.
 
 The short version:
 
 - The HTTP endpoint, `https://your-server.example/mcp`, authenticates every request with a bearer API key or an OAuth 2.1 access token.
 - Local stdio, `lific mcp`, has no transport authentication. The agent's identity is the API key in `LIFIC_TOKEN`, checked again before every tool call.
 - Remote stdio, `lific mcp --remote --url <BASE_URL>`, is a local command that forwards to a server's HTTP endpoint with a bearer credential.
-- A tool that cannot do what you asked returns text starting with `Error:`, not a protocol error.
+- A tool that cannot do what you asked returns text starting with `Error:`, not a protocol error. A parameter the tool does not declare is refused before it runs, with a suggestion for the name you probably meant.
 - Lists are paged. When more rows exist, the output ends with the `offset` to pass on the next call.
 - Local stdio answers a pre-initialize `server/discover` probe with "method not found" and keeps the session open.
 
@@ -117,7 +117,7 @@ A tool that cannot do what you asked returns an ordinary result whose text start
 
 Some failures happen before a tool runs, and those are JSON-RPC errors:
 
-- Arguments that do not fit the tool's schema, such as a missing required parameter, a wrong type, or an unknown parameter to `edit_comment`, return `-32602` (invalid params).
+- Arguments that do not fit the tool's schema return `-32602` (invalid params): a missing required parameter, a wrong type, or a parameter the tool does not declare. Unknown parameters are refused on every tool, nested objects included, so a misspelling cannot quietly change the answer. The message names the unknown key, suggests the closest valid name, and lists the valid ones, for example ``Unknown parameter `comments` in get_issue. Did you mean `include_comments`?``
 - The remote stdio proxy returns `-32603` when it cannot reach the server.
 - The multi-instance proxy returns `-32602` for a call it cannot route.
 
@@ -125,13 +125,20 @@ A revoked stdio credential is the one tool result flagged `isError: true`. An un
 
 ### Lists are paged
 
-`list_issues`, `list_comments`, `search`, `get_activity`, and `list_resources` for issues and pages return one page. When more rows exist, the output ends with a line naming the `offset` to pass next, such as `call again with offset=50`. Pass it back with the same filters. `get_attachment` pages a text file the same way, by line.
+`list_issues`, `list_comments`, `search`, `get_activity`, and `list_resources` for issues and pages return one page. When more rows exist, the output ends with a line naming the `offset` to pass next, such as `call again with offset=50`. Pass it back with the same filters. `get_attachment` pages a text file the same way, by line, and `export` pages a whole project by document. A `get_page` read cut at its size budget ends with the exact call, `offset` included, that continues it.
 
 The plan listing in `list_resources` honors `limit` and `offset` but prints no hint, and `list_attachments` is not paged. The [agent guide](/docs/mcp/agents#page-through-lists) lists each tool's default and cap.
 
 ### Responses are bounded
 
-`get_issue` and `list_comments` keep each response within 2 MiB. When the comments would not fit, fewer are returned and the output says the size budget, not the row limit, ended the page.
+Agent harnesses cut long tool output off without saying so, so the tools that can return a lot hold themselves to a budget and say when they hit it:
+
+| Tool | Budget | When it is reached |
+| --- | --- | --- |
+| `get_issue`, `list_comments` | 2 MiB | Fewer comments are returned, and the output says the size budget, not the row limit, ended the page. |
+| `get_page` | 30,000 characters of content | A long page returns its outline and opening; read the rest by `section` or `offset`. |
+| `get_briefing` | 6,000 characters | Lines are dropped from the longest sections, and each cut section names the call that lists everything. |
+| `export` for a project | 256 KiB of Markdown | The page of documents stops early, and the last line gives the next `offset`. |
 
 ## Identity and authorization
 

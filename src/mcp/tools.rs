@@ -225,7 +225,8 @@ impl Display for IssueLine<'_> {
                 },
                 formatter,
             )
-        })
+        })?;
+        Display::fmt(&super::waits::WaitTokens(&issue.waits), formatter)
     }
 }
 
@@ -363,6 +364,86 @@ fn issue_reference<'a>(
     reference_with_context(context, ReferenceKind::Issue(identifier))
 }
 
+/// How many possible duplicates `create_issue` names (LIF-477).
+const SIMILAR_ISSUE_LIMIT: usize = 3;
+
+/// Append the possible-duplicates section after a create confirmation, one
+/// line per issue. Writes nothing when there are none.
+fn write_similar_issues(
+    output: &mut String,
+    context: Option<&IssueLinkContext>,
+    similar: &[queries::SimilarIssue],
+) -> fmt::Result {
+    if similar.is_empty() {
+        return Ok(());
+    }
+    write!(output, "\nSimilar open issues:")?;
+    similar.iter().try_for_each(|issue| {
+        write!(
+            output,
+            "\n- {} ({}) {}",
+            issue_reference(context, &issue.identifier),
+            issue.status,
+            issue.title
+        )
+    })
+}
+
+/// Create one `create_issue` batch item on the batch's transaction (LIF-478).
+fn create_batch_item(
+    conn: &rusqlite::Connection,
+    project_id: i64,
+    item: &CreateIssueItem,
+    attachments: models::AttachmentActor,
+) -> Result<models::Issue, crate::error::LificError> {
+    use crate::error::LificError;
+    if item.title.trim().is_empty() {
+        return Err(LificError::BadRequest("title is required".into()));
+    }
+    let module_id = item
+        .module
+        .as_deref()
+        .map(|name| names::module_id(conn, project_id, name))
+        .transpose()?;
+    let labels =
+        names::stored_label_names(conn, project_id, item.labels.as_deref().unwrap_or_default())?;
+    queries::create_issue(
+        conn,
+        &models::CreateIssue {
+            project_id,
+            title: item.title.clone(),
+            description: item.description.clone().unwrap_or_default(),
+            status: models::Status::parse_opt(item.status.as_deref())
+                .map_err(LificError::BadRequest)?
+                .unwrap_or_default(),
+            priority: models::Priority::parse_opt(item.priority.as_deref())
+                .map_err(LificError::BadRequest)?
+                .unwrap_or_default(),
+            module_id,
+            start_date: item.start_date.clone(),
+            target_date: item.target_date.clone(),
+            labels,
+            source: None,
+            attachments,
+        },
+    )
+}
+
+/// Name the batch item a caller-facing error came from, as `issues[i]`, the
+/// path the caller sent it under. Database and internal errors pass through
+/// untouched: they are sanitized to a generic message anyway.
+fn at_batch_item(index: usize, error: crate::error::LificError) -> crate::error::LificError {
+    use crate::error::LificError;
+    let at = |message: String| format!("issues[{index}]: {message}");
+    match error {
+        LificError::NotFound(message) => LificError::NotFound(at(message)),
+        LificError::BadRequest(message) => LificError::BadRequest(at(message)),
+        LificError::Forbidden(message) => LificError::Forbidden(at(message)),
+        LificError::Conflict(message) => LificError::Conflict(at(message)),
+        other => other,
+    }
+}
+
 fn project_reference<'a>(
     context: Option<&'a IssueLinkContext>,
     identifier: &'a str,
@@ -455,10 +536,14 @@ struct CommentLines<'a> {
 impl Display for CommentLines<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.comments.iter().try_for_each(|comment| {
+            write!(formatter, "[{}] ", comment.created_at)?;
+            if comment.kind == models::CommentKind::Verification {
+                formatter.write_str("[verification] ")?;
+            }
             write!(
                 formatter,
-                "[{}] {} ({})",
-                comment.created_at, comment.author, comment.author_display_name
+                "{} ({})",
+                comment.author, comment.author_display_name
             )?;
             self.context.map_or(Ok(()), |context| {
                 write!(
@@ -938,6 +1023,7 @@ impl LificMcp {
     /// | `create_issue` | resolvable | omission is an error today |
     /// | `get_board` | resolvable | omission is an error today |
     /// | `create_plan` | resolvable | omission is an error today |
+    /// | `get_briefing` | resolvable | omission is an error without a binding |
     /// | `list_resources` (issue, plan, module, label, folder) | resolvable | omission is an error today |
     /// | `list_resources` (page) | meaning-preserved | omission lists pages across every project |
     /// | `list_resources` (project) | meaning-preserved | `project` is ignored for this type |
@@ -972,7 +1058,7 @@ const FALLBACK_RESOURCE_TYPES: [&str; 5] = ["issue", "plan", "module", "label", 
 /// machine, and has nothing but the tool name and arguments to go on.
 pub(crate) fn project_fallback_applies(tool: &str, resource_type: Option<&str>) -> bool {
     match tool {
-        "list_issues" | "create_issue" | "get_board" | "create_plan" => true,
+        "list_issues" | "create_issue" | "get_board" | "create_plan" | "get_briefing" => true,
         "list_resources" => {
             resource_type.is_some_and(|kind| FALLBACK_RESOURCE_TYPES.contains(&kind))
         }
@@ -989,12 +1075,15 @@ fn canonical_project_identifier(
         .map_err(|e| e.to_string())
 }
 
+mod export_pages;
+mod names;
+
 fn resolve_module(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
-    queries::resolve_module_name(conn, project_id, name).map_err(|e| e.to_string())
+    names::module_id(conn, project_id, name).map_err(|e| e.to_string())
 }
 
 fn resolve_folder(conn: &rusqlite::Connection, project_id: i64, name: &str) -> Result<i64, String> {
-    queries::resolve_folder_name(conn, project_id, name).map_err(|e| e.to_string())
+    names::folder_id(conn, project_id, name).map_err(|e| e.to_string())
 }
 
 /// LIF-145 sentinel for a create's simple `Option<String>` icon field: field
@@ -1372,6 +1461,19 @@ impl Display for ActivityLine<'_> {
                     activity.old_value.as_deref().unwrap_or("?")
                 )
             ),
+            // LIF-484: user and date blockers.
+            "wait" => write!(
+                formatter,
+                "{} +wait {}",
+                label,
+                activity.new_value.as_deref().unwrap_or("?")
+            ),
+            "unwait" => write!(
+                formatter,
+                "{} -wait {}",
+                label,
+                activity.old_value.as_deref().unwrap_or("?")
+            ),
             other => write!(formatter, "{label} {other}"),
         }
     }
@@ -1565,6 +1667,10 @@ impl LificMcp {
     }
 }
 
+#[cfg(test)]
+mod activity_since_tests;
+mod briefing;
+
 #[tool_router]
 impl LificMcp {
     #[tool(description = "Search across all issues, pages, and comments by text")]
@@ -1634,6 +1740,13 @@ impl LificMcp {
         }
         let link_context = current_issue_link_context();
         Ok(render_response(|output| {
+            if results[0].partial_match {
+                writeln!(
+                    output,
+                    "{}",
+                    queries::partial_match_notice(input.sort.as_deref())
+                )?;
+            }
             writeln!(output, "{} results:", results.len())?;
             results.iter().try_for_each(|result| {
                 let identifier = result.identifier.as_deref().unwrap_or("");
@@ -1697,7 +1810,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values."
+        description = "Read the audit log: who changed what, when, and through which door (web UI, MCP, API, CLI). Takes an issue, page, or project ID; project scope covers the whole feed. Newest-first with old and new values; pass since to read forward from a timestamp."
     )]
     fn get_activity(&self, Parameters(input): Parameters<GetActivityInput>) -> String {
         self.get_activity_inner(input)
@@ -1717,6 +1830,12 @@ impl LificMcp {
             queries::activity::MAX_LIMIT,
         );
         let ident = input.identifier.trim();
+        let since = input
+            .since
+            .as_deref()
+            .map(queries::activity::normalize_since)
+            .transpose()
+            .map_err(|error| error.to_string())?;
 
         // Resolve the identifier shape: page → issue → project. Pages are
         // unambiguous (DOC segment); issue resolution requires a numeric
@@ -1791,16 +1910,26 @@ impl LificMcp {
                 .then_some(scope_identifier.as_str())
         });
         let rendered = self.read(|conn| {
-            let feed = queries::activity::list_activity(conn, scope, Some(limit), Some(offset))?;
+            let feed = queries::activity::list_activity_since(
+                conn,
+                scope,
+                since.as_deref(),
+                Some(limit),
+                Some(offset),
+            )?;
             if feed.items.is_empty() {
                 return Ok((None, 0, feed.has_more));
             }
             let output = try_render(|output| {
-                writeln!(
+                write!(
                     output,
-                    "{} activity entries for {scope_reference}:",
+                    "{} activity entries for {scope_reference}",
                     feed.items.len()
                 )?;
+                match &since {
+                    Some(since) => writeln!(output, " after {since} UTC, oldest first:"),
+                    None => writeln!(output, ":"),
+                }?;
                 feed.items.iter().try_for_each(|activity| {
                     writeln!(
                         output,
@@ -1822,8 +1951,12 @@ impl LificMcp {
             Ok((Some(output), feed.items.len(), feed.has_more))
         })?;
         Ok(match rendered {
-            (None, _, _) if offset == 0 => render_response(|output| {
-                write!(output, "No recorded activity for {scope_reference} yet.")
+            (None, _, _) if offset == 0 => render_response(|output| match &since {
+                Some(since) => write!(
+                    output,
+                    "No activity for {scope_reference} after {since} UTC."
+                ),
+                None => write!(output, "No recorded activity for {scope_reference} yet."),
             }),
             (Some(mut out), _, has_more) => {
                 let result = append_pagination_hint(&mut out, has_more, offset + limit);
@@ -1831,6 +1964,14 @@ impl LificMcp {
             }
             (None, _, _) => "No activity entries in this range.".into(),
         })
+    }
+
+    #[tool(
+        description = "Call first when resuming a project: active plans with next steps, blocked, workable and active issues, key pages (metadata only) and, with since, what changed. Bounded to about 6,000 characters."
+    )]
+    fn get_briefing(&self, Parameters(input): Parameters<GetBriefingInput>) -> String {
+        self.get_briefing_inner(input)
+            .unwrap_or_else(error_response)
     }
 
     #[tool(
@@ -1866,7 +2007,11 @@ impl LificMcp {
                     priority: models::Priority::parse_opt(input.priority.as_deref())
                         .map_err(crate::error::LificError::BadRequest)?,
                     module_id,
-                    label: input.label.clone(),
+                    label: input
+                        .label
+                        .as_deref()
+                        .map(|name| names::stored_label_name(conn, pid, name))
+                        .transpose()?,
                     workable: input.workable,
                     blocked: input.blocked,
                     created_since: input.created_since.clone(),
@@ -1877,6 +2022,7 @@ impl LificMcp {
                     order: input.order.clone(),
                     limit: Some(limit),
                     offset: Some(offset),
+                    ..Default::default()
                 },
             )
         })?;
@@ -1900,7 +2046,7 @@ impl LificMcp {
         Ok(render_response(|output| {
             writeln!(output, "{} issues:", issues.len())?;
             issues.iter().try_for_each(|issue| {
-                writeln!(
+                write!(
                     output,
                     "- {}",
                     IssueLine {
@@ -1910,7 +2056,12 @@ impl LificMcp {
                             .and_then(|id| module_names.get(&id).map(String::as_str)),
                         context: context.as_deref(),
                     }
-                )
+                )?;
+                // LIF-487: only issues that carry a task list pay for this.
+                crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
+                    write!(output, " checklist: {}/{}", list.done, list.total)
+                })?;
+                writeln!(output)
             })?;
             append_pagination_hint(output, has_more, offset + limit)
         }))
@@ -2007,6 +2158,9 @@ impl LificMcp {
                     }
                 )
             })?;
+            crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
+                writeln!(output, "Checklist: {}/{} done", list.done, list.total)
+            })?;
             [
                 ("Blocks: ", rels.blocks.as_slice()),
                 ("Blocked by: ", rels.blocked_by.as_slice()),
@@ -2026,6 +2180,7 @@ impl LificMcp {
                     }
                 )
             })?;
+            write!(output, "{}", super::waits::WaitLines(&issue.waits))?;
             (!issue.description.is_empty())
                 .then(|| writeln!(output, "\n{}", issue.description))
                 .transpose()
@@ -2137,7 +2292,7 @@ impl LificMcp {
     }
 
     #[tool(
-        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). Issues and pages return the markdown; projects return the exported file paths."
+        description = "Export as markdown: an issue (PRO-42), a page (PRO-DOC-3), or a whole project (PRO). A project returns its issue and page documents a page at a time; continue with offset."
     )]
     async fn export(&self, Parameters(input): Parameters<ExportInput>) -> String {
         self.export_inner(input)
@@ -2177,6 +2332,10 @@ impl LificMcp {
             Kind::Project
         };
 
+        // Resolved here, on the request's own task: the identity does not
+        // follow the blocking worker. Relations to issues the caller cannot
+        // see are left out of the frontmatter; pages render none.
+        let visible = visible_project_ids_mcp(&self.db)?;
         let slot = self
             .db
             .acquire_export_slot()
@@ -2184,10 +2343,15 @@ impl LificMcp {
         let this = self.clone();
         let identifier = ident.to_string();
         let (bundle, _slot) = tokio::task::spawn_blocking(move || {
+            let visible = visible.as_ref();
             let bundle = match kind {
-                Kind::Issue => this.read(|conn| crate::export::export_issue(conn, &identifier)),
+                Kind::Issue => {
+                    this.read(|conn| crate::export::export_issue(conn, &identifier, visible))
+                }
                 Kind::Page => this.read(|conn| crate::export::export_page(conn, &identifier)),
-                Kind::Project => this.read(|conn| crate::export::export_project(conn, &identifier)),
+                Kind::Project => {
+                    this.read(|conn| crate::export::export_project(conn, &identifier, visible))
+                }
             }?;
             Ok::<_, String>((bundle, slot))
         })
@@ -2203,23 +2367,27 @@ impl LificMcp {
                 || "Error: issue export produced no files".into(),
                 |file| file.content,
             )),
-            Kind::Project => Ok(render_response(|output| {
-                writeln!(output, "{} exported file(s):", bundle.files.len())?;
-                bundle
-                    .files
-                    .iter()
-                    .try_for_each(|file| writeln!(output, "- {}", file.path))
-            })),
+            Kind::Project => Ok(export_pages::render_project_page(
+                &bundle,
+                input.offset,
+                input.limit,
+            )),
         }
     }
 
-    #[tool(description = "Create a new issue in a project")]
+    #[tool(description = "Create a new issue in a project, or several at once with issues")]
     fn create_issue(&self, Parameters(input): Parameters<CreateIssueInput>) -> String {
         self.create_issue_inner(input)
             .unwrap_or_else(error_response)
     }
 
-    fn create_issue_inner(&self, input: CreateIssueInput) -> Result<String, String> {
+    fn create_issue_inner(&self, mut input: CreateIssueInput) -> Result<String, String> {
+        if let Some(items) = input.issues.take() {
+            return self.create_issue_batch(input, items);
+        }
+        if input.title.trim().is_empty() {
+            return Err("title is required (or pass issues to create several)".into());
+        }
         let conn = self.read_conn()?;
         let pid = resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?;
         require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
@@ -2248,7 +2416,11 @@ impl LificMcp {
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
-                    labels: input.labels.clone().unwrap_or_default(),
+                    labels: names::stored_label_names(
+                        conn,
+                        pid,
+                        input.labels.as_deref().unwrap_or_default(),
+                    )?,
                     source: None,
                     attachments,
                 },
@@ -2261,6 +2433,20 @@ impl LificMcp {
             },
             issue.seq,
         );
+        // LIF-477: name likely duplicates so the agent can link or cancel one
+        // now. Best effort: the issue already exists, so a failed lookup only
+        // costs the hint.
+        let similar = self
+            .read(|conn| {
+                queries::similar_open_issues(
+                    conn,
+                    pid,
+                    &issue.title,
+                    &[issue.id],
+                    SIMILAR_ISSUE_LIMIT,
+                )
+            })
+            .unwrap_or_default();
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             write!(
@@ -2268,7 +2454,119 @@ impl LificMcp {
                 "Created {}: {}",
                 issue_reference(context.as_deref(), &issue.identifier),
                 issue.title
-            )
+            )?;
+            write_similar_issues(output, context.as_deref(), &similar)
+        }))
+    }
+
+    /// LIF-478: agents file issues in bursts. The whole batch is one
+    /// transaction, so any invalid item (unknown module, bad status, missing
+    /// title) creates nothing, and the error names the item by its index.
+    ///
+    /// Only `project` applies to the batch; every other top-level field must
+    /// be absent, so there is no merge rule to guess at. The similar-issues
+    /// hint stays, reduced to identifiers on the item's own line: bursts are
+    /// where duplicates of existing work are most likely, but three full
+    /// lines per item would bury the list of what was created. Issues from the
+    /// same batch are never offered as each other's duplicates.
+    fn create_issue_batch(
+        &self,
+        input: CreateIssueInput,
+        items: Vec<CreateIssueItem>,
+    ) -> Result<String, String> {
+        const MAX_ISSUE_BATCH: usize = 50;
+        let has_single_fields = !input.title.is_empty()
+            || input.description.is_some()
+            || input.status.is_some()
+            || input.priority.is_some()
+            || input.module.is_some()
+            || input.labels.is_some()
+            || input.start_date.is_some()
+            || input.target_date.is_some();
+        if has_single_fields {
+            return Err(
+                "with issues, set title and the other fields on each item; only project applies to the whole batch"
+                    .into(),
+            );
+        }
+        if items.is_empty() {
+            return Err("issues is empty; pass at least one item".into());
+        }
+        if items.len() > MAX_ISSUE_BATCH {
+            return Err(format!(
+                "issues holds {} items; the limit is {MAX_ISSUE_BATCH} per call",
+                items.len()
+            ));
+        }
+        let pid = {
+            let conn = self.read_conn()?;
+            resolve_project(&conn, self.project_or_bound(input.project.as_deref())?)?
+        };
+        require_role_mcp(&self.db, pid, models::Role::Maintainer)?;
+        let created = self.transaction(|conn| {
+            // Same actor re-check as the single create, once for the batch.
+            let attachments = sync_link_actor_conn(conn, Some(pid), models::Role::Maintainer)?;
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    create_batch_item(conn, pid, item, attachments)
+                        .map_err(|error| at_batch_item(index, error))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        for issue in &created {
+            self.emit_with_seq(
+                crate::realtime::RealtimeEvent::IssueCreated {
+                    project_id: issue.project_id,
+                    issue_id: issue.id,
+                },
+                issue.seq,
+            );
+        }
+        let batch_ids: Vec<i64> = created.iter().map(|issue| issue.id).collect();
+        let similar: Vec<Vec<queries::SimilarIssue>> = created
+            .iter()
+            .map(|issue| {
+                self.read(|conn| {
+                    queries::similar_open_issues(
+                        conn,
+                        pid,
+                        &issue.title,
+                        &batch_ids,
+                        SIMILAR_ISSUE_LIMIT,
+                    )
+                })
+                .unwrap_or_default()
+            })
+            .collect();
+        let context = current_issue_link_context();
+        Ok(render_response(|output| {
+            write!(output, "Created {} issues:", created.len())?;
+            created
+                .iter()
+                .zip(&similar)
+                .try_for_each(|(issue, similar)| {
+                    write!(
+                        output,
+                        "\n- {}: {}",
+                        issue_reference(context.as_deref(), &issue.identifier),
+                        issue.title
+                    )?;
+                    if similar.is_empty() {
+                        return Ok(());
+                    }
+                    write!(output, " (similar open: ")?;
+                    similar.iter().enumerate().try_for_each(|(i, other)| {
+                        let separator = if i == 0 { "" } else { ", " };
+                        write!(
+                            output,
+                            "{separator}{}",
+                            issue_reference(context.as_deref(), &other.identifier)
+                        )
+                    })?;
+                    write!(output, ")")
+                })
         }))
     }
 
@@ -2281,13 +2579,30 @@ impl LificMcp {
     }
 
     fn update_issue_inner(&self, input: UpdateIssueInput) -> Result<String, String> {
+        // LIF-486: evidence documents a close, so it rides only on a
+        // transition to done. Cancelled work has nothing to verify, and a
+        // verification badge on abandoned work would mislead the reader.
+        let evidence = match input.evidence.as_deref() {
+            Some(text) if text.trim().is_empty() => {
+                return Err(
+                    "evidence is empty. Omit it, or describe how the work was verified.".into(),
+                );
+            }
+            Some(_)
+                if models::Status::parse_opt(input.status.as_deref())
+                    != Ok(Some(models::Status::Done)) =>
+            {
+                return Err("evidence is only accepted with status=done in the same call. Use add_comment for notes on an open issue.".into());
+            }
+            other => other,
+        };
         let (id, project_id) = self.read(|conn| {
             let id = queries::resolve_identifier(conn, &input.identifier)?;
             let project_id = queries::get_issue(conn, id)?.project_id;
             Ok((id, project_id))
         })?;
         require_role_mcp(&self.db, project_id, models::Role::Maintainer)?;
-        let (issue, cascade_action, cascaded_steps) = self.transaction(|conn| {
+        let (issue, cascade_action, cascaded_steps, verification) = self.transaction(|conn| {
             // Migration 020's cascades key exclusively on transitions to or
             // from `done`, not on the broader cancelled/open distinction.
             // Keep an audit checkpoint before the direct issue update so the
@@ -2306,13 +2621,19 @@ impl LificMcp {
             // (unassign module), non-empty = resolve + set.
             let module_id = match &input.module {
                 Some(name) if name.is_empty() => Some(None),
-                Some(name) => Some(Some(queries::resolve_module_name(
+                Some(name) => Some(Some(names::module_id(
                     conn,
                     previous_issue.project_id,
                     name,
                 )?)),
                 None => None,
             };
+            if evidence.is_some() && previous_issue.status == models::Status::Done {
+                return Err(crate::error::LificError::BadRequest(format!(
+                    "{} is already done; evidence is recorded only when closing. Use add_comment instead.",
+                    previous_issue.identifier
+                )));
+            }
             // LIF-369/LIF-409: resolved before the write it authorizes, on the
             // same connection and transaction, so no revocation can slip in.
             let attachments = sync_link_actor_conn(
@@ -2333,7 +2654,13 @@ impl LificMcp {
                     module_id,
                     start_date: input.start_date.clone(),
                     target_date: input.target_date.clone(),
-                    labels: input.labels.clone(),
+                    labels: input
+                        .labels
+                        .as_deref()
+                        .map(|labels| {
+                            names::stored_label_names(conn, previous_issue.project_id, labels)
+                        })
+                        .transpose()?,
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
                     attachments,
@@ -2353,7 +2680,25 @@ impl LificMcp {
                 }
                 _ => Vec::new(),
             };
-            Ok((issue, cascade_action, cascaded_steps))
+            let (issue, verification) = match evidence {
+                Some(evidence) => {
+                    let actor = resolve_comment_actor_conn(conn)?;
+                    let author = models::CommentActor::from(&actor.user);
+                    let comment = queries::comments::create_verification_comment(
+                        conn,
+                        id,
+                        issue.project_id,
+                        author,
+                        models::AttachmentActor::Authenticated(author),
+                        evidence,
+                        crate::authz::authz_enforced_conn(conn)?,
+                    )?;
+                    // The comment bumped the issue's seq; report the current one.
+                    (queries::get_issue(conn, id)?, Some(comment.id))
+                }
+                None => (issue, None),
+            };
+            Ok((issue, cascade_action, cascaded_steps, verification))
         })?;
         self.emit_with_seq(
             crate::realtime::RealtimeEvent::IssueUpdated {
@@ -2387,7 +2732,26 @@ impl LificMcp {
                         context: context.as_deref(),
                     }
                 )
-            })
+            })?;
+            verification.map_or(Ok(()), |comment_id| {
+                write!(output, "\nVerification recorded as comment #{comment_id}.")
+            })?;
+            // LIF-487: closing over unchecked acceptance items is allowed,
+            // but not silently.
+            match (
+                cascade_action,
+                crate::checklist::checklist(&issue.description),
+            ) {
+                (Some(PlanStepCascadeAction::AutoComplete), Some(list)) if list.open() > 0 => {
+                    write!(
+                        output,
+                        "\nWarning: {} of {} checklist items still unchecked.",
+                        list.open(),
+                        list.total
+                    )
+                }
+                _ => Ok(()),
+            }
         }))
     }
 
@@ -2432,7 +2796,11 @@ impl LificMcp {
                         priority: models::Priority::parse_opt(input.filter_priority.as_deref())
                             .map_err(crate::error::LificError::BadRequest)?,
                         module_id: filter_module_id,
-                        label: input.filter_label.clone(),
+                        label: input
+                            .filter_label
+                            .as_deref()
+                            .map(|name| names::stored_label_name(conn, pid, name))
+                            .transpose()?,
                         limit: Some(BULK_CAP),
                         ..Default::default()
                     },
@@ -2716,12 +3084,20 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Link two issues with a relation: blocks, relates_to, or duplicate")]
+    #[tool(
+        description = "Link two issues with a relation: blocks, relates_to, or duplicate. A blocks link with user or from/until instead of source makes target wait on a person or dates."
+    )]
     fn link_issues(&self, Parameters(input): Parameters<LinkIssuesInput>) -> String {
         self.link_issues_inner(input).unwrap_or_else(error_response)
     }
 
     fn link_issues_inner(&self, input: LinkIssuesInput) -> Result<String, String> {
+        if super::waits::link_is_wait(&input) {
+            return self.link_wait(&input);
+        }
+        if input.source.trim().is_empty() {
+            return Err("source is required, or pass user or from for a blocks wait".into());
+        }
         let (source, target) = self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
@@ -2755,13 +3131,21 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Remove a relation between two issues")]
+    #[tool(
+        description = "Remove a relation between two issues, or clear target's wait by user or from."
+    )]
     fn unlink_issues(&self, Parameters(input): Parameters<UnlinkIssuesInput>) -> String {
         self.unlink_issues_inner(input)
             .unwrap_or_else(error_response)
     }
 
     fn unlink_issues_inner(&self, input: UnlinkIssuesInput) -> Result<String, String> {
+        if super::waits::unlink_is_wait(&input) {
+            return self.unlink_wait(&input);
+        }
+        if input.source.trim().is_empty() {
+            return Err("source is required, or pass user or from to clear a wait".into());
+        }
         let (source, target) = self.read(|conn| {
             let source_id = queries::resolve_identifier(conn, &input.source)?;
             let target_id = queries::resolve_identifier(conn, &input.target)?;
@@ -2792,22 +3176,53 @@ impl LificMcp {
         }))
     }
 
-    #[tool(description = "Get a page by identifier (e.g. LIF-DOC-1). Returns full content.")]
+    #[tool(
+        description = "Get a page by identifier (e.g. LIF-DOC-1). Pages over 30,000 chars return their outline and opening; read the rest by section."
+    )]
     fn get_page(&self, Parameters(input): Parameters<GetPageInput>) -> String {
         self.get_page_inner(input).unwrap_or_else(error_response)
     }
 
     fn get_page_inner(&self, input: GetPageInput) -> Result<String, String> {
-        let (page, folder_name) = self.read(|conn| {
+        let (page, folder_name, before) = self.read(|conn| {
             let id = queries::resolve_page_identifier(conn, &input.identifier)?;
             let page = queries::get_page(conn, id)?;
             let folder_name = match page.folder_id {
                 Some(fid) => Some(queries::get_folder_name(conn, fid)?),
                 None => None,
             };
-            Ok((page, folder_name))
+            let before = match input.since_seq {
+                Some(seq) => queries::page_content_at_seq(conn, id, seq)?,
+                None => None,
+            };
+            Ok((page, folder_name, before))
         })?;
         require_page_role_mcp(&self.db, page.project_id, models::Role::Viewer)?;
+        // LIF-479: oversized pages come back as an outline plus their
+        // opening; `section` and `outline` read them piece by piece.
+        // LIF-480: `since_seq` returns only the content diff.
+        let body = match input.since_seq {
+            Some(_)
+                if input.section.is_some() || input.outline.is_some() || input.offset.is_some() =>
+            {
+                return Err("since_seq cannot be combined with section, outline or offset".into());
+            }
+            Some(since) => super::page_reads::page_changes(
+                &page.identifier,
+                before.as_deref(),
+                &page.content,
+                since,
+                page.seq,
+            )?,
+            None => super::page_reads::page_body(
+                &page.identifier,
+                &page.content,
+                page.seq,
+                input.section.as_deref(),
+                input.outline.unwrap_or(false),
+                input.offset,
+            )?,
+        };
         let context = current_issue_link_context();
         Ok(render_response(|output| {
             writeln!(
@@ -2831,10 +3246,8 @@ impl LificMcp {
                     }
                 )
             })?;
-            (!page.content.is_empty())
-                .then(|| writeln!(output, "\n{}", page.content))
-                .transpose()
-                .map(|_| ())
+            output.push_str(&body);
+            Ok(())
         }))
     }
 
@@ -2869,7 +3282,14 @@ impl LificMcp {
                     title: input.title.clone(),
                     content: input.content.clone().unwrap_or_default(),
                     status: input.status.clone().unwrap_or_else(|| "draft".into()),
-                    labels: input.labels.clone().unwrap_or_default(),
+                    labels: match project_id {
+                        Some(pid) => names::stored_label_names(
+                            conn,
+                            pid,
+                            input.labels.as_deref().unwrap_or_default(),
+                        )?,
+                        None => input.labels.clone().unwrap_or_default(),
+                    },
                     attachments,
                 },
             )
@@ -2878,13 +3298,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Created {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 
@@ -2912,7 +3336,7 @@ impl LificMcp {
                             "page has no project for folder resolution".into(),
                         )
                     })?;
-                    Some(Some(queries::resolve_folder_name(conn, pid, name)?))
+                    Some(Some(names::folder_id(conn, pid, name)?))
                 }
                 None => None,
             };
@@ -2930,7 +3354,12 @@ impl LificMcp {
                     folder_id,
                     status: input.status.clone(),
                     pinned: input.pinned,
-                    labels: input.labels.clone(),
+                    labels: match (input.labels.as_deref(), page_project_id) {
+                        (Some(labels), Some(pid)) => {
+                            Some(names::stored_label_names(conn, pid, labels)?)
+                        }
+                        (labels, _) => labels.map(<[String]>::to_vec),
+                    },
                     // LIF-441: omitted means last-writer-wins, unchanged.
                     expected_seq: input.expected_seq,
                     attachments,
@@ -2942,13 +3371,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Updated {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 
@@ -3017,13 +3450,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Edited {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 
@@ -3106,18 +3543,18 @@ impl LificMcp {
                 require_structure_role_mcp(&self.db, pid)?;
                 let reference = match input.resource_type.as_str() {
                     "module" => self.write(|conn| {
-                        let id = queries::resolve_module_name(conn, pid, &input.identifier)?;
+                        let id = names::module_id(conn, pid, &input.identifier)?;
                         let module = queries::get_module(conn, id)?;
                         queries::delete_module(conn, id)?;
                         Ok(module.name)
                     }),
                     "label" => self.write(|conn| {
-                        let id = queries::resolve_label_name(conn, pid, &input.identifier)?;
+                        let id = names::label_id(conn, pid, &input.identifier)?;
                         queries::delete_label(conn, id)?;
                         Ok(format!("'{}'", input.identifier))
                     }),
                     "folder" => self.write(|conn| {
-                        let id = queries::resolve_folder_name(conn, pid, &input.identifier)?;
+                        let id = names::folder_id(conn, pid, &input.identifier)?;
                         queries::delete_folder(conn, id)?;
                         Ok(format!("'{}'", input.identifier))
                     }),
@@ -3287,8 +3724,16 @@ impl LificMcp {
                     (Some(name), Some(pid)) => Some(resolve_folder(&resolver, pid, name)?),
                     _ => None,
                 };
+                // Workspace pages carry no labels, so only a project listing
+                // has a stored label name to match.
+                let label = match (input.label.as_deref(), project_id) {
+                    (Some(name), Some(pid)) => Some(
+                        names::stored_label_name(&resolver, pid, name).map_err(sanitize_error)?,
+                    ),
+                    (name, _) => name.map(str::to_owned),
+                };
                 drop(resolver);
-                let label = input.label.as_deref();
+                let label = label.as_deref();
                 let status = input.status.as_deref();
                 let order_by = input.order_by.as_deref();
                 let order = input.order.as_deref();
@@ -3604,7 +4049,7 @@ impl LificMcp {
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify label".into());
                 };
-                let lid = self.read(|conn| queries::resolve_label_name(conn, pid, current))?;
+                let lid = self.read(|conn| names::label_id(conn, pid, current))?;
                 let l = self.write(|conn| {
                     queries::update_label(
                         conn,
@@ -3649,7 +4094,7 @@ impl LificMcp {
                 let Some(ref current) = input.current_name else {
                     return Err("current_name required to identify folder".into());
                 };
-                let fid = self.read(|conn| queries::resolve_folder_name(conn, pid, current))?;
+                let fid = self.read(|conn| names::folder_id(conn, pid, current))?;
                 let f = self.write(|conn| {
                     queries::update_folder(
                         conn,
@@ -4962,6 +5407,27 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 }
 
 #[cfg(test)]
+mod input_hardening_tests;
+
+#[cfg(test)]
+mod tests_verification;
+
+#[cfg(test)]
+mod tests_checklist;
+
+#[cfg(test)]
+#[path = "tests_search_filing.rs"]
+mod tests_search_filing;
+
+#[cfg(test)]
+#[path = "tests_page_reads.rs"]
+mod tests_page_reads;
+
+#[cfg(test)]
+#[path = "tests_waits.rs"]
+mod tests_waits;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn comment_budget_counts_mcp_escaping_and_the_final_envelope() {
@@ -5020,7 +5486,7 @@ mod tests {
         .expect("seed first admin");
     }
 
-    fn mcp() -> (LificMcp, McpTestGuard) {
+    pub(super) fn mcp() -> (LificMcp, McpTestGuard) {
         let db = crate::db::open_memory().expect("test db");
         seed_first_admin(&db);
         (LificMcp::new(db), acquire_test_guard())
@@ -5053,7 +5519,7 @@ mod tests {
     }
 
     /// Seed a project via manage_resource, return identifier.
-    fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
+    pub(super) fn seed_project(mcp: &LificMcp, name: &str, ident: &str) -> String {
         let result = mcp.manage_resource(Parameters(ManageResourceInput {
             resource_type: "project".into(),
             action: "create".into(),
@@ -5070,7 +5536,7 @@ mod tests {
         ident.to_string()
     }
 
-    fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
+    pub(super) fn seed_issue(mcp: &LificMcp, project: &str, title: &str) -> String {
         let result = mcp.create_issue(Parameters(CreateIssueInput {
             project: Some(project.into()),
             title: title.into(),
@@ -6402,6 +6868,7 @@ mod tests {
             source: "LNK-01".into(),
             target: "LNK-02".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         assert_eq!(result, "LNK-1 blocks LNK-2");
 
@@ -6416,6 +6883,7 @@ mod tests {
         let result = m.unlink_issues(Parameters(UnlinkIssuesInput {
             source: "LNK-01".into(),
             target: "LNK-02".into(),
+            ..Default::default()
         }));
         assert_eq!(result, "Unlinked LNK-1 and LNK-2");
     }
@@ -6436,11 +6904,13 @@ mod tests {
             source: "REL-2".into(),
             target: "REL-1".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         m.link_issues(Parameters(LinkIssuesInput {
             source: "REL-3".into(),
             target: "REL-1".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         m.update_issue(Parameters(UpdateIssueInput {
             identifier: "REL-2".into(),
@@ -6468,6 +6938,7 @@ mod tests {
             source: "BLK-1".into(),
             target: "BLK-2".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
 
         let result = m.list_issues(Parameters(ListIssuesInput {
@@ -6809,6 +7280,7 @@ mod tests {
 
         let get = m.get_page(Parameters(GetPageInput {
             identifier: "SFP-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(get.contains("not found"), "got: {get}");
 
@@ -6848,6 +7320,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PG-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Design Doc"), "got: {detail}");
         assert!(detail.contains("# Overview"), "got: {detail}");
@@ -7554,6 +8027,7 @@ mod tests {
             relates_to: vec![],
             duplicates: vec!["T-3".into()],
             duplicated_by: vec!["T-4".into()],
+            waits: vec![],
         };
         crate::mcp::reset_issue_link_context_reads();
         let context = current_issue_link_context();
@@ -8955,6 +9429,7 @@ mod tests {
         let issue = m
             .export(Parameters(ExportInput {
                 identifier: "EXP-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(issue.contains("issue body here"), "got: {issue}");
@@ -8963,22 +9438,26 @@ mod tests {
         let page = m
             .export(Parameters(ExportInput {
                 identifier: "EXP-DOC-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(page.contains("page body here"), "got: {page}");
 
-        // Bare project shape (EXP) returns the exported file listing.
+        // Bare project shape (EXP) returns the documents themselves.
         let project = m
             .export(Parameters(ExportInput {
                 identifier: "EXP".into(),
+                ..Default::default()
             }))
             .await;
-        assert!(project.contains("exported file(s)"), "got: {project}");
+        assert!(project.contains("issue body here"), "got: {project}");
+        assert!(project.contains("page body here"), "got: {project}");
 
         // Unknown identifiers name all three shapes in the error.
         let err = m
             .export(Parameters(ExportInput {
                 identifier: "NOPE-999".into(),
+                ..Default::default()
             }))
             .await;
         assert!(
@@ -8991,6 +9470,7 @@ mod tests {
         let blocked = m
             .export(Parameters(ExportInput {
                 identifier: "EXP".into(),
+                ..Default::default()
             }))
             .await;
         assert!(blocked.contains("too many exports"), "got: {blocked}");
@@ -9022,6 +9502,7 @@ mod tests {
         let exported = m
             .export(Parameters(ExportInput {
                 identifier: "ESC-1".into(),
+                ..Default::default()
             }))
             .await;
         assert!(
@@ -9279,6 +9760,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "EPC-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("new body"), "got: {detail}");
         assert!(!detail.contains("old body"), "got: {detail}");
@@ -9393,6 +9875,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "EPP-DOC-1".into(),
+            ..Default::default()
         }));
         // Title preserved, content edited.
         assert!(
@@ -9506,6 +9989,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PGL-DOC-1".into(),
+            ..Default::default()
         }));
         // get_page emits `Labels: <names>` when non-empty (mirrors get_issue).
         assert!(detail.contains("Labels: design"), "got: {detail}");
@@ -9538,6 +10022,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "PUL-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(detail.contains("Labels: draft"), "got: {detail}");
         assert!(!detail.contains("design"), "got: {detail}");
@@ -9854,6 +10339,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "DOC-1".into(),
+            ..Default::default()
         }));
         // No `Labels:` line present.
         assert!(!detail.contains("Labels:"), "got: {detail}");
@@ -9889,6 +10375,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(
             detail.contains("Status: active | Folder: Specs"),
@@ -9921,6 +10408,7 @@ mod tests {
 
         let detail = m.get_page(Parameters(GetPageInput {
             identifier: "MET-DOC-1".into(),
+            ..Default::default()
         }));
         assert!(
             detail.contains("Status: draft | Folder: none"),
@@ -10843,6 +11331,7 @@ mod tests {
             identifier: "TST".into(),
             limit: Some(50),
             offset: Some(2),
+            ..Default::default()
         }));
         // 5 total (project create + 4 issues) − 2 already seen = 3.
         assert!(next.contains("3 activity entries"), "got: {next}");
@@ -10975,6 +11464,7 @@ mod tests {
             source: "TST-1".into(),
             target: "TST-2".into(),
             relation_type: "blocks".into(),
+            ..Default::default()
         }));
         assert_eq!(linked, "TST-1 blocks TST-2");
         let context = crate::links::IssueLinkContext::parse("https://tracker.example").unwrap();
@@ -12548,11 +13038,12 @@ mod tests {
     #[test]
     fn the_fallback_classification_matches_the_documented_table() {
         // Every row of the table on `project_or_bound`, in order.
-        let resolvable: [(&str, Option<&str>); 9] = [
+        let resolvable: [(&str, Option<&str>); 10] = [
             ("list_issues", None),
             ("create_issue", None),
             ("get_board", None),
             ("create_plan", None),
+            ("get_briefing", None),
             ("list_resources", Some("issue")),
             ("list_resources", Some("plan")),
             ("list_resources", Some("module")),
@@ -13141,6 +13632,7 @@ mod authz_gating_tests {
         let denied_page = as_user(&non_member, || {
             m.get_page(Parameters(GetPageInput {
                 identifier: "MEM-DOC-1".into(),
+                ..Default::default()
             }))
         });
         assert!(is_forbidden(&denied_page), "got: {denied_page}");
@@ -13154,6 +13646,7 @@ mod authz_gating_tests {
         let allowed_page = as_user(&viewer, || {
             m.get_page(Parameters(GetPageInput {
                 identifier: "MEM-DOC-1".into(),
+                ..Default::default()
             }))
         });
         assert!(!is_forbidden(&allowed_page), "got: {allowed_page}");
@@ -13784,6 +14277,7 @@ mod authz_gating_tests {
                 source: "MEM-1".into(),
                 target: "OTH-1".into(),
                 relation_type: "relates_to".into(),
+                ..Default::default()
             }))
         });
         assert!(
@@ -13806,6 +14300,7 @@ mod authz_gating_tests {
                 source: "MEM-1".into(),
                 target: "OTH-1".into(),
                 relation_type: "relates_to".into(),
+                ..Default::default()
             }))
         });
         assert!(
@@ -14187,7 +14682,6 @@ mod authz_gating_tests {
 
         let auth_state = crate::auth::AuthState {
             db: (*m.db).clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
             required: true,
         };

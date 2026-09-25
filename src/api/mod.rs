@@ -23,6 +23,7 @@ mod repo_bindings;
 mod resources;
 mod sync;
 mod views;
+mod waits;
 
 use axum::{
     Router,
@@ -214,6 +215,16 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         .route("/api/issues/unlink", post(issues::unlink_issues))
         // Atomic direction swap for an existing edge (LIF-413)
         .route("/api/issues/reverse", post(issues::reverse_relation))
+        // User and date blockers (LIF-484)
+        .route("/api/clock", get(waits::server_clock))
+        .route(
+            "/api/issues/{id}/waits",
+            get(waits::list_waits).post(waits::add_wait),
+        )
+        .route(
+            "/api/issues/{id}/waits/{wait_id}",
+            delete(waits::clear_wait),
+        )
         // Project-wide relation edges (dependency graph — LIF-363)
         .route(
             "/api/projects/{id}/relations",
@@ -736,11 +747,46 @@ async fn search(
     // narrows the search to one project, since a non-member of that project
     // shouldn't be able to probe its existence via a 403 vs. empty-results
     // side channel here.
+    //
+    // LIF-476: when no hit contains every word, the results are the ranked
+    // any-word fallback and each carries `partial_match: true`.
     let visible = crate::authz::visible_project_ids(&db, &identity)?;
     let results = with_read(&db, |conn| {
         queries::search_page(conn, &q, visible.as_ref()).map(|page| page.items)
     })?;
     Ok(Json(results))
+}
+
+/// LIF-476: the REST search the web palette calls flags fallback hits.
+#[cfg(test)]
+mod search_fallback_tests {
+    use super::test_helpers::{json_get, json_post, parse_json, seed_project, test_app};
+
+    #[tokio::test]
+    async fn rest_search_flags_partial_matches_and_leaves_full_matches_unflagged() {
+        let app = test_app();
+        let (project_id, _) = seed_project(&app).await;
+        for title in ["Search ranking ignores empty titles", "Search is slow"] {
+            json_post(
+                &app,
+                "/api/issues",
+                serde_json::json!({ "project_id": project_id, "title": title }),
+            )
+            .await;
+        }
+
+        let full = parse_json(json_get(&app, "/api/search?query=search%20ranking").await).await;
+        let full = full.as_array().unwrap();
+        assert_eq!(full.len(), 1);
+        assert!(full[0].get("partial_match").is_none(), "got: {full:?}");
+
+        let partial =
+            parse_json(json_get(&app, "/api/search?query=ranking%20zeppelin").await).await;
+        let partial = partial.as_array().unwrap();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0]["title"], "Search ranking ignores empty titles");
+        assert_eq!(partial[0]["partial_match"], true);
+    }
 }
 
 // ── Shared test helpers ──────────────────────────────────────
@@ -1255,26 +1301,12 @@ mod tests {
 
     #[tokio::test]
     async fn presented_invalid_api_key_returns_401() {
-        use api_keys_simplified::{Environment, ExposeSecret, SecureString};
-
         let db = crate::db::open_memory().expect("test db");
-        let manager = crate::auth::create_key_manager().expect("key manager");
-        let valid_key = crate::auth::create_api_key(&db, &manager, "valid-test-key", None)
-            .expect("create valid key");
-        let invalid_key = manager
-            .generate(Environment::production())
-            .expect("generate mismatched key")
-            .key()
-            .expose_secret()
-            .to_string();
-        let invalid_key_id = manager.extract_key_id(&SecureString::from(invalid_key.clone()));
-        // Generated before `manager` moves into AuthState below.
-        let never_issued = manager
-            .generate(Environment::production())
-            .expect("generate never-issued key")
-            .key()
-            .expose_secret()
-            .to_string();
+        let valid_key =
+            crate::auth::create_api_key(&db, "valid-test-key", None).expect("create valid key");
+        let invalid_key = crate::auth::generate_api_key_token().unwrap();
+        let invalid_key_id = crate::auth::api_key_id(&invalid_key);
+        let never_issued = crate::auth::generate_api_key_token().unwrap();
         let app = crate::api::router(db.clone(), &[])
             .layer(axum::Extension(crate::realtime::RealtimeHub::new()))
             .layer(axum::Extension(crate::config::AuthConfig {
@@ -1285,7 +1317,6 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(
                 crate::auth::AuthState {
                     db: db.clone(),
-                    manager,
                     public_url: "https://example.com".into(),
                     required: true,
                 },
@@ -2193,7 +2224,6 @@ mod authz_gating_tests {
 
         let auth_state = crate::auth::AuthState {
             db: db.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
             required: true,
         };

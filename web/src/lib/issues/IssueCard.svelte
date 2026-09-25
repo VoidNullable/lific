@@ -13,6 +13,7 @@
   import { projectCodeOf } from "../references"; // LIF-248
   import { copyToClipboard } from "../clipboard";
   import CopyIdButton from "../CopyIdButton.svelte";
+  import WaitChip from "./WaitChip.svelte"; // LIF-485
 
   let {
     issue,
@@ -153,6 +154,7 @@
        exists, so the time anchor keeps card heights consistent whether or
        not labels do. -->
   <div class="flex items-center gap-1.5 mt-2 flex-wrap">
+    <WaitChip waits={issue.waits} />
     {#each issue.labels.slice(0, 3) as lbl}
       {@const labelObj = labels.find((l) => l.name === lbl)}
       <span

@@ -1,6 +1,6 @@
 ---
 title: Issues, pages and plans
-description: Create, update, link, delete and restore issues; write comments; manage pages, plans, modules, labels and folders; read each item's activity.
+description: Create, update, link, delete and restore issues; park issues on a person or a date; write comments; manage pages, plans, modules, labels and folders; read each item's activity.
 ---
 
 The [concept pages](/docs/concepts) explain what each of these is for. The `Issue`, `Page`, `Comment`, `Module`, `Label` and `Folder` shapes are defined once in [Shared shapes](/docs/rest-api#shared-shapes).
@@ -19,15 +19,15 @@ Every query parameter is optional:
 | `status`, `priority` | One exact value. |
 | `module_id` | Only this module. |
 | `label` | Only issues carrying this label name. |
-| `workable` | `true`: open issues whose blockers are all `done`. |
-| `blocked` | `true`: issues with at least one blocker that is not `done`, whatever their own status. |
+| `workable` | `true`: open issues whose blockers are all `done` and that have no wait still holding. |
+| `blocked` | `true`: issues with at least one blocker that is not `done`, or a wait still holding, whatever their own status. |
 | `created_since`, `updated_since` | Inclusive lower bound, a date or date-time. |
 | `created_until`, `updated_until` | Exclusive upper bound. |
 | `order_by` | `sort_order` (default), `sequence`, `created`, `updated` or `priority`. `created_at` and `updated_at` also work. |
 | `order` | `asc` (default) or `desc`. |
 | `limit`, `offset` | Default 50, at most 500. |
 
-The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks.
+The [issues concept page](/docs/concepts/issues#ready-and-blocked-work) explains why a `cancelled` blocker still blocks. An issue with [waits](#waits) carries them in `waits`, in lists as well as single reads.
 
 ### POST `/api/issues`
 
@@ -106,7 +106,59 @@ Flips the direction of the relations that run from `source` to `target`, in one 
 
 ### GET `/api/projects/{id}/relations`
 
-Every relation between two issues of this project, for drawing a dependency graph in one request. **Viewer.** Returns an array of `source_id`, `source_identifier`, `target_id`, `target_identifier` and `relation_type`.
+Every relation between two issues of this project, for drawing a dependency graph in one request. **Viewer.** Returns an array of `source_id`, `source_identifier`, `target_id`, `target_identifier` and `relation_type`. Waits are not relations and do not appear here.
+
+## Waits
+
+A wait blocks an issue on something that is not another issue: a person, or a window of days. A user wait holds until someone clears it. A date wait holds before its `earliest` day, is due from `earliest` through `latest`, and is overdue after `latest`. Only a holding wait blocks, for the `workable` and `blocked` filters as for everything else. "Today" is the server's local calendar day. [Waiting on a person or a date](/docs/concepts/issues#waiting-on-a-person-or-a-date) covers the model.
+
+A `Wait` has `id`, `issue_id`, `kind` (`user` or `date`), `note` (a string, empty when there is none), `state` and `created_at`. A user wait adds `user_id`, `username` and `display_name`. A date wait adds `earliest` and `latest` (`YYYY-MM-DD`; equal for a single day). `state` is `holding`, `due` or `overdue`, worked out on the server's day when the response was built. A client that keeps a wait across midnight should recompute it from `earliest` and `latest`, using [`GET /api/clock`](#get-apiclock).
+
+```json
+{
+  "id": 5,
+  "issue_id": 42,
+  "kind": "date",
+  "earliest": "2026-09-28",
+  "latest": "2026-10-02",
+  "note": "state filing office",
+  "state": "holding",
+  "created_at": "2026-09-25 14:02:11"
+}
+```
+
+Issue responses, `/index` rows and `/changes` rows carry an issue's waits as a `waits` array, left out when there are none. The [public read API](/docs/rest-api/public) never shows them. Adding or clearing a wait moves the issue's `seq`, records the change in the issue's activity, and publishes `issue.updated`.
+
+### GET `/api/issues/{id}/waits`
+
+The issue's waits: user waits first, then date waits by first day. **Viewer.** Returns a `Wait` array.
+
+### POST `/api/issues/{id}/waits`
+
+Adds a wait. **Maintainer.** Body: `user` (a username; a leading `@` is fine), or `from` (a date) with optional `until` (a date, default `from`). Either may carry `note`, up to 500 characters. Returns the new `Wait`.
+
+These are `400`: both `user` and `from`, neither, `until` without `from` or with `user`, a username with no active account, a date not in `YYYY-MM-DD` form, an `until` before `from`, and a note over 500 characters. A wait the issue already has, meaning the same person or the same window, is `409`.
+
+```bash
+curl -X POST "$LIFIC/api/issues/42/waits" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"2026-09-28","until":"2026-10-02","note":"state filing office"}'
+```
+
+### DELETE `/api/issues/{id}/waits/{wait_id}`
+
+Clears a wait. **Maintainer.** A `wait_id` that does not exist, or belongs to another issue, is `404`. Returns `{"cleared": true}`.
+
+### GET `/api/clock`
+
+The server's calendar day and its offset from UTC, which decide whether a date wait is holding, due or overdue. Any signed-in caller; a request with no identity is `403`. No parameters.
+
+```json
+{ "today": "2026-09-25", "utc_offset_minutes": -300 }
+```
+
+`utc_offset_minutes` is minutes east of UTC. A client that works out wait states itself should compute today at this offset, not in its own timezone, so that it agrees with the server. The web UI does this so an open tab turns over at the server's midnight.
 
 ## Comments
 
@@ -144,7 +196,7 @@ If even the first comment is larger than the budget, the answer is `413` with th
 
 ### POST `/api/pages/{page_id}/comments`
 
-Adds a comment. Body: `content` (Markdown). A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
+Adds a comment. Body: `content` (Markdown). A comment added here is always of kind `comment`; `verification` comments come only from closing an issue with evidence through MCP `update_issue`. A body may be at most 256 KiB, with at most 256 distinct `@`-mentions and 256 distinct attachment references; more is `400`. Returns the `Comment`.
 
 ### PUT `/api/comments/{id}`
 

@@ -3528,7 +3528,6 @@ mod cookie_fallback_tests {
     fn real_middleware_app(db: crate::db::DbPool) -> axum::Router {
         let auth_state = crate::auth::AuthState {
             db: db.clone(),
-            manager: crate::auth::create_key_manager().unwrap(),
             public_url: "https://example.com".into(),
             required: true,
         };
@@ -3722,8 +3721,7 @@ mod cookie_fallback_tests {
 
         // A genuinely valid API key — must still be refused via the cookie,
         // because the cookie path accepts ONLY session tokens.
-        let manager = crate::auth::create_key_manager().unwrap();
-        let key = crate::auth::create_api_key(&db, &manager, "cookie-key", None).unwrap();
+        let key = crate::auth::create_api_key(&db, "cookie-key", None).unwrap();
 
         let resp = app
             .clone()

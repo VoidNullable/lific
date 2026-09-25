@@ -10,7 +10,7 @@ Each route mirrors a private one: the same JSON shapes and the same comment pagi
 ## What it leaves out
 
 - The project's `lead_user_id` is null.
-- An issue has no `source`, and its relation arrays list only issues in the same project.
+- An issue has no `source` and no `waits`, and its relation arrays list only issues in the same project.
 - A comment keeps `author_display_name` but not `user_id` or the `author` username. The `author` filter on comment lists is ignored, so it cannot be used to test whether a username exists.
 - An attachment has no `uploader_id`.
 - `/changes` contains no comment rows, and its cursor counts only this project's writes.

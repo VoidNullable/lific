@@ -57,13 +57,68 @@ pub fn search_page(
     }
 
     let hits = match q.mode.as_deref() {
-        None | Some("fts") => search_fts(conn, q, fetch, offset, visible_project_ids),
+        None | Some("fts") => search_fts_with_fallback(conn, q, fetch, offset, visible_project_ids),
         Some("literal") => search_literal(conn, q, fetch, offset, visible_project_ids),
         Some(other) => Err(LificError::BadRequest(format!(
             "invalid mode '{other}'. Use fts or literal."
         ))),
     }?;
     Ok(super::Page::from_over_fetch(hits, limit))
+}
+
+/// How the words of an FTS query combine.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Terms {
+    /// Every word must match (the default, and the only mode before LIF-476).
+    All,
+    /// Any word may match; BM25 puts documents matching more of them first.
+    Any,
+}
+
+/// LIF-476: FTS with a ranked any-word fallback.
+///
+/// Every word is a required prefix term, so a long, specific query misses
+/// even when one document plainly matches most of it (measured over real
+/// agent searches: 45% of four-word queries and 60% of five-plus found
+/// nothing). When the all-words query has no hit anywhere in the requested
+/// scope, the same scope is searched again with any word allowed and each hit
+/// is flagged [`SearchResult::partial_match`].
+///
+/// The decision is made per query, not per page: a page past the end of
+/// genuine all-words hits is simply empty, and every page of a fallback
+/// search pages through the same any-word result list. A one-word query has
+/// nothing to relax, so it never falls back.
+fn search_fts_with_fallback(
+    conn: &Connection,
+    q: &SearchQuery,
+    limit: i64,
+    offset: i64,
+    visible_project_ids: Option<&HashSet<i64>>,
+) -> Result<Vec<SearchResult>, LificError> {
+    let hits = search_fts(conn, q, Terms::All, limit, offset, visible_project_ids)?;
+    if !hits.is_empty() || q.query.split_whitespace().nth(1).is_none() {
+        return Ok(hits);
+    }
+    if offset > 0 && !search_fts(conn, q, Terms::All, 1, 0, visible_project_ids)?.is_empty() {
+        return Ok(hits);
+    }
+    let mut partial = search_fts(conn, q, Terms::Any, limit, offset, visible_project_ids)?;
+    for hit in &mut partial {
+        hit.partial_match = true;
+    }
+    Ok(partial)
+}
+
+/// The line a renderer puts above fallback results, so a reader never takes
+/// a partial match for one that contains every word. `sort` is the search's
+/// own sort parameter.
+pub fn partial_match_notice(sort: Option<&str>) -> &'static str {
+    match sort {
+        Some("recent") => {
+            "No result contains every word; showing partial matches, most recent first."
+        }
+        _ => "No result contains every word; showing partial matches ranked by relevance.",
+    }
 }
 
 /// FTS5 full-text path.
@@ -77,6 +132,7 @@ pub fn search_page(
 fn search_fts(
     conn: &Connection,
     q: &SearchQuery,
+    terms: Terms,
     limit: i64,
     offset: i64,
     visible_project_ids: Option<&HashSet<i64>>,
@@ -85,8 +141,8 @@ fn search_fts(
     let want_attachments = q.result_type.as_deref().is_none_or(|rt| rt == "attachment");
 
     match (want_entities, want_attachments) {
-        (true, false) => search_entities_fts(conn, q, limit, offset, visible_project_ids),
-        (false, true) => search_attachments_fts(conn, q, limit, offset, visible_project_ids),
+        (true, false) => search_entities_fts(conn, q, terms, limit, offset, visible_project_ids),
+        (false, true) => search_attachments_fts(conn, q, terms, limit, offset, visible_project_ids),
         _ => {
             // Both sides, one page. The concatenation is entities-then-
             // attachments, so the requested window is cut out of the entity
@@ -94,7 +150,7 @@ fn search_fts(
             // index. Neither index is over-fetched by the offset (LIF-388 read
             // `offset + limit` rows from *each* side, which grows without
             // bound as a caller pages).
-            let mut rows = search_entities_fts(conn, q, limit, offset, visible_project_ids)?;
+            let mut rows = search_entities_fts(conn, q, terms, limit, offset, visible_project_ids)?;
             let remainder = limit - rows.len() as i64;
             if remainder <= 0 {
                 return Ok(rows);
@@ -106,7 +162,7 @@ fn search_fts(
             // translated, and only then is the count worth its query.
             let attachment_offset = if rows.is_empty() && offset > 0 {
                 offset
-                    .saturating_sub(count_entities_fts(conn, q, visible_project_ids)?)
+                    .saturating_sub(count_entities_fts(conn, q, terms, visible_project_ids)?)
                     .max(0)
             } else {
                 0
@@ -114,6 +170,7 @@ fn search_fts(
             rows.extend(search_attachments_fts(
                 conn,
                 q,
+                terms,
                 remainder,
                 attachment_offset,
                 visible_project_ids,
@@ -134,6 +191,7 @@ fn search_fts(
 fn search_attachments_fts(
     conn: &Connection,
     q: &SearchQuery,
+    terms: Terms,
     limit: i64,
     offset: i64,
     visible_project_ids: Option<&HashSet<i64>>,
@@ -147,7 +205,7 @@ fn search_attachments_fts(
             )));
         }
     };
-    let Some(fts_query) = fts_expression(&q.query) else {
+    let Some(fts_query) = fts_expression(&q.query, terms, ATTACHMENT_TEXT_COLUMNS) else {
         return Ok(Vec::new());
     };
 
@@ -230,22 +288,40 @@ fn attachment_result(
         snippet,
         project_id: target.project_id,
         parent_page_id: target.page_id,
+        partial_match: false,
     }))
 }
+
+/// The `search_index` columns that hold text. The others (`entity_type`,
+/// `entity_id`, `project_id`) are indexed too, so an unfiltered term like
+/// `issue` or `3` matches rows by their metadata.
+pub(crate) const ENTITY_TEXT_COLUMNS: &str = "{title body}";
+/// Likewise for `attachments_fts`, whose `attachment_id` column is indexed.
+const ATTACHMENT_TEXT_COLUMNS: &str = "{filename extracted_text}";
 
 /// Turn a user query into the prefix-matching FTS5 expression both indexes are
 /// searched with. `None` for an empty or whitespace-only query: `MATCH ''` is
 /// an fts5 syntax error, so the caller returns no results instead (LIF-133).
-fn fts_expression(query: &str) -> Option<String> {
-    let expression: String = query
+///
+/// [`Terms::All`] is the expression search has always used, byte for byte.
+/// [`Terms::Any`] ORs the words and confines them to `text_columns`: with
+/// every word optional, a metadata column match would otherwise be enough to
+/// return every issue for a query that merely contains the word "issue".
+pub(crate) fn fts_expression(query: &str, terms: Terms, text_columns: &str) -> Option<String> {
+    let words: Vec<String> = query
         .split_whitespace()
         .map(|word| {
             let escaped = word.replace('"', "\"\"");
             format!("\"{escaped}\"*")
         })
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!expression.is_empty()).then_some(expression)
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    Some(match terms {
+        Terms::All => words.join(" "),
+        Terms::Any => format!("{text_columns} : ({})", words.join(" OR ")),
+    })
 }
 
 /// Issue / page / comment hits from `search_index` (the original `search_fts`
@@ -253,6 +329,7 @@ fn fts_expression(query: &str) -> Option<String> {
 fn search_entities_fts(
     conn: &Connection,
     q: &SearchQuery,
+    terms: Terms,
     limit: i64,
     offset: i64,
     visible_project_ids: Option<&HashSet<i64>>,
@@ -275,7 +352,7 @@ fn search_entities_fts(
     // LIF-133: an empty or whitespace-only query tokenizes to an empty FTS
     // expression, and `MATCH ''` is an fts5 syntax error. Return no results
     // instead of surfacing a database error.
-    let Some((conditions, mut params)) = entity_fts_filter(q, visible_project_ids) else {
+    let Some((conditions, mut params)) = entity_fts_filter(q, terms, visible_project_ids) else {
         return Ok(Vec::new());
     };
 
@@ -329,9 +406,10 @@ fn search_entities_fts(
 /// Every fragment constrains `s` alone, so the count can skip the join chain.
 fn entity_fts_filter(
     q: &SearchQuery,
+    terms: Terms,
     visible_project_ids: Option<&HashSet<i64>>,
 ) -> Option<(Vec<String>, Vec<Value>)> {
-    let fts_query = fts_expression(&q.query)?;
+    let fts_query = fts_expression(&q.query, terms, ENTITY_TEXT_COLUMNS)?;
     let mut conditions = vec!["search_index MATCH ?".to_string()];
     let mut params = vec![Value::Text(fts_query)];
     if let Some(project_id) = q.project_id {
@@ -356,9 +434,10 @@ fn entity_fts_filter(
 fn count_entities_fts(
     conn: &Connection,
     q: &SearchQuery,
+    terms: Terms,
     visible_project_ids: Option<&HashSet<i64>>,
 ) -> Result<i64, LificError> {
-    let Some((conditions, params)) = entity_fts_filter(q, visible_project_ids) else {
+    let Some((conditions, params)) = entity_fts_filter(q, terms, visible_project_ids) else {
         return Ok(0);
     };
     let sql = format!(
@@ -382,7 +461,163 @@ fn row_to_search_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResul
         snippet: row.get(4)?,
         project_id: row.get(5)?,
         parent_page_id: row.get(6)?,
+        partial_match: false,
     })
+}
+
+// ── Similar open issues (LIF-477) ────────────────────────────
+
+/// An open issue whose wording overlaps a newly filed issue's title.
+#[derive(Debug)]
+pub struct SimilarIssue {
+    pub identifier: String,
+    pub title: String,
+    pub status: String,
+}
+
+/// Words that say nothing about what an issue is about: English function
+/// words plus the verbs and nouns nearly every issue title opens with.
+const SIMILARITY_STOPWORDS: &[&str] = &[
+    "about", "add", "after", "all", "also", "and", "any", "are", "before", "bug", "but", "can",
+    "cannot", "does", "doesn", "don", "for", "fix", "from", "has", "have", "into", "isn", "issue",
+    "its", "make", "more", "not", "now", "only", "should", "some", "than", "that", "the", "then",
+    "there", "this", "use", "via", "was", "when", "where", "which", "while", "why", "will", "with",
+    "without", "won", "you",
+];
+
+/// At most this many title words take part in the comparison.
+const MAX_SIMILARITY_TERMS: usize = 12;
+/// How many ranked candidates are checked for real overlap.
+const SIMILARITY_CANDIDATES: i64 = 10;
+
+/// The words of `title` worth comparing: lowercased, three characters or
+/// more, not a stopword, first occurrence only.
+fn significant_terms(title: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for word in title
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+    {
+        if word.chars().count() >= 3
+            && !SIMILARITY_STOPWORDS.contains(&word.as_str())
+            && !terms.contains(&word)
+        {
+            terms.push(word);
+        }
+        if terms.len() == MAX_SIMILARITY_TERMS {
+            break;
+        }
+    }
+    terms
+}
+
+/// Up to `limit` open issues in `project_id` that look like duplicates of an
+/// issue titled `title`, best first, never including `exclude_issue_ids` (the
+/// new issue itself, or a whole batch filed together).
+///
+/// Candidates come from the same ranked any-word FTS the search fallback
+/// uses (LIF-476), with the title column weighted above the description. A
+/// candidate is kept only if it shares at least two significant words with
+/// `title` (one, when the title has only one) and at least one of them
+/// appears in its own title. That rules out the overlap every tracker has:
+/// two issues that both mention "search" somewhere in a long description.
+pub fn similar_open_issues(
+    conn: &Connection,
+    project_id: i64,
+    title: &str,
+    exclude_issue_ids: &[i64],
+    limit: usize,
+) -> Result<Vec<SimilarIssue>, LificError> {
+    let terms = significant_terms(title);
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(any_term) = fts_expression(&terms.join(" "), Terms::Any, ENTITY_TEXT_COLUMNS) else {
+        return Ok(Vec::new());
+    };
+
+    // bm25 weights follow the column order: title, body, then the metadata
+    // columns the expression never touches.
+    let excluded = if exclude_issue_ids.is_empty() {
+        String::new()
+    } else {
+        let placeholders = vec!["?"; exclude_issue_ids.len()].join(", ");
+        format!("AND i.id NOT IN ({placeholders})")
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.id, p.identifier || '-' || i.sequence, i.title, i.status
+         FROM search_index s
+         JOIN issues i ON i.id = s.entity_id
+         JOIN projects p ON p.id = i.project_id
+         WHERE search_index MATCH ?
+           AND s.entity_type = 'issue'
+           AND s.project_id = ?
+           {excluded}
+           AND i.deleted_at IS NULL
+           AND i.status NOT IN ('done', 'cancelled')
+         ORDER BY bm25(search_index, 4.0, 1.0)
+         LIMIT ?"
+    ))?;
+    let mut params = vec![Value::Text(any_term), Value::Integer(project_id)];
+    params.extend(exclude_issue_ids.iter().copied().map(Value::Integer));
+    params.push(Value::Integer(SIMILARITY_CANDIDATES));
+    let candidates = stmt
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                SimilarIssue {
+                    identifier: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Which candidates match `expression`. Matching goes through the index
+    // rather than Rust string comparison so stemming and prefix rules agree
+    // with the ranking query ("filing" still meets "filed").
+    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let placeholders = vec!["?"; ids.len()].join(", ");
+    let matching_sql = format!(
+        "SELECT s.entity_id FROM search_index s
+         WHERE search_index MATCH ? AND s.entity_type = 'issue'
+           AND s.entity_id IN ({placeholders})"
+    );
+    let mut matching_stmt = conn.prepare(&matching_sql)?;
+    let mut matching = |expression: String| -> Result<HashSet<i64>, LificError> {
+        let mut params = vec![Value::Text(expression)];
+        params.extend(ids.iter().copied().map(Value::Integer));
+        matching_stmt
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+            .collect::<Result<HashSet<i64>, _>>()
+            .map_err(Into::into)
+    };
+
+    let mut shared: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for term in &terms {
+        let Some(expression) = fts_expression(term, Terms::Any, ENTITY_TEXT_COLUMNS) else {
+            continue;
+        };
+        for id in matching(expression)? {
+            *shared.entry(id).or_default() += 1;
+        }
+    }
+    let Some(in_title) = fts_expression(&terms.join(" "), Terms::Any, "title") else {
+        return Ok(Vec::new());
+    };
+    let title_hits = matching(in_title)?;
+
+    let needed = terms.len().min(2);
+    Ok(candidates
+        .into_iter()
+        .filter(|(id, _)| title_hits.contains(id) && shared.get(id).copied().unwrap_or(0) >= needed)
+        .map(|(_, issue)| issue)
+        .take(limit)
+        .collect())
 }
 
 /// Case-insensitive substring path (LIF-304).
@@ -544,6 +779,7 @@ fn search_literal_issues(
                 title,
                 project_id: row.get(5)?,
                 parent_page_id: None,
+                partial_match: false,
             },
         ))
     })?;
@@ -590,6 +826,7 @@ fn search_literal_pages(
                 title,
                 project_id: row.get(5)?,
                 parent_page_id: None,
+                partial_match: false,
             },
         ))
     })?;
@@ -659,6 +896,7 @@ fn search_literal_comments(
                 snippet: literal_snippet("", &content, needle),
                 project_id,
                 parent_page_id: page_id,
+                partial_match: false,
             },
         ))
     })?;
@@ -848,7 +1086,7 @@ mod tests {
     use crate::db::queries::{issues, pages, projects};
     use rusqlite::params;
 
-    fn test_db() -> db::DbPool {
+    pub(super) fn test_db() -> db::DbPool {
         db::open_memory().expect("test db")
     }
 
@@ -862,7 +1100,7 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    fn seed_issue(conn: &rusqlite::Connection, pid: i64, title: &str) -> i64 {
+    pub(super) fn seed_issue(conn: &rusqlite::Connection, pid: i64, title: &str) -> i64 {
         issues::create_issue(
             conn,
             &CreateIssue {
@@ -875,7 +1113,7 @@ mod tests {
         .id
     }
 
-    fn seed_project(conn: &rusqlite::Connection, ident: &str) -> i64 {
+    pub(super) fn seed_project(conn: &rusqlite::Connection, ident: &str) -> i64 {
         projects::create_project(
             conn,
             &CreateProject {
@@ -1711,7 +1949,7 @@ mod tests {
 
     /// Attach a file to `issue_id`, optionally with extracted text in the FTS
     /// index (as the upload path does for small `text/*` uploads).
-    fn seed_attachment(
+    pub(super) fn seed_attachment(
         conn: &rusqlite::Connection,
         issue_id: Option<i64>,
         filename: &str,
@@ -2352,5 +2590,183 @@ mod tests {
         assert_eq!(lits.len(), 2);
         assert_eq!(lits[0].identifier, Some("TST-2".into()), "newest first");
         assert_eq!(lits[1].identifier, Some("TST-1".into()));
+    }
+}
+
+/// LIF-476: the ranked any-word fallback.
+#[cfg(test)]
+mod fallback_tests {
+    use super::tests::{seed_attachment, seed_issue, seed_project, test_db};
+    use super::*;
+
+    fn fts(query: &str) -> SearchQuery {
+        SearchQuery {
+            query: query.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_result_with_every_word_falls_back_to_ranked_partial_matches() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Parser rejects empty input");
+        seed_issue(&conn, pid, "Search ranking ignores empty titles");
+        seed_issue(&conn, pid, "Unrelated billing work");
+
+        let results = search(&conn, &fts("search ranking empty zeppelin")).unwrap();
+
+        let titles: Vec<&str> = results.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Search ranking ignores empty titles",
+                "Parser rejects empty input"
+            ],
+            "the hit sharing three words ranks above the one sharing one"
+        );
+        assert!(results.iter().all(|r| r.partial_match));
+    }
+
+    #[test]
+    fn a_hit_with_every_word_suppresses_the_fallback() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Search ranking ignores empty titles");
+        seed_issue(&conn, pid, "Search is slow");
+
+        let results = search(&conn, &fts("search ranking")).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Search ranking ignores empty titles");
+        assert!(!results[0].partial_match);
+        let json = serde_json::to_value(&results[0]).unwrap();
+        assert!(
+            json.get("partial_match").is_none(),
+            "an all-words hit serializes exactly as before: {json}"
+        );
+    }
+
+    #[test]
+    fn an_attachment_with_every_word_counts_as_a_full_match() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        let iid = seed_issue(&conn, pid, "Crash while rendering");
+        seed_attachment(
+            &conn,
+            Some(iid),
+            "server.log",
+            "text/plain",
+            Some("gribblenaut render overflow"),
+        );
+
+        let results = search(&conn, &fts("gribblenaut overflow")).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, "attachment");
+        assert!(!results[0].partial_match);
+    }
+
+    #[test]
+    fn the_fallback_never_matches_on_metadata_columns() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Billing export");
+
+        // `issue` is the entity_type of every issue row; only title and body
+        // may satisfy an optional word.
+        let results = search(&conn, &fts("issue zeppelin")).unwrap();
+        assert!(results.is_empty(), "got: {results:?}");
+    }
+
+    #[test]
+    fn a_page_past_the_last_full_match_stays_empty() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Search ranking ignores empty titles");
+        seed_issue(&conn, pid, "Search is slow");
+
+        let page = search_page(
+            &conn,
+            &SearchQuery {
+                offset: Some(1),
+                ..fts("search ranking")
+            },
+            None,
+        )
+        .unwrap();
+        assert!(page.items.is_empty(), "got: {:?}", page.items);
+    }
+
+    #[test]
+    fn fallback_pages_through_one_ranked_list() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        for title in ["Alpha one", "Alpha two", "Alpha three"] {
+            seed_issue(&conn, pid, title);
+        }
+        let page = |offset| {
+            search_page(
+                &conn,
+                &SearchQuery {
+                    limit: Some(2),
+                    offset: Some(offset),
+                    ..fts("alpha zeppelin")
+                },
+                None,
+            )
+            .unwrap()
+        };
+
+        let first = page(0);
+        let second = page(2);
+        assert_eq!(first.items.len(), 2);
+        assert!(first.has_more);
+        assert_eq!(second.items.len(), 1);
+        assert!(!second.has_more);
+        assert!(
+            first
+                .items
+                .iter()
+                .chain(&second.items)
+                .all(|r| r.partial_match)
+        );
+        let mut ids: Vec<i64> = first
+            .items
+            .iter()
+            .chain(&second.items)
+            .map(|r| r.id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            3,
+            "each partial match appears on exactly one page"
+        );
+    }
+
+    #[test]
+    fn literal_mode_never_falls_back() {
+        let pool = test_db();
+        let conn = pool.write().unwrap();
+        let pid = seed_project(&conn, "TST");
+        seed_issue(&conn, pid, "Alpha one");
+
+        let results = search(
+            &conn,
+            &SearchQuery {
+                mode: Some("literal".into()),
+                ..fts("alpha zeppelin")
+            },
+        )
+        .unwrap();
+        assert!(results.is_empty());
     }
 }

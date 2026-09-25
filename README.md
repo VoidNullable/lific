@@ -29,7 +29,7 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **30 MCP tools in 6,715 tokens.** That's the measured size of the full `tools/list` tool definitions (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **31 MCP tools in 7,610 tokens.** That's the measured size of the full `tools/list` tool definitions (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
 - **One binary, 25 to 32 MB depending on platform.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
@@ -63,12 +63,16 @@ lific doctor            # green/yellow/red checks: config, database, server,
 
 ## What your agent can now do
 
+- **Resume a project in one call.** `get_briefing(project="APP")` returns active plans with their next step, blocked issues and what blocks them (issues, people, or date windows), date waits that have come due, the top workable and active issues, and the pages you name, in about 6,000 characters. Pass the `since` cursor it gave you last time and it leads with what changed.
 - **Ask "what can I work on right now?" in one call.** `list_issues(project="APP", workable=true)` returns only issues with every blocker resolved. Dependency-aware triage without a graph query.
+- **Block on people and dates, not only issues.** `link_issues(target="APP-9", relation_type="blocks", user="ada-lovelace")` parks an issue until someone clears it; `from="2026-09-28", until="2026-10-02", note="filing office"` parks it until a window opens, then shows it as due and later overdue.
 - **Keep a plan alive across sessions.** Plans are persistent, nestable step trees. A fresh session calls `get_plan` and resumes exactly where the last one left off. No `MEMORY.md`, no re-priming ritual.
 - **Break work down and wire it up.** Create issues, link blockers (`blocks`, `relates_to`, `duplicate`), group them into modules, and mirror plan steps to real issues with two-way done/close sync.
-- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
+- **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Pass `since` to read forward from where you stopped. Every agent's work is attributed (more below).
+- **Close with the proof attached.** `update_issue(status="done", evidence="cargo test: 412 passed")` saves the evidence as a verification comment in the same write as the close. `get_issue` marks it `[verification]` and the web UI badges it, so whoever reviews the close can see what was actually checked. If the description has a `- [ ]` task list, `get_issue` and `list_issues` show its progress (`3/5`), and closing with boxes still unchecked says how many.
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
+- **Read long pages a section at a time.** A page over 30,000 characters comes back as an outline with section sizes plus its opening, and `get_page(section="Current state")` fetches just that part. Nothing is silently cut off by the harness. Coming back to a page later, `get_page(since_seq=...)` returns only the lines that changed. Writes that push a page past the budget say so, with a nudge to split it.
 - **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
 
 ## Every tool gets its own identity, and that's the point
@@ -201,17 +205,17 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 
 ## MCP tools
 
-All 30, in 6,715 tokens:
+All 31, in 7,610 tokens:
 
 | Family | Tools |
 |--------|-------|
 | Issues | `list_issues` · `get_issue` · `create_issue` · `update_issue` · `bulk_update` · `edit_issue` · `get_board` |
-| Relations | `link_issues` · `unlink_issues` |
+| Relations & waits | `link_issues` · `unlink_issues` |
 | Pages | `get_page` · `create_page` · `update_page` · `edit_page` |
 | Plans | `create_plan` · `get_plan` · `edit_plan_step` · `update_plan_step` |
 | Comments | `add_comment` · `list_comments` · `edit_comment` · `delete_comment` |
 | Attachments | `upload_attachment` · `get_attachment` · `list_attachments` |
-| Search & history | `search` · `get_activity` |
+| Search & history | `get_briefing` · `search` · `get_activity` |
 | Structure | `list_resources` · `manage_resource` · `delete` |
 | Export | `export` (issue, page, or whole project by ID) |
 
@@ -224,7 +228,7 @@ Everything takes human-readable identifiers (`project="APP"`, not `project_id=7`
 | **Issue tracking** | Status, priority, modules with icons, labels, relations, comments, board view, fuzzy search, sort by recent activity |
 | **Plans** | Persisted, nestable step trees that outlive a session; steps mirror issues with two-way done/close sync |
 | **Documentation** | Markdown pages in recursive folders, with comments, labels, lifecycle status, full-text search, and Mermaid diagrams |
-| **MCP interface** | 30 tools, human-readable identifiers, compact schema, session instructions |
+| **MCP interface** | 31 tools, human-readable identifiers, compact schema, session instructions |
 | **Onboarding** | One-command setup (`lific init` installs a background service), `lific connect` (11 clients), `lific doctor`, `lific agents-md`, shell completions |
 | **REST API** | Resource endpoints, search, board view, and relationship/planning operations |
 | **Web UI** | Markdown editing with live preview, drag-and-drop board, Mermaid and code-copy, dark/light theme |
@@ -277,6 +281,8 @@ lific key list
 ```
 
 Prefer per-tool **bot identities** (what `lific connect` mints when you have a user account) over unbound keys: a bot inherits its owner's project access and shows up in the audit log by name.
+
+API-key verifier upgrades are a coordinated data-format change. The first successful use of an indexed legacy key rewrites its Argon2 verifier as `sha256:v1`; keys created or rotated by the new binary are also stored as `sha256:v1`. Older Lific binaries cannot authenticate those rows. Upgrade every server, CLI, and long-lived stdio process that shares the database together, and do not roll back to a binary that only understands Argon2 after any key has been created, rotated, or migrated. Active legacy rows without an indexed ID are revoked during upgrade. `lific key list` marks those rows `UNSUPPORTED FORMAT` / `unsupported_format`; rotate before reuse only for integrations that still need credentials. Rotation preserves the key's existing expiry and owner.
 
 ## Configuration
 
