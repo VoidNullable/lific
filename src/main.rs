@@ -39,6 +39,75 @@ use clap::{CommandFactory, FromArgMatches};
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
 
+// Keep scheduler startup bounded while retaining a multi-threaded runtime for
+// concurrent HTTP/MCP work. The blocking pool remains independently sized.
+const MAX_RUNTIME_WORKER_THREADS: usize = 8;
+
+fn bounded_worker_threads(available_parallelism: Option<usize>) -> usize {
+    available_parallelism
+        .unwrap_or(1)
+        .clamp(1, MAX_RUNTIME_WORKER_THREADS)
+}
+
+fn default_worker_threads() -> usize {
+    bounded_worker_threads(
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZeroUsize::get),
+    )
+}
+
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        builder.worker_threads(default_worker_threads());
+    }
+    builder.enable_all().build()
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use std::time::Duration;
+
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn application_runtime_keeps_io_timers_and_blocking_facilities() {
+        let runtime = super::build_runtime().expect("application runtime builds");
+
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("runtime IO driver binds a listener");
+            let address = listener.local_addr().expect("listener has an address");
+            let client = TcpStream::connect(address);
+            let (client, accepted) = tokio::join!(
+                client,
+                tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            );
+            client.expect("runtime IO driver connects");
+            accepted
+                .expect("timer driver does not stall IO")
+                .expect("runtime IO driver accepts a connection");
+
+            let result = tokio::task::spawn_blocking(|| 2 + 2)
+                .await
+                .expect("blocking pool remains available");
+            assert_eq!(result, 4);
+        });
+    }
+
+    #[test]
+    fn default_worker_threads_follow_small_machine_parallelism_and_cap_large_values() {
+        assert_eq!(super::bounded_worker_threads(None), 1);
+        assert_eq!(super::bounded_worker_threads(Some(1)), 1);
+        assert_eq!(super::bounded_worker_threads(Some(2)), 2);
+        assert_eq!(super::bounded_worker_threads(Some(4)), 4);
+        assert_eq!(super::bounded_worker_threads(Some(8)), 8);
+        assert_eq!(super::bounded_worker_threads(Some(32)), 8);
+    }
+}
+
 // Commands that operate directly on the database (no server required)
 fn is_crud_command(cmd: &Command) -> bool {
     matches!(
@@ -343,8 +412,11 @@ fn create_private_config(path: &std::path::Path, contents: &str) -> std::io::Res
 use rmcp::ServiceExt;
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    build_runtime()?.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Via `ArgMatches` rather than `Cli::parse()` so a value's source stays
     // answerable: `lific mcp --instances` rejects a typed `--url` but ignores
     // an exported `LIFIC_URL`. Behaviour is otherwise identical.
