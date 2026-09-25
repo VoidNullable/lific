@@ -69,7 +69,7 @@ lific doctor            # green/yellow/red checks: config, database, server,
 - **Leave a real audit trail.** `get_activity` answers "what changed while I was gone": who changed what, when, and through which tool. Every agent's work is attributed (more below).
 - **Write docs where the issues live.** Markdown pages in folders, with comments, labels, lifecycle status, and Mermaid diagrams. Design decisions stay next to the work they justify.
 - **Edit without resending.** `edit_issue` / `edit_page` do targeted find-and-replace, so updating one line of a long description doesn't cost the whole document in tokens.
-- **Read long pages a section at a time.** A page over 30,000 characters comes back as an outline with section sizes plus its opening, and `get_page(section="Current state")` fetches just that part. Nothing is silently cut off by the harness. Coming back to a page later, `get_page(since_seq=...)` returns only the lines that changed.
+- **Read long pages a section at a time.** A page over 30,000 characters comes back as an outline with section sizes plus its opening, and `get_page(section="Current state")` fetches just that part. Nothing is silently cut off by the harness. Coming back to a page later, `get_page(since_seq=...)` returns only the lines that changed. Writes that push a page past the budget say so, with a nudge to split it.
 - **Take everything with you.** `export` turns an issue, a page, or a whole project into portable markdown, no lock-in.
 
 ## Every tool gets its own identity, and that's the point

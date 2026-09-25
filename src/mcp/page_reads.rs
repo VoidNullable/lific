@@ -445,3 +445,17 @@ fn write_diff(out: &mut String, before: &str, after: &str, since: i64, seq: i64)
     }
     Ok(())
 }
+
+/// The line `create_page`, `update_page` and `edit_page` append when the
+/// stored content is over the read budget (LIF-481), so the writer learns
+/// that readers will no longer get the page whole.
+pub(crate) fn oversize_warning(content: &str) -> Option<String> {
+    let size = char_len(content);
+    (size > PAGE_READ_BUDGET).then(|| {
+        format!(
+            "\nNote: this page is {} chars, over the {}-char read budget, so get_page returns its outline and opening instead of the whole page. Consider splitting it or moving history to an archive page.",
+            Chars(size),
+            Chars(PAGE_READ_BUDGET)
+        )
+    })
+}

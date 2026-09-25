@@ -2904,13 +2904,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Created {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 
@@ -2968,13 +2972,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Updated {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 
@@ -3043,13 +3051,17 @@ impl LificMcp {
             self.emit(crate::realtime::RealtimeEvent::ProjectUpdated { project_id });
         }
         let context = current_issue_link_context();
+        // LIF-481: warn the writer when readers will get an outline.
+        let warning = super::page_reads::oversize_warning(&page.content);
         Ok(render_response(|output| {
             write!(
                 output,
                 "Edited {}: {}",
                 page_reference(context.as_deref(), &page),
                 page.title
-            )
+            )?;
+            output.push_str(warning.as_deref().unwrap_or_default());
+            Ok(())
         }))
     }
 

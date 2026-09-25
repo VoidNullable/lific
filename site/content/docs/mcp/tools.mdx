@@ -220,7 +220,7 @@ Only ATX headings (`#` to `######`) count, and lines inside fenced code blocks a
 
 ### `create_page`
 
-Creates a page in a project or at workspace level.
+Creates a page in a project or at workspace level. When the content is longer than the 30,000-character read budget of `get_page`, the response adds one line suggesting a split or an archive page.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -233,7 +233,7 @@ Creates a page in a project or at workspace level.
 
 ### `update_page`
 
-Updates the provided fields of a page.
+Updates the provided fields of a page. Like `create_page`, it adds one line to the response when the resulting content is over the read budget.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -247,7 +247,7 @@ Updates the provided fields of a page.
 
 ### `edit_page`
 
-Replaces an exact string in a page title or content.
+Replaces an exact string in a page title or content. Like `create_page`, it adds one line to the response when the resulting content is over the read budget.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |

@@ -557,3 +557,88 @@ fn page_history_is_deleted_with_the_page() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+// ── LIF-481: page writes warn above the read budget ──
+
+const OVERSIZE_NOTE: &str = "over the 30,000-char read budget, so get_page returns its outline and opening instead of the whole page. Consider splitting it or moving history to an archive page.";
+
+#[test]
+fn create_page_warns_only_when_the_content_exceeds_the_read_budget() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "WCR");
+    let create = |content: String| {
+        m.create_page(Parameters(CreatePageInput {
+            project: Some("WCR".into()),
+            title: "Notes".into(),
+            content: Some(content),
+            ..Default::default()
+        }))
+    };
+
+    let small = create("x".repeat(PAGE_READ_BUDGET));
+    assert_eq!(small, "Created WCR-DOC-1: Notes");
+
+    let big = create("x".repeat(PAGE_READ_BUDGET + 1));
+    assert_eq!(
+        big,
+        format!("Created WCR-DOC-2: Notes\nNote: this page is 30,001 chars, {OVERSIZE_NOTE}")
+    );
+}
+
+#[test]
+fn update_page_warns_only_when_the_resulting_content_exceeds_the_read_budget() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "WUP");
+    let identifier = seed_page(&m, "WUP", "short");
+    let update = |content: Option<String>, title: Option<&str>| {
+        m.update_page(Parameters(UpdatePageInput {
+            identifier: identifier.clone(),
+            content,
+            title: title.map(Into::into),
+            ..Default::default()
+        }))
+    };
+
+    assert_eq!(
+        update(Some("still short".into()), None),
+        "Updated WUP-DOC-1: Working notes"
+    );
+    let grown = update(Some("y".repeat(40_000)), None);
+    assert!(
+        grown.ends_with(&format!("40,000 chars, {OVERSIZE_NOTE}")),
+        "got: {grown}"
+    );
+    // The warning follows the stored content, not just this write's fields.
+    let renamed = update(None, Some("Renamed"));
+    assert!(
+        renamed.starts_with("Updated WUP-DOC-1: Renamed\nNote: "),
+        "got: {renamed}"
+    );
+}
+
+#[test]
+fn edit_page_warns_only_when_the_edited_content_exceeds_the_read_budget() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "WED");
+    let identifier = seed_page(
+        &m,
+        "WED",
+        &format!("head\n{}", "z".repeat(PAGE_READ_BUDGET - 10)),
+    );
+    let edit_to = |old: &str, new: &str| {
+        m.edit_page(Parameters(EditPageInput {
+            identifier: identifier.clone(),
+            old_string: old.into(),
+            new_string: new.into(),
+            ..Default::default()
+        }))
+    };
+
+    assert_eq!(edit_to("head", "top"), "Edited WED-DOC-1: Working notes");
+    let over = edit_to("top", "top line that pushes the page over");
+    assert!(
+        over.starts_with("Edited WED-DOC-1: Working notes\nNote: this page is "),
+        "got: {over}"
+    );
+    assert!(over.ends_with(OVERSIZE_NOTE), "got: {over}");
+}
