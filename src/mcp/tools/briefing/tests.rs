@@ -90,6 +90,7 @@ fn seeded() -> (LificMcp, McpTestGuard, String) {
         source: "BRF-1".into(),
         target: "BRF-2".into(),
         relation_type: "blocks".into(),
+        ..Default::default()
     }));
     assert!(!linked.starts_with("Error"), "got: {linked}");
     let plan = m.create_plan(Parameters(CreatePlanInput {
