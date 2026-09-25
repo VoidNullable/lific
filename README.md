@@ -29,8 +29,8 @@ Your agent can write the code. What it can't do is remember: the plan dies with 
 
 Three numbers instead of adjectives:
 
-- **30 MCP tools in 6,335 tokens.** That's the measured size of the full `tools/list` response (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
-- **One ~25 MB binary.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
+- **30 MCP tools in 6,715 tokens.** That's the measured size of the full `tools/list` tool definitions (o200k tokenizer). Your entire tracker costs about as much context as one long file read.
+- **One binary, 25 to 32 MB depending on platform.** Embedded SQLite, embedded web UI, backups built in. The data set is just the database and a content-addressed `attachments/` dir beside it (both covered by the automatic backups). No Docker, no Postgres, no reverse proxy, no daemon farm. Copy it to a server, point your agents at it, done.
 - **11 AI clients configured by one command.** `lific connect` writes correct MCP config into OpenCode, Claude Code, Cursor, VS Code, Codex, Zed, and more. No hand-edited JSON.
 
 Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive being spoken, logged, grepped, and pasted into a prompt.
@@ -40,17 +40,17 @@ Identifiers are human-readable everywhere: `APP-42`, never a UUID. They survive 
 ```bash
 cargo install lific     # or grab a binary from the releases page
 
-lific init              # config + database + your API key, printed once -
-                        # then installs a background service and starts it.
+lific init              # config, database and your admin account, then
+                        # installs a background service and starts it.
                         # The server is now on :3456 and survives reboot.
 lific connect           # writes MCP config into your AI clients
 ```
 
-That's the whole thing. `lific init` sets everything up in your OS's standard locations (config in `~/.config/lific/`, data in `~/.local/share/lific/` on Linux; macOS and Windows equivalents) so it works the same from any directory - use `lific init --here` if you'd rather keep a directory-local instance (`./lific.toml` + `./lific.db`). It registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS), so it isn't a process tied to your terminal - it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
+That's the whole thing. `lific init` asks your name and how you want to sign in (login-free for a private local instance, or passwords), then sets everything up in your OS's standard locations (config in `~/.config/lific/`, data in `~/.local/share/lific/` on Linux; macOS and Windows equivalents) so it works the same from any directory. Use `lific init --here` if you'd rather keep a directory-local instance (`./lific.toml` + `./lific.db`). It registers the server with your OS service manager (a systemd user unit on Linux, a LaunchAgent on macOS), so it isn't a process tied to your terminal: it's still running tomorrow. `lific connect` then detects the AI tools installed on your machine, lets you pick, mints a per-tool API key, and merges correct MCP config into each one without overwriting existing config. Restart your client and the Lific tools are there.
 
-Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging)? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
+Manage the service anytime with `lific service status | restart | stop | uninstall`. Prefer a foreground process (containers, supervisors, debugging), or on Windows, where there is no service manager Lific can drive? `lific init --no-service` skips the service and `lific start` runs the server in your terminal.
 
-The web UI is at `http://localhost:3456`. Sign up there to create your account, then grant it admin rights from the CLI: `lific user promote --username <username>`.
+The web UI is at `http://localhost:3456`, and you are its administrator already. Login-free mode signs you in automatically; with passwords, sign in with the username `init` prints, which is your name in lowercase with hyphens (`Ada Lovelace` becomes `ada-lovelace`).
 
 Verify any setup with:
 
@@ -98,7 +98,7 @@ lific connect --dry-run --client vscode          # preview without writing
 Each client gets its native schema (`mcpServers` vs `servers` vs `mcp`, Codex TOML with an env-var token, Goose YAML; the quirks are handled). JSON configs are merged non-destructively; a file `connect` can't parse safely is left untouched and you get the exact snippet to paste instead.
 
 <details>
-<summary>OAuth, if you'd rather auth as yourself</summary>
+<summary>OAuth, if you'd rather sign in from the client than paste a key</summary>
 
 Lific implements the full MCP authorization spec (RFC 9728 protected-resource metadata, dynamic client registration, PKCE), so OAuth-capable clients can connect with **just the URL** and complete auth in the browser:
 
@@ -110,7 +110,7 @@ opencode mcp auth lific                   # browser opens → sign in → approv
 claude mcp add --transport http lific http://localhost:3456/mcp
 ```
 
-The trade-off: an OAuth token **is you**. Changes made through it are indistinguishable from your own edits in the audit log, with no per-harness attribution. Fine for personally browsing your tracker from an editor; for agents doing real work, prefer the per-tool bot identities above.
+The approval page asks which tool is connecting and mints that tool's bot identity under your account, the same kind `lific connect` creates, so OAuth-connected tools keep per-tool attribution and can be revoked one at a time. The difference is only where the credential comes from: the client runs the browser flow instead of `connect` writing a key into its config.
 
 **Headless / SSH / agents.** No browser on the box? The device flow has you covered:
 
@@ -151,7 +151,7 @@ Tokens are stored in your OS keyring (Secret Service / Keychain / Credential Man
 }
 ```
 
-Create keys anytime with `lific key create --name my-key`.
+Without `LIFIC_TOKEN` in its environment, a stdio session runs as the instance operator; set it to an API key to act as a specific user or bot. Create keys anytime with `lific key create --name my-key` (add `--user <name>` to bind one to an account).
 
 </details>
 
@@ -168,7 +168,7 @@ Each connection creates a bot identity tied to your account (the CLI's `connect`
 
 An agent's plan shouldn't die when its context does. A **plan** is an ordered, arbitrarily-nestable tree of steps that persists across sessions and compaction. Start a new session, call `get_plan`, and it's still there, ready to resume.
 
-- **Steps can mirror issues.** Link a step to an issue and the two stay in sync: close the issue and the step checks itself; mark the step done and the issue closes. Reopen the issue and the step reopens, with a note of why.
+- **Steps can mirror issues.** Link a step to an issue and the two stay in sync while the plan is active: mark the issue `done` and the step checks itself; check the step and the issue becomes `done`. Move the issue out of `done` and the step unchecks, with a note of why.
 - **Authored in one call.** `create_plan` builds a full nested tree at once; `edit_plan_step` and `update_plan_step` keep it current.
 - **First-class in the UI.** A Plans tab sits alongside Issues, Board, Modules, and Pages: a real tree view with done toggles, per-step markdown notes, issue chips, and an activity timeline.
 - **Fully tracked.** Every plan and step change lands in the audit log, including the issue-driven cascades.
@@ -197,11 +197,11 @@ lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" 
 lific --backend http --url https://lific.example.com --api-key "$LIFIC_API_KEY" issue update APP-42 --status done
 ```
 
-`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. If no API key is supplied, it also uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file). The default backend remains direct SQL; HTTP mode never opens the local database for data commands. Its human-readable output is currently pretty-printed JSON. A remote project export downloads one archive file from the server rather than individual Markdown files.
+`--backend http` can read the URL and bearer key from `LIFIC_URL` and `LIFIC_API_KEY`. If no API key is supplied, it also uses the credential from `lific login` (`LIFIC_TOKEN`, keyring, or credential file). The default backend remains direct SQL; HTTP mode never opens the local database for data commands. Both backends print the same human-readable and JSON output. A remote project export downloads one archive file from the server rather than individual Markdown files.
 
 ## MCP tools
 
-All 30, in 6,335 tokens:
+All 30, in 6,715 tokens:
 
 | Family | Tools |
 |--------|-------|
@@ -246,7 +246,7 @@ For one human directing several agents across personal projects (the thing it's 
 
 ## Authorization
 
-Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership is enforced on project-scoped REST and MCP calls, including reads. Instance administrators and operator-trusted credentials intentionally bypass project membership checks, while instance-scoped endpoints have their own rules. **Fresh installs (created on 2.0+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in - nothing changes under you on upgrade. Toggle it at runtime:
+Lific has project-scoped, default-deny authorization: viewer / maintainer / lead membership is enforced on project-scoped REST and MCP calls, including reads. Instance administrators and operator-trusted credentials intentionally bypass project membership checks, while instance-scoped endpoints have their own rules. **Fresh installs (created on 2.0+) enforce it by default; instances upgraded from an earlier version keep it off** until you opt in, so nothing changes under you on upgrade. Toggle it at runtime:
 
 ```bash
 lific instance set --authz-enforced true    # or false
@@ -268,9 +268,9 @@ Forgotten password? The operator can reset one from the shell (this signs out al
 lific user set-password --username sam
 ```
 
-**Auth can be turned off entirely for a private, local instance** with `required = false` under `[auth]` in `lific.toml`. Credential-less requests then get admin-equivalent access; a presented-but-invalid token still fails loudly. The web UI signs you in automatically as the first admin (the single-user auto-login flow) instead of showing a login form - if no account exists yet, the signup screen still appears so there's an identity to attribute work to. This is a config-file key on purpose (flipping it requires shell access, like minting an operator key), and it comes with guard rails: the server refuses to start if `server.public_url` points anywhere but localhost, and logs a prominent warning otherwise - the default bind is `0.0.0.0`, so keep an auth-less instance loopback-only or firewalled.
+**Auth can be turned off entirely for a private, local instance** with `required = false` under `[auth]` in `lific.toml`. That is what `lific init`'s login-free mode writes, together with `host = "127.0.0.1"`. Credential-less requests then get admin-equivalent access; a presented-but-invalid token still fails loudly. The web UI signs you in automatically as the first admin instead of showing a login form. This is a config-file key on purpose (flipping it requires shell access, like minting an operator key), and it comes with a guard rail: the server refuses to start when `server.host` is not a loopback address, or when `server.public_url` points at anything other than a loopback or private-network host. Browser auto-login is refused under the same conditions.
 
-**Unbound API keys bypass authorization by design.** A key with no user binding - the one `lific start` auto-mints on a keyless DB, and the ones `lific key create` and `connect`'s fresh-install path produce - is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That's what keeps the zero-user `init → start → connect` flow working with enforcement on. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
+**Unbound API keys bypass authorization by design.** A key with no user binding (from `lific key create` without `--user`, from `lific connect` on an instance with no human accounts, or the one `lific start` mints on a database with neither keys nor users) is *operator-trusted*: it can only be created by someone with shell access to the server, so it's treated as admin-equivalent even in enforced mode. That keeps an instance with no human accounts manageable from the shell. The threat the default guards against is a web-signup stranger's session/OAuth token, not the operator's own shell-minted key. Audit these keys any time with:
 
 ```bash
 lific key list
@@ -283,7 +283,7 @@ Prefer per-tool **bot identities** (what `lific connect` mints when you have a u
 <details>
 <summary><code>lific.toml</code></summary>
 
-`lific init` generates this:
+`lific init` generates this (login-free mode then sets `host = "127.0.0.1"` and `required = false`):
 
 ```toml
 [server]
@@ -307,7 +307,12 @@ level = "info"
 [auth]
 allow_signup = true
 required = true
+
+[retention]
+trash_days = 30
 ```
+
+`retention.trash_days` is how long deleted issues, pages and comments stay restorable before they are purged; `0` keeps them forever. Signup is open by default, so anyone who can reach the server can create an ordinary account; close it with `lific instance set --signups false` or in the web UI's instance settings.
 
 CLI flags (`--db`, `--port`, `--host`) override config values. Set `server.public_url` when exposing Lific beyond localhost; it becomes the OAuth issuer and the URL `lific connect` writes into client configs. `server.trusted_proxies` controls which peers may supply `X-Forwarded-For` or `X-Real-IP`; it defaults to none. Add only isolated proxy IPs/CIDRs you operate, and prevent direct clients from reaching that ingress.
 
@@ -338,7 +343,7 @@ lific restore lific_20260703_141500.tar.gz          # refuses to overwrite an ex
 lific restore lific_20260703_141500.tar.gz --force  # moves the current db aside to lific.db.pre-restore-<ts>
 ```
 
-Restores are staged (a failure leaves the original data dir untouched) and refuse archives created by a newer Lific; older archives are fine, and pending migrations apply on next start.
+Restores are staged (a failure leaves the original data dir untouched) and refuse archives created by a newer Lific; older archives are fine, and pending migrations apply on next start. Archives over the default limits (512 MiB database, 64 MiB per attachment, 1 GiB total, 10,000 entries) need `--allow-large`.
 
 The automatic interval backups (`[backup]` in config) write the same `.tar.gz` artifact to the backup dir with rotation. External backup harnesses (restic, borg, cron) can either scoop up that dir or call `lific dump` as a pre-backup hook:
 
