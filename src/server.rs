@@ -1482,6 +1482,73 @@ mod authless_mcp_tests {
         );
     }
 
+    #[tokio::test]
+    async fn shared_mcp_routes_use_each_handlers_database() {
+        let routers = ["ALPHA", "BETA"].map(|identifier| {
+            let pool = db::open_memory().unwrap();
+            {
+                let conn = pool.write().unwrap();
+                db::queries::users::create_passwordless_admin(&conn, "Operator").unwrap();
+                db::queries::create_project(
+                    &conn,
+                    &db::models::CreateProject {
+                        name: format!("{identifier} project"),
+                        identifier: identifier.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            build_authless_mcp_router(
+                pool,
+                "test-token",
+                None,
+                vec!["localhost".into()],
+                None,
+                realtime::RealtimeHub::new(),
+            )
+        });
+
+        // Alternate servers and repeat requests: each request constructs a new
+        // handler, while the shared tool callbacks must use that handler's DB.
+        for index in [0, 1, 0, 1] {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/mcp/test-token")
+                .header("host", "localhost")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", "2025-06-18")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_resources",
+                            "arguments": {"resource_type": "project"}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let res = routers[index].clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(value["result"]["isError"], true, "{value}");
+            let text = value["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains(["ALPHA project", "BETA project"][index]),
+                "{text}"
+            );
+            assert!(
+                !text.contains(["BETA project", "ALPHA project"][index]),
+                "{text}"
+            );
+        }
+    }
+
     /// A wrong path token does not match the route at all (no secret leak,
     /// no MCP access) — it falls through to 404 in this isolated router.
     #[tokio::test]
