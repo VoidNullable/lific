@@ -313,3 +313,39 @@ fn invalid_config_never_repairs_an_implicit_database() {
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 }
+
+/// `init --here` names its config by the relative path `lific.toml`, whose
+/// `Path::parent()` is the empty path rather than `None`. Syncing that parent
+/// used to fail with a bare "No such file or directory" after the config had
+/// already been written, so the documented directory-local setup never
+/// created a database.
+///
+/// Login-free mode also rewrites that config afterwards (bind host, auth), which
+/// went through a second copy of the same parent lookup.
+#[test]
+fn init_here_creates_an_instance_in_an_empty_directory() {
+    for mode in ["passwords", "login-free"] {
+        let tmp = private_tempdir();
+        doctor_command(tmp.path())
+            .args([
+                "--json",
+                "init",
+                "--here",
+                "--no-service",
+                "--auth-mode",
+                mode,
+                "--name",
+                "Ada Lovelace",
+                "--password",
+                "init-here-contract-password",
+            ])
+            .assert()
+            .success();
+        assert!(tmp.path().join("lific.db").is_file(), "{mode}");
+        let config = std::fs::read_to_string(tmp.path().join("lific.toml")).unwrap();
+        if mode == "login-free" {
+            assert!(config.contains("host = \"127.0.0.1\""), "{config}");
+            assert!(config.contains("required = false"), "{config}");
+        }
+    }
+}

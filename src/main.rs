@@ -247,8 +247,18 @@ fn rewrite_config_in_place(path: &std::path::Path, _contents: &str) -> std::io::
     ))
 }
 
+/// The directory a config file lives in, for staging and syncing. A bare file
+/// name such as `lific.toml` (what `init --here` uses) has the empty path as
+/// its parent, and opening "" to sync it fails, so that means the current
+/// directory too.
+fn config_parent_dir(path: &std::path::Path) -> &std::path::Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
 fn write_private_config(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = config_parent_dir(path);
     let staging = match tempfile::Builder::new()
         .prefix(".lific-config-")
         .tempdir_in(parent)
@@ -303,7 +313,7 @@ fn sync_parent_dir(_dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn create_private_config(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = config_parent_dir(path);
     let staging = tempfile::Builder::new()
         .prefix(".lific-config-")
         .tempdir_in(parent)?;
