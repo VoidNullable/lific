@@ -23,6 +23,71 @@ use sha2::{Digest, Sha256};
 
 use crate::error::LificError;
 
+#[cfg(test)]
+pub(crate) mod test_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+    static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    static PEAK_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) struct CountingAllocator;
+
+    // SAFETY: Every operation delegates to the platform allocator and the
+    // counters are independent atomics.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: The caller supplies the layout required by the global
+            // allocator contract.
+            let pointer = unsafe { System.alloc(layout) };
+            if ACTIVE.with(Cell::get) && !pointer.is_null() {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+                ALLOCATED_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                let live = LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: The caller supplies the pointer and layout returned by
+            // the matching allocation.
+            unsafe { System.dealloc(pointer, layout) };
+            if ACTIVE.with(Cell::get) {
+                LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub(crate) struct Stats {
+        pub(crate) allocations: usize,
+        pub(crate) allocated_bytes: usize,
+        pub(crate) peak_retained_bytes: usize,
+    }
+
+    pub(crate) fn measure(function: impl FnOnce()) -> Stats {
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        LIVE_BYTES.store(0, Ordering::Relaxed);
+        PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
+        ACTIVE.with(|active| active.set(true));
+        function();
+        ACTIVE.with(|active| active.set(false));
+        Stats {
+            allocations: ALLOCATIONS.load(Ordering::Relaxed),
+            allocated_bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+            peak_retained_bytes: PEAK_LIVE_BYTES.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Cross-process advisory lock file for the store.
 ///
 /// It lives *beside* `attachments/`, in the stable data directory, not inside
@@ -53,15 +118,20 @@ fn lock_is_busy(error: &std::io::Error) -> bool {
     }
 }
 
-/// Handle to the on-disk attachments directory. Cheap to clone (just a
-/// `PathBuf`); threaded through the API layer as an axum `Extension` the same
-/// way `AuthConfig` is.
-#[derive(Debug, Clone)]
-pub struct AttachmentStore {
+#[derive(Debug)]
+struct StorePaths {
     dir: PathBuf,
     /// Where the cross-process lock lives. Held separately from `dir` because
     /// it must survive `dir` being replaced wholesale by a restore.
     lock_path: PathBuf,
+}
+
+/// Handle to the on-disk attachments directory. Cheap to clone (just shared
+/// handles); threaded through the API layer as an axum `Extension` the same
+/// way `AuthConfig` is.
+#[derive(Debug, Clone)]
+pub struct AttachmentStore {
+    paths: Arc<StorePaths>,
     operation_lock: Arc<Mutex<()>>,
 }
 
@@ -131,8 +201,10 @@ impl AttachmentStore {
         // The lock is a sibling of the attachments directory, in the data dir,
         // which a restore never replaces. See [`STORE_LOCK_FILE`].
         Self {
-            dir: data_dir.join("attachments"),
-            lock_path: data_dir.join(STORE_LOCK_FILE),
+            paths: Arc::new(StorePaths {
+                dir: data_dir.join("attachments"),
+                lock_path: data_dir.join(STORE_LOCK_FILE),
+            }),
             operation_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -150,8 +222,10 @@ impl AttachmentStore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(dir: PathBuf) -> Self {
         Self {
-            lock_path: dir.join(STORE_LOCK_FILE),
-            dir,
+            paths: Arc::new(StorePaths {
+                lock_path: dir.join(STORE_LOCK_FILE),
+                dir,
+            }),
             operation_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -160,7 +234,7 @@ impl AttachmentStore {
     /// `read`/`write`/`delete`, so only tests need the raw path today.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn dir(&self) -> &Path {
-        &self.dir
+        &self.paths.dir
     }
 
     /// Absolute path to the sidecar file for a given content hash. Kept
@@ -172,7 +246,7 @@ impl AttachmentStore {
                 "attachment hash must be 64 lowercase hexadecimal characters".into(),
             ));
         }
-        Ok(self.dir.join(sha256))
+        Ok(self.paths.dir.join(sha256))
     }
 
     /// Absolute path to the cached thumbnail for a content hash. Thumbnails
@@ -181,7 +255,7 @@ impl AttachmentStore {
     /// collide with its own derivative.
     pub(crate) fn thumb_path_for(&self, sha256: &str) -> Result<PathBuf, LificError> {
         self.path_for(sha256)?;
-        Ok(self.dir.join("thumbs").join(format!("{sha256}.webp")))
+        Ok(self.paths.dir.join("thumbs").join(format!("{sha256}.webp")))
     }
 
     /// Cache a generated thumbnail. Same temp-file-then-rename dance as
@@ -272,7 +346,7 @@ impl AttachmentStore {
 
     /// Path of the store's cross-process lock file.
     pub(crate) fn lock_path(&self) -> &Path {
-        &self.lock_path
+        &self.paths.lock_path
     }
 
     /// Open the lock file, creating its parent directory if needed.
@@ -281,7 +355,7 @@ impl AttachmentStore {
     /// symlink planted at that name would otherwise let another user pick the
     /// file this process opens.
     fn open_lock_file(&self) -> std::io::Result<File> {
-        if let Some(parent) = self.lock_path.parent()
+        if let Some(parent) = self.paths.lock_path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
@@ -448,12 +522,12 @@ impl AttachmentStore {
 
     pub(crate) fn write_unlocked(&self, bytes: &[u8]) -> Result<String, LificError> {
         let sha = Self::hash_bytes(bytes);
-        std::fs::create_dir_all(&self.dir)
+        std::fs::create_dir_all(&self.paths.dir)
             .map_err(|e| LificError::Internal(format!("create attachments dir: {e}")))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))
+            std::fs::set_permissions(&self.paths.dir, std::fs::Permissions::from_mode(0o700))
                 .map_err(|e| LificError::Internal(format!("secure attachments dir: {e}")))?;
         }
         let path = self.path_for(&sha)?;
@@ -463,6 +537,7 @@ impl AttachmentStore {
         // Write to a temp file then rename, so a concurrent reader never sees a
         // half-written blob at the final content-addressed path.
         let tmp = self
+            .paths
             .dir
             .join(format!(".{sha}.{:016x}.tmp", rand::random::<u64>()));
         let mut options = std::fs::OpenOptions::new();
@@ -490,7 +565,7 @@ impl AttachmentStore {
                 "finalize attachment: {error}"
             )));
         }
-        sync_dir(&self.dir)?;
+        sync_dir(&self.paths.dir)?;
         Ok(sha)
     }
 
@@ -518,7 +593,7 @@ impl AttachmentStore {
             let dir = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-                .open(&self.dir)
+                .open(&self.paths.dir)
                 .map_err(|e| LificError::Internal(format!("open attachment directory: {e}")))?;
             let name = std::ffi::CString::new(sha256).expect("validated hash");
             // `dir` stays open across openat; `name` is a validated single hash.
@@ -544,7 +619,12 @@ impl AttachmentStore {
             {
                 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
                 // Reject junctions as well as symlinks in the store path.
-                for parent in self.dir.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+                for parent in self
+                    .paths
+                    .dir
+                    .ancestors()
+                    .filter(|p| !p.as_os_str().is_empty())
+                {
                     let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
                         LificError::Internal(format!("inspect attachment directory: {e}"))
                     })?;
@@ -1306,6 +1386,38 @@ mod tests {
         // the attachments dir is created on first write.
         let store = AttachmentStore::new(tmp.path().join("attachments"));
         (store, tmp)
+    }
+
+    #[test]
+    fn cloning_store_and_wrapping_it_in_an_extension_are_allocation_free() {
+        let (store, _tmp) = tmp_store();
+        let store_clones = test_alloc::measure(|| {
+            for _ in 0..256 {
+                std::hint::black_box(store.clone());
+            }
+        });
+        println!("store clones: {store_clones:?}");
+        assert_eq!(
+            store_clones,
+            test_alloc::Stats {
+                allocations: 0,
+                allocated_bytes: 0,
+                peak_retained_bytes: 0,
+            }
+        );
+
+        let extension = test_alloc::measure(|| {
+            let _ = std::hint::black_box(axum::Extension(store.clone()));
+        });
+        println!("extension wrapper: {extension:?}");
+        assert_eq!(
+            extension,
+            test_alloc::Stats {
+                allocations: 0,
+                allocated_bytes: 0,
+                peak_retained_bytes: 0,
+            }
+        );
     }
 
     // ── Cross-process store lock ─────────────────────────────

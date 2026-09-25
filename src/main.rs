@@ -30,6 +30,11 @@ mod storage;
 #[cfg(test)]
 mod test_env;
 
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: storage::test_alloc::CountingAllocator =
+    storage::test_alloc::CountingAllocator;
+
 use clap::{CommandFactory, FromArgMatches};
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
