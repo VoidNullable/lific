@@ -897,6 +897,16 @@ export async function addIssueWait(issueId: number, input: CreateWaitInput) {
   });
 }
 
+/** `GET /api/clock`: the server's day and UTC offset (minutes east). */
+export interface ServerClock {
+  today: string;
+  utc_offset_minutes: number;
+}
+
+export async function getServerClock() {
+  return request<ServerClock>("/clock");
+}
+
 export async function clearIssueWait(issueId: number, waitId: number) {
   return request<{ cleared: boolean }>(`/issues/${issueId}/waits/${waitId}`, {
     method: "DELETE",

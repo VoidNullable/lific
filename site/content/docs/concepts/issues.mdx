@@ -82,7 +82,9 @@ A date wait has an earliest and a latest day, plus an optional note such as "sta
 | Due to check | From the earliest day through the latest day | No |
 | Overdue | After the latest day | No |
 
-A wait that is due or overdue no longer blocks the issue. It stays on the issue, and the issue list, board and detail view show it as due or overdue until someone clears it. "Today" is the server's local calendar day.
+A wait that is due or overdue no longer blocks the issue. It stays on the issue, and the issue list, board and detail view show it as due or overdue until someone clears it.
+
+"Today" is always the server's local calendar day, for every client. The MCP tools, the REST API and the web app agree on whether an issue is blocked even when a browser sits in another timezone: the web app reads the server's UTC offset and works out the server's date from it, so an open tab also turns over at the server's midnight, not the browser's.
 
 Each issue can wait on a given person once and on a given window once. Clearing a wait removes it. The issue's activity history records both the wait and the clear.
 

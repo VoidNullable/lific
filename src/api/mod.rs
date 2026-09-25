@@ -216,6 +216,7 @@ pub fn router(db: DbPool, cors_origins: &[String]) -> Router {
         // Atomic direction swap for an existing edge (LIF-413)
         .route("/api/issues/reverse", post(issues::reverse_relation))
         // User and date blockers (LIF-484)
+        .route("/api/clock", get(waits::server_clock))
         .route(
             "/api/issues/{id}/waits",
             get(waits::list_waits).post(waits::add_wait),

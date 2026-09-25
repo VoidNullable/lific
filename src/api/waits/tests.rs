@@ -191,3 +191,32 @@ async fn wait_routes_are_gated_viewer_to_read_and_maintainer_to_write() {
         .unwrap();
     assert_eq!(audited, 2);
 }
+
+#[tokio::test]
+async fn the_clock_reports_the_servers_day_and_utc_offset() {
+    let app = test_app();
+    let _day = crate::db::queries::waits::pin_today("2026-09-26");
+    let resp = json_get(&app, "/api/clock").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let clock = parse_json(resp).await;
+    assert_eq!(clock["today"], "2026-09-26");
+    assert_eq!(
+        clock["utc_offset_minutes"],
+        chrono::Local::now().offset().local_minus_utc() / 60
+    );
+}
+
+#[tokio::test]
+async fn the_clock_needs_a_signed_in_caller() {
+    let (db, ..) = setup_membership_test();
+    let anonymous = with_client_ip_test_layers(
+        crate::api::router(db, &[]).layer(axum::Extension(
+            None::<crate::resolve_caller::ResolvedIdentity>,
+        )),
+        test_peer(),
+    );
+    assert_eq!(
+        json_get(&anonymous, "/api/clock").await.status(),
+        StatusCode::FORBIDDEN
+    );
+}

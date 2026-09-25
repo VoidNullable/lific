@@ -389,6 +389,10 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
         (("POST", "/api/issues/link"), Gated(Maintainer)),
         (("POST", "/api/issues/unlink"), Gated(Maintainer)),
         (("GET", "/api/issues/{id}/waits"), Gated(Viewer)),
+        (
+            ("GET", "/api/clock"),
+            Exempt("server calendar day and UTC offset for any signed-in caller; no project data"),
+        ),
         (("POST", "/api/issues/{id}/waits"), Gated(Maintainer)),
         (
             ("DELETE", "/api/issues/{id}/waits/{wait_id}"),
