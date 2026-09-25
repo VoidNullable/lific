@@ -3,8 +3,12 @@
 //
 // The server stamps each wait with a `state`, but that answer is only true on
 // the day it was read. A list row can sit in the read model across midnight,
-// so every surface recomputes the state here from `earliest`/`latest` against
-// the browser's local day. The rule matches the server's:
+// so every surface recomputes the state here from `earliest`/`latest`. The
+// day it compares against is the SERVER's calendar day, computed from the
+// server's UTC offset (`GET /api/clock`, see `serverClock.svelte.ts`), never
+// the browser's: a Chicago browser and a UTC server must agree on whether an
+// issue is blocked, or the UI would contradict `workable` over REST and MCP.
+// Until the offset is known, the server's own `state` is used as is.
 //
 //   holding  before `earliest` (a user wait always holds until cleared)
 //   due      from `earliest` through `latest`
@@ -12,7 +16,8 @@
 
 import type { IssueWait, WaitState } from "../api";
 
-/** `YYYY-MM-DD` for the local calendar day of `now`. */
+/** `YYYY-MM-DD` of a `Date` built from local fields. Date arithmetic only;
+ *  never "today" for a wait, which is `dayAtOffset` at the server's offset. */
 export function localDay(now: Date = new Date()): string {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
@@ -20,8 +25,19 @@ export function localDay(now: Date = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
-/** A wait's standing on `today` (`YYYY-MM-DD`). */
-export function waitState(wait: IssueWait, today: string = localDay()): WaitState {
+/** `YYYY-MM-DD` of the calendar day at `nowMs` in a timezone
+ *  `offsetMinutes` east of UTC. Independent of the browser's own timezone. */
+export function dayAtOffset(nowMs: number, offsetMinutes: number): string {
+  const shifted = new Date(nowMs + offsetMinutes * 60_000);
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${shifted.getUTCFullYear()}-${m}-${d}`;
+}
+
+/** A wait's standing on the server's day `today` (`YYYY-MM-DD`). `null`
+ *  means the server's clock is not known yet: trust the server's `state`. */
+export function waitState(wait: IssueWait, today: string | null): WaitState {
+  if (today === null) return wait.state;
   if (wait.kind === "user") return "holding";
   if (wait.earliest && today < wait.earliest) return "holding";
   if (wait.latest && today > wait.latest) return "overdue";
@@ -78,7 +94,7 @@ export function waitHandle(wait: IssueWait): string {
 /** One wait in words, for the detail view and tooltips. */
 export function describeWait(
   wait: IssueWait,
-  today: string = localDay(),
+  today: string | null,
 ): { state: WaitState; headline: string } {
   const state = waitState(wait, today);
   if (wait.kind === "user") {
@@ -125,7 +141,7 @@ export interface WaitSummary {
  *  issue waits on nothing. */
 export function summarizeWaits(
   waits: IssueWait[] | undefined,
-  today: string = localDay(),
+  today: string | null,
 ): WaitSummary | null {
   if (!waits || waits.length === 0) return null;
   const ranked = waits

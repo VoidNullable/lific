@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { IssueWait } from "../src/lib/api";
 import {
   dayAfter,
+  dayAtOffset,
   describeWait,
   formatWindow,
   localDay,
@@ -47,9 +48,29 @@ describe("wait state", () => {
     expect(waitState(userWait, "2099-01-01")).toBe("holding");
   });
 
-  test("today is the local calendar day", () => {
+  test("date arithmetic stays on the calendar", () => {
     expect(localDay(new Date(2026, 8, 5, 23, 59))).toBe("2026-09-05");
     expect(dayAfter("2026-12-31")).toBe("2027-01-01");
+  });
+
+  test("today is the server's day at its UTC offset, not the browser's", () => {
+    // 2026-09-26T01:00Z: still Sep 25 in Chicago (UTC-5), already Sep 26 on
+    // a UTC server. The UI must follow the server.
+    const instant = Date.UTC(2026, 8, 26, 1, 0);
+    const wait = dateWait("2026-09-26");
+    expect(dayAtOffset(instant, 0)).toBe("2026-09-26");
+    expect(waitState(wait, dayAtOffset(instant, 0))).toBe("due");
+    expect(dayAtOffset(instant, -300)).toBe("2026-09-25");
+    expect(waitState(wait, dayAtOffset(instant, -300))).toBe("holding");
+    // East of UTC crosses midnight earlier.
+    expect(dayAtOffset(Date.UTC(2026, 8, 25, 22, 30), 150)).toBe("2026-09-26");
+  });
+
+  test("with no server clock yet, the server's own state stands", () => {
+    expect(waitState({ ...dateWait("2026-09-26"), state: "due" }, null)).toBe("due");
+    expect(summarizeWaits([{ ...dateWait("2026-09-26"), state: "overdue" }], null)?.state).toBe(
+      "overdue",
+    );
   });
 });
 
@@ -62,7 +83,7 @@ describe("wait text", () => {
   });
 
   test("the detail headline names the state", () => {
-    expect(describeWait(userWait).headline).toBe("Waiting on Blake (@blake)");
+    expect(describeWait(userWait, null).headline).toBe("Waiting on Blake (@blake)");
     expect(describeWait(dateWait("2026-09-28"), "2026-09-01").headline).toMatch(/^Waiting until /);
     expect(describeWait(dateWait("2026-09-28"), "2026-09-28").headline).toMatch(/^Due to check since /);
     expect(describeWait(dateWait("2026-09-28", "2026-09-29"), "2026-10-01").headline).toMatch(

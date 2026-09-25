@@ -7,13 +7,17 @@
   import { Hourglass, CalendarClock, CalendarCheck, CircleAlert } from "lucide-svelte";
   import Tooltip from "../Tooltip.svelte";
   import { now } from "../now.svelte";
-  import { localDay, summarizeWaits } from "./waits";
+  import { summarizeWaits } from "./waits";
+  import { ensureServerClock, serverDay } from "../serverClock.svelte";
 
   let { waits }: { waits: IssueWait[] | undefined } = $props();
 
-  // Rides the shared clock so a card left open across midnight moves from
-  // "until" to "due" without a refetch.
-  const summary = $derived(summarizeWaits(waits, localDay(new Date(now()))));
+  // Rides the shared clock so a card left open across the server's midnight
+  // moves from "until" to "due" without a refetch. The day is the server's.
+  const summary = $derived(summarizeWaits(waits, serverDay(now())));
+  $effect(() => {
+    if (waits?.length) ensureServerClock(now());
+  });
 
   const TONE = {
     holding: "text-[var(--warn-text)] bg-[color-mix(in_srgb,var(--warn)_14%,transparent)]",

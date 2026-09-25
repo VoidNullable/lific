@@ -19,6 +19,20 @@ use crate::realtime::{RealtimeEvent, RealtimeHub};
 
 use super::with_read;
 
+/// `GET /api/clock`: the server's calendar day and UTC offset, which decide
+/// whether a date wait is holding, due or overdue. The web client computes
+/// "today" at this offset rather than in the browser's timezone. Signed-in
+/// callers only: the offset hints at where the server lives.
+pub(super) async fn server_clock(
+    Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
+) -> Result<Json<serde_json::Value>, LificError> {
+    super::require_user(&identity)?;
+    Ok(Json(serde_json::json!({
+        "today": waits::today_text(),
+        "utc_offset_minutes": waits::utc_offset_minutes(),
+    })))
+}
+
 pub(super) async fn list_waits(
     State(db): State<DbPool>,
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,

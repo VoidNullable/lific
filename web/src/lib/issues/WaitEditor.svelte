@@ -13,7 +13,8 @@
   import { Hourglass, CalendarClock, CalendarCheck, CircleAlert, Plus, X } from "lucide-svelte";
   import { toast } from "../toast/toast.svelte";
   import { now } from "../now.svelte";
-  import { describeWait, localDay } from "./waits";
+  import { describeWait } from "./waits";
+  import { ensureServerClock, serverDay } from "../serverClock.svelte";
 
   let {
     issueId,
@@ -30,7 +31,11 @@
     onChange: (waits: IssueWait[]) => void;
   } = $props();
 
-  const today = $derived(localDay(new Date(now())));
+  // The server's day, so this field agrees with REST/MCP `workable`.
+  const today = $derived(serverDay(now()));
+  $effect(() => {
+    ensureServerClock(now());
+  });
 
   let adding = $state(false);
   let kind = $state<"user" | "date">("user");

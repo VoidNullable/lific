@@ -125,6 +125,10 @@ Clears a wait. Path parameters are `id` (integer issue ID) and `wait_id` (intege
 
 Adding or clearing a wait publishes `issue.updated` for the issue.
 
+### GET `/api/clock`
+
+Returns the server's calendar day and UTC offset, which decide whether a date wait is holding, due or overdue. It has no parameters or request body. Requires a signed-in caller. Response: `{ "today": "2026-09-26", "utc_offset_minutes": -300 }`, where the offset is minutes east of UTC. A client that evaluates wait states itself should compute today at this offset rather than in its own timezone.
+
 ### GET `/api/issues/{id}/activity`
 
 Returns activity for an issue. Path parameter: `id` (integer issue ID). Query parameters are `limit` (integer, optional) and `offset` (integer, optional).

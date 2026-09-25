@@ -68,6 +68,14 @@ pub(crate) fn pin_today(day: &str) -> PinnedToday {
     PinnedToday(PINNED_TODAY.with(|cell| cell.replace(Some(day))))
 }
 
+/// The server's current offset from UTC in minutes (east positive), read
+/// at the same instant as the local day. Clients that decide a wait's state
+/// themselves (the web UI across midnight) compute "today" at this offset,
+/// so a browser in another timezone agrees with REST and MCP.
+pub fn utc_offset_minutes() -> i32 {
+    chrono::Local::now().offset().local_minus_utc() / 60
+}
+
 /// [`today`] as the `YYYY-MM-DD` text the table stores, for SQL comparison.
 pub fn today_text() -> String {
     today().format("%Y-%m-%d").to_string()
