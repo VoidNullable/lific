@@ -34,6 +34,50 @@ use clap::{CommandFactory, FromArgMatches};
 use cli::{BackendKind, Cli, Command, ServiceAction};
 use config::Config;
 
+// Keep scheduler startup bounded while retaining a multi-threaded runtime for
+// concurrent HTTP/MCP work. The blocking pool remains independently sized.
+const RUNTIME_WORKER_THREADS: usize = 8;
+
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(RUNTIME_WORKER_THREADS)
+        .enable_all()
+        .build()
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use std::time::Duration;
+
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn application_runtime_keeps_io_timers_and_blocking_facilities() {
+        let runtime = super::build_runtime().expect("application runtime builds");
+
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("runtime IO driver binds a listener");
+            let address = listener.local_addr().expect("listener has an address");
+            let client = TcpStream::connect(address);
+            let (client, accepted) = tokio::join!(
+                client,
+                tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            );
+            client.expect("runtime IO driver connects");
+            accepted
+                .expect("timer driver does not stall IO")
+                .expect("runtime IO driver accepts a connection");
+
+            let result = tokio::task::spawn_blocking(|| 2 + 2)
+                .await
+                .expect("blocking pool remains available");
+            assert_eq!(result, 4);
+        });
+    }
+}
+
 // Commands that operate directly on the database (no server required)
 fn is_crud_command(cmd: &Command) -> bool {
     matches!(
@@ -328,8 +372,11 @@ fn create_private_config(path: &std::path::Path, contents: &str) -> std::io::Res
 use rmcp::ServiceExt;
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    build_runtime()?.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Via `ArgMatches` rather than `Cli::parse()` so a value's source stays
     // answerable: `lific mcp --instances` rejects a typed `--url` but ignores
     // an exported `LIFIC_URL`. Behaviour is otherwise identical.
