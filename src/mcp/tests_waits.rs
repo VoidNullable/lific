@@ -367,3 +367,98 @@ fn adding_or_clearing_a_wait_requires_maintainer_on_the_waiting_issue() {
     assert!(read.contains("Waiting on @lead"), "{read}");
     assert!(as_user(&lead, &clear).starts_with("Cleared MEM-1's wait"));
 }
+
+/// A membership revoked after the read-side gate but before the write must
+/// stop the write: the Maintainer check is repeated inside the write
+/// transaction, on the connection that writes.
+#[test]
+fn a_revocation_between_the_gate_and_the_write_refuses_the_wait() {
+    let (db, _admin, lead, maintainer, _viewer, _non_member, project_id) =
+        crate::api::test_helpers::setup_membership_test();
+    let m = LificMcp::new(db);
+    let _guard = acquire_test_guard();
+    let au = |u: &models::User| models::AuthUser {
+        id: u.id,
+        username: u.username.clone(),
+        display_name: u.display_name.clone(),
+        is_admin: u.is_admin,
+    };
+    let (lead, maintainer_user) = (au(&lead), au(&maintainer));
+    let as_user = |user: &models::AuthUser, f: &dyn Fn() -> String| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::mcp::with_request_user(
+                Some(user.clone()),
+                || async { f() },
+            ))
+    };
+    let created = as_user(&lead, &|| {
+        m.create_issue(Parameters(CreateIssueInput {
+            project: Some("MEM".into()),
+            title: "Gate".into(),
+            ..Default::default()
+        }))
+    });
+    assert!(created.starts_with("Created"), "{created}");
+    let revoke_before_write = |db: std::sync::Arc<crate::db::DbPool>, user_id: i64| {
+        crate::mcp::waits::BEFORE_WAIT_WRITE.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(move || {
+                let conn = db.write().unwrap();
+                crate::db::queries::members::remove_member(&conn, project_id, user_id).unwrap();
+            }));
+        });
+    };
+    let wait_count = || {
+        m.db.read()
+            .unwrap()
+            .query_row("SELECT count(*) FROM issue_waits", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+
+    revoke_before_write(m.db.clone(), maintainer.id);
+    let added = as_user(&maintainer_user, &|| {
+        m.link_issues(Parameters(LinkIssuesInput {
+            target: "MEM-1".into(),
+            relation_type: "blocks".into(),
+            user: Some("lead".into()),
+            ..Default::default()
+        }))
+    });
+    assert!(added.starts_with("Error: Forbidden:"), "{added}");
+    assert_eq!(wait_count(), 0, "the refused add wrote nothing");
+
+    // Restore the membership, add a wait, then revoke inside the clear.
+    {
+        let conn = m.db.write().unwrap();
+        crate::db::queries::members::upsert_member(
+            &conn,
+            project_id,
+            maintainer.id,
+            models::Role::Maintainer,
+        )
+        .unwrap();
+    }
+    let add = || {
+        m.link_issues(Parameters(LinkIssuesInput {
+            target: "MEM-1".into(),
+            relation_type: "blocks".into(),
+            user: Some("lead".into()),
+            ..Default::default()
+        }))
+    };
+    assert!(as_user(&maintainer_user, &add).starts_with("MEM-1: Waiting on @lead"));
+    revoke_before_write(m.db.clone(), maintainer.id);
+    let cleared = as_user(&maintainer_user, &|| {
+        m.unlink_issues(Parameters(UnlinkIssuesInput {
+            target: "MEM-1".into(),
+            user: Some("lead".into()),
+            ..Default::default()
+        }))
+    });
+    assert!(cleared.starts_with("Error: Forbidden:"), "{cleared}");
+    assert_eq!(wait_count(), 1, "the refused clear left the wait in place");
+}

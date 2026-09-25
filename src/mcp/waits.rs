@@ -102,6 +102,42 @@ impl Display for WaitLines<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs after the read-side gate and before the write
+    /// transaction opens, which is exactly the window a revocation must not
+    /// be able to exploit.
+    pub(super) static BEFORE_WAIT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn before_wait_write() {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_WAIT_WRITE.with(|cell| cell.borrow_mut().take()) {
+        hook();
+    }
+}
+
+/// Re-assert Maintainer on the waiting issue's project against the
+/// connection that is about to write, inside its transaction, and return the
+/// caller's user id for `created_by`. The gate in [`LificMcp::waiting_issue`]
+/// ran on a read connection earlier; a membership revoked since then is
+/// visible here and refuses the write. Same shape as REST's
+/// `require_role_conn` recheck in `api::waits`.
+fn authorize_wait_write(
+    conn: &rusqlite::Connection,
+    issue_id: i64,
+) -> Result<Option<i64>, crate::error::LificError> {
+    let project_id = queries::issue_project_id(conn, issue_id)?;
+    let identity = crate::resolve_caller::resolve_caller_conn(
+        conn,
+        super::current_auth_user(),
+        crate::actor::Transport::Mcp,
+    )?;
+    crate::authz::require_role_conn(conn, &identity, project_id, models::Role::Maintainer)?;
+    Ok(identity.map(|identity| identity.user.id))
+}
+
 impl LificMcp {
     /// The waiting issue, resolved and authorized as a Maintainer write.
     fn waiting_issue(&self, identifier: &str) -> Result<models::Issue, String> {
@@ -153,8 +189,9 @@ impl LificMcp {
             );
         }
         let issue = self.waiting_issue(&input.target)?;
-        let created_by = super::current_identity(&self.db).map(|identity| identity.user.id);
-        let wait = self.write(|conn| {
+        before_wait_write();
+        let wait = self.transaction(|conn| {
+            let created_by = authorize_wait_write(conn, issue.id)?;
             waits::add_wait(
                 conn,
                 issue.id,
@@ -182,15 +219,19 @@ impl LificMcp {
         let user = input.user.as_deref().filter(|v| !v.trim().is_empty());
         let from = input.from.as_deref().filter(|v| !v.trim().is_empty());
         let issue = self.waiting_issue(&input.target)?;
-        let cleared = self.write(|conn| match (user, from) {
-            (Some(_), Some(_)) => Err(crate::error::LificError::BadRequest(
-                "clear one wait at a time: pass user or from".into(),
-            )),
-            (Some(user), None) => Ok(vec![waits::clear_user_wait(conn, issue.id, user)?]),
-            (None, Some(from)) => waits::clear_date_waits(conn, issue.id, from),
-            (None, None) => Err(crate::error::LificError::BadRequest(
-                "pass user or from to clear a wait".into(),
-            )),
+        before_wait_write();
+        let cleared = self.transaction(|conn| {
+            authorize_wait_write(conn, issue.id)?;
+            match (user, from) {
+                (Some(_), Some(_)) => Err(crate::error::LificError::BadRequest(
+                    "clear one wait at a time: pass user or from".into(),
+                )),
+                (Some(user), None) => Ok(vec![waits::clear_user_wait(conn, issue.id, user)?]),
+                (None, Some(from)) => waits::clear_date_waits(conn, issue.id, from),
+                (None, None) => Err(crate::error::LificError::BadRequest(
+                    "pass user or from to clear a wait".into(),
+                )),
+            }
         })?;
         self.emit_wait_change(issue.id);
         let mut out = format!("Cleared {}'s wait", issue.identifier);
