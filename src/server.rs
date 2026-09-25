@@ -26,7 +26,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rust_embed::Embed;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
 use crate::config::{self, Config};
@@ -713,7 +713,13 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
     } else {
         let origins: Vec<HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
-        layer.allow_origin(origins)
+        assert!(
+            !origins.contains(&HeaderValue::from_static("*")),
+            "Wildcard origin (`*`) cannot be passed to configured cors_origins"
+        );
+        layer.allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origins.contains(origin)
+        }))
     }
 }
 
@@ -937,6 +943,30 @@ mod cors_tests {
         inner.layer(build_global_cors(origins))
     }
 
+    /// REST responses use the same top-level CORS policy as MCP responses.
+    /// Keep the custom paging headers and authentication challenge visible to
+    /// browser clients when the API router is composed into the full app.
+    fn rest_app_with_cors(origins: &[String]) -> Router {
+        let inner = Router::new().route(
+            "/api/issues/1/comments",
+            post(|| async {
+                let mut response = StatusCode::UNAUTHORIZED.into_response();
+                let headers = response.headers_mut();
+                headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+                headers.insert(
+                    HeaderName::from_static(crate::api::comments::HAS_MORE_HEADER),
+                    HeaderValue::from_static("false"),
+                );
+                headers.insert(
+                    HeaderName::from_static(crate::api::comments::NEXT_OFFSET_HEADER),
+                    HeaderValue::from_static("0"),
+                );
+                response
+            }),
+        );
+        inner.layer(build_global_cors(origins))
+    }
+
     /// A browser MCP client (Claude Web) issues a CORS preflight before the
     /// authenticated POST. That preflight must succeed WITHOUT any
     /// Authorization header — otherwise the browser blocks the real request
@@ -1025,7 +1055,10 @@ mod cors_tests {
     /// receive an Access-Control-Allow-Origin header echoing them back.
     #[tokio::test]
     async fn explicit_origins_are_allowlisted() {
-        let app = app_with_cors(&["https://claude.ai".to_string()]);
+        let app = app_with_cors(&[
+            "https://claude.ai".to_string(),
+            "invalid\norigin".to_string(),
+        ]);
 
         let req = Request::builder()
             .method(Method::OPTIONS)
@@ -1035,7 +1068,7 @@ mod cors_tests {
             .body(Body::empty())
             .unwrap();
 
-        let res = app.oneshot(req).await.unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
         assert!(res.status().is_success());
         assert_eq!(
             res.headers()
@@ -1043,6 +1076,23 @@ mod cors_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("https://claude.ai")
         );
+
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/mcp")
+            .header("origin", "https://evil.example")
+            .header("access-control-request-method", "POST")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert!(!res.headers().contains_key("access-control-allow-origin"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Wildcard origin (`*`)")]
+    fn configured_wildcard_origin_keeps_rejection() {
+        let _ = build_global_cors(&["*".to_string()]);
     }
 
     /// MCP responses must expose the session id header so the client can
@@ -1090,6 +1140,52 @@ mod cors_tests {
             expose.contains("www-authenticate"),
             "www-authenticate must be exposed, got: {expose}"
         );
+    }
+
+    #[tokio::test]
+    async fn rest_metadata_and_auth_headers_are_cors_visible() {
+        let app = rest_app_with_cors(&[]);
+
+        let preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/issues/1/comments")
+            .header("origin", "https://app.example")
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(preflight).await.unwrap();
+        assert!(response.status().is_success());
+        let allowed = response
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(allowed.contains("authorization"));
+        assert!(allowed.contains("content-type"));
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/issues/1/comments")
+            .header("origin", "https://app.example")
+            .header("authorization", "Bearer test")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let exposed = response
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(exposed.contains("www-authenticate"));
+        assert!(exposed.contains(crate::api::comments::HAS_MORE_HEADER));
+        assert!(exposed.contains(crate::api::comments::NEXT_OFFSET_HEADER));
     }
 }
 
