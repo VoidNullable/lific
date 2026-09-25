@@ -299,6 +299,10 @@ pub struct GetPageInput {
         description = "A seq from an earlier read: return only the content diff since then, plus the current seq"
     )]
     pub since_seq: Option<i64>,
+    #[schemars(
+        description = "Continue a cut read from this character offset (into the section if given)"
+    )]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

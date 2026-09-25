@@ -3192,8 +3192,10 @@ impl LificMcp {
         // opening; `section` and `outline` read them piece by piece.
         // LIF-480: `since_seq` returns only the content diff.
         let body = match input.since_seq {
-            Some(_) if input.section.is_some() || input.outline.is_some() => {
-                return Err("since_seq cannot be combined with section or outline".into());
+            Some(_)
+                if input.section.is_some() || input.outline.is_some() || input.offset.is_some() =>
+            {
+                return Err("since_seq cannot be combined with section, outline or offset".into());
             }
             Some(since) => super::page_reads::page_changes(
                 &page.identifier,
@@ -3208,6 +3210,7 @@ impl LificMcp {
                 page.seq,
                 input.section.as_deref(),
                 input.outline.unwrap_or(false),
+                input.offset,
             )?,
         };
         let context = current_issue_link_context();

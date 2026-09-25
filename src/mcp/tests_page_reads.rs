@@ -24,7 +24,7 @@ fn read(m: &LificMcp, identifier: &str, section: Option<&str>, outline: bool) ->
         identifier: identifier.into(),
         section: section.map(Into::into),
         outline: outline.then_some(true),
-        since_seq: None,
+        ..Default::default()
     }))
 }
 
@@ -233,7 +233,11 @@ fn an_oversized_page_returns_its_outline_and_opening_with_the_section_call() {
         "got: {result}"
     );
     assert!(
-        result.contains("get_page(identifier=\"BIG-DOC-1\", section=\"<heading text or anchor>\")"),
+        result.contains("Next: get_page(identifier=\"BIG-DOC-1\", offset="),
+        "got: {result}"
+    );
+    assert!(
+        result.contains("Or read one section by heading instead"),
         "got: {result}"
     );
     assert!(
@@ -246,7 +250,7 @@ fn an_oversized_page_returns_its_outline_and_opening_with_the_section_call() {
         "got: {result}"
     );
     assert!(!result.contains("week 40 entry 99"), "the tail stays out");
-    assert!(result.contains("[Truncated at "), "got: {result}");
+    assert!(result.contains("\n[Chars 0 to "), "got: {result}");
     assert!(
         result.chars().count() < PAGE_READ_BUDGET + 1_000,
         "{} chars",
@@ -265,9 +269,10 @@ fn an_oversized_page_without_headings_says_it_cannot_be_sectioned() {
     let identifier = seed_page(&m, "FLT", &"flat line\n".repeat(PAGE_READ_BUDGET / 5));
 
     let result = read(&m, &identifier, None, false);
-    assert!(result.contains("has no headings"), "got: {result}");
+    assert!(result.contains("so only its first "), "got: {result}");
+    assert!(!result.contains("by heading"), "got: {result}");
     assert!(!result.contains("Outline"), "got: {result}");
-    assert!(result.contains("[Truncated at "), "got: {result}");
+    assert!(result.contains("\n[Chars 0 to "), "got: {result}");
 }
 
 #[test]
@@ -641,4 +646,247 @@ fn edit_page_warns_only_when_the_edited_content_exceeds_the_read_budget() {
         "got: {over}"
     );
     assert!(over.ends_with(OVERSIZE_NOTE), "got: {over}");
+}
+
+// ── LIF-479 follow-up: `offset` continues a cut read ──
+
+fn read_at(m: &LificMcp, identifier: &str, section: Option<&str>, offset: usize) -> String {
+    m.get_page(Parameters(GetPageInput {
+        identifier: identifier.into(),
+        section: section.map(Into::into),
+        offset: Some(offset),
+        ..Default::default()
+    }))
+}
+
+/// The slice a response shows after `marker`, and the offset its
+/// continuation line names (None on the last slice).
+fn shown_after<'a>(result: &'a str, marker: &str) -> (&'a str, Option<usize>) {
+    let start = result
+        .find(marker)
+        .unwrap_or_else(|| panic!("no {marker:?} in {result}"))
+        + marker.len();
+    match result[start..].rfind("\n[Chars ") {
+        Some(end) => {
+            let rest = &result[start + end..];
+            let next = rest
+                .split_once(", offset=")
+                .and_then(|(_, tail)| tail.split_once(')'))
+                .map(|(number, _)| number.parse().unwrap());
+            (&result[start..start + end], next)
+        }
+        None => (
+            result[start..]
+                .strip_suffix('\n')
+                .expect("slice ends the response"),
+            None,
+        ),
+    }
+}
+
+fn amendment_log() -> (String, String) {
+    let mut section = String::from("# 4. Amendment log\n");
+    for entry in 1..=1_500 {
+        section.push_str(&format!(
+            "- 2026-09-{:02}: entry {entry} amends the current state of the plan.\n",
+            entry % 28 + 1
+        ));
+    }
+    let page = format!("# 3. State\nnow\n\n{section}# 5. Next\nlater\n");
+    (page, section)
+}
+
+#[test]
+fn a_headingless_oversized_section_can_be_walked_to_the_end_by_offset() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "WLK");
+    let (page, section) = amendment_log();
+    assert!(section.chars().count() > 3 * PAGE_READ_BUDGET);
+    let identifier = seed_page(&m, "WLK", &page);
+    let seq = page_seq(&m, &identifier);
+
+    let first = read(&m, &identifier, Some("4. Amendment log"), false);
+    assert!(
+        !first.contains("by heading"),
+        "no subsection to offer: {first}"
+    );
+    assert!(!first.contains("Outline"), "nothing to outline: {first}");
+    let (text, mut next) = shown_after(&first, "Start of the section:\n");
+    let mut walked = text.to_string();
+    let mut calls = 0;
+    while let Some(offset) = next {
+        assert!(walked.ends_with('\n'), "every cut is at a line end");
+        assert_eq!(
+            walked.chars().count(),
+            offset,
+            "offsets match what was shown"
+        );
+        assert!(first.contains(
+            "Next: get_page(identifier=\"WLK-DOC-1\", section=\"4. Amendment log\", offset="
+        ));
+        let result = read_at(&m, &identifier, Some("4. Amendment log"), offset);
+        assert!(!result.contains("Outline"), "no outline repeated: {result}");
+        let (text, after) = shown_after(
+            &result,
+            &format!("of section \"4. Amendment log\" (seq {seq}):\n"),
+        );
+        next = after;
+        assert!(
+            result.contains(&format!("\nChars {} to ", Chars(offset))),
+            "got: {result}"
+        );
+        walked.push_str(text);
+        calls += 1;
+        assert!(calls < 10);
+    }
+    assert!(calls >= 3);
+    assert_eq!(walked, section, "the slices rebuild the section exactly");
+}
+
+#[test]
+fn an_oversized_page_can_be_walked_to_the_end_by_offset() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "WPG");
+    let content = amendment_log().0;
+    let identifier = seed_page(&m, "WPG", &content);
+    let seq = page_seq(&m, &identifier);
+
+    let first = read(&m, &identifier, None, false);
+    // "# 5. Next" is still unread, so a section is worth offering.
+    assert!(
+        first.contains("Or read one section by heading instead"),
+        "got: {first}"
+    );
+    let (text, mut next) = shown_after(&first, "Start of the page:\n");
+    let mut walked = text.to_string();
+    while let Some(offset) = next {
+        let result = read_at(&m, &identifier, None, offset);
+        let (text, after) = shown_after(&result, &format!(" (seq {seq}):\n"));
+        walked.push_str(text);
+        next = after;
+    }
+    assert_eq!(walked, content);
+}
+
+#[test]
+fn a_cut_falls_on_a_line_end_near_the_budget_or_exactly_at_it() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "CUT");
+    // 1,500-char lines: the budget lands mid-line, within reach of a line end.
+    let line = format!("{}\n", "a".repeat(1_500));
+    let identifier = seed_page(&m, "CUT", &line.repeat(50));
+    let result = read_at(&m, &identifier, None, 0);
+    let (text, next) = shown_after(&result, "):\n");
+    assert_eq!(text, line.repeat(19), "19 whole lines, not 19.98");
+    assert_eq!(next, Some(19 * 1_501));
+
+    // One 70,000-char line: no line end in reach, so the cut is exact.
+    seed_project(&m, "Test", "LNG");
+    let identifier = seed_page(&m, "LNG", &"b".repeat(70_000));
+    let result = read_at(&m, &identifier, None, 0);
+    let (text, next) = shown_after(&result, "):\n");
+    assert_eq!(text.chars().count(), PAGE_READ_BUDGET);
+    assert_eq!(next, Some(PAGE_READ_BUDGET));
+    assert!(
+        result.contains("of 70,000 shown; 40,000 remain."),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn an_offset_at_or_past_the_end_is_an_error() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "END");
+    let identifier = seed_page(&m, "END", NESTED);
+    let beta = "## Beta\nbeta body\n".chars().count();
+
+    let past = read_at(&m, &identifier, Some("Beta"), beta);
+    assert_eq!(
+        past,
+        format!("Error: offset {beta} is past the end of the section, which has {beta} chars")
+    );
+    let page = read_at(&m, &identifier, None, 1_000_000);
+    assert!(
+        page.starts_with("Error: offset 1000000 is past the end of the page"),
+        "got: {page}"
+    );
+
+    let last = read_at(&m, &identifier, Some("Beta"), beta - 2);
+    assert!(
+        last.ends_with(&format!(
+            "of section \"Beta\" (seq {}):\ny\n\n",
+            page_seq(&m, &identifier)
+        )),
+        "got: {last:?}"
+    );
+}
+
+#[test]
+fn offset_cannot_be_combined_with_outline_or_since_seq() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "OCB");
+    let identifier = seed_page(&m, "OCB", NESTED);
+
+    let outline = m.get_page(Parameters(GetPageInput {
+        identifier: identifier.clone(),
+        outline: Some(true),
+        offset: Some(0),
+        ..Default::default()
+    }));
+    assert_eq!(outline, "Error: offset cannot be combined with outline");
+
+    let since = m.get_page(Parameters(GetPageInput {
+        identifier,
+        since_seq: Some(1),
+        offset: Some(0),
+        ..Default::default()
+    }));
+    assert_eq!(
+        since,
+        "Error: since_seq cannot be combined with section, outline or offset"
+    );
+}
+
+#[test]
+fn a_cut_offers_sections_only_when_the_unread_part_has_headings() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "MSG");
+    // A heading at the top only: the outline shows, but nothing after the
+    // cut can be read by section.
+    let top_only = format!("## Log\n{}", "- entry\n".repeat(8_000));
+    let identifier = seed_page(&m, "MSG", &top_only);
+    let result = read(&m, &identifier, None, false);
+    assert!(result.contains("\nOutline (seq "), "got: {result}");
+    assert!(
+        result.contains("Next: get_page(identifier=\"MSG-DOC-1\", offset="),
+        "got: {result}"
+    );
+    assert!(!result.contains("by heading"), "got: {result}");
+
+    // A section whose subsections start past the cut offers them.
+    seed_project(&m, "Test", "SUB");
+    let nested = format!("## Log\n{}### Later\nmore\n", "- entry\n".repeat(8_000));
+    let identifier = seed_page(&m, "SUB", &nested);
+    let result = read(&m, &identifier, Some("Log"), false);
+    assert!(
+        result.contains("Next: get_page(identifier=\"SUB-DOC-1\", section=\"Log\", offset="),
+        "got: {result}"
+    );
+    assert!(
+        result.contains("Or read one subsection by heading instead (outline=true lists them)."),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn a_continuation_selects_an_ambiguous_section_by_its_anchor() {
+    let (m, _guard) = mcp();
+    seed_project(&m, "Test", "DUP");
+    let content = format!("## Notes\nshort\n## Notes\n{}", "- entry\n".repeat(8_000));
+    let identifier = seed_page(&m, "DUP", &content);
+    let result = read(&m, &identifier, Some("notes-1"), false);
+    assert!(
+        result.contains("section=\"notes-1\", offset="),
+        "got: {result}"
+    );
 }

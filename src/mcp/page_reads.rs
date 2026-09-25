@@ -218,29 +218,110 @@ fn write_outline(out: &mut String, content: &str, seq: i64) -> fmt::Result {
     Ok(())
 }
 
-/// The first `max_chars` characters of `body`, cut back to a line break when
-/// one falls in the second half so the excerpt does not end mid-line.
+/// How far back from a cut `prefix` looks for a line break, in characters.
+const LINE_CUT_WINDOW: usize = 2_000;
+
+/// The first `max_chars` characters of `body`, cut back to the end of a line
+/// when one ends within the last [`LINE_CUT_WINDOW`] characters, so a bullet
+/// is not split mid-line. A body that fits is returned whole.
 fn prefix(body: &str, max_chars: usize) -> &str {
-    let cut = body
-        .char_indices()
-        .nth(max_chars)
-        .map_or(body.len(), |(index, _)| index);
+    let Some((cut, _)) = body.char_indices().nth(max_chars) else {
+        return body;
+    };
     let at_line = body[..cut]
         .rfind('\n')
-        .filter(|newline| *newline >= cut / 2)
-        .map_or(cut, |newline| newline + 1);
+        .map(|newline| newline + 1)
+        .filter(|start| char_len(&body[*start..cut]) <= LINE_CUT_WINDOW)
+        .unwrap_or(cut);
     &body[..at_line]
 }
 
-/// An oversized page or section: the outline (trimmed to its share of the
-/// budget) and the start of the body, with the call that reads the rest.
-fn write_oversized(
+/// The body one `get_page` call reads: the whole page, or one section.
+struct Reading<'a> {
+    identifier: &'a str,
+    body: &'a str,
+    /// The selected section: the `section` argument that selects it again
+    /// (its text, or its anchor when the text is ambiguous) and its text.
+    section: Option<(String, &'a str)>,
+}
+
+impl Reading<'_> {
+    fn noun(&self) -> &'static str {
+        if self.section.is_some() {
+            "section"
+        } else {
+            "page"
+        }
+    }
+}
+
+/// The exact call that continues a read cut at `end_byte` (`end_chars`
+/// characters into the body), and how much is left. Sections are suggested
+/// only when a heading actually starts in the unread part.
+fn write_continuation(
     out: &mut String,
-    identifier: &str,
-    noun: &str,
-    body: &str,
-    seq: i64,
+    reading: &Reading<'_>,
+    end_byte: usize,
+    end_chars: usize,
+    start_chars: usize,
 ) -> fmt::Result {
+    let total = char_len(reading.body);
+    write!(
+        out,
+        "[Chars {} to {} of {} shown; {} remain. Next: get_page(identifier=\"{}\"",
+        Chars(start_chars),
+        Chars(end_chars),
+        Chars(total),
+        Chars(total - end_chars),
+        reading.identifier
+    )?;
+    if let Some((argument, _)) = &reading.section {
+        write!(out, ", section=\"{argument}\"")?;
+    }
+    write!(out, ", offset={end_chars}).")?;
+    if headings(reading.body).iter().any(|h| h.start >= end_byte) {
+        let sub = if reading.section.is_some() { "sub" } else { "" };
+        write!(
+            out,
+            " Or read one {sub}section by heading instead (outline=true lists them)."
+        )?;
+    }
+    writeln!(out, "]")
+}
+
+/// `offset` reads: a position line and the next window of the body, with
+/// the call after it when the body goes on. No outline is repeated.
+fn write_offset(out: &mut String, reading: &Reading<'_>, seq: i64, offset: usize) -> fmt::Result {
+    let start = reading
+        .body
+        .char_indices()
+        .nth(offset)
+        .map_or(reading.body.len(), |(index, _)| index);
+    let shown = prefix(&reading.body[start..], PAGE_READ_BUDGET);
+    let end_chars = offset + char_len(shown);
+    let total = char_len(reading.body);
+    write!(
+        out,
+        "Chars {} to {} of {}",
+        Chars(offset),
+        Chars(end_chars),
+        Chars(total)
+    )?;
+    if let Some((_, text)) = &reading.section {
+        write!(out, " of section \"{text}\"")?;
+    }
+    writeln!(out, " (seq {seq}):\n{shown}")?;
+    if end_chars < total {
+        write_continuation(out, reading, start + shown.len(), end_chars, offset)?;
+    }
+    Ok(())
+}
+
+/// An oversized page or section: the outline (trimmed to its share of the
+/// budget) and the start of the body, with the call that continues it.
+fn write_oversized(out: &mut String, reading: &Reading<'_>, seq: i64) -> fmt::Result {
+    let body = reading.body;
+    let noun = reading.noun();
     let total = char_len(body);
     let headings = headings(body);
     let mut max_level = 6;
@@ -264,62 +345,94 @@ fn write_oversized(
     let shown = prefix(body, PAGE_READ_BUDGET.saturating_sub(char_len(&outline)));
     let shown_chars = char_len(shown);
 
-    writeln!(
-        out,
-        "\nThis {noun} is {} chars, over the {}-char read budget, so only its outline and first {} chars follow.",
-        Chars(total),
-        Chars(PAGE_READ_BUDGET),
-        Chars(shown_chars)
-    )?;
-    if headings.is_empty() {
+    // A section's own heading alone is not worth an outline.
+    let subheadings = headings
+        .iter()
+        .any(|h| reading.section.is_none() || h.start > 0);
+    if !subheadings {
         writeln!(
             out,
-            "It has no headings, so it cannot be read by section. Split it into smaller pages."
+            "\nThis {noun} is {} chars, over the {}-char read budget, so only its first {} chars follow.",
+            Chars(total),
+            Chars(PAGE_READ_BUDGET),
+            Chars(shown_chars)
         )?;
     } else {
         writeln!(
             out,
-            "Read the rest one section at a time: get_page(identifier=\"{identifier}\", section=\"<heading text or anchor>\").{outline_note}"
+            "\nThis {noun} is {} chars, over the {}-char read budget, so only its outline and first {} chars follow.{outline_note}",
+            Chars(total),
+            Chars(PAGE_READ_BUDGET),
+            Chars(shown_chars)
         )?;
         writeln!(out, "\nOutline (seq {seq}; sizes include subsections):")?;
         out.push_str(&outline);
     }
     writeln!(out, "\nStart of the {noun}:\n{shown}")?;
-    writeln!(
-        out,
-        "[Truncated at {} of {} chars.]",
-        Chars(shown_chars),
-        Chars(total)
-    )
+    write_continuation(out, reading, shown.len(), shown_chars, 0)
 }
 
 /// Everything `get_page` prints after the page header.
 ///
 /// A plain read of a page within the budget is the content exactly as it
 /// has always been rendered, so small pages are unchanged byte for byte.
+/// `offset` continues a cut read of the page, or of the section when
+/// `section` is given.
 pub(crate) fn page_body(
     identifier: &str,
     content: &str,
     seq: i64,
     section: Option<&str>,
     outline: bool,
+    offset: Option<usize>,
 ) -> Result<String, String> {
+    if offset.is_some() && outline {
+        return Err("offset cannot be combined with outline".into());
+    }
+    let all_headings = section.map(|_| headings(content)).unwrap_or_default();
+    let heading = match section {
+        Some(query) => Some(select_section(&all_headings, identifier, content, query)?),
+        None => None,
+    };
+    let reading = Reading {
+        identifier,
+        body: heading.map_or(content, |h| &content[h.start..h.end]),
+        section: heading.map(|h| (section_argument(h), h.text.as_str())),
+    };
+    if let Some(offset) = offset {
+        let total = char_len(reading.body);
+        if offset > 0 && offset >= total {
+            return Err(format!(
+                "offset {offset} is past the end of the {}, which has {} chars",
+                reading.noun(),
+                Chars(total)
+            ));
+        }
+    }
+
     let mut out = String::new();
-    let rendered = match section {
-        Some(query) => {
-            let headings = headings(content);
-            let heading = select_section(&headings, identifier, content, query)?;
-            write_section(&mut out, identifier, content, seq, heading, outline)
+    let rendered = match (heading, offset) {
+        (_, Some(offset)) => write_offset(&mut out, &reading, seq, offset),
+        (Some(heading), None) => write_section(&mut out, &reading, content, seq, heading, outline),
+        (None, None) if outline => write_outline(&mut out, content, seq),
+        (None, None) if char_len(content) > PAGE_READ_BUDGET => {
+            write_oversized(&mut out, &reading, seq)
         }
-        None if outline => write_outline(&mut out, content, seq),
-        None if char_len(content) > PAGE_READ_BUDGET => {
-            write_oversized(&mut out, identifier, "page", content, seq)
-        }
-        None if content.is_empty() => Ok(()),
-        None => writeln!(out, "\n{content}"),
+        (None, None) if content.is_empty() => Ok(()),
+        (None, None) => writeln!(out, "\n{content}"),
     };
     rendered.map_err(|error| format!("failed to format response: {error}"))?;
     Ok(out)
+}
+
+/// The `section` value that selects `heading` again in a continuation call:
+/// its text, unless another heading shares it or it would need escaping.
+fn section_argument(heading: &Heading) -> String {
+    if heading.duplicate || heading.text.contains(['"', '\\']) {
+        heading.anchor.clone()
+    } else {
+        heading.text.clone()
+    }
 }
 
 /// The heading `query` names, or an error that lists what an agent can pass
@@ -368,13 +481,13 @@ fn select_section<'a>(
 
 fn write_section(
     out: &mut String,
-    identifier: &str,
+    reading: &Reading<'_>,
     content: &str,
     seq: i64,
     heading: &Heading,
     outline: bool,
 ) -> fmt::Result {
-    let body = &content[heading.start..heading.end];
+    let body = reading.body;
     write!(out, "Section: ")?;
     heading_line(out, heading)?;
     writeln!(
@@ -386,7 +499,7 @@ fn write_section(
     if outline {
         write_outline(out, body, seq)
     } else if char_len(body) > PAGE_READ_BUDGET {
-        write_oversized(out, identifier, "section", body, seq)
+        write_oversized(out, reading, seq)
     } else {
         writeln!(out, "\n{}", body.trim_end())
     }
@@ -404,7 +517,7 @@ pub(crate) fn page_changes(
     seq: i64,
 ) -> Result<String, String> {
     let Some(before) = before else {
-        let body = page_body(identifier, content, seq, None, false)?;
+        let body = page_body(identifier, content, seq, None, false, None)?;
         return Ok(format!(
             "Note: seq {since} is outside this page's recorded history (its latest 50 versions), so the full page follows.\n{body}"
         ));
