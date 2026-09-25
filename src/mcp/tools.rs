@@ -5095,7 +5095,11 @@ impl LificMcp {
                         base64::engine::general_purpose::STANDARD.encode(&bytes),
                         format!("attachment://{}", attachment.id),
                     )
-                    .with_mime_type(attachment.mime),
+                    .with_mime_type(if attachment.mime == "image/svg+xml" {
+                        "application/octet-stream"
+                    } else {
+                        &attachment.mime
+                    }),
                 ),
             ]),
         }
@@ -13061,6 +13065,38 @@ mod tests {
                     blob,
                     &base64::engine::general_purpose::STANDARD.encode(bytes)
                 );
+            }
+            rmcp::model::ResourceContents::TextResourceContents { .. } => {
+                panic!("expected an embedded blob resource, got {resource:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn get_attachment_returns_svg_as_inert_stdio_resource() {
+        let (m, _tmp, _guard, _identity) = mcp_with_attachments();
+        let svg = base64::engine::general_purpose::STANDARD
+            .encode(br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#);
+        let id = attachment_id_from(&m.upload_attachment(Parameters(UploadAttachmentInput {
+            filename: "diagram.svg".into(),
+            content_base64: svg,
+            entity: None,
+            comment_id: None,
+        })));
+
+        let result = m.get_attachment(Parameters(GetAttachmentInput {
+            attachment_id: id,
+            offset: None,
+            limit: None,
+        }));
+        let resource = result
+            .content
+            .iter()
+            .find_map(|content| content.as_resource().map(|resource| &resource.resource))
+            .expect("stdio should return the SVG as an embedded resource");
+        match resource {
+            rmcp::model::ResourceContents::BlobResourceContents { mime_type, .. } => {
+                assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
             }
             rmcp::model::ResourceContents::TextResourceContents { .. } => {
                 panic!("expected an embedded blob resource, got {resource:?}")
