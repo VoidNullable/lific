@@ -5,6 +5,7 @@ mod authz;
 #[cfg(test)]
 mod authz_coverage_tests;
 mod backup;
+mod checklist;
 mod cli;
 mod config;
 mod db;

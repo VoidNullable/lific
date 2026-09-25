@@ -1904,7 +1904,7 @@ impl LificMcp {
         Ok(render_response(|output| {
             writeln!(output, "{} issues:", issues.len())?;
             issues.iter().try_for_each(|issue| {
-                writeln!(
+                write!(
                     output,
                     "- {}",
                     IssueLine {
@@ -1914,7 +1914,12 @@ impl LificMcp {
                             .and_then(|id| module_names.get(&id).map(String::as_str)),
                         context: context.as_deref(),
                     }
-                )
+                )?;
+                // LIF-487: only issues that carry a task list pay for this.
+                crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
+                    write!(output, " checklist: {}/{}", list.done, list.total)
+                })?;
+                writeln!(output)
             })?;
             append_pagination_hint(output, has_more, offset + limit)
         }))
@@ -2010,6 +2015,9 @@ impl LificMcp {
                         separator: ", ",
                     }
                 )
+            })?;
+            crate::checklist::checklist(&issue.description).map_or(Ok(()), |list| {
+                writeln!(output, "Checklist: {}/{} done", list.done, list.total)
             })?;
             [
                 ("Blocks: ", rels.blocks.as_slice()),
@@ -2435,7 +2443,23 @@ impl LificMcp {
             })?;
             verification.map_or(Ok(()), |comment_id| {
                 write!(output, "\nVerification recorded as comment #{comment_id}.")
-            })
+            })?;
+            // LIF-487: closing over unchecked acceptance items is allowed,
+            // but not silently.
+            match (
+                cascade_action,
+                crate::checklist::checklist(&issue.description),
+            ) {
+                (Some(PlanStepCascadeAction::AutoComplete), Some(list)) if list.open() > 0 => {
+                    write!(
+                        output,
+                        "\nWarning: {} of {} checklist items still unchecked.",
+                        list.open(),
+                        list.total
+                    )
+                }
+                _ => Ok(()),
+            }
         }))
     }
 
@@ -5011,6 +5035,9 @@ pub(crate) fn acquire_test_guard() -> McpTestGuard {
 
 #[cfg(test)]
 mod tests_verification;
+
+#[cfg(test)]
+mod tests_checklist;
 
 #[cfg(test)]
 mod tests {
