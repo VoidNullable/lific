@@ -533,7 +533,13 @@ pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ratelimit;
+    use crate::{Config, auth, db, realtime, server, storage};
+    use axum::body::Body;
+    use base64::Engine;
+    use http_body_util::BodyExt;
     use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
 
     type Reply = Box<dyn Fn(&str) -> Result<String, ForwardError> + Send + Sync>;
 
@@ -829,6 +835,99 @@ mod tests {
         assert_eq!(output[1]["result"]["content"][0]["text"], "issue");
         assert_eq!(seen.lock().unwrap().as_slice(), &[Some("1".into()), None]);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn real_mcp_server_embeds_authorized_attachment_bytes_and_denies_other_users() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("lific.db");
+        let pool = db::open(&db_path).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash) VALUES (1, 'owner', 'owner@test', 'x'), (2, 'other', 'other@test', 'x')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = storage::AttachmentStore::from_db_path(&db_path);
+        let bytes = b"PK\x03\x04zip bytes";
+        let sha = store.write(bytes).unwrap();
+        let attachment_id = {
+            let conn = pool.write().unwrap();
+            db::queries::attachments::create_attachment(
+                &conn,
+                &sha,
+                "archive.zip",
+                "application/zip",
+                bytes.len() as i64,
+                Some(1),
+            )
+            .unwrap()
+            .id
+        };
+        let owner_key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
+        let other_key = auth::create_api_key(&pool, "other", Some(2)).unwrap();
+
+        let mut config = Config::default();
+        config.database.path = db_path;
+        config.auth.required = true;
+        config.server.public_url = Some("https://example.test".into());
+        config.server.host = "127.0.0.1".into();
+        let trusted_proxies =
+            Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
+        let app = server::build_app_with_store(
+            &config,
+            pool,
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            store,
+        );
+
+        async fn call_server(app: &axum::Router, key: &str, attachment_id: i64) -> Value {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "get_attachment", "arguments": { "attachment_id": attachment_id } },
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("host", "example.test")
+                        .header("authorization", format!("Bearer {key}"))
+                        .header("content-type", "application/json")
+                        .header("accept", "application/json, text/event-stream")
+                        .header(INLINE_ATTACHMENT_HEADER, "1")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap()
+        }
+
+        let owner = call_server(&app, &owner_key, attachment_id).await;
+        let resource = &owner["result"]["content"][1]["resource"];
+        assert_eq!(resource["mimeType"], "application/zip");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(resource["blob"].as_str().unwrap()),
+            Ok(bytes.to_vec())
+        );
+
+        let other = call_server(&app, &other_key, attachment_id).await;
+        assert!(
+            other["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Error: ")
+        );
+        assert!(other["result"]["content"].get(1).is_none());
     }
 
     const OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
