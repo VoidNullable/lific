@@ -5086,22 +5086,30 @@ impl LificMcp {
             Some(url) => Ok(vec![Content::text(format!(
                 "{metadata}. Binary, download at {url}"
             ))]),
-            None => Ok(vec![
-                Content::text(format!(
-                    "{metadata}. Binary content is attached as an MCP resource."
-                )),
-                Content::resource(
-                    rmcp::model::ResourceContents::blob(
-                        base64::engine::general_purpose::STANDARD.encode(&bytes),
-                        format!("attachment://{}", attachment.id),
-                    )
-                    .with_mime_type(if attachment.mime == "image/svg+xml" {
-                        "application/octet-stream"
-                    } else {
-                        &attachment.mime
-                    }),
-                ),
-            ]),
+            None => {
+                let bytes = self
+                    .store
+                    .read(&attachment.sha256)
+                    .map_err(sanitize_error)?;
+                Ok(vec![
+                    Content::text(format!(
+                        "{metadata}. Binary content is attached as an MCP resource."
+                    )),
+                    Content::resource(
+                        rmcp::model::ResourceContents::blob(
+                            base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            format!("attachment://{}", attachment.id),
+                        )
+                        .with_mime_type(
+                            if attachment.mime == "image/svg+xml" {
+                                "application/octet-stream"
+                            } else {
+                                &attachment.mime
+                            },
+                        ),
+                    ),
+                ])
+            }
         }
     }
 
@@ -13000,6 +13008,7 @@ mod tests {
                     bytes.len() as i64,
                     None,
                 )?;
+                m.store.write_unlocked(bytes)?;
                 Ok(attachment.id)
             })
             .expect("seed media attachment");
