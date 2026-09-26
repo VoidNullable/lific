@@ -44,6 +44,22 @@ export const FIELD_WEIGHTS = {
 /** The largest single-field weight, used to normalize document scores. */
 export const MAX_FIELD_WEIGHT = FIELD_WEIGHTS.title;
 
+type ProjectCatalogIdentity = { id: number; identifier: string };
+
+/** Whether cached project-scoped catalog rows could refer to different projects. */
+export function projectCatalogChanged(
+  cached: readonly ProjectCatalogIdentity[],
+  fresh: readonly ProjectCatalogIdentity[],
+): boolean {
+  return (
+    cached.length !== fresh.length ||
+    fresh.some((project) => {
+      const previous = cached.find(({ id }) => id === project.id);
+      return !previous || previous.identifier !== project.identifier;
+    })
+  );
+}
+
 /** Prefix matching needs at least this many characters. One letter matches
  *  the start of far too much to be a useful ranking signal. */
 export const PREFIX_MIN_TERM = 2;

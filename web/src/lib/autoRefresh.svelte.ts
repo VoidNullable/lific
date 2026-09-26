@@ -17,6 +17,10 @@ export interface AutoRefreshOptions {
   intervalMs?: number;
   /** Return true when a realtime event is relevant to this mounted view. */
   shouldRefresh?: (event: RealtimeEvent) => boolean;
+  /** Coalesce realtime events before re-fetching an expensive view. */
+  realtimeDebounceMs?: number;
+  /** Maximum delay before refreshing during a continuous realtime event burst. */
+  realtimeMaxWaitMs?: number;
 }
 
 export const REALTIME_INVALIDATE_EVENT = "lific:realtime";
@@ -42,10 +46,18 @@ export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
     return () => {};
   }
 
-  const { refresh, isBusy, intervalMs, shouldRefresh } = opts;
+  const {
+    refresh,
+    isBusy,
+    intervalMs,
+    shouldRefresh,
+    realtimeDebounceMs = 50,
+    realtimeMaxWaitMs,
+  } = opts;
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let eagerDebounce: ReturnType<typeof setTimeout> | null = null;
+  let realtimeMaxWait: ReturnType<typeof setTimeout> | null = null;
   let retryDebounce: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   let refreshing = false;
@@ -86,13 +98,23 @@ export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
 
   // Visibility/focus revalidate, debounced so the visibilitychange +
   // window.focus pair that fires on tab-switch-back is a single fetch.
-  function scheduleEager() {
+  function scheduleEager(delayMs = 50, maxWaitMs?: number) {
     if (!disposed && !document.hidden) {
       if (eagerDebounce) clearTimeout(eagerDebounce);
       eagerDebounce = setTimeout(() => {
         eagerDebounce = null;
+        if (realtimeMaxWait) clearTimeout(realtimeMaxWait);
+        realtimeMaxWait = null;
         void runRefresh();
-      }, 50);
+      }, delayMs);
+      if (maxWaitMs && maxWaitMs > 0 && !realtimeMaxWait) {
+        realtimeMaxWait = setTimeout(() => {
+          realtimeMaxWait = null;
+          if (eagerDebounce) clearTimeout(eagerDebounce);
+          eagerDebounce = null;
+          void runRefresh();
+        }, maxWaitMs);
+      }
     }
   }
 
@@ -102,15 +124,19 @@ export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
     }
   }
 
+  function onFocus() {
+    scheduleEager();
+  }
+
   function onRealtime(event: Event) {
     const detail = (event as CustomEvent<RealtimeEvent>).detail;
     if (detail && shouldRefresh?.(detail)) {
-      scheduleEager();
+      scheduleEager(realtimeDebounceMs, realtimeMaxWaitMs);
     }
   }
 
   document.addEventListener("visibilitychange", onVisibility);
-  window.addEventListener("focus", scheduleEager);
+  window.addEventListener("focus", onFocus);
   if (shouldRefresh) {
     window.addEventListener(REALTIME_INVALIDATE_EVENT, onRealtime);
   }
@@ -123,9 +149,10 @@ export function startAutoRefresh(opts: AutoRefreshOptions): () => void {
     disposed = true;
     if (timer) clearInterval(timer);
     if (eagerDebounce) clearTimeout(eagerDebounce);
+    if (realtimeMaxWait) clearTimeout(realtimeMaxWait);
     if (retryDebounce) clearTimeout(retryDebounce);
     document.removeEventListener("visibilitychange", onVisibility);
-    window.removeEventListener("focus", scheduleEager);
+    window.removeEventListener("focus", onFocus);
     if (shouldRefresh) {
       window.removeEventListener(REALTIME_INVALIDATE_EVENT, onRealtime);
     }

@@ -338,16 +338,9 @@ pub(crate) fn build_app_with_store(
     let authed_routes = authed_routes
         .route(
             "/mcp",
-            any(move |request: Request<Body>| async move {
-                // Extract the authenticated user (set by auth middleware)
-                // and store it for MCP tools to read. Serialized to prevent
-                // concurrent requests from overwriting each other's identity.
-                let auth_user = request
-                    .extensions()
-                    .get::<Option<db::models::AuthUser>>()
-                    .cloned()
-                    .flatten();
-
+            any(move |mut request: Request<Body>| async move {
+                // rmcp copies HTTP request extensions into the spawned tool
+                // task's RequestContext. Keep identity bound to that request.
                 let issue_links = links::IssueLinkContext::for_http_request(
                     mcp_public_url.as_deref(),
                     request
@@ -357,10 +350,19 @@ pub(crate) fn build_app_with_store(
                     &mcp_allowed_hosts_for_links,
                 );
 
-                mcp::with_request_context(auth_user, issue_links, || async {
-                    mcp_service.handle(request).await.into_response()
-                })
-                .await
+                if let Some(issue_links) = issue_links {
+                    let auth_user = request
+                        .extensions_mut()
+                        .remove::<Option<db::models::AuthUser>>()
+                        .unwrap_or(None);
+                    request
+                        .extensions_mut()
+                        .insert(Arc::new(mcp::HttpRequestData {
+                            user: auth_user,
+                            issue_links,
+                        }));
+                }
+                mcp_service.handle(request).await.into_response()
             }),
         )
         .layer(axum::Extension(realtime.clone()))
@@ -766,7 +768,7 @@ fn build_authless_mcp_router(
     ));
     Router::new().route(
         &format!("/mcp/{token}"),
-        any(move |request: Request<Body>| async move {
+        any(move |mut request: Request<Body>| async move {
             let issue_links = links::IssueLinkContext::for_http_request(
                 public_url.as_deref(),
                 request
@@ -775,10 +777,14 @@ fn build_authless_mcp_router(
                     .and_then(|value| value.to_str().ok()),
                 &allowed_hosts_for_links,
             );
-            mcp::with_request_context(user, issue_links, || async {
-                service.handle(request).await.into_response()
-            })
-            .await
+            if let Some(issue_links) = issue_links {
+                request
+                    .extensions_mut()
+                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
+            } else {
+                request.extensions_mut().insert(user);
+            }
+            service.handle(request).await.into_response()
         }),
     )
 }
@@ -1847,6 +1853,92 @@ mod authless_mcp_tests {
                 "{text}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_mcp_calls_keep_their_own_user() {
+        let pool = db::open_memory().unwrap();
+        let users = {
+            let conn = pool.write().unwrap();
+            db::queries::settings::ensure(&conn, false).unwrap();
+            db::queries::users::create_passwordless_admin(&conn, "Operator").unwrap();
+            ["alice", "bob"].map(|name| {
+                let user = db::queries::users::create_user(
+                    &conn,
+                    &db::models::CreateUser {
+                        username: name.into(),
+                        email: format!("{name}@example.test"),
+                        password: "testpassword1".into(),
+                        display_name: None,
+                        is_admin: false,
+                        is_bot: false,
+                    },
+                )
+                .unwrap();
+                db::models::AuthUser {
+                    id: user.id,
+                    username: user.username,
+                    display_name: user.display_name,
+                    is_admin: false,
+                }
+            })
+        };
+        {
+            let conn = pool.write().unwrap();
+            for (user, identifier) in users.iter().zip(["ALICE", "BOB"]) {
+                db::queries::create_project(
+                    &conn,
+                    &db::models::CreateProject {
+                        name: format!("{identifier} project"),
+                        identifier: identifier.into(),
+                        lead_user_id: Some(user.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let routers = users.map(|user| {
+            build_authless_mcp_router(
+                pool.clone(),
+                "test-token",
+                Some(user),
+                vec!["localhost".into()],
+                None,
+                realtime::RealtimeHub::new(),
+            )
+        });
+        let call = |router: Router| async move {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/mcp/test-token")
+                .header("host", "localhost")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", "2025-06-18")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "list_resources", "arguments": {"resource_type": "project"}}
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let (alice, bob) = tokio::join!(call(routers[0].clone()), call(routers[1].clone()));
+        assert!(alice.contains("ALICE project"), "{alice}");
+        assert!(!alice.contains("BOB project"), "{alice}");
+        assert!(bob.contains("BOB project"), "{bob}");
+        assert!(!bob.contains("ALICE project"), "{bob}");
     }
 
     /// A wrong path token does not match the route at all (no secret leak,

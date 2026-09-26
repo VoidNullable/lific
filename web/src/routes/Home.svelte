@@ -103,6 +103,8 @@
     startAutoRefresh({
       refresh: () => loadData(false),
       isBusy: () => loading,
+      realtimeDebounceMs: 750,
+      realtimeMaxWaitMs: 5_000,
       shouldRefresh: (event) =>
         event.type === "resync.required" ||
         event.type.startsWith("project.") ||

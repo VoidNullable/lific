@@ -40,6 +40,7 @@
     isStaleSearch,
     localScoreToPaletteScore,
     preserveSelection,
+    projectCatalogChanged,
     searchLocalDocsPerKind,
   } from "./paletteSearch";
   import { cachedProject, getProjectModel } from "./sync/readModel.svelte";
@@ -92,8 +93,10 @@
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
   let selectedIdx = $state(0);
+  let openingGeneration = 0;
 
   async function show() {
+    const generation = ++openingGeneration;
     open = true;
     commandPaletteState.open = true;
     cancelSearch();
@@ -101,14 +104,19 @@
     query = "";
     selectedIdx = 0;
     await tick();
+    if (generation !== openingGeneration || !open) return;
     inputEl?.focus();
-    // First open: wait for the catalog before rendering the default
-    // project-switcher list, or it flashes "No projects yet".
-    await ensureCatalog();
-    if (open && !query.trim()) void runSearch("");
+    // The project switcher only needs projects. Module and folder metadata
+    // can finish loading after the palette becomes usable.
+    await ensureProjects();
+    if (generation === openingGeneration && open && mode.type === "root") {
+      void runSearch(query);
+    }
+    void ensureCatalog();
   }
 
   function hide() {
+    openingGeneration++;
     open = false;
     commandPaletteState.open = false;
     // A response that lands after the palette closes must not repopulate it.
@@ -186,39 +194,79 @@
   };
   let catalog = $state<Catalog>({ projects: [], modules: [], folders: [] });
   let catalogAt = 0;
+  let projectsAt = 0;
   const CATALOG_TTL = 60_000;
+  let catalogLoad: Promise<void> | null = null;
+  let projectsLoad: Promise<Project[] | null> | null = null;
+  let catalogGeneration = 0;
 
-  async function ensureCatalog() {
+  function ensureProjects(): Promise<Project[] | null> {
+    if (Date.now() - projectsAt < CATALOG_TTL) return Promise.resolve(catalog.projects);
+    if (projectsLoad) return projectsLoad;
+
+    projectsLoad = listProjects()
+      .then((response) => {
+        if (!response.ok) return null;
+        const projectsChanged = projectCatalogChanged(catalog.projects, response.data);
+        catalog = projectsChanged
+          ? { projects: response.data, modules: [], folders: [] }
+          : { ...catalog, projects: response.data };
+        if (projectsChanged) {
+          catalogAt = 0;
+          catalogGeneration += 1;
+        }
+        projectsAt = Date.now();
+        return response.data;
+      })
+      .finally(() => {
+        projectsLoad = null;
+      });
+    return projectsLoad;
+  }
+
+  async function ensureCatalog(): Promise<void> {
     if (Date.now() - catalogAt < CATALOG_TTL) return;
-    const projRes = await listProjects();
-    if (!projRes.ok) return;
-    const projects = projRes.data;
-
-    const perProject = await Promise.all(
-      projects.map(async (p) => {
-        const [mods, flds] = await Promise.all([
-          listModules(p.id),
-          listFolders(p.id),
-        ]);
-        return {
-          modules: (mods.ok ? mods.data : []).map((m) => ({
-            ...m,
-            projectIdent: p.identifier,
-          })),
-          folders: (flds.ok ? flds.data : []).map((f) => ({
-            ...f,
-            projectIdent: p.identifier,
-          })),
-        };
-      }),
-    );
-
-    catalog = {
-      projects,
-      modules: perProject.flatMap((x) => x.modules),
-      folders: perProject.flatMap((x) => x.folders),
-    };
-    catalogAt = Date.now();
+    if (catalogLoad) return catalogLoad;
+    let loadedGeneration: number | null = null;
+    catalogLoad = (async () => {
+      const projects = await ensureProjects();
+      if (!projects) return;
+      const generation = catalogGeneration;
+      loadedGeneration = generation;
+      const modules: Catalog["modules"] = [];
+      const folders: Catalog["folders"] = [];
+      // Bound the fanout: two requests per project, four projects per batch.
+      for (let start = 0; start < projects.length; start += 4) {
+        if (!open || generation !== catalogGeneration) return;
+        const batch = await Promise.all(
+          projects.slice(start, start + 4).map(async (project) => {
+            const [mods, flds] = await Promise.all([
+              listModules(project.id),
+              listFolders(project.id),
+            ]);
+            return { project, mods, flds };
+          }),
+        );
+        for (const { project, mods, flds } of batch) {
+          if (mods.ok) modules.push(...mods.data.map((mod) => ({
+            ...mod, projectIdent: project.identifier,
+          })));
+          if (flds.ok) folders.push(...flds.data.map((folder) => ({
+            ...folder, projectIdent: project.identifier,
+          })));
+        }
+      }
+      if (generation !== catalogGeneration) return;
+      catalog = { projects, modules, folders };
+      catalogAt = Date.now();
+      if (open && query.trim()) refreshCatalogSearch();
+    })().finally(() => {
+      catalogLoad = null;
+      if (open && loadedGeneration !== null && loadedGeneration !== catalogGeneration) {
+        void ensureCatalog();
+      }
+    });
+    return catalogLoad;
   }
 
   // ── Results ──────────────────────────────────────────
@@ -570,6 +618,12 @@
   let pendingQuery = "";
   let pendingLocal: PaletteResult[] = [];
   let pendingCatalog: PaletteResult[] = [];
+  let completedRemote: {
+    query: string;
+    projectIdent: string | null;
+    generation: number;
+    results: PaletteResult[];
+  } | null = null;
   /** The project the pending local rows were computed from. A response is
    *  only allowed to merge with local rows from the same project. */
   let pendingProjectIdent: string | null = null;
@@ -604,6 +658,30 @@
     return pendingLocal.length;
   }
 
+  /** Rebuild local/catalog hits without restarting an already completed
+   *  identifier or FTS request for the same query and project. */
+  function refreshCatalogSearch() {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      runLocal(query);
+      return;
+    }
+
+    pendingQuery = trimmed;
+    pendingProjectIdent = activeProjectIdent;
+    pendingLocal = localHits(trimmed);
+    pendingCatalog = catalogHits(trimmed);
+    const cached = completedRemote;
+    const remote =
+      cached &&
+      cached.query === trimmed &&
+      cached.projectIdent === activeProjectIdent &&
+      cached.generation === searchGen
+        ? cached.results
+        : [];
+    publish([...remote, ...pendingLocal, ...pendingCatalog], true);
+  }
+
   /** The network half: identifier fast paths always, server FTS only when
    *  the local answer was thin. Both are guarded by `gen` and by the project
    *  they were issued against. */
@@ -634,7 +712,7 @@
     // the merge would splice project A's issues into project B's results.
     if (pendingProjectIdent !== issued.projectIdent || pendingQuery !== trimmed) return;
 
-    const merged: PaletteResult[] = [...idHits, ...pendingLocal, ...pendingCatalog];
+    const remoteResults: PaletteResult[] = [...idHits];
 
     if (fts?.ok) {
       // FTS rank is positional — decay the score with position so identifier
@@ -655,7 +733,7 @@
               ? `/${project.identifier}/issues/${r.identifier}`
               : null;
         if (!route) return;
-        merged.push({
+        remoteResults.push({
           kind: r.result_type === "page" ? "page" : "issue",
           title: r.title,
           identifier: r.identifier ?? undefined,
@@ -669,7 +747,13 @@
       });
     }
 
-    publish(merged, true);
+    completedRemote = {
+      query: trimmed,
+      projectIdent: issued.projectIdent,
+      generation: gen,
+      results: remoteResults,
+    };
+    publish([...remoteResults, ...pendingLocal, ...pendingCatalog], true);
   }
 
   /** Cancel the debounce AND invalidate any response already in flight, so a

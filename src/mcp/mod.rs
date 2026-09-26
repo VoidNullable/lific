@@ -8,6 +8,7 @@ mod waits;
 #[cfg(test)]
 use std::cell::Cell;
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::Mutex;
 
 use rmcp::{
@@ -22,20 +23,70 @@ use crate::links::IssueLinkContext;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 use crate::storage::AttachmentStore;
 
-/// Serialization lock for MCP request handling.
-/// Ensures only one MCP request processes at a time, preventing the race
-/// condition where concurrent requests could overwrite each other's user identity.
-/// Acceptable throughput cost for a local-first, single-user tool.
+/// Direct-call tests still use process-wide context; production HTTP requests
+/// carry their context through rmcp's request extensions instead.
+#[cfg(test)]
 static MCP_HANDLER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Per-request user identity storage.
 /// Protected from races by MCP_HANDLER_LOCK ensuring serial access.
 /// Uses unwrap_or_else to recover from poison (e.g. if a handler panics).
+#[cfg(test)]
 static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
 
 /// Per-request external origin used for structured resource links.
 /// Protected by [`MCP_HANDLER_LOCK`] for the same reason as the identity state.
+#[cfg(test)]
 static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<Arc<IssueLinkContext>>> = Mutex::new(None);
+
+enum RequestData {
+    Scoped {
+        user: Option<AuthUser>,
+        issue_links: Option<Arc<IssueLinkContext>>,
+    },
+    Http(Arc<HttpRequestData>),
+}
+
+tokio::task_local! {
+    static REQUEST_DATA: RequestData;
+}
+
+/// Most tools use synchronous SQLite calls on Tokio workers. Bound concurrent
+/// tools to leave a worker available for HTTP and websocket tasks, while
+/// retaining the four-tool cap on larger runtimes.
+static MCP_TOOL_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// rmcp copies HTTP request parts into each tool call's extensions before it
+/// spawns the handler task. The Axum route supplies this value there.
+pub(crate) struct HttpRequestData {
+    pub user: Option<AuthUser>,
+    pub issue_links: IssueLinkContext,
+}
+
+// HTTP callers already own the request data through an Arc, while scoped
+// callers own the link context directly. Keep both handles here so reading
+// the context never needs to allocate another Arc.
+pub(crate) enum IssueLinkContextRef {
+    Scoped(Arc<IssueLinkContext>),
+    Http(Arc<HttpRequestData>),
+}
+
+impl IssueLinkContextRef {
+    fn as_context(&self) -> &IssueLinkContext {
+        match self {
+            Self::Scoped(context) => context,
+            Self::Http(context) => &context.issue_links,
+        }
+    }
+}
+
+impl std::ops::Deref for IssueLinkContextRef {
+    type Target = IssueLinkContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_context()
+    }
+}
 
 #[cfg(test)]
 tokio::task_local! {
@@ -47,13 +98,10 @@ thread_local! {
     static TEST_ISSUE_LINK_CONTEXT_READS: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Acquire the MCP handler lock, set the user, run the provided future,
-/// then clean up. Guarantees no identity confusion between concurrent requests.
+/// Scope an MCP caller's context to the task that actually executes the tool.
 ///
-/// LIF-155: also scopes the audit actor context (transport = mcp) around
-/// the handler so every DB write a tool performs is attributed to this
-/// user via MCP — both the OAuth /mcp route and the authless /mcp/<token>
-/// route funnel through here.
+/// LIF-155: also scope the audit actor context (transport = mcp) around
+/// stdio tool calls. HTTP tool calls scope it after rmcp's task spawn.
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn with_request_user<F, Fut, R>(user: Option<AuthUser>, f: F) -> R
 where
@@ -63,9 +111,8 @@ where
     with_request_context(user, None, f).await
 }
 
-/// Run an MCP request with its authenticated identity and optional external
-/// origin. The origin is transport metadata: stdio callers pass `None`, while
-/// HTTP callers pass the validated browser-facing base URL.
+/// Scope a stdio or direct test request with its identity and optional link
+/// origin. HTTP routes carry this data in request extensions instead.
 pub async fn with_request_context<F, Fut, R>(
     user: Option<AuthUser>,
     issue_links: Option<IssueLinkContext>,
@@ -75,38 +122,71 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = R>,
 {
-    let _guard = MCP_HANDLER_LOCK.lock().await;
-    let issue_links = issue_links.map(Arc::new);
     #[cfg(test)]
-    let test_issue_links = issue_links.clone();
+    {
+        let _guard = MCP_HANDLER_LOCK.lock().await;
+        let test_issue_links = issue_links.clone().map(Arc::new);
+        *MCP_REQUEST_USER.lock().unwrap_or_else(|e| e.into_inner()) = user.clone();
+        *MCP_REQUEST_ISSUE_LINKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = test_issue_links.clone();
+        let _clear = RequestGlobalGuard;
+        TEST_REQUEST_ISSUE_LINKS
+            .scope(
+                test_issue_links,
+                scope_request_context(user, issue_links, f()),
+            )
+            .await
+    }
+    #[cfg(not(test))]
+    scope_request_context(user, issue_links, f()).await
+}
+
+async fn scope_request_context<Fut, R>(
+    user: Option<AuthUser>,
+    issue_links: Option<IssueLinkContext>,
+    future: Fut,
+) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
     let actor = crate::actor::ActorCtx {
         user_id: user.as_ref().map(|u| u.id),
         transport: crate::actor::Transport::Mcp,
     };
-    *MCP_REQUEST_USER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = user;
-    *MCP_REQUEST_ISSUE_LINKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = issue_links;
-    // Panic-safe cleanup: clear the globals on scope exit (including if `f`
-    // panics), before `_guard` releases MCP_HANDLER_LOCK (reverse declaration
-    // order). Without this, a panicking request would leave a stale user in the
-    // process-wide global for the next (concurrent) test to read.
-    let _clear = RequestGlobalGuard;
-    #[cfg(test)]
-    let result = TEST_REQUEST_ISSUE_LINKS
-        .scope(test_issue_links, crate::actor::scope(actor, f()))
-        .await;
-    #[cfg(not(test))]
-    let result = crate::actor::scope(actor, f()).await;
-    result
+    REQUEST_DATA
+        .scope(
+            RequestData::Scoped {
+                user,
+                issue_links: issue_links.map(Arc::new),
+            },
+            crate::actor::scope(actor, future),
+        )
+        .await
+}
+
+async fn scope_http_request_context<Fut, R>(context: Arc<HttpRequestData>, future: Fut) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    let actor = crate::actor::ActorCtx {
+        user_id: context.user.as_ref().map(|user| user.id),
+        transport: crate::actor::Transport::Mcp,
+    };
+    REQUEST_DATA
+        .scope(
+            RequestData::Http(context),
+            crate::actor::scope(actor, future),
+        )
+        .await
 }
 
 /// Drops the per-request globals on scope exit (panic-safe). Declared after the
 /// globals are set in [`with_request_context`], so it runs before the handler
 /// lock is released.
+#[cfg(test)]
 struct RequestGlobalGuard;
+#[cfg(test)]
 impl Drop for RequestGlobalGuard {
     fn drop(&mut self) {
         *MCP_REQUEST_USER
@@ -120,10 +200,19 @@ impl Drop for RequestGlobalGuard {
 
 /// Get the authenticated user for the current MCP request, if any.
 pub(crate) fn current_auth_user() -> Option<AuthUser> {
-    MCP_REQUEST_USER
+    if let Ok(user) = REQUEST_DATA.try_with(|context| match context {
+        RequestData::Scoped { user, .. } => user.clone(),
+        RequestData::Http(context) => context.user.clone(),
+    }) {
+        return user;
+    }
+    #[cfg(test)]
+    return MCP_REQUEST_USER
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    #[cfg(not(test))]
+    None
 }
 
 /// The `LIFIC_TOKEN` a stdio MCP session was launched with, plus what it takes
@@ -196,19 +285,27 @@ pub(crate) fn current_identity(
 
 /// Get the validated external origin for structured resource links, if this MCP
 /// request arrived through an HTTP transport that knows it.
-pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
+pub(crate) fn current_issue_link_context() -> Option<IssueLinkContextRef> {
+    if let Ok(links) = REQUEST_DATA.try_with(|context| match context {
+        RequestData::Scoped { issue_links, .. } => {
+            issue_links.clone().map(IssueLinkContextRef::Scoped)
+        }
+        RequestData::Http(context) => Some(IssueLinkContextRef::Http(context.clone())),
+    }) {
+        #[cfg(test)]
+        TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
+        return links;
+    }
     #[cfg(test)]
     {
         TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
         TEST_REQUEST_ISSUE_LINKS
             .try_with(Clone::clone)
             .unwrap_or(None)
+            .map(IssueLinkContextRef::Scoped)
     }
     #[cfg(not(test))]
-    MCP_REQUEST_ISSUE_LINKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    None
 }
 
 #[cfg(test)]
@@ -259,10 +356,10 @@ pub struct LificMcp {
     /// one content-addressed directory.
     store: AttachmentStore,
     tool_router: &'static ToolRouter<Self>,
+    transport: McpTransport,
     /// Present only for a stdio session launched with a `LIFIC_TOKEN`. `None`
-    /// covers both the HTTP transport (where per-request middleware already
-    /// owns identity, and where re-entering [`with_request_context`] here would
-    /// deadlock on [`MCP_HANDLER_LOCK`]) and a tokenless local stdio session,
+    /// covers both the HTTP transport (whose request parts carry identity)
+    /// and a tokenless local stdio session,
     /// which keeps its credential-less operator behavior.
     stdio_auth: Option<Arc<StdioAuth>>,
     /// LIF-451: the project identifier (e.g. `"LIF"`) this session's working
@@ -273,13 +370,18 @@ pub struct LificMcp {
     bound_project: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpTransport {
+    Http,
+    Stdio,
+}
+
 impl LificMcp {
-    /// An HTTP-transport server with a private realtime hub. Production wires
-    /// [`Self::with_realtime`] (to share the hub) and [`Self::for_stdio`];
-    /// this is the convenience shape the test suites build on.
+    /// A tokenless MCP session for direct and in-memory transport tests.
+    /// Production HTTP routes use [`Self::with_realtime`].
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(db: DbPool) -> Self {
-        Self::with_realtime(db, RealtimeHub::new())
+        Self::for_stdio(db, None)
     }
 
     pub fn with_realtime(db: DbPool, realtime: RealtimeHub) -> Self {
@@ -289,6 +391,7 @@ impl LificMcp {
             realtime,
             store,
             tool_router: Self::shared_tool_router(),
+            transport: McpTransport::Http,
             stdio_auth: None,
             bound_project: None,
         }
@@ -310,6 +413,7 @@ impl LificMcp {
     /// same as before.
     pub fn for_stdio(db: DbPool, auth: Option<StdioAuth>) -> Self {
         Self {
+            transport: McpTransport::Stdio,
             stdio_auth: auth.map(Arc::new),
             ..Self::with_realtime(db, RealtimeHub::new())
         }
@@ -317,10 +421,8 @@ impl LificMcp {
 
     /// The stdio revalidation seam. Every tool call goes through here.
     ///
-    /// With no stdio credential this is a pass-through, which is what the HTTP
-    /// transport needs: `server.rs` already wraps each request in
-    /// [`with_request_context`], and taking [`MCP_HANDLER_LOCK`] a second time
-    /// here would deadlock.
+    /// With no stdio credential this is a pass-through. HTTP requests are
+    /// scoped in [`Self::call_tool`] from their request extensions.
     ///
     /// With one, the token is re-resolved against the database *on this call*
     /// and the tool runs inside [`with_request_user`] with whatever came back,
@@ -411,11 +513,9 @@ impl LificMcp {
         f(&conn).map_err(sanitize_error)
     }
 
-    /// LIF-155: re-stamp the audit actor from the MCP request-user global.
-    /// The task-local stamped by `DbPool::write()` does NOT survive rmcp's
-    /// internal task spawns (verified in production: tool writes attributed
-    /// to 'system'), but `MCP_REQUEST_USER` does — it's a global guarded by
-    /// the serialization lock, so it is exactly this request's identity.
+    /// LIF-155: stamp the actor from the tool task's request context. The HTTP
+    /// request task-local does not survive rmcp's internal spawn, so
+    /// [`Self::call_tool`] scopes it again from the HTTP request extensions.
     fn stamp_request_actor(conn: &rusqlite::Connection) {
         let user = current_auth_user();
         crate::actor::stamp(
@@ -563,26 +663,55 @@ impl ServerHandler for LificMcp {
     fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        mut context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
+            let workers = tokio::runtime::Handle::current().metrics().num_workers();
+            let allowed_concurrency = workers.saturating_sub(1).clamp(1, 4);
+            let permits_per_tool = 4_usize.div_ceil(allowed_concurrency) as u32;
+            let _permit = MCP_TOOL_PERMITS
+                .acquire_many(permits_per_tool)
+                .await
+                .expect("MCP tool semaphore is never closed");
+            let http_context = context
+                .extensions
+                .get_mut::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.remove::<Arc<HttpRequestData>>());
+            let http_user = context
+                .extensions
+                .get_mut::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.remove::<Option<AuthUser>>());
+            if self.transport == McpTransport::Http && http_context.is_none() && http_user.is_none()
+            {
+                tracing::error!("HTTP MCP tool call has no request context");
+                return Err(rmcp::ErrorData::internal_error(
+                    "HTTP MCP request context missing",
+                    None,
+                ));
+            }
             let tool = request.name.clone();
             let tool_context =
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-            self.dispatch_tool(|| self.tool_router.call(tool_context))
-                .await
-                .map_err(|error| {
-                    let top_level = self.tool_router.get(&tool).map(|tool| {
-                        tool.input_schema
-                            .get("properties")
-                            .and_then(serde_json::Value::as_object)
-                            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
-                            .unwrap_or_default()
-                    });
-                    arguments::explain_unknown_parameter(&tool, top_level.as_deref(), error)
-                })
+            let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
+            let result = match http_context {
+                Some(http) => scope_http_request_context(http, dispatch()).await,
+                None if self.transport == McpTransport::Http => {
+                    scope_request_context(http_user.flatten(), None, dispatch()).await
+                }
+                None => dispatch().await,
+            };
+            result.map_err(|error| {
+                let top_level = self.tool_router.get(&tool).map(|tool| {
+                    tool.input_schema
+                        .get("properties")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                });
+                arguments::explain_unknown_parameter(&tool, top_level.as_deref(), error)
+            })
         }
     }
 
@@ -604,6 +733,47 @@ mod tests {
     use http_body_util::BodyExt;
     use rusqlite::params;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn request_contexts_can_overlap_without_leaking_identity() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let run = |id, name: &'static str, barrier: Arc<tokio::sync::Barrier>| async move {
+            let user = AuthUser {
+                id,
+                username: name.into(),
+                display_name: name.into(),
+                is_admin: false,
+            };
+            scope_request_context(
+                Some(user),
+                IssueLinkContext::parse(&format!("https://{name}.example")),
+                async move {
+                    barrier.wait().await;
+                    tokio::task::yield_now().await;
+                    (
+                        current_auth_user().unwrap().id,
+                        current_issue_link_context()
+                            .unwrap()
+                            .issue_markdown("LIF-1")
+                            .to_string(),
+                    )
+                },
+            )
+            .await
+        };
+        let alice = tokio::spawn(run(11, "alice", barrier.clone()));
+        let bob = tokio::spawn(run(22, "bob", barrier.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+            .await
+            .expect("both MCP requests must enter concurrently");
+        let (alice, bob) = tokio::join!(alice, bob);
+        let (alice_id, alice_link) = alice.unwrap();
+        let (bob_id, bob_link) = bob.unwrap();
+        assert_eq!((alice_id, bob_id), (11, 22));
+        assert!(alice_link.contains("alice.example"), "{alice_link}");
+        assert!(bob_link.contains("bob.example"), "{bob_link}");
+        assert!(current_auth_user().is_none());
+    }
 
     // ── LIF-204: OAuth-token user_id -> resolved AuthUser (MCP path) ─────
     //

@@ -13,6 +13,7 @@ import {
   isStaleSearch,
   localScoreToPaletteScore,
   matchQuality,
+  projectCatalogChanged,
   preserveSelection,
   refNumber,
   scoreDoc,
@@ -49,6 +50,25 @@ describe("tokenize", () => {
 
   test("an empty query yields no terms", () => {
     expect(tokenize("   ")).toEqual([]);
+  });
+});
+
+describe("project catalog freshness", () => {
+  const cached = [
+    { id: 1, identifier: "LIF" },
+    { id: 2, identifier: "OPS" },
+  ];
+
+  test("keeps metadata for the same project identities regardless of order", () => {
+    expect(projectCatalogChanged(cached, [...cached].reverse())).toBe(false);
+  });
+
+  test("invalidates metadata when projects are added, removed, or renamed", () => {
+    expect(projectCatalogChanged(cached, [...cached, { id: 3, identifier: "WEB" }])).toBe(true);
+    expect(projectCatalogChanged(cached, [cached[0]])).toBe(true);
+    expect(projectCatalogChanged(cached, [{ ...cached[0], identifier: "LIF2" }, cached[1]])).toBe(
+      true,
+    );
   });
 });
 
