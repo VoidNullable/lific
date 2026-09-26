@@ -4203,11 +4203,11 @@ impl LificMcp {
                     output,
                     "{} added to {} by {} at {}",
                     reference_with_context(
-                        Some(context.as_ref()),
+                        Some(context.as_context()),
                         comment_reference_kind(&parent_identifier, parent, comment.id),
                     ),
                     reference_with_context(
-                        Some(context.as_ref()),
+                        Some(context.as_context()),
                         comment_parent_reference_kind(&parent_identifier, parent),
                     ),
                     comment.author,
@@ -4437,7 +4437,7 @@ impl LificMcp {
                     output,
                     "{} edited at {}",
                     reference_with_context(
-                        Some(context.as_ref()),
+                        Some(context.as_context()),
                         comment_reference_kind(parent_identifier, parent, comment.id),
                     ),
                     comment.updated_at
@@ -4492,7 +4492,7 @@ impl LificMcp {
                     "Comment #{} deleted from {}",
                     input.comment_id,
                     reference_with_context(
-                        Some(context.as_ref()),
+                        Some(context.as_context()),
                         comment_parent_reference_kind(parent_identifier, parent),
                     )
                 )

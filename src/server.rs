@@ -359,7 +359,7 @@ pub(crate) fn build_app_with_store(
                         .extensions_mut()
                         .insert(Arc::new(mcp::HttpRequestData {
                             user: auth_user,
-                            issue_links: Some(issue_links),
+                            issue_links,
                         }));
                 }
                 mcp_service.handle(request).await.into_response()
@@ -780,10 +780,7 @@ fn build_authless_mcp_router(
             if let Some(issue_links) = issue_links {
                 request
                     .extensions_mut()
-                    .insert(Arc::new(mcp::HttpRequestData {
-                        user,
-                        issue_links: Some(issue_links),
-                    }));
+                    .insert(Arc::new(mcp::HttpRequestData { user, issue_links }));
             } else {
                 request.extensions_mut().insert(user);
             }

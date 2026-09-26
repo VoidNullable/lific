@@ -60,7 +60,7 @@ static MCP_TOOL_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_
 /// spawns the handler task. The Axum route supplies this value there.
 pub(crate) struct HttpRequestData {
     pub user: Option<AuthUser>,
-    pub issue_links: Option<IssueLinkContext>,
+    pub issue_links: IssueLinkContext,
 }
 
 pub(crate) enum IssueLinkContextRef {
@@ -68,23 +68,20 @@ pub(crate) enum IssueLinkContextRef {
     Http(Arc<HttpRequestData>),
 }
 
-impl std::ops::Deref for IssueLinkContextRef {
-    type Target = IssueLinkContext;
-
-    fn deref(&self) -> &Self::Target {
+impl IssueLinkContextRef {
+    fn as_context(&self) -> &IssueLinkContext {
         match self {
             Self::Scoped(context) => context,
-            Self::Http(context) => context
-                .issue_links
-                .as_ref()
-                .expect("HTTP link context handle only exists when links are present"),
+            Self::Http(context) => &context.issue_links,
         }
     }
 }
 
-impl AsRef<IssueLinkContext> for IssueLinkContextRef {
-    fn as_ref(&self) -> &IssueLinkContext {
-        self
+impl std::ops::Deref for IssueLinkContextRef {
+    type Target = IssueLinkContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_context()
     }
 }
 
@@ -290,10 +287,7 @@ pub(crate) fn current_issue_link_context() -> Option<IssueLinkContextRef> {
         RequestData::Scoped { issue_links, .. } => {
             issue_links.clone().map(IssueLinkContextRef::Scoped)
         }
-        RequestData::Http(context) => context
-            .issue_links
-            .as_ref()
-            .map(|_| IssueLinkContextRef::Http(context.clone())),
+        RequestData::Http(context) => Some(IssueLinkContextRef::Http(context.clone())),
     }) {
         #[cfg(test)]
         TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
@@ -359,7 +353,7 @@ pub struct LificMcp {
     /// one content-addressed directory.
     store: AttachmentStore,
     tool_router: &'static ToolRouter<Self>,
-    http_transport: bool,
+    transport: McpTransport,
     /// Present only for a stdio session launched with a `LIFIC_TOKEN`. `None`
     /// covers both the HTTP transport (whose request parts carry identity)
     /// and a tokenless local stdio session,
@@ -371,6 +365,12 @@ pub struct LificMcp {
     /// [`LificMcp::project_or_bound`] for the per-tool policy. Always `None`
     /// on the HTTP transport, which has no single working directory to bind.
     bound_project: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpTransport {
+    Http,
+    Stdio,
 }
 
 impl LificMcp {
@@ -388,7 +388,7 @@ impl LificMcp {
             realtime,
             store,
             tool_router: Self::shared_tool_router(),
-            http_transport: true,
+            transport: McpTransport::Http,
             stdio_auth: None,
             bound_project: None,
         }
@@ -410,7 +410,7 @@ impl LificMcp {
     /// same as before.
     pub fn for_stdio(db: DbPool, auth: Option<StdioAuth>) -> Self {
         Self {
-            http_transport: false,
+            transport: McpTransport::Stdio,
             stdio_auth: auth.map(Arc::new),
             ..Self::with_realtime(db, RealtimeHub::new())
         }
@@ -680,7 +680,8 @@ impl ServerHandler for LificMcp {
                 .extensions
                 .get_mut::<axum::http::request::Parts>()
                 .and_then(|parts| parts.extensions.remove::<Option<AuthUser>>());
-            if self.http_transport && http_context.is_none() && http_user.is_none() {
+            if self.transport == McpTransport::Http && http_context.is_none() && http_user.is_none()
+            {
                 tracing::error!("HTTP MCP tool call has no request context");
                 return Err(rmcp::ErrorData::internal_error(
                     "HTTP MCP request context missing",
@@ -693,7 +694,7 @@ impl ServerHandler for LificMcp {
             let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
             let result = match http_context {
                 Some(http) => scope_http_request_context(http, dispatch()).await,
-                None if self.http_transport => {
+                None if self.transport == McpTransport::Http => {
                     scope_request_context(http_user.flatten(), None, dispatch()).await
                 }
                 None => dispatch().await,
