@@ -599,7 +599,7 @@ Reads one attachment.
 | `offset` | `integer` | No | Text only: zero-based first line. |
 | `limit` | `integer` | No | Text only: lines to return. Default 200, capped at 500. |
 
-A text file comes back as a range of lines under a header, ending with the `offset` for the next call when more remain. PNG, JPEG, GIF and WebP come back as MCP image content a multimodal agent can look at. For HTTP MCP requests, other types return a summary with an absolute download URL based on the configured public URL or the validated request origin. Downloading requires attachment read permission.
+A text file comes back as a range of lines under a header, ending with the `offset` for the next call when more remain. PNG, JPEG, GIF and WebP come back as MCP image content a multimodal agent can look at. For HTTP MCP requests, other types return a summary with an absolute download URL when a configured public URL or validated request origin is available. Without link context, the URL is `/api/attachments/{id}`. Downloading requires attachment read permission.
 
 Reading takes `viewer` in any project the attachment is linked into. An attachment linked nowhere has no project to check, so only its uploader or an administrator can read it.
 
