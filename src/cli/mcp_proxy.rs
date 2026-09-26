@@ -38,6 +38,16 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::mcp::INLINE_ATTACHMENT_HEADER;
+
+/// Only attachment calls need the binary MCP result from an HTTP backend.
+pub(crate) fn is_get_attachment_call(body: &str) -> bool {
+    let Ok(message) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    message["method"] == "tools/call" && message["params"]["name"] == "get_attachment"
+}
+
 /// A forward to the remote instance that produced no JSON-RPC response.
 ///
 /// The message is already phrased for a human, because an agent will paste it
@@ -108,12 +118,16 @@ struct HttpForwarder {
 
 impl Forwarder for HttpForwarder {
     async fn forward(&self, body: String) -> Result<String, ForwardError> {
+        let inline_attachment = is_get_attachment_call(&body);
         let mut request = self
             .client
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .body(body);
+        if inline_attachment {
+            request = request.header(INLINE_ATTACHMENT_HEADER, "1");
+        }
         if let Some(credential) = &self.credential {
             request = request.bearer_auth(credential);
         }
@@ -519,7 +533,13 @@ pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::ratelimit;
+    use crate::{Config, auth, db, realtime, server, storage};
+    use axum::body::Body;
+    use base64::Engine;
+    use http_body_util::BodyExt;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
 
     type Reply = Box<dyn Fn(&str) -> Result<String, ForwardError> + Send + Sync>;
 
@@ -734,6 +754,180 @@ mod tests {
         assert_eq!(received.len(), 1, "exactly one request was forwarded");
         let sent: Value = serde_json::from_str(&received[0]).expect("forwarded body is JSON");
         sent["params"]["arguments"].clone()
+    }
+
+    #[tokio::test]
+    async fn remote_stdio_delivers_attachment_bytes_in_the_tool_result() {
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+
+        let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        async fn mcp(
+            State(seen): State<Arc<Mutex<Vec<Option<String>>>>>,
+            headers: HeaderMap,
+            axum::Json(request): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            let inline = headers
+                .get("x-lific-mcp-inline-attachment")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            seen.lock().unwrap().push(inline.clone());
+            let content = if request["params"]["name"] == "get_attachment" {
+                if inline.as_deref() == Some("1") {
+                    serde_json::json!([{
+                        "type": "resource",
+                        "resource": {
+                            "uri": "attachment://42",
+                            "mimeType": "application/zip",
+                            "blob": "UEsDBA==",
+                        },
+                    }])
+                } else {
+                    serde_json::json!([{ "type": "text", "text": "download at https://example.test/api/attachments/42" }])
+                }
+            } else {
+                serde_json::json!([{ "type": "text", "text": "issue" }])
+            };
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": { "content": content },
+            }))
+        }
+
+        let app = axum::Router::new()
+            .route("/mcp", post(mcp))
+            .with_state(Arc::clone(&seen));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let forwarder = HttpForwarder {
+            client: reqwest::Client::new(),
+            endpoint: format!("http://{address}/mcp"),
+            credential: None,
+        };
+
+        let requests = format!(
+            "{}\n{}\n",
+            call("get_attachment", serde_json::json!({ "attachment_id": 42 })),
+            call("get_issue", serde_json::json!({ "identifier": "TEST-1" })),
+        );
+        let mut stdout = Vec::new();
+        pump(
+            BufReader::new(requests.as_bytes()),
+            &mut stdout,
+            &forwarder,
+            None,
+        )
+        .await
+        .unwrap();
+        let output: Vec<Value> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(
+            output[0]["result"]["content"][0]["resource"]["blob"],
+            "UEsDBA=="
+        );
+        assert_eq!(output[1]["result"]["content"][0]["text"], "issue");
+        assert_eq!(seen.lock().unwrap().as_slice(), &[Some("1".into()), None]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn real_mcp_server_embeds_authorized_attachment_bytes_and_denies_other_users() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("lific.db");
+        let pool = db::open(&db_path).unwrap();
+        {
+            let conn = pool.write().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, username, email, password_hash) VALUES (1, 'owner', 'owner@test', 'x'), (2, 'other', 'other@test', 'x')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = storage::AttachmentStore::from_db_path(&db_path);
+        let bytes = b"PK\x03\x04zip bytes";
+        let sha = store.write(bytes).unwrap();
+        let attachment_id = {
+            let conn = pool.write().unwrap();
+            db::queries::attachments::create_attachment(
+                &conn,
+                &sha,
+                "archive.zip",
+                "application/zip",
+                bytes.len() as i64,
+                Some(1),
+            )
+            .unwrap()
+            .id
+        };
+        let owner_key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
+        let other_key = auth::create_api_key(&pool, "other", Some(2)).unwrap();
+
+        let mut config = Config::default();
+        config.database.path = db_path;
+        config.auth.required = true;
+        config.server.public_url = Some("https://example.test".into());
+        config.server.host = "127.0.0.1".into();
+        let trusted_proxies =
+            Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
+        let app = server::build_app_with_store(
+            &config,
+            pool,
+            realtime::RealtimeHub::new(),
+            trusted_proxies,
+            store,
+        );
+
+        async fn call_server(app: &axum::Router, key: &str, attachment_id: i64) -> Value {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "get_attachment", "arguments": { "attachment_id": attachment_id } },
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("host", "example.test")
+                        .header("authorization", format!("Bearer {key}"))
+                        .header("content-type", "application/json")
+                        .header("accept", "application/json, text/event-stream")
+                        .header(INLINE_ATTACHMENT_HEADER, "1")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap()
+        }
+
+        let owner = call_server(&app, &owner_key, attachment_id).await;
+        let resource = &owner["result"]["content"][1]["resource"];
+        assert_eq!(resource["mimeType"], "application/zip");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(resource["blob"].as_str().unwrap()),
+            Ok(bytes.to_vec())
+        );
+
+        let other = call_server(&app, &other_key, attachment_id).await;
+        assert!(
+            other["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Error: ")
+        );
+        assert!(other["result"]["content"].get(1).is_none());
     }
 
     const OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;

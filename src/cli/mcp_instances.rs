@@ -28,14 +28,17 @@ use serde_json::{Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, BufReader};
 
 use super::mcp_proxy::{
-    ForwardError, encode, inject_bound_project, internal_error_response, parse_error_response,
-    tidy, write_line,
+    ForwardError, encode, inject_bound_project, internal_error_response, is_get_attachment_call,
+    parse_error_response, tidy, write_line,
 };
+use crate::mcp::INLINE_ATTACHMENT_HEADER;
 
 // Limits. Each bounds something attacker- or accident-controlled.
 
 /// Largest response body accepted from a backend, per request.
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// A 10 MiB attachment expands to about 13.4 MiB when base64-encoded in JSON.
+const MAX_ATTACHMENT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Largest single JSON-RPC line accepted from the client on stdin.
 const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
 /// Largest instances config file.
@@ -510,12 +513,16 @@ pub(crate) struct HttpBackends {
 
 impl HttpBackends {
     async fn post(backend: &HttpBackend, body: String) -> Result<String, ForwardError> {
+        let inline_attachment = is_get_attachment_call(&body);
         let mut request = backend
             .client
             .post(&backend.endpoint)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .body(body);
+        if inline_attachment {
+            request = request.header(INLINE_ATTACHMENT_HEADER, "1");
+        }
         if let Some(credential) = &backend.credential {
             request = request.bearer_auth(credential);
         }
@@ -537,7 +544,9 @@ impl HttpBackends {
             return Err(ForwardError::rejected(status));
         }
         if !status.is_success() {
-            let detail = read_capped(response).await.unwrap_or_default();
+            let detail = read_capped(response, MAX_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
             return Err(ForwardError::unreachable(format!(
                 "HTTP {status} from {}: {}",
                 backend.endpoint,
@@ -563,20 +572,25 @@ impl HttpBackends {
             )));
         }
 
-        read_capped(response).await
+        let limit = if inline_attachment {
+            MAX_ATTACHMENT_RESPONSE_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        };
+        read_capped(response, limit).await
     }
 }
 
 /// Read a body a chunk at a time, refusing to buffer more than
-/// [`MAX_RESPONSE_BYTES`]. `response.text()` would happily allocate whatever a
+/// `limit`. `response.text()` would happily allocate whatever a
 /// hostile or broken backend sent, in a process the agent cannot restart.
-async fn read_capped(response: reqwest::Response) -> Result<String, ForwardError> {
+async fn read_capped(response: reqwest::Response, limit: usize) -> Result<String, ForwardError> {
     let mut response = response;
     let mut buffer: Vec<u8> = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(ForwardError::unreachable)? {
-        if buffer.len() + chunk.len() > MAX_RESPONSE_BYTES {
+        if buffer.len() + chunk.len() > limit {
             return Err(ForwardError::unreachable(format!(
-                "response exceeded the {MAX_RESPONSE_BYTES} byte limit"
+                "response exceeded the {limit} byte limit"
             )));
         }
         buffer.extend_from_slice(&chunk);
@@ -1688,7 +1702,7 @@ async fn resolve_binding_capped(
         tracing::warn!(%alias, status = %response.status(), "unbound: the instance refused the repository lookup");
         return None;
     }
-    let raw = match read_capped(response).await {
+    let raw = match read_capped(response, MAX_RESPONSE_BYTES).await {
         Ok(raw) => redactor.scrub(&raw),
         Err(error) => {
             tracing::warn!(

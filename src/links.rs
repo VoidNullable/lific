@@ -42,6 +42,7 @@ enum ResourcePath<'a> {
         project: &'a str,
         id: i64,
     },
+    Attachment(i64),
     Plan {
         project: &'a str,
         id: i64,
@@ -72,6 +73,7 @@ impl Display for ResourceUrl<'_> {
             } => write!(formatter, "{project}/issues/{identifier}")?,
             ResourcePath::Project(project) => write!(formatter, "{project}/overview")?,
             ResourcePath::Page { project, id } => write!(formatter, "{project}/pages/{id}")?,
+            ResourcePath::Attachment(id) => write!(formatter, "api/attachments/{id}")?,
             ResourcePath::Plan { project, id } => write!(formatter, "{project}/plans/{id}")?,
             ResourcePath::Module { project, id } => write!(formatter, "{project}/modules/{id}")?,
         }
@@ -227,6 +229,11 @@ impl IssueLinkContext {
                 id: page_id,
             })
         })
+    }
+
+    #[must_use]
+    pub(crate) fn attachment_url<'a>(&'a self, id: i64) -> Option<ResourceUrl<'a>> {
+        (id > 0).then(|| self.url(ResourcePath::Attachment(id)))
     }
 
     #[must_use]
@@ -540,6 +547,23 @@ mod tests {
             context.page_comment_markdown("DOC-3", 18, 9).to_string(),
             "[comment #9](https://tracker.example/lific/DOC/pages/18#comment-9)"
         );
+    }
+
+    #[test]
+    fn attachment_url_preserves_base_path_and_rejects_invalid_ids() {
+        for base_url in [
+            "https://tracker.example/lific",
+            "https://tracker.example/lific/",
+        ] {
+            let context = IssueLinkContext::parse(base_url).unwrap();
+            assert_eq!(
+                context.attachment_url(12).unwrap().to_string(),
+                "https://tracker.example/lific/api/attachments/12"
+            );
+        }
+        let context = IssueLinkContext::parse("https://tracker.example").unwrap();
+        assert!(context.attachment_url(0).is_none());
+        assert!(context.attachment_url(-1).is_none());
     }
 
     #[test]
