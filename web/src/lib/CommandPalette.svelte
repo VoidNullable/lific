@@ -93,8 +93,10 @@
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
   let selectedIdx = $state(0);
+  let openingGeneration = 0;
 
   async function show() {
+    const generation = ++openingGeneration;
     open = true;
     commandPaletteState.open = true;
     cancelSearch();
@@ -102,15 +104,19 @@
     query = "";
     selectedIdx = 0;
     await tick();
+    if (generation !== openingGeneration || !open) return;
     inputEl?.focus();
     // The project switcher only needs projects. Module and folder metadata
     // can finish loading after the palette becomes usable.
     await ensureProjects();
-    if (open) void runSearch(query);
+    if (generation === openingGeneration && open && mode.type === "root") {
+      void runSearch(query);
+    }
     void ensureCatalog();
   }
 
   function hide() {
+    openingGeneration++;
     open = false;
     commandPaletteState.open = false;
     // A response that lands after the palette closes must not repopulate it.

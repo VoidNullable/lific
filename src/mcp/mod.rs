@@ -63,6 +63,9 @@ pub(crate) struct HttpRequestData {
     pub issue_links: IssueLinkContext,
 }
 
+// HTTP callers already own the request data through an Arc, while scoped
+// callers own the link context directly. Keep both handles here so reading
+// the context never needs to allocate another Arc.
 pub(crate) enum IssueLinkContextRef {
     Scoped(Arc<IssueLinkContext>),
     Http(Arc<HttpRequestData>),
