@@ -520,8 +520,14 @@
   // Re-fetch projects whenever route changes (catches new/deleted projects).
   // Also dismiss the mobile nav on navigation so it never lingers over the
   // newly-loaded route (LIF-223).
+  let routeEffectMounted = false;
   $effect(() => {
     route; // track route changes
+    // loadUser already fetches projects on mount.
+    if (!routeEffectMounted) {
+      routeEffectMounted = true;
+      return;
+    }
     refreshProjects();
   });
 

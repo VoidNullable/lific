@@ -102,10 +102,11 @@
     selectedIdx = 0;
     await tick();
     inputEl?.focus();
-    // First open: wait for the catalog before rendering the default
-    // project-switcher list, or it flashes "No projects yet".
-    await ensureCatalog();
-    if (open && !query.trim()) void runSearch("");
+    // The project switcher only needs projects. Module and folder metadata
+    // can finish loading after the palette becomes usable.
+    await ensureProjects();
+    if (open) void runSearch(query);
+    void ensureCatalog();
   }
 
   function hide() {
@@ -186,39 +187,53 @@
   };
   let catalog = $state<Catalog>({ projects: [], modules: [], folders: [] });
   let catalogAt = 0;
+  let projectsAt = 0;
   const CATALOG_TTL = 60_000;
+  let catalogLoad: Promise<void> | null = null;
 
-  async function ensureCatalog() {
+  async function ensureProjects(): Promise<Project[] | null> {
+    if (Date.now() - projectsAt < CATALOG_TTL) return catalog.projects;
+    const response = await listProjects();
+    if (!response.ok) return null;
+    catalog = { ...catalog, projects: response.data };
+    projectsAt = Date.now();
+    return response.data;
+  }
+
+  async function ensureCatalog(): Promise<void> {
     if (Date.now() - catalogAt < CATALOG_TTL) return;
-    const projRes = await listProjects();
-    if (!projRes.ok) return;
-    const projects = projRes.data;
-
-    const perProject = await Promise.all(
-      projects.map(async (p) => {
-        const [mods, flds] = await Promise.all([
-          listModules(p.id),
-          listFolders(p.id),
-        ]);
-        return {
-          modules: (mods.ok ? mods.data : []).map((m) => ({
-            ...m,
-            projectIdent: p.identifier,
-          })),
-          folders: (flds.ok ? flds.data : []).map((f) => ({
-            ...f,
-            projectIdent: p.identifier,
-          })),
-        };
-      }),
-    );
-
-    catalog = {
-      projects,
-      modules: perProject.flatMap((x) => x.modules),
-      folders: perProject.flatMap((x) => x.folders),
-    };
-    catalogAt = Date.now();
+    if (catalogLoad) return catalogLoad;
+    catalogLoad = (async () => {
+      const projects = await ensureProjects();
+      if (!projects) return;
+      const modules: Catalog["modules"] = [];
+      const folders: Catalog["folders"] = [];
+      // Bound the fanout: two requests per project, four projects per batch.
+      for (let start = 0; start < projects.length; start += 4) {
+        if (!open) return;
+        const batch = await Promise.all(
+          projects.slice(start, start + 4).map(async (project) => {
+            const [mods, flds] = await Promise.all([
+              listModules(project.id),
+              listFolders(project.id),
+            ]);
+            return { project, mods, flds };
+          }),
+        );
+        for (const { project, mods, flds } of batch) {
+          if (mods.ok) modules.push(...mods.data.map((mod) => ({
+            ...mod, projectIdent: project.identifier,
+          })));
+          if (flds.ok) folders.push(...flds.data.map((folder) => ({
+            ...folder, projectIdent: project.identifier,
+          })));
+        }
+      }
+      catalog = { projects, modules, folders };
+      catalogAt = Date.now();
+      if (open && query.trim()) runSearch(query);
+    })().finally(() => { catalogLoad = null; });
+    return catalogLoad;
   }
 
   // ── Results ──────────────────────────────────────────
