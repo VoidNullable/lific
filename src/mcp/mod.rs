@@ -39,9 +39,12 @@ static MCP_REQUEST_USER: Mutex<Option<AuthUser>> = Mutex::new(None);
 #[cfg(test)]
 static MCP_REQUEST_ISSUE_LINKS: Mutex<Option<Arc<IssueLinkContext>>> = Mutex::new(None);
 
-struct RequestData {
-    user: Option<AuthUser>,
-    issue_links: Option<Arc<IssueLinkContext>>,
+enum RequestData {
+    Scoped {
+        user: Option<AuthUser>,
+        issue_links: Option<Arc<IssueLinkContext>>,
+    },
+    Http(Arc<HttpRequestData>),
 }
 
 tokio::task_local! {
@@ -49,16 +52,40 @@ tokio::task_local! {
 }
 
 /// Most tools use synchronous SQLite calls on Tokio workers. Bound concurrent
-/// tools below the default eight-worker runtime so REST and websocket tasks
-/// keep worker capacity during an agent burst.
+/// tools to leave a worker available for HTTP and websocket tasks, while
+/// retaining the four-tool cap on larger runtimes.
 static MCP_TOOL_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// rmcp copies HTTP request parts into each tool call's extensions before it
 /// spawns the handler task. The Axum route supplies this value there.
-#[derive(Clone)]
 pub(crate) struct HttpRequestData {
     pub user: Option<AuthUser>,
     pub issue_links: Option<IssueLinkContext>,
+}
+
+pub(crate) enum IssueLinkContextRef {
+    Scoped(Arc<IssueLinkContext>),
+    Http(Arc<HttpRequestData>),
+}
+
+impl std::ops::Deref for IssueLinkContextRef {
+    type Target = IssueLinkContext;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Scoped(context) => context,
+            Self::Http(context) => context
+                .issue_links
+                .as_ref()
+                .expect("HTTP link context handle only exists when links are present"),
+        }
+    }
+}
+
+impl AsRef<IssueLinkContext> for IssueLinkContextRef {
+    fn as_ref(&self) -> &IssueLinkContext {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -129,10 +156,26 @@ where
     };
     REQUEST_DATA
         .scope(
-            RequestData {
+            RequestData::Scoped {
                 user,
                 issue_links: issue_links.map(Arc::new),
             },
+            crate::actor::scope(actor, future),
+        )
+        .await
+}
+
+async fn scope_http_request_context<Fut, R>(context: Arc<HttpRequestData>, future: Fut) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    let actor = crate::actor::ActorCtx {
+        user_id: context.user.as_ref().map(|user| user.id),
+        transport: crate::actor::Transport::Mcp,
+    };
+    REQUEST_DATA
+        .scope(
+            RequestData::Http(context),
             crate::actor::scope(actor, future),
         )
         .await
@@ -157,7 +200,10 @@ impl Drop for RequestGlobalGuard {
 
 /// Get the authenticated user for the current MCP request, if any.
 pub(crate) fn current_auth_user() -> Option<AuthUser> {
-    if let Ok(user) = REQUEST_DATA.try_with(|context| context.user.clone()) {
+    if let Ok(user) = REQUEST_DATA.try_with(|context| match context {
+        RequestData::Scoped { user, .. } => user.clone(),
+        RequestData::Http(context) => context.user.clone(),
+    }) {
         return user;
     }
     #[cfg(test)]
@@ -239,8 +285,16 @@ pub(crate) fn current_identity(
 
 /// Get the validated external origin for structured resource links, if this MCP
 /// request arrived through an HTTP transport that knows it.
-pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
-    if let Ok(links) = REQUEST_DATA.try_with(|context| context.issue_links.clone()) {
+pub(crate) fn current_issue_link_context() -> Option<IssueLinkContextRef> {
+    if let Ok(links) = REQUEST_DATA.try_with(|context| match context {
+        RequestData::Scoped { issue_links, .. } => {
+            issue_links.clone().map(IssueLinkContextRef::Scoped)
+        }
+        RequestData::Http(context) => context
+            .issue_links
+            .as_ref()
+            .map(|_| IssueLinkContextRef::Http(context.clone())),
+    }) {
         #[cfg(test)]
         TEST_ISSUE_LINK_CONTEXT_READS.set(TEST_ISSUE_LINK_CONTEXT_READS.get() + 1);
         return links;
@@ -251,6 +305,7 @@ pub(crate) fn current_issue_link_context() -> Option<Arc<IssueLinkContext>> {
         TEST_REQUEST_ISSUE_LINKS
             .try_with(Clone::clone)
             .unwrap_or(None)
+            .map(IssueLinkContextRef::Scoped)
     }
     #[cfg(not(test))]
     None
@@ -605,21 +660,27 @@ impl ServerHandler for LificMcp {
     fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        mut context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
     + rmcp::service::MaybeSendFuture
     + '_ {
         async move {
+            let workers = tokio::runtime::Handle::current().metrics().num_workers();
+            let allowed_concurrency = workers.saturating_sub(1).clamp(1, 4);
+            let permits_per_tool = 4_usize.div_ceil(allowed_concurrency) as u32;
             let _permit = MCP_TOOL_PERMITS
-                .acquire()
+                .acquire_many(permits_per_tool)
                 .await
                 .expect("MCP tool semaphore is never closed");
             let http_context = context
                 .extensions
-                .get::<axum::http::request::Parts>()
-                .and_then(|parts| parts.extensions.get::<HttpRequestData>())
-                .cloned();
-            if self.http_transport && http_context.is_none() {
+                .get_mut::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.remove::<Arc<HttpRequestData>>());
+            let http_user = context
+                .extensions
+                .get_mut::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.remove::<Option<AuthUser>>());
+            if self.http_transport && http_context.is_none() && http_user.is_none() {
                 tracing::error!("HTTP MCP tool call has no request context");
                 return Err(rmcp::ErrorData::internal_error(
                     "HTTP MCP request context missing",
@@ -631,7 +692,10 @@ impl ServerHandler for LificMcp {
                 rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
             let dispatch = || self.dispatch_tool(|| self.tool_router.call(tool_context));
             let result = match http_context {
-                Some(http) => scope_request_context(http.user, http.issue_links, dispatch()).await,
+                Some(http) => scope_http_request_context(http, dispatch()).await,
+                None if self.http_transport => {
+                    scope_request_context(http_user.flatten(), None, dispatch()).await
+                }
                 None => dispatch().await,
             };
             result.map_err(|error| {

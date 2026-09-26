@@ -341,12 +341,6 @@ pub(crate) fn build_app_with_store(
             any(move |mut request: Request<Body>| async move {
                 // rmcp copies HTTP request extensions into the spawned tool
                 // task's RequestContext. Keep identity bound to that request.
-                let auth_user = request
-                    .extensions()
-                    .get::<Option<db::models::AuthUser>>()
-                    .cloned()
-                    .flatten();
-
                 let issue_links = links::IssueLinkContext::for_http_request(
                     mcp_public_url.as_deref(),
                     request
@@ -356,10 +350,18 @@ pub(crate) fn build_app_with_store(
                     &mcp_allowed_hosts_for_links,
                 );
 
-                request.extensions_mut().insert(mcp::HttpRequestData {
-                    user: auth_user,
-                    issue_links,
-                });
+                if let Some(issue_links) = issue_links {
+                    let auth_user = request
+                        .extensions_mut()
+                        .remove::<Option<db::models::AuthUser>>()
+                        .unwrap_or(None);
+                    request
+                        .extensions_mut()
+                        .insert(Arc::new(mcp::HttpRequestData {
+                            user: auth_user,
+                            issue_links: Some(issue_links),
+                        }));
+                }
                 mcp_service.handle(request).await.into_response()
             }),
         )
@@ -775,10 +777,16 @@ fn build_authless_mcp_router(
                     .and_then(|value| value.to_str().ok()),
                 &allowed_hosts_for_links,
             );
-            request.extensions_mut().insert(mcp::HttpRequestData {
-                user: user.clone(),
-                issue_links,
-            });
+            if let Some(issue_links) = issue_links {
+                request
+                    .extensions_mut()
+                    .insert(Arc::new(mcp::HttpRequestData {
+                        user,
+                        issue_links: Some(issue_links),
+                    }));
+            } else {
+                request.extensions_mut().insert(user);
+            }
             service.handle(request).await.into_response()
         }),
     )
