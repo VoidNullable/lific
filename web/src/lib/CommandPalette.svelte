@@ -191,22 +191,31 @@
   let projectsAt = 0;
   const CATALOG_TTL = 60_000;
   let catalogLoad: Promise<void> | null = null;
+  let projectsLoad: Promise<Project[] | null> | null = null;
   let catalogGeneration = 0;
 
-  async function ensureProjects(): Promise<Project[] | null> {
-    if (Date.now() - projectsAt < CATALOG_TTL) return catalog.projects;
-    const response = await listProjects();
-    if (!response.ok) return null;
-    const projectsChanged = projectCatalogChanged(catalog.projects, response.data);
-    catalog = projectsChanged
-      ? { projects: response.data, modules: [], folders: [] }
-      : { ...catalog, projects: response.data };
-    if (projectsChanged) {
-      catalogAt = 0;
-      catalogGeneration += 1;
-    }
-    projectsAt = Date.now();
-    return response.data;
+  function ensureProjects(): Promise<Project[] | null> {
+    if (Date.now() - projectsAt < CATALOG_TTL) return Promise.resolve(catalog.projects);
+    if (projectsLoad) return projectsLoad;
+
+    projectsLoad = listProjects()
+      .then((response) => {
+        if (!response.ok) return null;
+        const projectsChanged = projectCatalogChanged(catalog.projects, response.data);
+        catalog = projectsChanged
+          ? { projects: response.data, modules: [], folders: [] }
+          : { ...catalog, projects: response.data };
+        if (projectsChanged) {
+          catalogAt = 0;
+          catalogGeneration += 1;
+        }
+        projectsAt = Date.now();
+        return response.data;
+      })
+      .finally(() => {
+        projectsLoad = null;
+      });
+    return projectsLoad;
   }
 
   async function ensureCatalog(): Promise<void> {
