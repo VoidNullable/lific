@@ -5037,12 +5037,11 @@ impl LificMcp {
             &attachment,
         )
         .map_err(sanitize_error)?;
-        let bytes = self
-            .store
-            .read(&attachment.sha256)
-            .map_err(sanitize_error)?;
-
         if attachment.mime.starts_with("text/") {
+            let bytes = self
+                .store
+                .read(&attachment.sha256)
+                .map_err(sanitize_error)?;
             return Ok(vec![Content::text(render_attachment_text(
                 &attachment,
                 &bytes,
@@ -5051,6 +5050,10 @@ impl LificMcp {
             ))]);
         }
         if crate::storage::is_raster_mime(&attachment.mime) {
+            let bytes = self
+                .store
+                .read(&attachment.sha256)
+                .map_err(sanitize_error)?;
             // The raster formats a multimodal agent can actually look at.
             // SVG is deliberately excluded, matching `is_inline_safe_mime`.
             return Ok(vec![
@@ -12979,7 +12982,6 @@ mod tests {
                     bytes.len() as i64,
                     None,
                 )?;
-                m.store.write_unlocked(bytes)?;
                 Ok(attachment.id)
             })
             .expect("seed media attachment");
