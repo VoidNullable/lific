@@ -9,7 +9,7 @@ use crate::db::{DbPool, models::*, queries};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::{require_user, with_read};
+use super::{require_user, with_read, with_write};
 
 /// Comments are gated at `Viewer` — anyone who can see a project
 /// can read and post comments on its issues/pages (the actual auth-required
@@ -183,7 +183,7 @@ fn create_for_parent(
     content: &str,
 ) -> Result<Json<Comment>, LificError> {
     let user = require_user(identity)?;
-    let (comment, project_id) = db.try_transaction(|conn| {
+    let (comment, project_id) = with_write(db, |conn| {
         let project_id = parent.project_id(conn)?;
         authz::require_project_or_workspace_role_conn(conn, identity, project_id, Role::Viewer)?;
         let member_scoped = authz::authz_enforced_conn(conn)?;
@@ -295,7 +295,7 @@ pub(super) async fn update_comment_handler(
     Json(input): Json<UpdateComment>,
 ) -> Result<Json<Comment>, LificError> {
     let user = require_user(&identity)?;
-    let (comment, context) = db.try_transaction(|conn| {
+    let (comment, context) = with_write(&db, |conn| {
         let existing = comments::get_comment(conn, id)?;
         let context = CommentContext::resolve(conn, &existing)?;
         let project_id = context.project_id();
@@ -336,7 +336,7 @@ pub(super) async fn delete_comment_handler(
     Extension(identity): Extension<Option<crate::resolve_caller::ResolvedIdentity>>,
 ) -> Result<Json<serde_json::Value>, LificError> {
     let user = require_user(&identity)?;
-    let (context, seq) = db.try_transaction(|conn| {
+    let (context, seq) = with_write(&db, |conn| {
         let existing = comments::get_comment(conn, id)?;
         let context = CommentContext::resolve(conn, &existing)?;
         authz::require_project_or_workspace_role_conn(

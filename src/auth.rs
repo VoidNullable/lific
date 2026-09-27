@@ -1271,7 +1271,7 @@ fn migrate_api_key_verifier(
 ) -> Result<bool, ApiKeyReject> {
     let encoded_verifier = verifier.encode();
     let updated = db
-        .try_transaction(|tx| {
+        .request_transaction(|tx| {
             Ok(tx.execute(
                 "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2 AND key_hash = ?3 \
                  AND key_id = ?4 AND revoked = 0 \

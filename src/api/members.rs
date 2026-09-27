@@ -32,7 +32,7 @@ use crate::db::{DbPool, models::*};
 use crate::error::LificError;
 use crate::realtime::{RealtimeEvent, RealtimeHub};
 
-use super::with_read;
+use super::{with_read, with_write};
 
 /// GET /api/projects/{id}/members — visible to any project member
 /// (`Viewer`+); non-members are denied same as any other project read.
@@ -133,7 +133,7 @@ pub(super) async fn add_project_member(
     let session_token = crate::auth::recent_session_token(&headers)?;
     let role = input.role.as_deref().unwrap_or("viewer").to_string();
 
-    let member = db.try_transaction(|tx| {
+    let member = with_write(&db, |tx| {
         // A session token is always a human's, so the identity the middleware
         // resolved IS the session's user; `revalidate_recent_session` asserts
         // exactly that. Bot callers cannot reach here at all, because they do
@@ -180,7 +180,7 @@ pub(super) async fn update_project_member(
     let session_token = crate::auth::recent_session_token(&headers).ok();
     let granter = super::require_user(&identity).ok();
 
-    let member = db.try_transaction(|tx| {
+    let member = with_write(&db, |tx| {
         let current = members::get_member_role(tx, project_id, user_id)?;
         let is_increase = current.is_none_or(|role| requested > role);
         if is_increase {
@@ -231,7 +231,7 @@ pub(super) async fn remove_project_member(
 ) -> Result<Json<serde_json::Value>, LificError> {
     authz::require_role(&db, &identity, project_id, Role::Lead)?;
     let caller = super::require_user(&identity)?;
-    db.try_transaction(|tx| {
+    with_write(&db, |tx| {
         // Same reasoning as the downgrade path: the authoritative check reads
         // the caller inside the transaction, so a demoted admin or a removed
         // lead cannot act on a stale snapshot.

@@ -648,9 +648,9 @@ fn retain_visible_relations(
 /// Commit the operation and its audit stamp together.
 fn with_write<F, T>(db: &DbPool, f: F) -> Result<T, LificError>
 where
-    F: FnOnce(&rusqlite::Connection) -> Result<T, LificError>,
+    F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, LificError>,
 {
-    db.try_transaction(|conn| f(conn))
+    db.request_transaction(f)
 }
 
 #[test]

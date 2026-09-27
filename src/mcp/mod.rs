@@ -546,7 +546,7 @@ impl LificMcp {
         F: FnOnce(&rusqlite::Connection) -> Result<T, crate::error::LificError>,
     {
         self.db
-            .try_transaction(|conn| {
+            .request_transaction(|conn| {
                 Self::stamp_request_actor(conn)?;
                 f(conn)
             })

@@ -53,7 +53,7 @@ pub(super) async fn reorder_groups(
     Json(input): Json<ReorderProjectGroups>,
 ) -> Result<Json<Vec<ProjectGroup>>, LificError> {
     let user = require_user(&identity)?;
-    let groups = db.try_transaction(|tx| {
+    let groups = with_write(&db, |tx| {
         let visible = super::projects::sidebar_visibility(tx, user.id)?;
         let mut groups = project_groups::reorder_groups(tx, user.id, &input.ids)?;
         if let Some(ids) = &visible {

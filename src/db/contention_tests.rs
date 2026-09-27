@@ -183,7 +183,7 @@ fn independent_pool_contention_times_out_then_commits_without_partial_rows() {
 }
 
 #[test]
-fn request_transaction_fails_fast_while_archive_holds_writer() {
+fn request_transaction_bounds_wait_while_archive_holds_writer() {
     let directory = tempfile::tempdir().unwrap();
     let db = open(&directory.path().join("request-writer.db")).unwrap();
     let (held_tx, wait_for_hold) = mpsc::channel();
@@ -204,19 +204,21 @@ fn request_transaction_fails_fast_while_archive_holds_writer() {
         });
         wait_for_hold.recv_timeout(Duration::from_secs(10)).unwrap();
         let started = std::time::Instant::now();
-        let result = db.try_transaction(|_| Ok(()));
+        let result = db.request_transaction(|_| Ok(()));
         assert!(
             matches!(result, Err(LificError::Unavailable(_))),
             "{result:?}"
         );
-        assert!(started.elapsed() < Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= REQUEST_WRITE_BUDGET / 2, "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
         release_tx.send(()).unwrap();
         holder.join().unwrap();
     });
 }
 
 #[test]
-fn request_transaction_fails_fast_while_an_external_writer_holds_sqlite() {
+fn request_transaction_bounds_wait_while_an_external_writer_holds_sqlite() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("external-request-writer.db");
     let db = open(&path).unwrap();
@@ -224,15 +226,57 @@ fn request_transaction_fails_fast_while_an_external_writer_holds_sqlite() {
     external.execute_batch("BEGIN IMMEDIATE;").unwrap();
 
     let started = std::time::Instant::now();
-    let result = db.try_transaction(|_| Ok(()));
+    let result = db.request_transaction(|_| Ok(()));
     assert!(
         matches!(result, Err(LificError::Unavailable(_))),
         "{result:?}"
     );
-    assert!(started.elapsed() < Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    assert!(elapsed >= REQUEST_WRITE_BUDGET / 2, "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
 
     external.execute_batch("ROLLBACK;").unwrap();
-    db.try_transaction(|_| Ok(())).unwrap();
+    external.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(5));
+        external.execute_batch("ROLLBACK;").unwrap();
+    });
+    db.request_transaction(|_| Ok(())).unwrap();
+    release.join().unwrap();
+}
+
+#[test]
+fn request_transaction_retries_a_brief_local_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = open(&directory.path().join("brief-request-writer.db")).unwrap();
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let holder_pool = db.clone();
+        let holder = scope.spawn(move || {
+            holder_pool
+                .transaction(|_| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let request_pool = db.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let request = scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            request_pool.request_transaction(|_| Ok(()))
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        release_tx.send(()).unwrap();
+        assert!(request.join().unwrap().is_ok());
+        holder.join().unwrap();
+    });
 }
 
 #[test]

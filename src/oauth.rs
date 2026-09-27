@@ -513,11 +513,11 @@ async fn register_client(
     }
 
     let db = state.db;
-    let mut writer = match db.try_writer() {
+    let mut writer = match db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let conn = match writer.try_transaction() {
+    let conn = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -1135,11 +1135,11 @@ async fn authorize_approve(
     // lockdown either commits first (and this transaction finds no session) or
     // commits after (and burns the code this one wrote). There is no order in
     // which an approval outlives the session that authorized it.
-    let mut writer = match oauth.db.try_writer() {
+    let mut writer = match oauth.db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let tx = match writer.try_transaction() {
+    let tx = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -1573,11 +1573,11 @@ async fn device_authorization(
     let mut user_code = generate_user_code();
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEVICE_CODE_EXPIRES_IN as i64);
 
-    let mut writer = match state.db.try_writer() {
+    let mut writer = match state.db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let conn = match writer.try_transaction() {
+    let conn = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -1940,11 +1940,11 @@ async fn device_approve(
     // used to take its own write lock, which is why this handler had to
     // resolve the bot before opening its own, and why a lockdown could land
     // between the two.
-    let mut writer = match oauth.db.try_writer() {
+    let mut writer = match oauth.db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let tx = match writer.try_transaction() {
+    let tx = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -2086,11 +2086,11 @@ async fn token_exchange(
     // the token. Splitting the read from the burn is what let a recovery land
     // in between and hand out a 30-day token against a code it had already
     // invalidated.
-    let mut writer = match state.db.try_writer() {
+    let mut writer = match state.db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let conn = match writer.try_transaction() {
+    let conn = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -2289,11 +2289,11 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     // approved-row read used to sit outside the transaction that consumed it,
     // so a recovery that denied the grant between the two still handed the
     // polling device a token.
-    let mut writer = match state.db.try_writer() {
+    let mut writer = match state.db.request_writer() {
         Ok(writer) => writer,
         Err(error) => return database_error_response(error),
     };
-    let conn = match writer.try_transaction() {
+    let conn = match writer.transaction() {
         Ok(transaction) => transaction,
         Err(error) => return database_error_response(error),
     };
@@ -2585,7 +2585,7 @@ async fn revoke_token(
     // token in place while telling the client it had been revoked.
     // Hash the token before lookup since we store SHA-256 hashes.
     let token_hash = sha256_hex(req.token.as_bytes());
-    if let Err(error) = state.db.try_transaction(|conn| {
+    if let Err(error) = state.db.request_transaction(|conn| {
         conn.execute(
             "UPDATE oauth_tokens SET revoked = 1 WHERE access_token = ?1",
             params![token_hash],
