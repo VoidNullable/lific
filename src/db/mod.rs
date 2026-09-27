@@ -52,28 +52,25 @@ pub(crate) struct Writer<'a>(std::sync::MutexGuard<'a, Connection>);
 impl Writer<'_> {
     /// Reserve SQLite's writer before stamping the audit actor.
     pub(crate) fn transaction(&mut self) -> Result<Transaction<'_>, LificError> {
-        self.0.busy_timeout(WRITE_BUSY_TIMEOUT)?;
-        let transaction = self
-            .0
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::actor::stamp(&transaction, &crate::actor::current())?;
-        Ok(transaction)
+        self.begin_transaction(WRITE_BUSY_TIMEOUT)
     }
 
     /// Reserve SQLite's writer without waiting for a connection in another process.
     pub(crate) fn try_transaction(&mut self) -> Result<Transaction<'_>, LificError> {
-        self.0.busy_timeout(Duration::ZERO)?;
-        let transaction = match self
+        self.begin_transaction(Duration::ZERO)
+            .map_err(unavailable_on_transaction)
+    }
+
+    fn begin_transaction(
+        &mut self,
+        begin_timeout: Duration,
+    ) -> Result<Transaction<'_>, LificError> {
+        self.0.busy_timeout(begin_timeout)?;
+        let transaction = self
             .0
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-        {
-            Ok(transaction) => transaction,
-            Err(error) => {
-                return Err(unavailable_if_busy(error));
-            }
-        };
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.busy_timeout(WRITE_BUSY_TIMEOUT)?;
-        crate::actor::stamp(&transaction, &crate::actor::current()).map_err(unavailable_if_busy)?;
+        crate::actor::stamp(&transaction, &crate::actor::current())?;
         Ok(transaction)
     }
 }

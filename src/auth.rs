@@ -1270,8 +1270,8 @@ fn migrate_api_key_verifier(
     verifier: Sha256ApiKeyVerifier,
 ) -> Result<bool, ApiKeyReject> {
     let encoded_verifier = verifier.encode();
-    let migrate = || {
-        db.try_transaction(|tx| {
+    let updated = db
+        .try_transaction(|tx| {
             Ok(tx.execute(
                 "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2 AND key_hash = ?3 \
                  AND key_id = ?4 AND revoked = 0 \
@@ -1279,19 +1279,10 @@ fn migrate_api_key_verifier(
                 params![&encoded_verifier, key.id, original_hash, key_id],
             )?)
         })
-    };
-    let mut updated = migrate();
-    for _ in 0..5 {
-        if !matches!(&updated, Err(crate::error::LificError::Unavailable(_))) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        updated = migrate();
-    }
-    let updated = updated.map_err(|error| match error {
-        crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
-        _ => ApiKeyReject::Db,
-    })?;
+        .map_err(|error| match error {
+            crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
+            _ => ApiKeyReject::Db,
+        })?;
     if updated == 1 {
         return Ok(true);
     }
@@ -2296,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_legacy_authentications_both_succeed_during_migration() {
+    fn concurrent_legacy_authentications_can_retry_after_migration_contention() {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use std::sync::{Arc, Barrier};
 
@@ -2344,9 +2335,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        for worker in workers {
-            assert!(worker.join().unwrap().is_ok());
-        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(outcomes.iter().any(Result::is_ok));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Ok(_) | Err(ApiKeyReject::Busy)))
+        );
+        assert!(validate_api_key(&setup_pool, &key).is_ok());
         let conn = setup_pool.read().unwrap();
         let verifier: String = conn
             .query_row(

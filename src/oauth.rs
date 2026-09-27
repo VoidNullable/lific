@@ -514,18 +514,12 @@ async fn register_client(
 
     let db = state.db;
     let mut writer = match db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let conn = match writer.try_transaction() {
-        Ok(conn) => conn,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
     // Drop grants that can never authenticate anything again, so the client
     // reclaim below can actually see the client as unused.
@@ -1142,21 +1136,12 @@ async fn authorize_approve(
     // commits after (and burns the code this one wrote). There is no order in
     // which an approval outlives the session that authorized it.
     let mut writer = match oauth.db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let tx = match writer.try_transaction() {
-        Ok(tx) => tx,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open OAuth authorization transaction");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-        }
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
 
     // Validated inside the transaction, not before it: anything checked
@@ -1589,18 +1574,12 @@ async fn device_authorization(
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(DEVICE_CODE_EXPIRES_IN as i64);
 
     let mut writer = match state.db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let conn = match writer.try_transaction() {
-        Ok(conn) => conn,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
     if let Err(error) = cleanup_expired_device_codes(&conn) {
         warn!(%error, "failed to clean up expired OAuth device codes");
@@ -1962,21 +1941,12 @@ async fn device_approve(
     // resolve the bot before opening its own, and why a lockdown could land
     // between the two.
     let mut writer = match oauth.db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let tx = match writer.try_transaction() {
-        Ok(tx) => tx,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open device approval transaction");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-        }
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
 
     // Denying is a refusal, not a grant. It creates nothing, hands out
@@ -2117,21 +2087,12 @@ async fn token_exchange(
     // in between and hand out a 30-day token against a code it had already
     // invalidated.
     let mut writer = match state.db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let conn = match writer.try_transaction() {
-        Ok(tx) => tx,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open OAuth token transaction");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-        }
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
 
     // Named row type keeps the query_row result readable and avoids
@@ -2329,21 +2290,12 @@ fn device_token_exchange(state: &OAuthState, req: &TokenRequest) -> Response {
     // so a recovery that denied the grant between the two still handed the
     // polling device a token.
     let mut writer = match state.db.try_writer() {
-        Ok(c) => c,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
+        Ok(writer) => writer,
+        Err(error) => return database_error_response(error),
     };
     let conn = match writer.try_transaction() {
-        Ok(tx) => tx,
-        Err(LificError::Unavailable(_)) => {
-            return LificError::Unavailable("database writer is busy".into()).into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open device token transaction");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
-        }
+        Ok(transaction) => transaction,
+        Err(error) => return database_error_response(error),
     };
 
     /// Commit the bookkeeping a non-issuing outcome still needs to persist
@@ -2647,6 +2599,16 @@ async fn revoke_token(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+fn database_error_response(error: LificError) -> Response {
+    match error {
+        error @ LificError::Unavailable(_) => error.into_response(),
+        error => {
+            tracing::error!(%error, "OAuth database operation failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+        }
+    }
+}
 
 fn valid_s256_challenge(challenge: &str) -> bool {
     challenge.len() == 43
