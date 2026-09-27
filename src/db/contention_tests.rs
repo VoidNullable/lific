@@ -236,6 +236,12 @@ fn request_transaction_bounds_wait_while_an_external_writer_holds_sqlite() {
     assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
 
     external.execute_batch("ROLLBACK;").unwrap();
+    let timeout: i64 = db
+        .write()
+        .unwrap()
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(timeout, WRITE_BUSY_TIMEOUT.as_millis() as i64);
     external.execute_batch("BEGIN IMMEDIATE;").unwrap();
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(5));

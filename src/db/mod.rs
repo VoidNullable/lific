@@ -107,6 +107,7 @@ impl Writer<'_> {
                             if matches!(error, LificError::Unavailable(_)) && backoff.wait() {
                                 continue;
                             }
+                            connection.busy_timeout(WRITE_BUSY_TIMEOUT)?;
                             return Err(error);
                         }
                     }
