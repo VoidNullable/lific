@@ -1270,19 +1270,28 @@ fn migrate_api_key_verifier(
     verifier: Sha256ApiKeyVerifier,
 ) -> Result<bool, ApiKeyReject> {
     let encoded_verifier = verifier.encode();
-    let updated = db
-        .try_transaction(|tx| {
+    let migrate = || {
+        db.try_transaction(|tx| {
             Ok(tx.execute(
                 "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2 AND key_hash = ?3 \
                  AND key_id = ?4 AND revoked = 0 \
                  AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))",
-                params![encoded_verifier, key.id, original_hash, key_id],
+                params![&encoded_verifier, key.id, original_hash, key_id],
             )?)
         })
-        .map_err(|error| match error {
-            crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
-            _ => ApiKeyReject::Db,
-        })?;
+    };
+    let mut updated = migrate();
+    for _ in 0..5 {
+        if !matches!(&updated, Err(crate::error::LificError::Unavailable(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        updated = migrate();
+    }
+    let updated = updated.map_err(|error| match error {
+        crate::error::LificError::Unavailable(_) => ApiKeyReject::Busy,
+        _ => ApiKeyReject::Db,
+    })?;
     if updated == 1 {
         return Ok(true);
     }
